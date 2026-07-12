@@ -16,6 +16,13 @@ The LoCoMo EchoMemory path is HTTP-only. The harness does not import the
 EchoMemory Python SDK, query Neo4j, or read the EchoMemory server workspace for
 QA evidence.
 
+> **Do not modify EchoMemory source code for a black-box benchmark.**
+> Start an unmodified EchoMemory release or commit as a separate service and
+> connect this harness through its public HTTP API. Changes to EchoMemory
+> retrieval, indexing, prompts, graph logic, or response formatting make the
+> run a modified-backend experiment, not a comparable black-box result. Such
+> runs must be labeled separately with the exact EchoMemory commit and patch.
+
 ```bash
 git clone --branch v2 \
   https://github.com/tech-innovation-group/Memory-System-Eval-Harness.git

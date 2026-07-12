@@ -4,6 +4,18 @@ This guide shows how to connect an EchoMemory service to the `v2` benchmark
 workbench without importing or modifying EchoMemory source code, and how to run
 the complete LoCoMo `conv-30` evaluation.
 
+> [!IMPORTANT]
+> Do not change EchoMemory source code when producing a black-box benchmark
+> result. Run EchoMemory as an independent, unmodified service and configure
+> this harness only through HTTP endpoints, command-line options, and
+> environment variables documented here.
+>
+> In particular, do not patch EchoMemory indexing limits, retrieval ranking,
+> graph selection, extraction prompts, API response fields, or memory files to
+> improve a run. If EchoMemory source code must be changed for an experiment,
+> record the exact commit and patch, label the result as a modified-backend
+> experiment, and do not compare it directly with the black-box baseline.
+
 ## What Black-box Means
 
 For EchoMemory LoCoMo import and QA, the harness communicates with EchoMemory
@@ -21,6 +33,7 @@ LoCoMo dataset
 
 The harness does not:
 
+- modify or patch the EchoMemory repository
 - import the EchoMemory SDK
 - read EchoMemory memory files for QA evidence
 - query Neo4j directly
