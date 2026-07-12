@@ -1,0 +1,7 @@
+runs/ export-ignore
+dist/ export-ignore
+outputs/ export-ignore
+artifacts/ export-ignore
+external/ export-ignore
+dataset/full/ export-ignore
+docs/*.html export-ignore

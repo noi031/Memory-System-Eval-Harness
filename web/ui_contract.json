@@ -1,0 +1,120 @@
+{
+  "version": "20260628hotpotfix23",
+  "product": {
+    "name": "Memory Evaluation Workbench",
+    "positioning": "Custom memory-agent benchmark workbench for LoCoMo-first evaluation.",
+    "north_star": "A tester can import memory, run QA, judge answers, and export an evidence-rich HTML report without leaking API keys."
+  },
+  "backend_scope": "OpenViking + EchoMemory",
+  "agent": {
+    "id": "memorybench_agent",
+    "label": "MemoryBench Agent",
+    "alignment_reference": "VikingBoat",
+    "alignment_mode": "vikingboat_aligned_minimal",
+    "formal_score_source": "LoCoMo evaluation reports, not the interactive chat page",
+    "must_have": [
+      "manual conversation testing",
+      "relevant memory display",
+      "context trace",
+      "manual memory write",
+      "LoCoMo QA comparability controls"
+    ],
+    "forbidden_context": [
+      "raw conversation fallback in formal score",
+      "archive fallback in formal score",
+      "cross-account memory reads",
+      "hidden backend-specific prompt branches"
+    ]
+  },
+  "memory_backends": [
+    {
+      "id": "openviking",
+      "label": "OpenViking",
+      "role": "baseline memory backend",
+      "required": true
+    },
+    {
+      "id": "echomemory",
+      "label": "EchoMemory",
+      "role": "external memory backend adapter",
+      "required": true
+    }
+  ],
+  "sidebar": [
+    {
+      "view": "chatView",
+      "label": "对话",
+      "purpose": "Interactive MemoryBench Agent debugging with relevant memory, context trace, and manual memory write."
+    },
+    {
+      "view": "openvikingView",
+      "label": "LoCoMo",
+      "purpose": "Primary LoCoMo entry: open memory import first, then continue to QA, judging, report export, history, and diff."
+    },
+    {
+      "view": "longMemEvalView",
+      "label": "LongMemEval",
+      "purpose": "Long-context memory benchmark entry; MemoryBench memory-QA and official-style adapters must be clearly separated."
+    },
+    {
+      "view": "evolvingEventsView",
+      "label": "EvolvingEvents",
+      "purpose": "Event-evolution memory benchmark entry."
+    },
+    {
+      "view": "hotpotQaView",
+      "label": "HotpotQA",
+      "purpose": "Multi-hop QA benchmark entry with answer metrics and future supporting-fact metrics."
+    },
+    {
+      "view": "proAgentBenchView",
+      "label": "ProAgentBench",
+      "purpose": "Agent task benchmark entry; official runner work remains separate from LoCoMo scoring."
+    },
+    {
+      "view": "tauBenchView",
+      "label": "Tau2-bench",
+      "purpose": "Tool-task benchmark entry; official tool environment work remains separate from LoCoMo scoring."
+    },
+    {
+      "view": "systemConfigView",
+      "label": "系统配置",
+      "purpose": "Per-account backend selection, workspace, model configuration, readiness, and handoff gates."
+    }
+  ],
+  "formal_benchmark_priority": [
+    "locomo",
+    "longmemeval",
+    "evolvingevents",
+    "hotpotqa",
+    "proagentbench",
+    "tau2bench"
+  ],
+  "delivery_boundary": {
+    "public_html": [
+      "web/static/index.html",
+      "web/static/product-roadmap.html"
+    ],
+    "public_static_files": [
+      "web/static/index.html",
+      "web/static/app-state.js",
+      "web/static/app-core.js",
+      "web/static/app-format.js",
+      "web/static/app.js",
+      "web/static/styles.css",
+      "web/static/product-roadmap.html"
+    ],
+    "historical_static_policy": "Other HTML files under web/static are experiment history or generated reports, not public entrypoints.",
+    "do_not_ship": [
+      "runs/",
+      "dist/",
+      "outputs/",
+      "external/",
+      "dataset/full/",
+      ".env.local",
+      "judge.conf",
+      "workspace directories",
+      "real API keys"
+    ]
+  }
+}

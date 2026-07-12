@@ -1,0 +1,17 @@
+{
+  "name": "memory-benchmark-workbench",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "bash scripts/start-v2-server.sh",
+    "status": "bash scripts/status-v2-server.sh",
+    "stop": "bash scripts/stop-v2-server.sh",
+    "check": "node scripts/validate.mjs",
+    "check:runtime": "node scripts/check-v2-runtime.mjs --start-server"
+  },
+  "engines": {
+    "node": ">=18",
+    "python": ">=3.9"
+  }
+}
