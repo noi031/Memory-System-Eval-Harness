@@ -200,6 +200,7 @@ def openai_chat(
     api_key: str | None = None,
     base_url: str | None = None,
     config_path: Path | None = None,
+    timeout: int = 60,
 ) -> dict[str, Any]:
     configs = _vlm_config_candidates(config_path)
     primary_vlm = configs[0] if configs else {}
@@ -226,7 +227,7 @@ def openai_chat(
                 "Authorization": f"Bearer {token}",
             },
         )
-        with urlopen(req, timeout=60) as response:
+        with urlopen(req, timeout=timeout) as response:
             result = _read_json_response(response, "模型服务")
         if "error" in result:
             return result

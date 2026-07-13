@@ -210,3 +210,105 @@ This repository now contains the workbench frontend plus the currently used
 benchmark backend and runner code. The integration is transitional: the backend
 is vendored largely intact so the repo is runnable in one place before deeper
 refactoring.
+
+## EchoAgent Live Test (大模型交互评测)
+
+`scripts/echoagent_live_test.py` 提供端到端的大模型交互评测能力，用于测试：
+- **记忆召回能力**：跨会话记忆召回的质量
+- **Prefill 预发送效果**：打字期间预取记忆，降低首 token 延迟（TTFT）
+
+### 功能特点
+
+1. **模拟真实用户交互**：以均匀速率逐字符输入查询，触发 prefill 预发送
+2. **跨会话测试**：支持中途新开会话继续话题，验证跨会话记忆召回
+3. **场景自动生成**：调用 LLM 随机生成日常生活主题、事实和查询
+4. **数据集回放**：支持从 LoCoMo 格式数据集回放对话，测试跨会话记忆
+5. **完整指标采集**：TTFT、cached tokens、prompt tokens、回复质量评估
+
+### 前提条件
+
+1. EchoMem、EchoAgent 插件(31030)、EchoAgent 后端(31020) 均已启动
+2. EchoAgent 后端存在测试用户账号
+3. 场景生成需要 LLM API（火山引擎方舟或 DashScope）
+
+### 快速执行
+
+```bash
+# 火山引擎方舟
+python scripts/echoagent_live_test.py \
+  --echoagent-url http://127.0.0.1:31020 \
+  --username test_user --password test_password \
+  --num-batches 3 \
+  --queries-per-batch 5 \
+  --scenario-base-url https://ark.cn-beijing.volces.com/api/v3 \
+  --scenario-model doubao-seed-2.0-pro \
+  --scenario-api-key YOUR_API_KEY \
+  --out-dir runs/echoagent_test
+
+# DashScope（默认）
+export DASHSCOPE_API_KEY=sk-xxx
+python scripts/echoagent_live_test.py \
+  --echoagent-url http://127.0.0.1:31020 \
+  --username test_user --password test_password \
+  --out-dir runs/echoagent_test
+```
+
+### 主要参数
+
+| 参数 | 默认值 | 说明 |
+|------|--------|------|
+| `--echoagent-url` | `http://127.0.0.1:31020` | EchoAgent 后端地址 |
+| `--username` / `--password` | `test_user` / `test_password` | 登录凭证 |
+| `--num-batches` | 3 | 测试批次数，每批次独立生成一个场景 |
+| `--queries-per-batch` | 5 | 每批次查询轮数（不含事实注入轮） |
+| `--new-session-ratio` | 0.3 | 每轮随机新开会话的概率，测试跨会话召回 |
+| `--typing-speed-ms` | 200 | 模拟打字每字符间隔（毫秒） |
+| `--typing-jitter-ms` | 20 | 打字间隔随机抖动 |
+| `--memory-engine-endpoint` | `http://127.0.0.1:31030` | 记忆引擎 endpoint |
+| `--dataset` | （空） | 数据集名称或路径，指定后进入回放模式 |
+| `--out-dir` | （必填） | 结果输出目录 |
+
+### 输出文件
+
+执行后在 `--out-dir` 下生成：
+
+| 文件 | 说明 |
+|------|------|
+| `echoagent_live_test_results.json` | 完整结果，含每轮对话详情 |
+| `echoagent_live_test_results.csv` | 汇总表，每行一轮 |
+| `summary.json` | 汇总统计：平均 TTFT、cached_tokens、回复长度等 |
+| `quality_report.json` | LLM 评估的记忆召回质量报告 |
+| `run.log` | 运行日志 |
+
+### 质量评估报告
+
+测试结束后自动调用 LLM 评估记忆召回质量：
+
+| 维度 | 评分 | 说明 |
+|------|------|------|
+| `recall_score` | 0-2 | 是否正确使用了 ground-truth 事实 |
+| `factual_accuracy` | 0-2 | 回复是否事实准确无幻觉 |
+| `relevance` | 0-2 | 回复是否与查询相关 |
+
+汇总指标包括 `overall_score`、`cross_session_score`、`same_session_score`。
+
+### 数据集回放模式
+
+```bash
+python scripts/echoagent_live_test.py \
+  --echoagent-url http://127.0.0.1:31020 \
+  --username test_user --password test_password \
+  --dataset locomo10 \
+  --dataset-limit 10 \
+  --out-dir runs/replay_locomo10
+```
+
+回放流程：将数据集对话注入 EchoAgent 会话，在新会话中提问测试跨会话召回。
+
+### 详细文档
+
+参见项目根目录 `.agent/基础测试/` 下的设计文档：
+- `大模型测试方案.md`：测试场景描述
+- `大模型测试插件需求.md`：功能需求
+- `大模型测试插件实现方案.md`：技术架构
+- `大模型测试脚本执行方法.md`：执行参数详解
