@@ -60,7 +60,7 @@ export function createWorkbenchController(deps) {
     "wbQaLocalTimelineHints",
     "wbQaLocalMemoryArtifacts",
   ]);
-  const WORKBENCH_UI_STATE_KEY = "benchmark-console-v2:ui-state:v1";
+  const WORKBENCH_UI_STATE_KEY = "benchmark-console-v2:ui-state:v2";
   const PERSISTED_FIELD_IDS = new Set([
     "wbAccountSelect",
     "wbBackendSelect",
@@ -71,6 +71,14 @@ export function createWorkbenchController(deps) {
     "wbImportEchomemRoot",
   ]);
   const VALID_STAGES = new Set(["import", "qa", "judge", "report"]);
+  let restoredStartupStage = "import";
+
+  function isValidPersistedLocomoPath(value) {
+    const path = String(value || "").trim().toLowerCase();
+    if (!path || path.includes("longmemeval")) return false;
+    const filename = path.split(/[\\/]/).pop() || "";
+    return filename.includes("locomo") && filename.endsWith(".json");
+  }
 
   function parseQuestionIds(rawValue) {
     return String(rawValue || "")
@@ -300,7 +308,7 @@ export function createWorkbenchController(deps) {
       if (restoredBenchmark) state.activeBenchmark = restoredBenchmark;
       if (restoredStage) state.activeStage = restoredStage;
       if (restoredAccount) state.selectedAccount = restoredAccount;
-      if (String(locomo.dataPath || "").trim()) {
+      if (isValidPersistedLocomoPath(locomo.dataPath)) {
         state.questionDataPaths = state.questionDataPaths || {};
         state.questionDataPaths.locomo = String(locomo.dataPath || "").trim();
       }
@@ -500,6 +508,113 @@ export function createWorkbenchController(deps) {
     renderAll();
     syncPrimaryButton();
     persistWorkbenchUiState();
+  }
+
+  function activeLocomoTaskStage() {
+    const task = (tasksForBenchmark("locomo") || []).find((item) => {
+      const status = String(item?.status || "").trim().toLowerCase();
+      return ["running", "queued", "pending", "stopping"].includes(status);
+    });
+    if (!task) return { stage: "", signature: "" };
+    const kind = String(task.kind || "").trim().toLowerCase();
+    const stage = kind === "judge"
+      ? "judge"
+      : (kind.includes("qa") ? "qa" : (kind.includes("import") ? "import" : ""));
+    return {
+      stage,
+      signature: `${task.id || task.run_dir || kind}:${task.status || ""}`,
+    };
+  }
+
+  function locomoImportReady() {
+    const imported = state.locomoFlowStatus?.artifacts?.imported || {};
+    const importStage = (state.locomoFlowStatus?.stages || []).find((item) => item?.id === "import") || null;
+    return Number(imported.session_count || imported.sessions?.length || 0) > 0
+      || Number(imported.summary_count || imported.summaries?.length || 0) > 0
+      || String(importStage?.status || "").trim().toLowerCase() === "ok";
+  }
+
+  function locomoQaStage() {
+    const run = currentRun();
+    if (!run) {
+      const importReady = locomoImportReady();
+      return {
+        stage: importReady ? "qa" : "import",
+        signature: `no-qa:${importReady ? "import-ready" : "not-imported"}`,
+      };
+    }
+    const status = String(run.status || "").trim().toLowerCase();
+    if (["running", "queued", "pending", "stopping"].includes(status)) {
+      return {
+        stage: "qa",
+        signature: `${run.run_dir || run.id}:qa:${status}`,
+      };
+    }
+    const detail = run.run_dir ? state.runDetails?.[run.run_dir] || null : null;
+    const result = run.output_file ? state.resultSummaries?.[run.output_file] || null : null;
+    const summary = result?.summary || detail?.record?.summary || run.summary || {};
+    const rows = Number(summary.rows || 0);
+    const graded = Number(summary.graded || 0);
+    const pending = Number(summary.result_counts?.UNSCORED ?? Math.max(0, rows - graded));
+    if (rows > 0 && pending <= 0) {
+      return {
+        stage: "report",
+        signature: `${run.run_dir || run.id}:report:${rows}:${pending}`,
+      };
+    }
+    if (rows > 0) {
+      return {
+        stage: "judge",
+        signature: `${run.run_dir || run.id}:judge:${rows}:${pending}`,
+      };
+    }
+    return {
+      stage: "qa",
+      signature: `${run.run_dir || run.id}:qa:${status || "unknown"}`,
+    };
+  }
+
+  function reconcileLocomoDatasetAndWorkspace() {
+    const records = (state.datasets || []).filter((item) =>
+      String(item?.format || item?.dataset_format || "").trim().toLowerCase() === "locomo"
+      && item?.exists !== false
+      && String(item?.path || "").trim()
+    );
+    const currentPath = String(state.questionDataPaths?.locomo || "").trim();
+    if (!records.some((item) => String(item.path || "").trim() === currentPath)) {
+      state.questionDataPaths = state.questionDataPaths || {};
+      state.questionDataPaths.locomo = String(records[0]?.path || state.config?.data || "").trim();
+      state.questionScope = "";
+      state.questions = [];
+    }
+    const accountConfig = state.accountDetails?.config || {};
+    const accountWorkspace = String(
+      accountConfig.workspace
+      || accountConfig.memoryWorkspace
+      || accountConfig.ovWorkspace
+      || state.config?.workspace
+      || ""
+    ).trim();
+    if (accountWorkspace) {
+      ensureLocomoQaDraft().wbWorkspace = accountWorkspace;
+    }
+  }
+
+  function reconcileAfterBootstrap() {
+    if (state.activeBenchmark !== "locomo") {
+      if (!state.stageBootstrapReconciled) {
+        state.stageBootstrapReconciled = true;
+        setActiveStage(VALID_STAGES.has(restoredStartupStage) ? restoredStartupStage : "import");
+      }
+      return;
+    }
+    reconcileLocomoDatasetAndWorkspace();
+    const activeTask = activeLocomoTaskStage();
+    const resolved = activeTask.stage ? activeTask : locomoQaStage();
+    const signature = `${resolved.stage}:${resolved.signature}`;
+    if (state.locomoStageSignature === signature) return;
+    state.locomoStageSignature = signature;
+    setActiveStage(resolved.stage || "import");
   }
 
   function upsertTask(task) {
@@ -1229,13 +1344,13 @@ export function createWorkbenchController(deps) {
   function start({ loadBootstrapRunner, refreshAllRunner, pollLogRunner }) {
     bindEvents({ refreshAllRunner, pollLogRunner });
     const restored = restoreWorkbenchUiState() || {};
+    restoredStartupStage = VALID_STAGES.has(String(restored.activeStage || "").trim())
+      ? String(restored.activeStage || "").trim()
+      : "import";
     if (restored.activeBenchmark) {
       setActiveBenchmark(restored.activeBenchmark || defaultBenchmarkId);
     }
-    const nextStage = VALID_STAGES.has(String(restored.activeStage || "").trim())
-      ? String(restored.activeStage || "").trim()
-      : "import";
-    setActiveStage(nextStage);
+    setActiveStage(state.activeBenchmark === "locomo" ? "import" : restoredStartupStage);
     loadBootstrapRunner({
       account: restored.selectedAccount || undefined,
     }).then(() => {
@@ -1249,6 +1364,7 @@ export function createWorkbenchController(deps) {
 
   return {
     bindEvents,
+    reconcileAfterBootstrap,
     setActiveBenchmark,
     setActiveStage,
     start,

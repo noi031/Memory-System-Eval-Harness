@@ -153,6 +153,22 @@ function checkStrictBlackboxReportSmoke() {
   run("strict black-box report smoke", "python3", [join(root, "scripts", "smoke_blackbox_report.py")]);
 }
 
+function checkStrictBlackboxApiSmoke() {
+  run("strict black-box API smoke", "python3", [join(root, "scripts", "smoke-strict-blackbox-api.py")]);
+}
+
+function checkStrictBlackboxUiSmoke() {
+  run("strict black-box UI smoke", "node", [join(root, "scripts", "smoke-strict-blackbox-ui.mjs")]);
+}
+
+function checkStrictTokenMetricsSmoke() {
+  run("strict token metrics smoke", "node", [join(root, "scripts", "smoke-token-metrics.mjs")]);
+}
+
+function checkRunSelectionSmoke() {
+  run("run selection smoke", "node", [join(root, "scripts", "smoke-official-run-selection.mjs")]);
+}
+
 function checkLocomoControlsStillExist() {
   const renderer = readFileSync(join(root, "src", "render", "qa-locomo.js"), "utf8");
   const formReader = readFileSync(join(root, "src", "form-readers.js"), "utf8");
@@ -179,6 +195,10 @@ const checks = [
   checkLongMemEvalPayloadSmoke,
   checkLocomoPayloadSmoke,
   checkStrictBlackboxReportSmoke,
+  checkStrictBlackboxApiSmoke,
+  checkStrictBlackboxUiSmoke,
+  checkStrictTokenMetricsSmoke,
+  checkRunSelectionSmoke,
   checkLocomoControlsStillExist,
 ];
 

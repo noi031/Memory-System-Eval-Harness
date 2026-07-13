@@ -104,15 +104,15 @@ input, select { min-width: 0; }
 
 .wb-shell {
   display: grid;
-  grid-template-columns: 232px minmax(0, 1fr);
+  grid-template-columns: 196px minmax(0, 1fr);
   min-height: 100vh;
 }
 
 .wb-sidebar {
   display: grid;
   align-content: start;
-  gap: 24px;
-  padding: 24px 14px 24px 16px;
+  gap: 18px;
+  padding: 20px 12px;
   border-right: 1px solid var(--border);
   background: var(--sidebar-bg);
   position: relative;
@@ -209,7 +209,7 @@ input, select { min-width: 0; }
 /* Account toolbar */
 .wb-account-bar {
   display: grid;
-  grid-template-columns: minmax(340px, 1.3fr) minmax(170px, 0.7fr) auto;
+  grid-template-columns: minmax(260px, 1.35fr) minmax(150px, 0.65fr) auto;
   gap: 10px;
   align-items: center;
   padding: 10px 16px;
@@ -1149,6 +1149,176 @@ summary.wb-subpanel-head::after {
   display: grid; gap: 8px; margin: 0; padding: 0; list-style: none;
 }
 
+/* Strict black-box report */
+.wb-strict-panel {
+  display: grid;
+  gap: 14px;
+  margin-top: 14px;
+  padding: 16px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+}
+.wb-strict-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+}
+.wb-strict-head > div { display: grid; gap: 3px; min-width: 0; }
+.wb-strict-head span {
+  color: var(--accent-strong);
+  font-size: 10px;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+.wb-strict-head h3 { margin: 0; font-size: 16px; }
+.wb-strict-head p {
+  max-width: 760px;
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.55;
+}
+.wb-strict-head > strong {
+  flex: 0 0 auto;
+  color: var(--text);
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+}
+.wb-strict-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(148px, 1fr));
+  gap: 8px;
+}
+.wb-strict-metric {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface-muted-strong);
+}
+.wb-strict-metric span,
+.wb-strict-metric small {
+  min-width: 0;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.4;
+}
+.wb-strict-metric strong {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  color: var(--text);
+  font-size: 17px;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.25;
+}
+.wb-strict-metric.success { border-left: 3px solid var(--success); }
+.wb-strict-metric.warn { border-left: 3px solid var(--warn); }
+.wb-strict-metric.danger { border-left: 3px solid var(--danger); }
+.wb-strict-folds { display: grid; gap: 8px; }
+.wb-strict-fold {
+  min-width: 0;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+}
+.wb-strict-fold > summary,
+.wb-strict-definition > summary {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 12px;
+  align-items: center;
+  padding: 11px 12px;
+  cursor: pointer;
+  list-style: none;
+}
+.wb-strict-fold > summary::-webkit-details-marker,
+.wb-strict-definition > summary::-webkit-details-marker { display: none; }
+.wb-strict-fold > summary:hover,
+.wb-strict-definition > summary:hover { background: var(--surface-muted); }
+.wb-strict-fold > summary strong,
+.wb-strict-definition > summary strong { font-size: 13px; }
+.wb-strict-fold > summary span,
+.wb-strict-definition > summary span {
+  color: var(--muted);
+  font-size: 11px;
+  white-space: nowrap;
+}
+.wb-strict-table-wrap {
+  overflow: auto;
+  border-top: 1px solid var(--border);
+}
+.wb-strict-table {
+  width: 100%;
+  min-width: 660px;
+  border-collapse: collapse;
+  font-variant-numeric: tabular-nums;
+}
+.wb-strict-table th,
+.wb-strict-table td {
+  padding: 9px 12px;
+  border-bottom: 1px solid var(--border-soft);
+  text-align: right;
+  white-space: nowrap;
+}
+.wb-strict-table th:first-child,
+.wb-strict-table td:first-child { text-align: left; }
+.wb-strict-table thead th {
+  color: var(--muted);
+  background: var(--surface-muted);
+  font-size: 11px;
+}
+.wb-strict-table tbody th { font-size: 12px; font-weight: 600; }
+.wb-strict-table tbody td { font-size: 12px; }
+.wb-strict-definition-list {
+  display: grid;
+  gap: 8px;
+  padding: 10px;
+  border-top: 1px solid var(--border);
+  background: var(--surface-muted);
+}
+.wb-strict-definition {
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface);
+}
+.wb-strict-definition > div {
+  display: grid;
+  gap: 8px;
+  padding: 0 12px 12px;
+  border-top: 1px solid var(--border-soft);
+}
+.wb-strict-definition p {
+  display: grid;
+  grid-template-columns: 48px minmax(0, 1fr);
+  gap: 8px;
+  margin: 0;
+  padding-top: 8px;
+  color: var(--text-soft-strong);
+  font-size: 12px;
+  line-height: 1.55;
+}
+.wb-strict-definition b { color: var(--muted); }
+.wb-strict-definition code {
+  min-width: 0;
+  padding: 2px 5px;
+  overflow-wrap: anywhere;
+  border-radius: 4px;
+  background: var(--surface-muted);
+  color: var(--text);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+.wb-strict-panel.compact .wb-strict-folds { display: none; }
+.wb-strict-panel.compact .wb-strict-grid {
+  grid-template-columns: repeat(auto-fit, minmax(132px, 1fr));
+}
+.wb-strict-panel.compact .wb-strict-head p { max-width: 620px; }
+
 /* Current result / recovery */
 .wb-current-result-strip, .wb-recovery-strip {
   display: grid; gap: 12px;
@@ -1669,7 +1839,7 @@ summary.wb-subpanel-head::after {
 .wb-shell[data-benchmark="locomo"].wb-shell-compact .wb-hero-copy strong { font-size: 20px; line-height: 1.08; }
 
 .wb-shell[data-benchmark="locomo"].wb-shell-compact .wb-account-bar {
-  grid-template-columns: minmax(300px, 1.2fr) minmax(168px, 0.68fr) auto;
+  grid-template-columns: minmax(240px, 1.3fr) minmax(150px, 0.7fr) auto;
   gap: 6px; min-height: 62px; padding: 8px 10px;
 }
 .wb-shell[data-benchmark="locomo"].wb-shell-compact .wb-account-cluster { gap: 8px; }
@@ -1698,7 +1868,7 @@ summary.wb-subpanel-head::after {
    RESPONSIVE
    ============================================================ */
 
-@media (max-width: 1240px) {
+@media (max-width: 1120px) {
   .wb-shell { grid-template-columns: minmax(0, 1fr); }
   .wb-sidebar { gap: 14px; padding: 14px 16px; border-right: 0; border-bottom: 1px solid var(--border); }
   .wb-side-nav { gap: 12px; }
@@ -1723,6 +1893,7 @@ summary.wb-subpanel-head::after {
   }
   .wb-pending-filter-grid, .wb-recovery-strip-items { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .wb-current-workbench-grid { grid-template-columns: minmax(0, 1fr); }
+  .wb-strict-head { display: grid; }
   .wb-locomo-recall-toolbar, .wb-question-workbench-toolbar { grid-template-columns: minmax(0, 1fr); }
   .wb-question-workbench-actions, .wb-recovery-actions, .wb-setup-actions,
   .wb-locomo-pill-row, .wb-locomo-trace-summary > span { justify-content: flex-start; }
@@ -1777,6 +1948,10 @@ summary.wb-subpanel-head::after {
   .wb-shell[data-benchmark="locomo"] .wb-recovery-strip-items,
   .wb-shell[data-benchmark="locomo"] .wb-locomo-qa-pairs,
   .wb-shell[data-benchmark="locomo"] .wb-report-primary .wb-kv { grid-template-columns: minmax(0, 1fr); }
+  .wb-strict-panel { padding: 12px; }
+  .wb-strict-grid,
+  .wb-strict-panel.compact .wb-strict-grid { grid-template-columns: minmax(0, 1fr); }
+  .wb-strict-definition p { grid-template-columns: minmax(0, 1fr); }
 }
 
 @media (max-width: 840px) {

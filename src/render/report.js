@@ -5,6 +5,7 @@ import { getRunPhase, getRunStatusLabel } from "../run-status.js";
 import { renderBenchmarkRunCards } from "./run-list.js";
 import { renderOfficialStageActions, renderOfficialStageCurrent } from "./official-stage.js";
 import { BENCHMARKS } from "../config.js";
+import { renderStrictBlackboxMetrics } from "./strict-blackbox.js";
 
 export function createReportRenderers({
   $,
@@ -42,6 +43,11 @@ export function createReportRenderers({
       formatInt,
       formatPct,
     });
+    if (metrics.strictBlackbox) {
+      $("wbReportCurrent").insertAdjacentHTML("beforeend", renderStrictBlackboxMetrics(metrics.strictBlackbox, {
+        escapeHtml,
+      }));
+    }
   }
 
   function renderReportActions() {

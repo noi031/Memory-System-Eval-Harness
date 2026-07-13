@@ -244,4 +244,44 @@ assert(longmemCurrent?.run_dir === longmemOfficialReady.run_dir, "LongMemEval cu
 const visibleLongmem = selectors.visibleRunsForBenchmark("longmemeval", { limit: 3 });
 assert(visibleLongmem[0]?.run_dir === longmemOfficialReady.run_dir || visibleLongmem[1]?.run_dir === longmemOfficialReady.run_dir, "LongMemEval visible runs should prioritize official-ready runs near the front");
 
+const locomoImportOnly = {
+  run_dir: "/tmp/locomo-import-only",
+  output_file: "/tmp/locomo-import-only/echomemory_import_summary.json",
+  dataset_format: "locomo",
+  kind: "echomemory_import",
+  status: "succeeded",
+  account: "default",
+  sample: "conv-30",
+  name: "locomo import only",
+};
+const locomoQa = {
+  run_dir: "/tmp/locomo-qa",
+  output_file: "/tmp/locomo-qa/echomemory_memory_qa_results.csv",
+  dataset_format: "locomo",
+  kind: "echomemory_qa",
+  status: "succeeded",
+  account: "default",
+  sample: "conv-30",
+  name: "locomo qa",
+};
+const locomoImportState = {
+  ...makeState(),
+  activeBenchmark: "locomo",
+  selectedAccount: "default",
+  runs: [locomoImportOnly],
+  currentRunDirs: {...makeState().currentRunDirs, locomo: locomoImportOnly.run_dir},
+};
+const locomoImportSelectors = createSelectors({
+  state: locomoImportState,
+  BENCHMARKS,
+  $: () => null,
+  queryAll: () => [],
+  firstValue,
+});
+assert(locomoImportSelectors.currentRun() === null, "LoCoMo currentRun must not expose an import run as a QA result");
+
+locomoImportState.runs = [locomoImportOnly, locomoQa];
+const locomoQaPreferred = locomoImportSelectors.currentRun();
+assert(locomoQaPreferred?.run_dir === locomoQa.run_dir, "LoCoMo currentRun must select a QA run when import and QA runs coexist");
+
 console.log("official run selection smoke passed");

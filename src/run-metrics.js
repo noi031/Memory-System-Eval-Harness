@@ -205,6 +205,9 @@ export function summarizeBenchmarkRun(benchmarkId, run, detail, result) {
     summary.retrieval_total_tokens,
     summary.run_retrieval_total_tokens,
   );
+  const strictBlackbox = summary?.strict_blackbox && typeof summary.strict_blackbox === "object"
+    ? summary.strict_blackbox
+    : null;
 
   return {
     summary,
@@ -235,6 +238,7 @@ export function summarizeBenchmarkRun(benchmarkId, run, detail, result) {
     importTotalTokens,
     retrievalTotalTokens,
     totalTokens: sumNumbers(importTotalTokens, retrievalTotalTokens, answerTotalTokens),
+    strictBlackbox,
     officialMetric: summary?.official_metric || official?.official_metric || "",
     officialMetricScope: official?.metric_scope || "",
     officialNote: official?.official_metric_note || "",

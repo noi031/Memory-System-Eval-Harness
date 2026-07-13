@@ -87,6 +87,15 @@ def integer(value, default: int = 0) -> int:
         return default
 
 
+def optional_integer(value) -> int | None:
+    if value is None or not str(value).strip():
+        return None
+    try:
+        return int(float(value))
+    except (TypeError, ValueError):
+        return None
+
+
 def first_present(row: dict, *fields: str):
     for field in fields:
         value = row.get(field)
@@ -122,8 +131,8 @@ def metric_stats(values: list[float]) -> dict[str, float | None]:
     }
 
 
-def strict_metric_explanations_html() -> str:
-    items = [
+def strict_metric_definitions() -> list[dict[str, str]]:
+    return [
         {
             "name": "准确率与分类准确率",
             "kind": "严格计算",
@@ -245,6 +254,10 @@ def strict_metric_explanations_html() -> str:
             "boundary": "只有提交响应而没有后台完成标志时，无法严格确定结束时刻，因此不展示平均导入时间。",
         },
     ]
+
+
+def strict_metric_explanations_html() -> str:
+    items = strict_metric_definitions()
     rows = []
     for item in items:
         rows.append(
@@ -318,8 +331,8 @@ def observed_blackbox_metrics(
     tokens_per_correct = total_answer_tokens / correct if complete_token_usage and correct else None
 
     import_summary = import_summary or {}
-    expected_messages = integer(import_summary.get("expected_messages"))
-    submitted_messages = integer(import_summary.get("submitted_messages"))
+    expected_messages = optional_integer(import_summary.get("expected_messages"))
+    submitted_messages = optional_integer(import_summary.get("submitted_messages"))
 
     def values(field: str) -> list[float]:
         return [
@@ -351,7 +364,9 @@ def observed_blackbox_metrics(
         "llm_total_ms": metric_stats(values("llm_total_ms")),
         "expected_messages": expected_messages,
         "submitted_messages": submitted_messages,
-        "submission_rate": submitted_messages / expected_messages if expected_messages else None,
+        "submission_rate": submitted_messages / expected_messages
+        if submitted_messages is not None and expected_messages
+        else None,
         "import_status": str(import_summary.get("status") or "N/A"),
     }
 
@@ -1025,7 +1040,7 @@ def generate_html_report(
                 <div class="strict-metric">
                     <span>消息提交率</span>
                     <strong>{format_percent(observed["submission_rate"])}</strong>
-                    <small>{observed["submitted_messages"]}/{observed["expected_messages"]}，不代表记忆导入完成</small>
+                    <small>{format_number(observed["submitted_messages"], 0)}/{format_number(observed["expected_messages"], 0)}，不代表记忆导入完成</small>
                 </div>
                 <div class="strict-metric status">
                     <span>记忆导入状态</span>

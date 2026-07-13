@@ -12,6 +12,12 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 
+from scripts.generate_html_report import (
+    load_results,
+    observed_blackbox_metrics,
+    strict_metric_definitions,
+)
+
 
 ROOT = Path(__file__).resolve().parent
 
@@ -95,6 +101,36 @@ def merge_longmemeval_summary(summary: dict[str, Any], csv_path: Path) -> dict[s
     return merged
 
 
+def merge_strict_blackbox_summary(summary: dict[str, Any], csv_path: Path) -> dict[str, Any]:
+    if csv_path.suffix.lower() != ".csv" or not csv_path.exists():
+        return summary
+    try:
+        rows = load_results(str(csv_path))
+    except Exception:
+        return summary
+    if not rows:
+        return summary
+    summary_json = summary.get("summary_json")
+    import_summary = summary.get("import_summary")
+    if not isinstance(import_summary, dict) and isinstance(summary_json, dict):
+        import_summary = summary_json.get("import_summary")
+    if not isinstance(import_summary, dict):
+        import_summary = None
+    merged = dict(summary)
+    merged["strict_blackbox"] = {
+        "mode": "strict_observed",
+        "source": str(csv_path),
+        "row_count": len(rows),
+        "metrics": observed_blackbox_metrics(rows, import_summary),
+        "definitions": strict_metric_definitions(),
+        "unavailable": {
+            "internal_memory_injection_tokens": None,
+            "initial_memory_import_time_ms": None,
+        },
+    }
+    return merged
+
+
 def maybe_patch_results_payload(raw_payload: bytes, parsed_url: urllib.parse.ParseResult) -> bytes:
     if parsed_url.path != "/api/results":
         return raw_payload
@@ -114,6 +150,7 @@ def maybe_patch_results_payload(raw_payload: bytes, parsed_url: urllib.parse.Par
         return raw_payload
     patched = merge_hotpotqa_summary(summary, csv_path)
     patched = merge_longmemeval_summary(patched, csv_path)
+    patched = merge_strict_blackbox_summary(patched, csv_path)
     if patched == summary:
         return raw_payload
     merged = dict(data)

@@ -243,6 +243,8 @@ DEFAULT_DATA = first_existing_path(
         DATASET_DIR / "locomo10.json",
         DEFAULT_REPO / "dataset" / "full" / "locomo.json",
         DEFAULT_REPO / "dataset" / "locomo.json",
+        Path.home() / "Workspace-Groups/LoCoMo/locomo-eval-web/dataset/locomo10.json",
+        Path.home() / "Code/Memory-System-Eval-Harness0710/dataset/locomo10.json",
         DEFAULT_REPO / "benchmark/locomo/data/locomo10.json",
         DEFAULT_REPO / "test/locomo10.json",
         ROOT / "data/locomo10.json",

@@ -25,20 +25,27 @@ const openvikingLocomoMetrics = summarizeBenchmarkRun(
       answer_total_tokens: 2676,
       internal_memory_import_total_tokens: 258817,
       retrieval_tokens_est: 912,
+      strict_blackbox: {
+        mode: "strict_observed",
+        row_count: 10,
+        metrics: {},
+        definitions: [],
+      },
     },
   },
 );
 
-assert(openvikingLocomoMetrics.importTotalTokens === 258817, "OpenViking LoCoMo import tokens must fall back to internal_memory_import_total_tokens");
-assert(openvikingLocomoMetrics.importLlmTotalTokens === 258817, "OpenViking LoCoMo import LLM tokens must reuse internal import totals when no split is available");
-assert(openvikingLocomoMetrics.retrievalTotalTokens === 912, "OpenViking LoCoMo retrieval tokens must be exposed");
-assert(openvikingLocomoMetrics.totalTokens === 262405, "OpenViking LoCoMo total tokens must sum import, retrieval, and answer tokens");
+assert(openvikingLocomoMetrics.importTotalTokens === null, "LoCoMo import tokens must not use internal_memory_import_total_tokens without authoritative usage");
+assert(openvikingLocomoMetrics.importLlmTotalTokens === null, "LoCoMo import LLM tokens must remain unavailable without authoritative usage");
+assert(openvikingLocomoMetrics.retrievalTotalTokens === null, "LoCoMo retrieval tokens must not use retrieval_tokens_est");
+assert(openvikingLocomoMetrics.totalTokens === 2676, "LoCoMo total tokens must only sum authoritative token fields");
+assert(openvikingLocomoMetrics.strictBlackbox?.row_count === 10, "LoCoMo strict black-box payload must be preserved");
 
 const locomoReportItems = buildReportMetricItems("locomo", openvikingLocomoMetrics);
 const locomoJudgeItems = buildJudgeMetricItems("locomo", openvikingLocomoMetrics);
 const locomoLabels = new Set([...locomoReportItems, ...locomoJudgeItems].map((item) => item.label));
-assert(locomoLabels.has("导入 Tokens"), "LoCoMo report/judge metrics must include import tokens");
-assert(locomoLabels.has("检索 Tokens"), "LoCoMo report/judge metrics must include retrieval tokens when present");
+assert(!locomoLabels.has("导入 Tokens"), "LoCoMo report/judge metrics must omit unavailable import tokens");
+assert(!locomoLabels.has("检索 Tokens"), "LoCoMo report/judge metrics must omit estimated retrieval tokens");
 assert(locomoLabels.has("答案 Tokens"), "LoCoMo report/judge metrics must include answer tokens");
 
 const longMemMetrics = summarizeBenchmarkRun(

@@ -3,6 +3,7 @@ import { buildJudgeActionViewModel, buildJudgeMetricItems } from "../benchmark-v
 import { getRunPhase, getRunStatusLabel } from "../run-status.js";
 import { actionCard, checklistCard, renderEmptyState } from "./shared.js";
 import { renderOfficialStageActions, renderOfficialStageCurrent } from "./official-stage.js";
+import { renderStrictBlackboxMetrics } from "./strict-blackbox.js";
 
 export function createJudgeRenderers({
   $,
@@ -142,6 +143,12 @@ export function createJudgeRenderers({
       formatInt,
       formatPct,
     });
+    if (metrics.strictBlackbox) {
+      $("wbJudgeCurrent").insertAdjacentHTML("beforeend", renderStrictBlackboxMetrics(metrics.strictBlackbox, {
+        escapeHtml,
+        compact: true,
+      }));
+    }
   }
 
   function renderJudgeActions(activeBenchmark) {
