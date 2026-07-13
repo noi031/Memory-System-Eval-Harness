@@ -122,6 +122,145 @@ def metric_stats(values: list[float]) -> dict[str, float | None]:
     }
 
 
+def strict_metric_explanations_html() -> str:
+    items = [
+        {
+            "name": "准确率与分类准确率",
+            "kind": "严格计算",
+            "formula": "CORRECT / (CORRECT + WRONG)",
+            "source": "CSV: result、category",
+            "meaning": "总准确率按全部已判分题计算；分类准确率按 LoCoMo category 分组后使用同一公式。",
+            "boundary": "UNSCORED 不进入分母。准确率依赖 Judge 结果，属于结果质量指标，不是系统运行成功率。",
+        },
+        {
+            "name": "QA 请求成功率",
+            "kind": "严格计算",
+            "formula": "四个状态均为 ok 的题数 / 四个状态字段完整的题数",
+            "source": "CSV: retrieval_status、answer_status、model_status、health_status",
+            "meaning": "一题只有在检索、回答、模型和总体健康状态均为 ok 时才计为成功。",
+            "boundary": "缺少任一状态字段的行不进入分母；它不是准确率，也不代表答案正确。",
+        },
+        {
+            "name": "空召回率",
+            "kind": "严格计算",
+            "formula": "retrieval_count = 0 的题数 / 有召回计数字段的题数",
+            "source": "CSV: retrieval_count；缺失时回退 memory_hit_count",
+            "meaning": "衡量评测平台从记忆 API 得到零条结果的比例。",
+            "boundary": "非空召回不等于召回了正确证据；后者需要单独的证据标注或召回质量评测。",
+        },
+        {
+            "name": "最终失败率",
+            "kind": "严格计算",
+            "formula": "未满足 QA 成功条件的完整状态行数 / 完整状态行数",
+            "source": "CSV: retrieval_status、answer_status、model_status、health_status",
+            "meaning": "统计黑盒调用链最终未完整成功的题，包括检索、模型、回答或健康状态失败。",
+            "boundary": "只有 CSV 明确记录的最终状态才会计入；无法仅凭该指标区分超时、限流和其他错误。",
+        },
+        {
+            "name": "外部可见模型重试率",
+            "kind": "严格计算",
+            "formula": "model_retry_count > 0 的题数 / 有 model_retry_count 的题数",
+            "source": "CSV: model_retry_count",
+            "meaning": "统计评测平台能够观察到的回答模型重试。",
+            "boundary": "记忆系统或模型网关内部未暴露的重试不可见，因此不计入。",
+        },
+        {
+            "name": "端到端 QA 时延",
+            "kind": "严格计算",
+            "formula": "逐题 end_to_end_ms 的平均、P50、P95、P99、最大值",
+            "source": "CSV: end_to_end_ms",
+            "meaning": "从评测平台开始处理该题到最终回答阶段完成的逐题墙钟时间。",
+            "boundary": "只覆盖 QA 阶段，不含预先导入背景记忆的耗时。",
+        },
+        {
+            "name": "记忆检索时延",
+            "kind": "严格计算",
+            "formula": "逐题 retrieval_latency_ms 的平均、P50、P95、P99、最大值",
+            "source": "CSV: retrieval_latency_ms",
+            "meaning": "评测平台调用记忆检索 API 并获得结果所记录的墙钟时间。",
+            "boundary": "这是 API 边界时延，无法拆分记忆系统内部的向量检索、图检索、重排等耗时。",
+        },
+        {
+            "name": "QA 侧编排注入时延",
+            "kind": "严格计算",
+            "formula": "逐题 injection_total_ms 的平均、P50、P95、P99、最大值",
+            "source": "CSV: injection_total_ms",
+            "meaning": "本实现中等于检索加记忆格式化和消息构建的 QA 侧时间。",
+            "boundary": "它不是初始记忆写入、抽取或生成完成时间。没有可靠导入完成标志时，不能据此计算平均记忆导入时间。",
+        },
+        {
+            "name": "回答模型时延",
+            "kind": "严格计算",
+            "formula": "逐题 llm_total_ms 的平均、P50、P95、P99、最大值",
+            "source": "CSV: llm_total_ms",
+            "meaning": "回答阶段对外部模型的全部可见调用耗时。",
+            "boundary": "模型服务内部排队、推理和网络传输无法继续拆分，除非模型 API 额外返回这些字段。",
+        },
+        {
+            "name": "回答模型 Token",
+            "kind": "严格计算",
+            "formula": "逐题 usage 的平均、P50、P95、P99 与合计",
+            "source": "CSV: answer_prompt_tokens、answer_completion_tokens、answer_total_tokens",
+            "meaning": "只统计回答模型 API 实际返回并落盘的 usage。",
+            "boundary": "不使用字符数换算或非权威推算字段。缺失 usage 时显示 N/A，不按 0 处理。",
+        },
+        {
+            "name": "每个正确答案 Token",
+            "kind": "严格计算",
+            "formula": "回答模型 answer_total_tokens 合计 / CORRECT 题数",
+            "source": "CSV: answer_total_tokens、result",
+            "meaning": "衡量获得一个正确答案对应的回答模型 Token 成本。",
+            "boundary": "只有所有题都存在回答 Token usage 且至少有一题正确时才计算，否则显示 N/A。",
+        },
+        {
+            "name": "消息提交率",
+            "kind": "严格计算",
+            "formula": "submitted_messages / expected_messages",
+            "source": "导入摘要: submitted_messages、expected_messages",
+            "meaning": "确认评测平台向记忆系统提交了多少条预期消息。",
+            "boundary": "提交成功不等于后台记忆抽取、索引或生成已经完成，不能替代导入完成率。",
+        },
+        {
+            "name": "记忆导入状态",
+            "kind": "直接读取",
+            "formula": "不做二次推导，直接展示导入摘要 status",
+            "source": "导入摘要: status",
+            "meaning": "以后端导入流程给出的最终状态为准。",
+            "boundary": "若后端没有可靠的完成状态，报告显示 N/A 或原始不完整状态，不自行猜测。",
+        },
+        {
+            "name": "内部记忆注入 Token",
+            "kind": "不可黑盒计算",
+            "formula": "N/A",
+            "source": "需要记忆系统返回权威 LLM / Embedding usage",
+            "meaning": "记忆系统在抽取、总结、Embedding、重排等内部阶段实际消耗的 Token。",
+            "boundary": "当前黑盒 API 未返回完整 usage；任何非权威推算字段都不进入严格指标。",
+        },
+        {
+            "name": "初始记忆导入时间",
+            "kind": "当前不可严格计算",
+            "formula": "需要可靠的导入开始时间与后台处理完成时间之差",
+            "source": "需要记忆系统提供完成事件、任务状态或可验证的 ready 标志",
+            "meaning": "从消息提交开始到记忆可稳定检索的真实耗时。",
+            "boundary": "只有提交响应而没有后台完成标志时，无法严格确定结束时刻，因此不展示平均导入时间。",
+        },
+    ]
+    rows = []
+    for item in items:
+        rows.append(
+            "<details class=\"metric-definition\">"
+            f"<summary><strong>{html_lib.escape(item['name'])}</strong>"
+            f"<span>{html_lib.escape(item['kind'])}</span></summary>"
+            "<div class=\"metric-definition-body\">"
+            f"<p><b>计算：</b><code>{html_lib.escape(item['formula'])}</code></p>"
+            f"<p><b>数据来源：</b>{html_lib.escape(item['source'])}</p>"
+            f"<p><b>含义：</b>{html_lib.escape(item['meaning'])}</p>"
+            f"<p><b>边界：</b>{html_lib.escape(item['boundary'])}</p>"
+            "</div></details>"
+        )
+    return "".join(rows)
+
+
 def format_percent(value: float | None) -> str:
     return "N/A" if value is None else f"{value * 100:.2f}%"
 
@@ -400,6 +539,7 @@ def generate_html_report(
             f"<td>{format_number(item['sum'], 0)}</td>"
             "</tr>"
         )
+    metric_explanations_html = strict_metric_explanations_html()
 
     html = f"""<!DOCTYPE html>
 <html lang="zh-CN">
@@ -580,6 +720,48 @@ def generate_html_report(
             margin: 16px 0 7px;
             color: #334155;
             font-size: 14px;
+        }}
+        .metric-definitions {{
+            display: grid;
+            gap: 8px;
+            margin-top: 10px;
+        }}
+        .metric-definition {{
+            border: 1px solid #dbe3df;
+            border-radius: 6px;
+            background: white;
+        }}
+        .metric-definition summary {{
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 12px;
+            padding: 10px 12px;
+            cursor: pointer;
+        }}
+        .metric-definition summary strong {{
+            color: #1f2937;
+            font-size: 13px;
+        }}
+        .metric-definition summary span {{
+            color: #166534;
+            font-size: 11px;
+            font-weight: 700;
+            white-space: nowrap;
+        }}
+        .metric-definition-body {{
+            padding: 0 12px 11px;
+            border-top: 1px solid #eef2f0;
+        }}
+        .metric-definition-body p {{
+            margin: 8px 0 0;
+            color: #475569;
+            font-size: 12px;
+        }}
+        .metric-definition-body code {{
+            color: #0f172a;
+            white-space: normal;
+            overflow-wrap: anywhere;
         }}
         .scope-panel {{
             margin: 8px 0 24px;
@@ -826,7 +1008,7 @@ def generate_html_report(
                     <small>{observed["empty_retrieval_count"]}/{observed["retrieval_observed_count"]} 条召回记录</small>
                 </div>
                 <div class="strict-metric">
-                    <span>超时或最终失败率</span>
+                    <span>最终失败率</span>
                     <strong>{format_percent(observed["failure_rate"])}</strong>
                     <small>{observed["failure_count"]}/{observed["request_status_count"]} 条完整状态记录</small>
                 </div>
@@ -880,6 +1062,13 @@ def generate_html_report(
                     <tbody>{token_rows_html}</tbody>
                 </table>
             </div>
+
+            <h3 class="strict-subtitle">指标口径说明</h3>
+            <p class="strict-note">
+                百分位采用线性插值：在排序后的逐题观测值上按 (n - 1) × q 定位。
+                以下说明同时标出严格计算项、直接读取项和当前不可黑盒计算项。
+            </p>
+            <div class="metric-definitions">{metric_explanations_html}</div>
         </section>
 
         <div class="augmentation-panel">

@@ -91,6 +91,10 @@ def main() -> None:
         "60.0",
         "ECHOMEMORY_IMPORT_INCOMPLETE",
         "内部记忆注入 Token",
+        "指标口径说明",
+        "QA 侧编排注入时延",
+        "初始记忆导入时间",
+        "当前不可严格计算",
         "<strong>N/A</strong>",
     ]
     for value in required:

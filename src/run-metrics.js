@@ -16,17 +16,6 @@ function firstNumber() {
   return null;
 }
 
-function preferredImportTokenTotal() {
-  let fallback = null;
-  for (let i = 0; i < arguments.length; i += 1) {
-    const num = asNumber(arguments[i]);
-    if (num === null) continue;
-    if (fallback === null) fallback = num;
-    if (num > 0) return num;
-  }
-  return fallback;
-}
-
 function sumNumbers() {
   let total = 0;
   let hasValue = false;
@@ -206,31 +195,15 @@ export function summarizeBenchmarkRun(benchmarkId, run, detail, result) {
   const importLlmTotalTokens = firstNumber(
     summary.import_llm_total_tokens,
     importSummary?.import_llm_total_tokens,
-    summary.internal_memory_import_total_tokens,
-    importSummary?.internal_memory_import_total_tokens,
-    summary.internal_memory_import_delta_total_tokens,
-    importSummary?.internal_memory_import_delta_total_tokens,
   );
   const importEmbeddingTotalTokens = firstNumber(summary.import_embedding_total_tokens, importSummary?.import_embedding_total_tokens);
-  const importTotalTokens = preferredImportTokenTotal(
+  const importTotalTokens = firstNumber(
     summary.import_total_tokens,
-    summary.internal_memory_import_total_tokens,
-    summary.internal_memory_import_delta_total_tokens,
-    summary.estimated_import_tokens,
     importSummary?.import_total_tokens,
-    importSummary?.internal_memory_import_total_tokens,
-    importSummary?.internal_memory_import_delta_total_tokens,
-    importSummary?.estimated_import_tokens,
-    summary.total_injection_tokens_est,
-    detail?.record?.injection_tokens,
-    run?.injection_tokens,
   );
   const retrievalTotalTokens = firstNumber(
     summary.retrieval_total_tokens,
-    summary.internal_retrieval_total_tokens,
-    summary.internal_retrieval_delta_total_tokens,
     summary.run_retrieval_total_tokens,
-    summary.retrieval_tokens_est,
   );
 
   return {
