@@ -204,7 +204,6 @@ function buildOfficialConfigStateBase({
   maxIterations,
   retrievalMode,
   toolSet,
-  toolMinScore,
   questionTimeoutS,
   officialEvalAfter,
   backendIsEchoMemory,
@@ -220,7 +219,6 @@ function buildOfficialConfigStateBase({
     maxIterations,
     retrievalMode,
     toolSet,
-    toolMinScore,
     questionTimeoutS,
     officialEvalAfter,
     backendIsEchoMemory,
@@ -260,7 +258,6 @@ function buildOfficialConfigState({
       maxIterations: firstValue(taskConfig.max_iterations, cfg.hotpotQaMaxIterations, "8"),
       retrievalMode: firstValue(taskConfig.retrieval_mode, cfg.hotpotQaRetrievalMode, "search"),
       toolSet: firstValue(taskConfig.tool_set, cfg.hotpotQaToolSet, "vikingbot_native_safe"),
-      toolMinScore: firstValue(taskConfig.tool_min_score, cfg.hotpotQaToolMinScore, "0.35"),
       questionTimeoutS: firstValue(taskConfig.question_timeout_s, cfg.hotpotQaQuestionTimeout, "180"),
       officialEvalAfter: taskConfig.official_eval_after !== undefined
         ? taskConfig.official_eval_after !== false
@@ -287,7 +284,6 @@ function buildOfficialConfigState({
       maxIterations: firstValue(taskConfig.max_iterations, cfg.longMemEvalMaxIterations, cfg.hotpotQaMaxIterations, "8"),
       retrievalMode: firstValue(taskConfig.retrieval_mode, cfg.longMemEvalRetrievalMode, cfg.hotpotQaRetrievalMode, "search"),
       toolSet: firstValue(taskConfig.tool_set, cfg.longMemEvalToolSet, cfg.hotpotQaToolSet, "vikingbot_native_safe"),
-      toolMinScore: firstValue(taskConfig.tool_min_score, cfg.longMemEvalToolMinScore, cfg.hotpotQaToolMinScore, "0.35"),
       questionTimeoutS: firstValue(taskConfig.question_timeout_s, cfg.longMemEvalQuestionTimeout, cfg.hotpotQaQuestionTimeout, "180"),
       officialEvalAfter: taskConfig.official_eval_after !== undefined
         ? taskConfig.official_eval_after !== false
@@ -304,7 +300,6 @@ function buildOfficialConfigState({
     maxIterations: firstValue(taskConfig.max_iterations, "8"),
     retrievalMode: firstValue(taskConfig.retrieval_mode, "search"),
     toolSet: firstValue(taskConfig.tool_set, "vikingbot_native_safe"),
-    toolMinScore: firstValue(taskConfig.tool_min_score, "0.35"),
     questionTimeoutS: firstValue(taskConfig.question_timeout_s, "180"),
     officialEvalAfter: taskConfig.official_eval_after !== false,
     backendIsEchoMemory: backendId === "echomemory",
@@ -351,7 +346,7 @@ function buildOfficialPreviewPresentation({
         backendId,
         headline: `题量 ${String(config.questionCount)} · Top K ${String(config.topK)} · 语料 ${String(config.hotpotqaCorpusMode)} · 官方评测 ${config.officialEvalAfter ? "开启" : "关闭"}${metrics.officialMetricScope ? ` · ${officialScopeLabel(metrics.officialMetricScope)}` : ""}`,
         echoPrimarySuffix: ` · checkpoint ${String(config.checkpointInterval)}`,
-        echoSecondaryLine: `检索模式 ${String(config.retrievalMode)} · 导入 ${String(config.hotpotqaGlobalImportMode)} · 工具集 ${String(config.toolSet)} · 最低分 ${String(config.toolMinScore)} · 超时 ${String(config.questionTimeoutS)}s`,
+        echoSecondaryLine: `检索模式 ${String(config.retrievalMode)} · 导入 ${String(config.hotpotqaGlobalImportMode)} · 工具集 ${String(config.toolSet)} · 超时 ${String(config.questionTimeoutS)}s`,
         nonEchoPrimaryLine: `检索增强 ${config.toolEnabled ? "开启" : "关闭"} · 当前后端不会使用 EchoMemory 检索参数`,
       }),
     };
@@ -369,7 +364,7 @@ function buildOfficialPreviewPresentation({
         config,
         backendId,
         headline: `题量 ${String(config.questionCount)} · Top K ${String(config.topK)} · 官方评测 ${config.officialEvalAfter ? "开启" : "关闭"}`,
-        echoSecondaryLine: `检索模式 ${String(config.retrievalMode)} · 工具集 ${String(config.toolSet)} · 最低分 ${String(config.toolMinScore)} · 超时 ${String(config.questionTimeoutS)}s`,
+        echoSecondaryLine: `检索模式 ${String(config.retrievalMode)} · 工具集 ${String(config.toolSet)} · 超时 ${String(config.questionTimeoutS)}s`,
         nonEchoPrimaryLine: `检索增强 ${config.toolEnabled ? "开启" : "关闭"} · 当前后端不会使用 EchoMemory 检索参数`,
       }),
     };

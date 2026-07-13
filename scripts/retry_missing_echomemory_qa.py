@@ -64,8 +64,6 @@ def build_retry_command(args: argparse.Namespace, question_ids: list[str], round
         args.prompt_mode if args.prompt_mode != "one_shot" else "vikingboat_lite",
         "--top-k",
         str(args.top_k),
-        "--score-threshold",
-        str(args.score_threshold),
         "--memory-budget-chars",
         str(args.memory_budget_chars),
         "--user-memory-budget-chars",
@@ -94,8 +92,6 @@ def build_retry_command(args: argparse.Namespace, question_ids: list[str], round
         args.tool_set,
         "--tool-search-limit",
         str(args.tool_search_limit),
-        "--tool-min-score",
-        str(args.tool_min_score),
         "--tool-log-chars",
         str(args.tool_log_chars),
         "--prefetch-read-count",
@@ -152,7 +148,6 @@ def main() -> None:
     parser.add_argument("--agent-id", default="default")
     parser.add_argument("--prompt-mode", choices=["one_shot", "vikingboat_lite", "vikingboat_compat"], default="vikingboat_lite")
     parser.add_argument("--top-k", type=int, default=30)
-    parser.add_argument("--score-threshold", type=float, default=0.1)
     parser.add_argument("--memory-budget-chars", type=int, default=6000)
     parser.add_argument("--user-memory-budget-chars", type=int, default=4000)
     parser.add_argument("--agent-memory-budget-chars", type=int, default=2000)
@@ -168,7 +163,6 @@ def main() -> None:
     parser.add_argument("--no-qa-memory-injection", dest="qa_memory_injection", action="store_false")
     parser.add_argument("--tool-set", default="search_read")
     parser.add_argument("--tool-search-limit", type=int, default=20)
-    parser.add_argument("--tool-min-score", type=float, default=0.35)
     parser.add_argument("--tool-log-chars", type=int, default=1200)
     parser.add_argument("--prefetch-read-count", type=int, default=4)
     parser.add_argument("--prefetch-context-chars", type=int, default=5000)

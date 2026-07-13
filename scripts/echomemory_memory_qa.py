@@ -149,10 +149,8 @@ from echomemory_common import (
 from memory.vikingboat_alignment import (
     VIKINGBOT_AGENT_MEMORY_BUDGET_CHARS,
     VIKINGBOT_ALIGNMENT_PROFILE,
-    VIKINGBOT_INITIAL_MIN_SCORE,
     VIKINGBOT_INITIAL_SEARCH_LIMIT,
     VIKINGBOT_MAX_ITERATIONS,
-    VIKINGBOT_TOOL_MIN_SCORE,
     VIKINGBOT_TOOL_SEARCH_LIMIT,
     VIKINGBOT_TOOL_SET,
     VIKINGBOT_USER_MEMORY_BUDGET_CHARS,
@@ -2399,7 +2397,7 @@ async def longmemeval_current_session_summary_fallback(
 
 
 def rank_hits_for_prompt(args: argparse.Namespace, query: str, items: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    filtered = [item for item in items if hit_score(item) >= args.score_threshold]
+    filtered = list(items)
     if not session_summary_allowed(args):
         filtered = [item for item in filtered if memory_type_of(item) != "session_summary"]
     dataset_format = str(getattr(args, "dataset_format", "") or "").strip().lower()
@@ -2578,7 +2576,7 @@ def rank_hits_for_prompt(args: argparse.Namespace, query: str, items: list[dict[
     prefer_grounded_precision = prefer_grounded_precision_prompt(
         query,
         filtered,
-        score_threshold=float(getattr(args, "score_threshold", 0.0) or 0.0),
+        score_threshold=0.0,
     )
     if prefer_grounded_precision:
         for item in filtered:
@@ -2598,7 +2596,7 @@ def rank_hits_for_prompt(args: argparse.Namespace, query: str, items: list[dict[
         1
         for item in filtered
         if grounded_memory_type(memory_type_of(item))
-        and float(item.get("_rank_score") or hit_score(item)) >= max(0.62, float(args.score_threshold) + 0.18)
+        and float(item.get("_rank_score") or hit_score(item)) >= 0.62
     )
     setattr(args, "_prefer_summary_in_prompt", prefer_summary_in_prompt)
     setattr(args, "_strong_grounded_hits_available", strong_grounded_hits_available)
@@ -3292,7 +3290,7 @@ async def echomemory_retrieve(args: argparse.Namespace, sdk: Any, query: str) ->
         high_signal_hits = sum(
             1
             for item in items
-            if hit_score(item) >= max(float(getattr(args, "score_threshold", 0.1) or 0.1), 0.45)
+            if hit_score(item) >= 0.45
         )
         if high_signal_hits >= max(2, min(4, int(getattr(args, "top_k", 0) or 0 or 4))):
             allow_summary_enrichment = False
@@ -3475,7 +3473,7 @@ async def build_initial_tool_prefetch(
 
     tools_used: list[dict[str, Any]] = []
     retrieval_errors: list[str] = []
-    search_args = {"query": query, "min_score": args.tool_min_score}
+    search_args = {"query": query}
     search_text, retrieval_error, result_count = await execute_echomemory_search_tool(
         args,
         sdk,
@@ -3544,6 +3542,7 @@ async def call_echomemory_vikingboat_lite_loop(
     retry_count_total = 0
     llm_call_ms_total = 0.0
     llm_http_attempts = 0
+    seen_search_queries: set[str] = set()
     attempts = max(1, args.model_retries + 1)
     for iteration in range(1, max(1, args.max_iterations) + 1):
         payload_variants = openai_payload_variants(args.answer_model, messages, default_openai_max_tokens(), tools)
@@ -3604,19 +3603,24 @@ async def call_echomemory_vikingboat_lite_loop(
             if max_tool_calls > 0:
                 remaining = max_tool_calls - len(tools_used)
                 if remaining <= 0:
-                    return {
-                        "answer": "",
-                        "prompt_tokens": total_usage["prompt_tokens"],
-                        "completion_tokens": total_usage["completion_tokens"],
-                        "total_tokens": total_usage["total_tokens"],
-                        "model_retry_count": retry_count_total,
-                        "model_error_kind": "max_tool_calls",
-                        "iteration": iteration,
-                        "tools_used": tools_used,
-                        "tool_retrieval_error": "; ".join(retrieval_errors[:5]),
-                        "llm_call_ms": round(llm_call_ms_total, 1),
-                        "llm_http_attempts": llm_http_attempts,
-                    }
+                    messages.append(
+                        {
+                            "role": "assistant",
+                            "content": message.get("content") or "I need to answer from the evidence already retrieved.",
+                        }
+                    )
+                    messages.append(
+                        {
+                            "role": "user",
+                            "content": (
+                                "The memory-tool budget is exhausted. Do not call another tool. "
+                                "Answer the original question now using the evidence already returned; "
+                                "reply unknown only if it is genuinely unsupported."
+                            ),
+                        }
+                    )
+                    tools = None
+                    continue
                 tool_calls = tool_calls[:remaining]
             messages.append({"role": "assistant", "content": message.get("content") or " ", "tool_calls": tool_calls})
             for tool_call in tool_calls:
@@ -3627,15 +3631,32 @@ async def call_echomemory_vikingboat_lite_loop(
                     parsed_args = json.loads(raw_args) if isinstance(raw_args, str) else dict(raw_args)
                 except Exception:
                     parsed_args = {"query": str(raw_args)}
-                result_text, retrieval_error, result_count = await execute_echomemory_tool(
-                    args,
-                    sdk,
-                    name,
-                    parsed_args,
-                    cache,
-                    retrieve_fn=echomemory_retrieve,
-                    hit_score_fn=hit_score,
-                )
+                normalized_query = ""
+                if name == MEMORY_SEARCH_TOOL_NAME:
+                    normalized_query = re.sub(
+                        r"\s+",
+                        " ",
+                        str(parsed_args.get("query") or "").strip().lower(),
+                    )
+                if normalized_query and normalized_query in seen_search_queries:
+                    result_text = (
+                        "Duplicate search skipped. Reformulate the query around a different "
+                        "entity, event phrase, date clue, quote, object, or relation."
+                    )
+                    retrieval_error = ""
+                    result_count = 0
+                else:
+                    if normalized_query:
+                        seen_search_queries.add(normalized_query)
+                    result_text, retrieval_error, result_count = await execute_echomemory_tool(
+                        args,
+                        sdk,
+                        name,
+                        parsed_args,
+                        cache,
+                        retrieve_fn=echomemory_retrieve,
+                        hit_score_fn=hit_score,
+                    )
                 if retrieval_error:
                     retrieval_errors.append(retrieval_error)
                 tools_used.append(
@@ -6682,10 +6703,8 @@ async def answer_question(
         "user_memory_budget_chars": str(args.user_memory_budget_chars),
         "agent_memory_budget_chars": str(args.agent_memory_budget_chars),
         "initial_search_limit": str(args.top_k),
-        "initial_score_threshold": str(args.score_threshold),
-        "score_threshold": str(args.score_threshold),
         "tool_search_limit": str(args.tool_search_limit),
-        "tool_min_score": str(args.tool_min_score),
+        "platform_score_filtering": "false",
         "user_agent_memory_split": "true",
         "link_only_when_over_budget": "true",
         "raw_turn_fallback": str(bool(args.local_messages)).lower(),
@@ -7020,7 +7039,7 @@ async def run(args: argparse.Namespace) -> None:
         "prefetch_context_chars": args.prefetch_context_chars,
         "max_iterations": args.max_iterations,
         "tool_search_limit": args.tool_search_limit,
-        "tool_min_score": args.tool_min_score,
+        "platform_score_filtering": False,
         "retrieval_mode": args.retrieval_mode,
         "evidence_policy": "blackbox",
         "evidence_origin": "echomemory_http_api",
@@ -7058,8 +7077,6 @@ async def run(args: argparse.Namespace) -> None:
         ),
         "top_k": args.top_k,
         "initial_search_limit": args.top_k,
-        "initial_score_threshold": args.score_threshold,
-        "score_threshold": args.score_threshold,
         "local_session_summaries": args.local_session_summaries,
         "local_segments": bool(getattr(args, "local_segments", False)),
         "local_atoms": args.local_atoms,
@@ -7273,7 +7290,6 @@ def main() -> None:
     parser.add_argument("--vikingboat-compat", dest="vikingboat_compat", action="store_true")
     parser.add_argument("--no-vikingboat-compat", dest="vikingboat_compat", action="store_false")
     parser.add_argument("--top-k", type=int, default=VIKINGBOT_INITIAL_SEARCH_LIMIT)
-    parser.add_argument("--score-threshold", type=float, default=VIKINGBOT_INITIAL_MIN_SCORE)
     parser.add_argument(
         "--memory-budget-chars",
         type=int,
@@ -7353,7 +7369,12 @@ def main() -> None:
     parser.add_argument("--no-vikingboat-tool-loop", dest="vikingboat_tool_loop", action="store_false")
     parser.add_argument("--tool-set", choices=["vikingboat_default", "search_read", "search_only", VIKINGBOT_TOOL_SET], default="search_read")
     parser.add_argument("--tool-search-limit", type=int, default=VIKINGBOT_TOOL_SEARCH_LIMIT)
-    parser.add_argument("--tool-min-score", type=float, default=VIKINGBOT_TOOL_MIN_SCORE)
+    parser.add_argument(
+        "--tool-search-pool-multiplier",
+        type=int,
+        default=1,
+        help="Optional HTTP search-depth multiplier before URI deduplication; strict black-box runs keep this at 1.",
+    )
     parser.add_argument("--tool-log-chars", type=int, default=1200)
     parser.add_argument("--search-overview-enrichment", dest="search_overview_enrichment", action="store_true")
     parser.add_argument("--no-search-overview-enrichment", dest="search_overview_enrichment", action="store_false")
@@ -7530,8 +7551,6 @@ def main() -> None:
             args.local_messages = False
             args.local_timeline_hints = False
             args.local_memory_artifacts = False
-        args.score_threshold = max(float(args.score_threshold), VIKINGBOT_INITIAL_MIN_SCORE)
-        args.tool_min_score = max(float(args.tool_min_score), VIKINGBOT_TOOL_MIN_SCORE)
         args.tool_search_limit = max(int(args.tool_search_limit), VIKINGBOT_TOOL_SEARCH_LIMIT)
     if args.retrieval_mode != "local" and not args.compat_allow_local_evidence:
         args.local_session_summaries = False

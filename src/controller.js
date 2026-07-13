@@ -36,12 +36,10 @@ export function createWorkbenchController(deps) {
     "wbQaRetrievalMode",
     "wbQaToolSet",
     "wbQaToolSearchLimit",
-    "wbQaToolMinScore",
     "wbQaMaxIterations",
     "wbQaModelRetries",
     "wbQaQuestionTimeout",
     "wbQaParallelism",
-    "wbQaScoreThreshold",
     "wbQaMemoryBudgetChars",
     "wbQaUserMemoryBudgetChars",
     "wbQaAgentMemoryBudgetChars",
@@ -65,6 +63,7 @@ export function createWorkbenchController(deps) {
   const WORKBENCH_UI_STATE_KEY = "benchmark-console-v2:ui-state:v1";
   const PERSISTED_FIELD_IDS = new Set([
     "wbAccountSelect",
+    "wbBackendSelect",
     "wbDataPath",
     "wbImportSample",
     "wbQaSample",
@@ -437,9 +436,7 @@ export function createWorkbenchController(deps) {
       locomoQaUseTools: readChecked("wbQaUseTools", savedCfg.locomoQaUseTools !== false),
       locomoQaMemoryInjection: readChecked("wbQaMemoryInjection", savedCfg.locomoQaMemoryInjection !== false),
       echomemQaTopK: readValue("wbQaTopK", savedCfg.echomemQaTopK || "30"),
-      echomemQaScoreThreshold: readValue("wbQaScoreThreshold", savedCfg.echomemQaScoreThreshold || "0.1"),
       echomemQaToolSearchLimit: readValue("wbQaToolSearchLimit", savedCfg.echomemQaToolSearchLimit || "20"),
-      echomemQaToolMinScore: readValue("wbQaToolMinScore", savedCfg.echomemQaToolMinScore || "0.35"),
       echomemQaMaxIterations: readValue("wbQaMaxIterations", savedCfg.echomemQaMaxIterations || "50"),
       echomemQaModelRetries: readValue("wbQaModelRetries", savedCfg.echomemQaModelRetries || "5"),
       echomemQaParallelism: readValue("wbQaParallelism", savedCfg.echomemQaParallelism || "5"),
@@ -877,6 +874,17 @@ export function createWorkbenchController(deps) {
           .catch((error) => alertUser(error.message || "切换账户失败"));
         return;
       }
+      if (target.id === "wbBackendSelect") {
+        const memoryBackend = target.value === "openviking" ? "openviking" : "echomemory";
+        const currentConfig = normalizeLocomoAccountConfig(
+          state?.accountDetails?.config || state?.config?.active_account_config || {}
+        );
+        actions.saveLocomoQaConfig({...currentConfig, memoryBackend})
+          .then((result) => applyActionResult(result, {refreshAllRunner, pollLogRunner}))
+          .then(() => renderAll())
+          .catch((error) => alertUser(error.message || "切换记忆后端失败"));
+        return;
+      }
       if (target.id === "wbQaQuestionCategory") {
         state.locomoQuestionFilters = {
           ...(state.locomoQuestionFilters || {}),
@@ -952,7 +960,7 @@ export function createWorkbenchController(deps) {
         syncLocomoQaDraftChecked(target.id, target.checked);
         invalidateLocomoTransientPreview({ rerender: true });
       }
-      if (["wbHotpotCount", "wbLongMemEvalCount", "wbQaTopK", "wbQaMaxIterations", "wbQaToolSearchLimit", "wbQaToolMinScore", "wbQaQuestionTimeout", "wbQaParallelism", "wbHotpotQaCheckpointInterval", "wbQaToolSet", "wbQaRetrievalMode", "wbHotpotQaCorpusMode", "wbHotpotQaGlobalImportMode", "wbWorkspace", "wbDataPath", "wbQaMode", "wbQaQuestionIds"].includes(target.id)) {
+      if (["wbHotpotCount", "wbLongMemEvalCount", "wbQaTopK", "wbQaMaxIterations", "wbQaToolSearchLimit", "wbQaQuestionTimeout", "wbQaParallelism", "wbHotpotQaCheckpointInterval", "wbQaToolSet", "wbQaRetrievalMode", "wbHotpotQaCorpusMode", "wbHotpotQaGlobalImportMode", "wbWorkspace", "wbDataPath", "wbQaMode", "wbQaQuestionIds"].includes(target.id)) {
         syncOfficialQaDraftValue(target.id, target.value || "");
         invalidateOfficialQaGateAndRefresh();
       }
@@ -976,7 +984,7 @@ export function createWorkbenchController(deps) {
       if (target.id && PERSISTED_FIELD_IDS.has(target.id)) {
         schedulePersistWorkbenchUiState();
       }
-      if (["wbHotpotCount", "wbLongMemEvalCount", "wbQaTopK", "wbQaMaxIterations", "wbQaToolSearchLimit", "wbQaToolMinScore", "wbQaQuestionTimeout", "wbQaParallelism", "wbHotpotQaCheckpointInterval", "wbQaToolSet", "wbQaRetrievalMode", "wbHotpotQaCorpusMode", "wbHotpotQaGlobalImportMode", "wbWorkspace", "wbDataPath", "wbQaMode", "wbQaQuestionIds"].includes(target.id)) {
+      if (["wbHotpotCount", "wbLongMemEvalCount", "wbQaTopK", "wbQaMaxIterations", "wbQaToolSearchLimit", "wbQaQuestionTimeout", "wbQaParallelism", "wbHotpotQaCheckpointInterval", "wbQaToolSet", "wbQaRetrievalMode", "wbHotpotQaCorpusMode", "wbHotpotQaGlobalImportMode", "wbWorkspace", "wbDataPath", "wbQaMode", "wbQaQuestionIds"].includes(target.id)) {
         syncOfficialQaDraftValue(target.id, target.value || "");
         invalidateOfficialQaGateAndRefresh();
       }

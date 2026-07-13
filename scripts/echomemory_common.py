@@ -1394,6 +1394,22 @@ class EchoMemHTTPCompatSDK:
         data = await self._request_async("GET", "/fs/read", params={"uri": raw})
         return {"content": str((data.get("result") or {}).get("text") or "")}
 
+    async def fs_list(self, uri: str, *, ctx: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+        raw = str(uri or "").strip()
+        if not raw:
+            return []
+        data = await self._request_async("GET", "/fs/ls", params={"uri": raw})
+        entries = (data.get("result") or {}).get("entries") or []
+        return [dict(entry) for entry in entries if isinstance(entry, dict)]
+
+    async def fs_glob(self, pattern: str, *, ctx: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+        raw = str(pattern or "").strip()
+        if not raw:
+            return []
+        data = await self._request_async("POST", "/fs/glob", payload={"pattern": raw})
+        entries = (data.get("result") or {}).get("entries") or []
+        return [dict(entry) for entry in entries if isinstance(entry, dict)]
+
     def transport_audit(self) -> dict[str, Any]:
         return {
             "transport": "http",

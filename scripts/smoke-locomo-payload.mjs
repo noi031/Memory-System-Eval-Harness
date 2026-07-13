@@ -104,7 +104,6 @@ function makeDeps({ backend = "echomemory", activeStage = "import", diagnostics 
     retrieval_mode: "search",
     tool_set: "vikingbot_native_safe",
     tool_search_limit: 20,
-    tool_min_score: 0.35,
     max_iterations: 50,
     model_retries: 7,
     qa_memory_injection: false,

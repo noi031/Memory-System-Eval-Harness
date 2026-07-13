@@ -1216,7 +1216,7 @@ export function renderLocomoQaConfig({
   if (String(run?.sample || "").trim() && String(run?.sample || "").trim() !== "all") sampleSet.add(String(run.sample).trim());
   const samples = Array.from(sampleSet).sort();
   const sampleOptions = samples.map((sample) => `<option value="${escapeHtml(sample)}"${currentSample === sample ? " selected" : ""}>${escapeHtml(sample)}</option>`).join("");
-  const currentEchomemBaseUrl = liveValue("wbQaEchomemBaseUrl", savedCfg.echomemBaseUrl || "");
+  const currentEchomemBaseUrl = liveValue("wbQaEchomemBaseUrl", cfg.echomemBaseUrl || "");
   const currentPromptMode = "vikingboat_lite";
   const currentRetrievalMode = "search";
   const retrievalModeHint = "LoCoMo EchoMemory 已固定对齐 OpenViking v0.4.7 / benchmark/locomo/vikingbot：search 检索、VikingBoat 问题模板、关闭平台侧 local summaries / atoms / prefetch / compat。";
@@ -1225,10 +1225,6 @@ export function renderLocomoQaConfig({
   const currentQaMemoryInjection = activeBackend === "echomemory"
     ? true
     : liveChecked("wbQaMemoryInjection", true);
-  const currentEchomemRoot = liveValue(
-    "wbQaEchomemRoot",
-    firstValue(cfg.echomemRoot, state.config?.echomemRoot, state.readiness?.preflight?.runtime?.root, ""),
-  );
   const currentQuestionLimit = readLocomoQaDraftValue({
     $,
     state,
@@ -1295,21 +1291,18 @@ export function renderLocomoQaConfig({
         ])}
         ${fieldGrid([
           ...(activeBackend === "echomemory" ? [
-            configField("EchoMemory Root", `<input id="wbQaEchomemRoot" type="text" value="${escapeHtml(currentEchomemRoot)}" placeholder="/path/to/EchoMem">`, escapeHtml, { full: true }),
-            configField("EchoMemory URL", `<input id="wbQaEchomemBaseUrl" type="text" value="${escapeHtml(liveValue("wbQaEchomemBaseUrl", savedCfg.echomemBaseUrl || ""))}" placeholder="http://127.0.0.1:8015">`, escapeHtml, { full: true }),
+            configField("EchoMemory URL", `<input id="wbQaEchomemBaseUrl" type="text" value="${escapeHtml(currentEchomemBaseUrl)}" placeholder="http://127.0.0.1:8015">`, escapeHtml, { full: true }),
           ] : []),
           configField("Top K", `<input id="wbQaTopK" type="number" min="1" step="1" value="${escapeHtml(liveValue("wbQaTopK", firstValue(cfg.echomemQaTopK, cfg.chatTopK, "30")))}">`, escapeHtml),
           configField("工具集", `<input id="wbQaToolSet" type="text" value="${escapeHtml(liveValue("wbQaToolSet", firstValue(cfg.echomemQaToolSet, "vikingbot_native_safe")))}" placeholder="vikingbot_native_safe">`, escapeHtml),
           configField("开启工具调用", `<input id="wbQaUseTools" type="checkbox"${currentUseTools ? " checked" : ""}>`, escapeHtml),
           configField("允许多轮工具调用", `<input id="wbQaToolLoop" type="checkbox"${currentToolLoop ? " checked" : ""}>`, escapeHtml),
           configField("工具召回数", `<input id="wbQaToolSearchLimit" type="number" min="1" step="1" value="${escapeHtml(liveValue("wbQaToolSearchLimit", firstValue(cfg.echomemQaToolSearchLimit, "20")))}">`, escapeHtml),
-          configField("最低召回分数", `<input id="wbQaToolMinScore" type="number" min="0" max="1" step="0.01" value="${escapeHtml(liveValue("wbQaToolMinScore", firstValue(cfg.echomemQaToolMinScore, "0.35")))}">`, escapeHtml),
           configField("最大迭代次数", `<input id="wbQaMaxIterations" type="number" min="1" step="1" value="${escapeHtml(liveValue("wbQaMaxIterations", firstValue(cfg.echomemQaMaxIterations, "50")))}">`, escapeHtml),
           configField("模型重试次数", `<input id="wbQaModelRetries" type="number" min="0" step="1" value="${escapeHtml(liveValue("wbQaModelRetries", firstValue(cfg.echomemQaModelRetries, "5")))}">`, escapeHtml),
           configField("单题超时（秒）", `<input id="wbQaQuestionTimeout" type="number" min="30" step="1" value="${escapeHtml(liveValue("wbQaQuestionTimeout", firstValue(cfg.echomemQaQuestionTimeout, "600")))}">`, escapeHtml),
           ...(activeBackend === "echomemory" ? [
             configField("QA 并发数（v2）", `<input id="wbQaParallelism" type="number" min="1" step="1" value="${escapeHtml(liveValue("wbQaParallelism", firstValue(cfg.echomemQaParallelism, "10")))}">`, escapeHtml),
-            configField("初始分数阈值", `<input id="wbQaScoreThreshold" type="number" min="0" max="1" step="0.01" value="${escapeHtml(liveValue("wbQaScoreThreshold", firstValue(cfg.echomemQaScoreThreshold, "0.1")))}">`, escapeHtml),
           ] : []),
         ])}
       </div>
@@ -1318,13 +1311,13 @@ export function renderLocomoQaConfig({
       `
         <div class="wb-locomo-param-block">
           <div class="wb-locomo-param-head">
-            <strong>${icon("database", { className: "wb-inline-icon" })}<span>记忆预算与预取</span></strong>
-            <small>保持旧系统预算语义，方便对照历史 LoCoMo 结果。</small>
+            <strong>${icon("database", { className: "wb-inline-icon" })}<span>初始证据上下文与预取</span></strong>
+            <small>仅限制 QA 首轮提示词中的证据字符数，不限制记忆注入数量。</small>
           </div>
           ${fieldGrid([
-            configField("总记忆预算", `<input id="wbQaMemoryBudgetChars" type="number" min="0" step="100" value="${escapeHtml(liveValue("wbQaMemoryBudgetChars", firstValue(cfg.echomemQaMemoryBudgetChars, "6000")))}">`, escapeHtml),
-            configField("用户记忆预算", `<input id="wbQaUserMemoryBudgetChars" type="number" min="0" step="100" value="${escapeHtml(liveValue("wbQaUserMemoryBudgetChars", firstValue(cfg.echomemQaUserMemoryBudgetChars, "4000")))}">`, escapeHtml),
-            configField("代理记忆预算", `<input id="wbQaAgentMemoryBudgetChars" type="number" min="0" step="100" value="${escapeHtml(liveValue("wbQaAgentMemoryBudgetChars", firstValue(cfg.echomemQaAgentMemoryBudgetChars, "2000")))}">`, escapeHtml),
+            configField("初始证据总字符数", `<input id="wbQaMemoryBudgetChars" type="number" min="0" step="100" value="${escapeHtml(liveValue("wbQaMemoryBudgetChars", firstValue(cfg.echomemQaMemoryBudgetChars, "6000")))}">`, escapeHtml),
+            configField("用户证据字符数", `<input id="wbQaUserMemoryBudgetChars" type="number" min="0" step="100" value="${escapeHtml(liveValue("wbQaUserMemoryBudgetChars", firstValue(cfg.echomemQaUserMemoryBudgetChars, "4000")))}">`, escapeHtml),
+            configField("代理证据字符数", `<input id="wbQaAgentMemoryBudgetChars" type="number" min="0" step="100" value="${escapeHtml(liveValue("wbQaAgentMemoryBudgetChars", firstValue(cfg.echomemQaAgentMemoryBudgetChars, "2000")))}">`, escapeHtml),
             configField("Prefetch Read Count", `<input id="wbQaPrefetchReadCount" type="number" min="0" step="1" value="${escapeHtml(liveValue("wbQaPrefetchReadCount", firstValue(cfg.echomemQaPrefetchReadCount, "4")))}">`, escapeHtml),
             configField("Prefetch Context Chars", `<input id="wbQaPrefetchContextChars" type="number" min="0" step="100" value="${escapeHtml(liveValue("wbQaPrefetchContextChars", firstValue(cfg.echomemQaPrefetchContextChars, "5000")))}">`, escapeHtml),
             configField("Tool Log Chars", `<input id="wbQaToolLogChars" type="number" min="200" step="100" value="${escapeHtml(liveValue("wbQaToolLogChars", firstValue(cfg.echomemQaToolLogChars, "1200")))}">`, escapeHtml),

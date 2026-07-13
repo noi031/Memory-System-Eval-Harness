@@ -337,7 +337,6 @@ export function createLocomoActions(deps) {
     assignIfPresent("top_k", runConfig.top_k);
     assignIfPresent("max_iterations", runConfig.max_iterations);
     assignIfPresent("tool_search_limit", runConfig.tool_search_limit);
-    assignIfPresent("tool_min_score", runConfig.tool_min_score);
     assignIfPresent("question_timeout_s", runConfig.question_timeout_s || runConfig.timeout_s);
     assignIfPresent("timeout_s", runConfig.timeout_s || runConfig.question_timeout_s);
     if (backendId() === "echomemory") {
@@ -347,7 +346,6 @@ export function createLocomoActions(deps) {
       assignIfPresent("em_agent_id", runConfig.em_agent_id || runConfig.agent_id);
       assignIfPresent("echomem_root", runConfig.echomem_root);
       assignIfPresent("echomem_config", runConfig.echomem_config);
-      assignIfPresent("score_threshold", runConfig.score_threshold);
       assignIfPresent("tool_set", runConfig.tool_set || runConfig.memory_tool_set);
       assignIfPresent("qa_parallelism", runConfig.qa_parallelism);
       assignIfPresent("judge_every", runConfig.judge_every);
@@ -439,10 +437,8 @@ export function createLocomoActions(deps) {
         evidence_policy: "blackbox",
         retrieval_source_mode: "echo_http_native",
         qa_memory_injection: true,
-        score_threshold: Number.isFinite(normalizedForm.score_threshold) ? normalizedForm.score_threshold : Number(firstValue(cfg.echomemQaScoreThreshold, "0.1")),
         tool_set: "vikingbot_native_safe",
         tool_search_limit: normalizedForm.tool_search_limit,
-        tool_min_score: Number.isFinite(normalizedForm.tool_min_score) ? normalizedForm.tool_min_score : Number(firstValue(cfg.echomemQaToolMinScore, "0.35")),
         max_iterations: normalizedForm.max_iterations,
         model_retries: Number.isFinite(normalizedForm.model_retries) ? normalizedForm.model_retries : Number(firstValue(cfg.echomemQaModelRetries, "5")),
         judge_retries: Number.isFinite(normalizedForm.model_retries) ? normalizedForm.model_retries : Number(firstValue(cfg.echomemQaModelRetries, "5")),
@@ -467,7 +463,6 @@ export function createLocomoActions(deps) {
         prompt_mode: toolEnabled ? (form.prompt_mode || firstValue(cfg.echomemQaPromptMode, "vikingbot_aligned")) : "one_shot",
         openviking_tool_set: form.tool_set || firstValue(cfg.echomemQaToolSet, "vikingbot_native_safe"),
         tool_search_limit: form.tool_search_limit,
-        tool_min_score: Number.isFinite(form.tool_min_score) ? form.tool_min_score : Number(firstValue(cfg.echomemQaToolMinScore, "0.35")),
         max_iterations: form.max_iterations,
         model_retries: Number.isFinite(form.model_retries) ? form.model_retries : Number(firstValue(cfg.echomemQaModelRetries, "5")),
         judge_retries: Number.isFinite(form.model_retries) ? form.model_retries : Number(firstValue(cfg.echomemQaModelRetries, "5")),
