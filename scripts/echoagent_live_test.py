@@ -34,6 +34,14 @@ if str(ROOT) not in sys.path:
 
 from memory import llm
 
+# Import new metrics modules
+try:
+    from runtime_metrics_client import RuntimeMetricsClient, histogram_quantile, histogram_sum, histogram_mean
+    from accuracy_evaluator import AccuracyEvaluator
+    METRICS_MODULES_AVAILABLE = True
+except ImportError:
+    METRICS_MODULES_AVAILABLE = False
+
 
 # ---------------------------------------------------------------------------
 # EchoAgent HTTP client
@@ -647,7 +655,14 @@ def _resolve_dataset_path(dataset_name: str) -> Path:
     raise FileNotFoundError(f"Dataset not found: {dataset_name}")
 
 
-def run_replay_test(args: argparse.Namespace, client: EchoAgentClient, log: Any, out_dir: Path) -> None:
+def run_replay_test(
+    args: argparse.Namespace,
+    client: EchoAgentClient,
+    log: Any,
+    out_dir: Path,
+    metrics_client: "RuntimeMetricsClient | None" = None,
+    baseline_metrics: dict[str, Any] | None = None,
+) -> None:
     """Replay a dataset against EchoAgent, measuring recall quality."""
     from memory import datasets
     scripts_dir = ROOT / "scripts"
@@ -1128,12 +1143,86 @@ def run_test(args: argparse.Namespace) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Runtime metrics collection helpers
+# ---------------------------------------------------------------------------
+
+def collect_runtime_metrics_snapshot(
+    metrics_client: "RuntimeMetricsClient",
+    baseline_metrics: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Collect a snapshot of runtime metrics from EchoAgent/EchoMem.
+    
+    Args:
+        metrics_client: RuntimeMetricsClient instance
+        baseline_metrics: Optional baseline for delta calculation
+        
+    Returns:
+        Dict with metrics snapshot
+    """
+    if not METRICS_MODULES_AVAILABLE:
+        return {"error": "Metrics modules not available"}
+    
+    current = metrics_client.fetch_metrics()
+    turn_metrics = metrics_client.extract_turn_metrics(current)
+    
+    result = {
+        "timestamp": current.get("timestamp"),
+        "metrics": turn_metrics,
+    }
+    
+    if baseline_metrics:
+        delta = metrics_client.diff_metrics(baseline_metrics, current)
+        result["delta_since_baseline"] = delta
+    
+    return result
+
+
+def save_runtime_report(
+    snapshots: list[dict[str, Any]],
+    out_dir: Path,
+) -> None:
+    """Save runtime metrics report to file.
+    
+    Args:
+        snapshots: List of metric snapshots
+        out_dir: Output directory
+    """
+    runtime_path = out_dir / "runtime.json"
+    report = {
+        "collection_points": snapshots,
+        "summary": _compute_runtime_summary(snapshots),
+    }
+    runtime_path.write_text(
+        json.dumps(report, ensure_ascii=False, indent=2, default=str),
+        encoding="utf-8"
+    )
+
+
+def _compute_runtime_summary(snapshots: list[dict[str, Any]]) -> dict[str, Any]:
+    """Compute summary statistics from runtime snapshots."""
+    if not snapshots:
+        return {}
+    
+    ttft_values = [s.get("metrics", {}).get("ttft_p50_seconds") for s in snapshots if s.get("metrics", {}).get("ttft_p50_seconds")]
+    cached_values = [s.get("metrics", {}).get("cached_tokens_sum", 0) for s in snapshots]
+    retrieval_count = sum(s.get("metrics", {}).get("retrieval_count", 0) for s in snapshots)
+    
+    return {
+        "num_snapshots": len(snapshots),
+        "avg_ttft_p50_seconds": round(sum(ttft_values) / len(ttft_values), 3) if ttft_values else None,
+        "total_cached_tokens": sum(cached_values),
+        "total_retrieval_count": retrieval_count,
+    }
+
+
+# ---------------------------------------------------------------------------
 # CLI entry point
 # ---------------------------------------------------------------------------
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="EchoAgent live test: end-to-end memory recall + prefill evaluation")
     parser.add_argument("--echoagent-url", default=os.environ.get("ECHOAGENT_URL", "http://127.0.0.1:31020"))
+    parser.add_argument("--echomem-url", default=os.environ.get("ECHOMEM_URL", "http://127.0.0.1:8010"), help="EchoMem service URL for runtime metrics")
     parser.add_argument("--username", default=os.environ.get("ECHOAGENT_TEST_USERNAME", "test_user"))
     parser.add_argument("--password", default=os.environ.get("ECHOAGENT_TEST_PASSWORD", "test_password"))
     parser.add_argument("--num-batches", type=int, default=int(os.environ.get("ECHOAGENT_TEST_BATCHES", "3")))
@@ -1149,6 +1238,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--dataset-sample", default="all", help="Dataset sample filter: all / sample_id / index number")
     parser.add_argument("--dataset-limit", type=int, default=0, help="Max QA questions to replay, 0=all")
     parser.add_argument("--save-dataset", default="", help="Save generated conversations as locomo-format dataset to this path (e.g. dataset/echoagent_gen_001.json)")
+    
+    # New options for runtime/accuracy metrics separation
+    parser.add_argument("--collect-runtime-metrics", action="store_true", default=True, help="Collect runtime metrics from Prometheus endpoints")
+    parser.add_argument("--no-runtime-metrics", action="store_true", help="Disable runtime metrics collection")
+    parser.add_argument("--accuracy-method", default="llm", choices=["llm", "heuristic"], help="Accuracy evaluation method")
+    parser.add_argument("--config", default="", help="Path to metrics_config.yaml")
+    
     parser.add_argument("--out-dir", required=True)
     return parser
 
@@ -1159,6 +1255,19 @@ def main() -> None:
 
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
+    
+    # Initialize runtime metrics client if enabled
+    collect_runtime = args.collect_runtime_metrics and not args.no_runtime_metrics and METRICS_MODULES_AVAILABLE
+    metrics_client = None
+    baseline_metrics = None
+    
+    if collect_runtime:
+        metrics_client = RuntimeMetricsClient(
+            echoagent_url=args.echoagent_url,
+            echomem_url=args.echomem_url,
+        )
+        baseline_metrics = metrics_client.fetch_metrics()
+        print(f"[metrics] Runtime metrics collection enabled. EchoAgent={args.echoagent_url} EchoMem={args.echomem_url}")
 
     if args.dataset:
         # Replay mode
@@ -1170,10 +1279,12 @@ def main() -> None:
             with log_path.open("a", encoding="utf-8") as f:
                 f.write(line + "\n")
         log(f"EchoAgent replay test starting. dataset={args.dataset} out_dir={out_dir}")
+        if collect_runtime:
+            log("[metrics] Runtime metrics collection enabled")
         log("Logging in...")
         client.login()
         log("Login successful.")
-        run_replay_test(args, client, log, out_dir)
+        run_replay_test(args, client, log, out_dir, metrics_client, baseline_metrics)
     else:
         # Generate mode (existing behavior)
         run_test(args)

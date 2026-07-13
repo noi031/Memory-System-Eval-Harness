@@ -1,0 +1,254 @@
+# Runtime and Accuracy Metrics Configuration
+# 大模型交互评测指标配置
+
+# ============================================
+# 运行时指标配置 (Runtime Metrics)
+# ============================================
+# 运行时指标从 EchoAgent/EchoMem 的 Prometheus /metrics 端点拉取
+# 评测系统将这些服务视为黑盒，仅通过公开接口获取指标
+
+runtime_metrics:
+  # EchoAgent 后端地址
+  echoagent_url: http://127.0.0.1:31020
+  # EchoMem 服务地址
+  echomem_url: http://127.0.0.1:8010
+  # 请求超时（秒）
+  timeout: 10
+  # 每轮结束后采集指标的间隔（毫秒）
+  collect_interval_ms: 100
+
+  # 要采集的运行时指标列表
+  metrics:
+    # TTFT (Time To First Token) - 首token延迟
+    - name: echoagent_turn_ttft_seconds
+      type: histogram
+      description: "Time from user submit to first content chunk received"
+      aggregation:
+        - p50      # 中位数
+        - p95      # 95分位
+        - mean     # 平均值
+      labels:
+        - pipeline   # memory_prefetch_prefill | baseline
+        - status     # completed | aborted | failed
+
+    # KV Cache 命中 token 数
+    - name: echoagent_generate_cached_tokens
+      type: histogram
+      description: "Cached prompt tokens reported by provider for generate requests"
+      aggregation:
+        - sum
+        - mean
+      labels:
+        - provider
+        - model
+        - pipeline
+        - status
+        - cache_state  # hit | miss | unknown
+
+    # Prompt token 总数
+    - name: echoagent_generate_prompt_tokens
+      type: histogram
+      description: "Prompt tokens reported by provider for generate requests"
+      aggregation:
+        - sum
+        - mean
+      labels:
+        - provider
+        - model
+        - pipeline
+        - status
+
+    # Prefill 预热耗时
+    - name: echoagent_prefill_warmup_duration_seconds
+      type: histogram
+      description: "Real LLM prefill warmup duration"
+      aggregation:
+        - p50
+        - p95
+        - mean
+      labels:
+        - status  # success | not_ok | skipped | failed
+
+    # Prefill 预热缓存 token 数
+    - name: echoagent_prefill_warmup_cached_tokens
+      type: histogram
+      description: "Cached prompt tokens for prefill warmup requests"
+      aggregation:
+        - sum
+        - mean
+      labels:
+        - provider
+        - model
+        - cache_state
+
+    # EchoMem API 调用耗时（从 EchoAgent 视角）
+    - name: echoagent_echomem_api_duration_seconds
+      type: histogram
+      description: "EchoAgent to EchoMem API request duration"
+      aggregation:
+        - p50
+        - p95
+        - mean
+      labels:
+        - operation  # probe | transform | memory_prefetch | memory_query
+        - status     # success | error | timeout | fail_open
+
+    # EchoMem 召回耗时
+    - name: echomem_retrieval_duration_seconds
+      type: histogram
+      description: "EchoMem retrieval operation duration"
+      aggregation:
+        - p50
+        - p95
+        - mean
+      labels:
+        - agent_id
+        - retrieval_mode
+
+    # EchoMem 召回条数
+    - name: echomem_retrieval_items_count
+      type: histogram
+      description: "Number of items returned by EchoMem retrieval"
+      aggregation:
+        - mean
+        - max
+      labels:
+        - agent_id
+
+
+# ============================================
+# 精度指标配置 (Accuracy Metrics)
+# ============================================
+# 精度指标需要外部 ground truth 验证，由评测系统计算
+
+accuracy_metrics:
+  # 评估方法: llm | heuristic
+  # llm: 使用 LLM 评估（更准确但需要 API 调用）
+  # heuristic: 使用关键词匹配（快速但不精确）
+  evaluator: llm
+
+  # LLM 评估配置
+  llm_config:
+    # 模型名称
+    model: deepseek-v4-flash
+    # API base URL（为空则从环境变量读取）
+    base_url: ""
+    # API key（为空则从环境变量读取）
+    api_key: ""
+    # 温度参数（评估时应较低）
+    temperature: 0.3
+    # 超时（秒）
+    timeout: 60
+
+  # 评分维度
+  scoring:
+    # 召回分数 (recall_score)
+    recall_score:
+      range: [0, 2]
+      description: |
+        0 = 未召回任何 ground-truth 事实
+        1 = 部分召回 ground-truth 事实
+        2 = 完整召回所有 ground-truth 事实
+
+    # 事实准确性 (factual_accuracy)
+    factual_accuracy:
+      range: [0, 2]
+      description: |
+        0 = 回复包含明显幻觉或错误信息
+        1 = 回复部分准确，有小错误
+        2 = 回复完全准确，无幻觉
+
+    # 相关性 (relevance)
+    relevance:
+      range: [0, 2]
+      description: |
+        0 = 回复与查询不相关
+        1 = 回复部分相关
+        2 = 回复高度相关，直接回答问题
+
+    # Ground truth 覆盖率 (ground_fact_coverage)
+    ground_fact_coverage:
+      range: [0.0, 1.0]
+      description: |
+        0.0 = 未覆盖任何 ground-truth 事实
+        1.0 = 覆盖所有 ground-truth 事实
+
+  # 聚合指标
+  aggregation:
+    # 整体分数（所有查询的平均 recall_score）
+    - name: overall_score
+      formula: "mean(recall_score)"
+
+    # 跨会话分数（新会话查询的平均 recall_score）
+    - name: cross_session_score
+      formula: "mean(recall_score where is_new_session=true)"
+
+    # 同会话分数（非新会话查询的平均 recall_score）
+    - name: same_session_score
+      formula: "mean(recall_score where is_new_session=false)"
+
+    # Ground truth 覆盖率平均值
+    - name: ground_fact_coverage_avg
+      formula: "mean(ground_fact_coverage)"
+
+
+# ============================================
+# 输出配置 (Output Configuration)
+# ============================================
+
+output:
+  # 输出目录
+  out_dir: runs/echoagent_live_test
+
+  # 输出文件
+  files:
+    # 完整结果
+    - name: full_results.json
+      enabled: true
+      description: "完整测试结果，包含所有轮次详情"
+
+    # 运行时指标
+    - name: runtime.json
+      enabled: true
+      description: "从 Prometheus 采集的运行时指标"
+
+    # 精度指标
+    - name: accuracy.json
+      enabled: true
+      description: "精度评估报告"
+
+    # 汇总
+    - name: summary.json
+      enabled: true
+      description: "汇总统计"
+
+    # CSV 格式（便于 Excel 查看）
+    - name: results.csv
+      enabled: true
+      description: "CSV 格式的轮次结果"
+
+    # 运行日志
+    - name: run.log
+      enabled: true
+      description: "运行时日志"
+
+
+# ============================================
+# 环境变量映射 (Environment Variables)
+# ============================================
+# 以下配置可通过环境变量覆盖
+
+env_mapping:
+  # EchoAgent 配置
+  ECHOAGENT_URL: runtime_metrics.echoagent_url
+  ECHOAGENT_TEST_USERNAME: accuracy_metrics.llm_config.model
+  ECHOAGENT_TEST_PASSWORD: ""
+
+  # EchoMem 配置
+  ECHOMEM_URL: runtime_metrics.echomem_url
+
+  # LLM 配置
+  DASHSCOPE_API_KEY: accuracy_metrics.llm_config.api_key
+  JUDGE_TOKEN: accuracy_metrics.llm_config.api_key
+  OPENAI_API_KEY: accuracy_metrics.llm_config.api_key
+  JUDGE_BASE_URL: accuracy_metrics.llm_config.base_url
