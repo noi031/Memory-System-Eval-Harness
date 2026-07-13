@@ -6757,12 +6757,107 @@ def resolve_openviking_vlm_config() -> dict[str, str]:
     }
 
 
+def resolve_echomemory_workspace_model_config(payload: dict[str, Any]) -> dict[str, str]:
+    """Read provider settings from the selected EchoMemory workspace without exposing secrets."""
+    workspace_values = [
+        payload.get("workspace"),
+        payload.get("echomemory_workspace"),
+        payload.get("memoryWorkspace"),
+        payload.get("ovWorkspace"),
+    ]
+    account_cfg = resolve_account_secret_config(payload)
+    workspace_values.extend(
+        [
+            account_cfg.get("workspace"),
+            account_cfg.get("memoryWorkspace"),
+            account_cfg.get("ovWorkspace"),
+        ]
+    )
+    candidates: list[Path] = []
+    explicit_config = str(payload.get("echomem_config") or "").strip()
+    if explicit_config:
+        candidates.append(Path(explicit_config).expanduser())
+    for value in workspace_values:
+        text = str(value or "").strip()
+        if not text:
+            continue
+        workspace = Path(text).expanduser()
+        candidates.append(workspace / "config.json")
+        parts = workspace.parts
+        if "tenants" in parts:
+            tenants_index = parts.index("tenants")
+            if tenants_index > 0:
+                candidates.append(Path(*parts[:tenants_index]) / "config.json")
+
+    config: dict[str, Any] = {}
+    seen: set[str] = set()
+    for candidate in candidates:
+        key = str(candidate)
+        if key in seen:
+            continue
+        seen.add(key)
+        try:
+            raw = read_json(candidate)
+        except Exception:
+            continue
+        if isinstance(raw, dict):
+            config = raw
+            break
+    if not config:
+        return {}
+
+    model = config.get("model") if isinstance(config.get("model"), dict) else {}
+    llm = model.get("llm") if isinstance(model.get("llm"), dict) else {}
+    embedding = model.get("embedding") if isinstance(model.get("embedding"), dict) else {}
+    engine_configs = ((config.get("engine") or {}).get("configs") or {}) if isinstance(config.get("engine"), dict) else {}
+    echo0 = engine_configs.get("echo0_plugin") if isinstance(engine_configs.get("echo0_plugin"), dict) else {}
+    models = echo0.get("models") if isinstance(echo0.get("models"), dict) else {}
+    providers = models.get("providers") if isinstance(models.get("providers"), dict) else {}
+    aliases = models.get("aliases") if isinstance(models.get("aliases"), dict) else {}
+    chat_alias = aliases.get("chat") if isinstance(aliases.get("chat"), dict) else {}
+    embedding_alias = aliases.get("embedding") if isinstance(aliases.get("embedding"), dict) else {}
+
+    chat_provider_name = str(chat_alias.get("provider") or llm.get("provider") or "").strip()
+    embedding_provider_name = str(embedding_alias.get("provider") or embedding.get("provider") or "").strip()
+    chat_provider = providers.get(chat_provider_name) if isinstance(providers.get(chat_provider_name), dict) else {}
+    embedding_provider = providers.get(embedding_provider_name) if isinstance(providers.get(embedding_provider_name), dict) else {}
+
+    def usable_secret(value: Any) -> str:
+        text = str(value or "").strip()
+        if not text or (text.startswith("${") and text.endswith("}")):
+            return ""
+        return text
+
+    return {
+        "chat_token": usable_secret(llm.get("api_key") or chat_provider.get("api_key")),
+        "chat_base": str(
+            llm.get("api_base")
+            or llm.get("base_url")
+            or chat_provider.get("base_url")
+            or chat_provider.get("api_base")
+            or ""
+        ).strip(),
+        "chat_model": str(llm.get("model") or chat_alias.get("model_id") or "").strip(),
+        "chat_provider": chat_provider_name or str(llm.get("provider") or "").strip(),
+        "embedding_token": usable_secret(embedding.get("api_key") or embedding_provider.get("api_key")),
+        "embedding_base": str(
+            embedding.get("api_base")
+            or embedding.get("base_url")
+            or embedding_provider.get("base_url")
+            or embedding_provider.get("api_base")
+            or ""
+        ).strip(),
+        "embedding_model": str(embedding.get("model") or embedding_alias.get("model_id") or "").strip(),
+    }
+
+
 def resolve_echomemory_runtime_env(payload: dict[str, Any], config: Path, judge_token: str = "") -> dict[str, str]:
     """Return EchoMemory SDK env without letting Answer/Judge endpoints pollute embedding."""
     account_cfg = resolve_account_secret_config(payload)
     vlm_config = resolve_vlm_config(payload, config)
     embedding_config = resolve_openviking_embedding_config()
     openviking_vlm = resolve_openviking_vlm_config()
+    workspace_model = resolve_echomemory_workspace_model_config(payload)
     memory_base = str(
         payload.get("memory_base_url")
         or payload.get("embedding_base_url")
@@ -6771,6 +6866,7 @@ def resolve_echomemory_runtime_env(payload: dict[str, Any], config: Path, judge_
         or account_cfg.get("judgeBaseUrl")
         or payload.get("dashscope_base_url")
         or os.environ.get("DASHSCOPE_BASE_URL")
+        or workspace_model.get("embedding_base")
         or embedding_config.get("api_base")
         or "https://dashscope.aliyuncs.com/compatible-mode/v1"
     ).strip()
@@ -6790,6 +6886,7 @@ def resolve_echomemory_runtime_env(payload: dict[str, Any], config: Path, judge_
         or account_cfg.get("judgeToken")
         or os.environ.get("DASHSCOPE_API_KEY")
         or os.environ.get("ECHOMEM_API_KEY")
+        or workspace_model.get("embedding_token")
         or embedding_config.get("api_key")
         or ""
     ).strip()
@@ -6802,6 +6899,7 @@ def resolve_echomemory_runtime_env(payload: dict[str, Any], config: Path, judge_
         or account_cfg.get("judgeBaseUrl")
         or os.environ.get("ECHOMEM_CHAT_BASE_URL")
         or os.environ.get("DASHSCOPE_BASE_URL")
+        or workspace_model.get("chat_base")
         or vlm_config.get("api_base")
         or openviking_vlm.get("api_base")
     )
@@ -6819,6 +6917,7 @@ def resolve_echomemory_runtime_env(payload: dict[str, Any], config: Path, judge_
         or account_cfg.get("memoryInjectToken")
         or judge_token
         or os.environ.get("ECHOMEM_CHAT_API_KEY")
+        or workspace_model.get("chat_token")
         or token
         or openviking_vlm.get("api_key")
     ).strip()
@@ -6832,6 +6931,7 @@ def resolve_echomemory_runtime_env(payload: dict[str, Any], config: Path, judge_
         or account_cfg.get("agentModel")
         or account_cfg.get("judgeModel")
         or os.environ.get("ECHOMEM_CHAT_MODEL")
+        or workspace_model.get("chat_model")
         or openviking_vlm.get("model")
         or "deepseek-v4-flash"
     ).strip()
@@ -6839,7 +6939,14 @@ def resolve_echomemory_runtime_env(payload: dict[str, Any], config: Path, judge_
         **vlm_config,
         "api_base": chat_base,
         "model": chat_model,
-        "provider": str(payload.get("echomem_chat_provider") or payload.get("vlm_provider") or openviking_vlm.get("provider") or vlm_config.get("provider") or "").strip(),
+        "provider": str(
+            payload.get("echomem_chat_provider")
+            or payload.get("vlm_provider")
+            or workspace_model.get("chat_provider")
+            or openviking_vlm.get("provider")
+            or vlm_config.get("provider")
+            or ""
+        ).strip(),
     }
     return {
         "token": token,
@@ -7002,9 +7109,38 @@ def model_preflight_from_payload(payload: dict[str, Any], config: Path = DEFAULT
         token = str(payload.get("api_key") or payload.get("token") or payload.get("judge_token") or resolve_judge_token(payload, config) or "").strip()
     else:
         defaults = load_ov_defaults(config)
-        base_url = str(payload.get("base_url") or payload.get("answer_base_url") or defaults.get("answer_base_url") or defaults.get("judge_base_url") or "").strip()
-        model = str(payload.get("model") or payload.get("answer_model") or defaults.get("answer_model") or defaults.get("judge_model") or "").strip()
-        token = str(payload.get("api_key") or payload.get("token") or payload.get("answer_token") or resolve_judge_token(payload, config) or "").strip()
+        backend = normalize_memory_backend(
+            str(payload.get("backend") or payload.get("memoryBackend") or "")
+        )
+        echomemory_env = (
+            resolve_echomemory_runtime_env(payload, config, resolve_judge_token(payload, config))
+            if backend == "echomemory"
+            else {}
+        )
+        base_url = str(
+            payload.get("base_url")
+            or payload.get("answer_base_url")
+            or echomemory_env.get("chat_base")
+            or defaults.get("answer_base_url")
+            or defaults.get("judge_base_url")
+            or ""
+        ).strip()
+        model = str(
+            payload.get("model")
+            or payload.get("answer_model")
+            or echomemory_env.get("chat_model")
+            or defaults.get("answer_model")
+            or defaults.get("judge_model")
+            or ""
+        ).strip()
+        token = str(
+            payload.get("api_key")
+            or payload.get("token")
+            or payload.get("answer_token")
+            or echomemory_env.get("chat_token")
+            or resolve_judge_token(payload, config)
+            or ""
+        ).strip()
     result = openai_compatible_chat_preflight(base_url, model, token, timeout_s=float(payload.get("timeout_s") or 45))
     result["role"] = role
     result["token_set"] = bool(token)

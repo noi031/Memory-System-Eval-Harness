@@ -157,6 +157,10 @@ function checkStrictBlackboxApiSmoke() {
   run("strict black-box API smoke", "python3", [join(root, "scripts", "smoke-strict-blackbox-api.py")]);
 }
 
+function checkEchoMemoryWorkspaceModelSmoke() {
+  run("EchoMemory workspace model smoke", "python3", [join(root, "scripts", "smoke-echomemory-workspace-model.py")]);
+}
+
 function checkStrictBlackboxUiSmoke() {
   run("strict black-box UI smoke", "node", [join(root, "scripts", "smoke-strict-blackbox-ui.mjs")]);
 }
@@ -196,6 +200,7 @@ const checks = [
   checkLocomoPayloadSmoke,
   checkStrictBlackboxReportSmoke,
   checkStrictBlackboxApiSmoke,
+  checkEchoMemoryWorkspaceModelSmoke,
   checkStrictBlackboxUiSmoke,
   checkStrictTokenMetricsSmoke,
   checkRunSelectionSmoke,
