@@ -149,6 +149,10 @@ function checkLocomoPayloadSmoke() {
   run("LoCoMo payload smoke", "node", [join(root, "scripts", "smoke-locomo-payload.mjs")]);
 }
 
+function checkStrictBlackboxReportSmoke() {
+  run("strict black-box report smoke", "python3", [join(root, "scripts", "smoke_blackbox_report.py")]);
+}
+
 function checkLocomoControlsStillExist() {
   const renderer = readFileSync(join(root, "src", "render", "qa-locomo.js"), "utf8");
   const formReader = readFileSync(join(root, "src", "form-readers.js"), "utf8");
@@ -174,6 +178,7 @@ const checks = [
   checkHotpotQaPayloadSmoke,
   checkLongMemEvalPayloadSmoke,
   checkLocomoPayloadSmoke,
+  checkStrictBlackboxReportSmoke,
   checkLocomoControlsStillExist,
 ];
 

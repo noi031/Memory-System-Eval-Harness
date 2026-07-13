@@ -364,8 +364,24 @@ Generate a shareable HTML report:
 python3 scripts/generate_html_report.py \
   "$RUN_DIR/qa-full/echomemory_memory_qa_results.csv" \
   --output "$RUN_DIR/qa-full/locomo-conv30-report.html" \
-  --name "EchoMemory HTTP Black-box LoCoMo conv-30"
+  --name "EchoMemory HTTP Black-box LoCoMo conv-30" \
+  --import-summary "$RUN_DIR/import/echomemory_import_summary.json"
 ```
+
+The report's strict black-box section only uses values directly observed at
+the API boundary:
+
+- final QA status, empty retrieval, and externally visible model retries
+- platform wall-clock latency for end-to-end QA, retrieval, context injection,
+  and the answer-model request
+- answer-model Prompt, Completion, and Total Token returned by provider usage
+- submitted message count and the final import status from the import summary
+
+Internal extraction, embedding, reranking, and memory-injection Token remain
+`N/A` unless the memory service returns authoritative usage. The report never
+uses `retrieval_tokens_est` or `injection_tokens_est` as measured Token, and a
+100% message submission rate does not imply that asynchronous memory import
+completed successfully.
 
 ## Required Output Audit
 

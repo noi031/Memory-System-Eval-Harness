@@ -5,6 +5,8 @@ import argparse
 import csv
 import html as html_lib
 import json
+import math
+import statistics
 from datetime import datetime
 from pathlib import Path
 
@@ -23,6 +25,13 @@ STRICT_AUGMENTATION_LABELS = {
     "local_atoms": "local atoms",
     "local_memory_artifacts": "local memory artifacts",
     "local_graph_nodes": "local graph nodes",
+}
+
+CATEGORY_NAMES = {
+    "1": "multi-hop",
+    "2": "temporal",
+    "3": "open-domain",
+    "4": "single-hop",
 }
 
 
@@ -64,6 +73,150 @@ def parse_json_list(value) -> list[str]:
     return [str(item).strip() for item in parsed if str(item).strip()]
 
 
+def number(value, default: float = 0.0) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def integer(value, default: int = 0) -> int:
+    try:
+        return int(float(value))
+    except (TypeError, ValueError):
+        return default
+
+
+def first_present(row: dict, *fields: str):
+    for field in fields:
+        value = row.get(field)
+        if str(value if value is not None else "").strip():
+            return value
+    return None
+
+
+def percentile(values: list[float], quantile: float) -> float | None:
+    cleaned = sorted(value for value in values if math.isfinite(value))
+    if not cleaned:
+        return None
+    if len(cleaned) == 1:
+        return cleaned[0]
+    position = (len(cleaned) - 1) * quantile
+    lower = math.floor(position)
+    upper = math.ceil(position)
+    if lower == upper:
+        return cleaned[lower]
+    return cleaned[lower] + (cleaned[upper] - cleaned[lower]) * (position - lower)
+
+
+def metric_stats(values: list[float]) -> dict[str, float | None]:
+    cleaned = [value for value in values if math.isfinite(value)]
+    return {
+        "count": float(len(cleaned)),
+        "sum": sum(cleaned) if cleaned else None,
+        "avg": statistics.fmean(cleaned) if cleaned else None,
+        "p50": percentile(cleaned, 0.50),
+        "p95": percentile(cleaned, 0.95),
+        "p99": percentile(cleaned, 0.99),
+        "max": max(cleaned) if cleaned else None,
+    }
+
+
+def format_percent(value: float | None) -> str:
+    return "N/A" if value is None else f"{value * 100:.2f}%"
+
+
+def format_number(value: float | None, digits: int = 1) -> str:
+    return "N/A" if value is None else f"{value:,.{digits}f}"
+
+
+def observed_blackbox_metrics(
+    results: list[dict],
+    import_summary: dict | None = None,
+) -> dict:
+    categories: dict[str, dict[str, int]] = {}
+    for row in results:
+        category_key = str(row.get("category") or "unknown").strip()
+        category = CATEGORY_NAMES.get(category_key, f"category-{category_key}")
+        item = categories.setdefault(category, {"correct": 0, "wrong": 0, "total": 0})
+        item["total"] += 1
+        verdict = str(row.get("result") or "").strip().upper()
+        if verdict == "CORRECT":
+            item["correct"] += 1
+        elif verdict == "WRONG":
+            item["wrong"] += 1
+
+    required_status_fields = ("retrieval_status", "answer_status", "model_status", "health_status")
+    status_rows = [
+        row
+        for row in results
+        if all(str(row.get(field) or "").strip() for field in required_status_fields)
+    ]
+    successful_rows = [
+        row
+        for row in status_rows
+        if all(str(row.get(field) or "").strip().lower() == "ok" for field in required_status_fields)
+    ]
+    failed_rows = len(status_rows) - len(successful_rows)
+
+    retrieval_rows = [
+        row
+        for row in results
+        if first_present(row, "retrieval_count", "memory_hit_count") is not None
+    ]
+    empty_retrieval_rows = [
+        row
+        for row in retrieval_rows
+        if integer(first_present(row, "retrieval_count", "memory_hit_count")) == 0
+    ]
+    retry_rows = [row for row in results if str(row.get("model_retry_count") or "").strip()]
+    retried_rows = [row for row in retry_rows if integer(row.get("model_retry_count")) > 0]
+
+    token_rows = [row for row in results if str(row.get("answer_total_tokens") or "").strip()]
+    correct = sum(1 for row in results if str(row.get("result") or "").strip().upper() == "CORRECT")
+    total_answer_tokens = sum(number(row.get("answer_total_tokens")) for row in token_rows)
+    complete_token_usage = len(token_rows) == len(results)
+    tokens_per_correct = total_answer_tokens / correct if complete_token_usage and correct else None
+
+    import_summary = import_summary or {}
+    expected_messages = integer(import_summary.get("expected_messages"))
+    submitted_messages = integer(import_summary.get("submitted_messages"))
+
+    def values(field: str) -> list[float]:
+        return [
+            number(row.get(field))
+            for row in results
+            if str(row.get(field) or "").strip()
+        ]
+
+    return {
+        "categories": categories,
+        "request_success_count": len(successful_rows),
+        "request_status_count": len(status_rows),
+        "request_success_rate": len(successful_rows) / len(status_rows) if status_rows else None,
+        "failure_count": failed_rows,
+        "failure_rate": failed_rows / len(status_rows) if status_rows else None,
+        "empty_retrieval_count": len(empty_retrieval_rows),
+        "retrieval_observed_count": len(retrieval_rows),
+        "empty_retrieval_rate": len(empty_retrieval_rows) / len(retrieval_rows) if retrieval_rows else None,
+        "retried_count": len(retried_rows),
+        "retry_observed_count": len(retry_rows),
+        "retry_rate": len(retried_rows) / len(retry_rows) if retry_rows else None,
+        "answer_prompt_tokens": metric_stats(values("answer_prompt_tokens")),
+        "answer_completion_tokens": metric_stats(values("answer_completion_tokens")),
+        "answer_total_tokens": metric_stats(values("answer_total_tokens")),
+        "tokens_per_correct": tokens_per_correct,
+        "end_to_end_ms": metric_stats(values("end_to_end_ms")),
+        "retrieval_latency_ms": metric_stats(values("retrieval_latency_ms")),
+        "injection_total_ms": metric_stats(values("injection_total_ms")),
+        "llm_total_ms": metric_stats(values("llm_total_ms")),
+        "expected_messages": expected_messages,
+        "submitted_messages": submitted_messages,
+        "submission_rate": submitted_messages / expected_messages if expected_messages else None,
+        "import_status": str(import_summary.get("status") or "N/A"),
+    }
+
+
 def triggered_augmentation_paths(row: dict) -> list[str]:
     paths = parse_json_list(row.get("strict_blackbox_augmentation_paths"))
     if paths:
@@ -80,8 +233,10 @@ def generate_html_report(
     output_path: str,
     run_name: str = "Memory QA 评测报告",
     run_summary: dict | None = None,
+    import_summary: dict | None = None,
 ) -> None:
     run_summary = run_summary or {}
+    observed = observed_blackbox_metrics(results, import_summary)
     evaluations = []
     total_score = 0.0
     row_augmentations: list[list[str]] = []
@@ -195,6 +350,56 @@ def generate_html_report(
     time_costs = [float(r["time_cost"]) for r in results if r.get("time_cost")]
     total_time = sum(time_costs)
     avg_time = total_time / len(time_costs) if time_costs else 0
+    category_rows_html = ""
+    for category, counts in observed["categories"].items():
+        graded = counts["correct"] + counts["wrong"]
+        category_accuracy = counts["correct"] / graded if graded else None
+        category_rows_html += (
+            "<tr>"
+            f"<td><strong>{safe(category)}</strong></td>"
+            f"<td>{counts['total']}</td>"
+            f"<td>{counts['correct']}</td>"
+            f"<td>{counts['wrong']}</td>"
+            f"<td>{format_percent(category_accuracy)}</td>"
+            "</tr>"
+        )
+
+    latency_rows_html = ""
+    for label, key in (
+        ("端到端 QA", "end_to_end_ms"),
+        ("记忆检索", "retrieval_latency_ms"),
+        ("平台编排注入", "injection_total_ms"),
+        ("回答模型", "llm_total_ms"),
+    ):
+        item = observed[key]
+        latency_rows_html += (
+            "<tr>"
+            f"<td><strong>{label}</strong></td>"
+            f"<td>{format_number(item['avg'])} ms</td>"
+            f"<td>{format_number(item['p50'])} ms</td>"
+            f"<td>{format_number(item['p95'])} ms</td>"
+            f"<td>{format_number(item['p99'])} ms</td>"
+            f"<td>{format_number(item['max'])} ms</td>"
+            "</tr>"
+        )
+
+    token_rows_html = ""
+    for label, key in (
+        ("Prompt Token", "answer_prompt_tokens"),
+        ("Completion Token", "answer_completion_tokens"),
+        ("回答总 Token", "answer_total_tokens"),
+    ):
+        item = observed[key]
+        token_rows_html += (
+            "<tr>"
+            f"<td><strong>{label}</strong></td>"
+            f"<td>{format_number(item['avg'])}</td>"
+            f"<td>{format_number(item['p50'])}</td>"
+            f"<td>{format_number(item['p95'])}</td>"
+            f"<td>{format_number(item['p99'])}</td>"
+            f"<td>{format_number(item['sum'], 0)}</td>"
+            "</tr>"
+        )
 
     html = f"""<!DOCTYPE html>
 <html lang="zh-CN">
@@ -288,6 +493,93 @@ def generate_html_report(
             border: 1px solid #e2e8f0;
             border-radius: 8px;
             background: #f8fafc;
+        }}
+        .strict-panel {{
+            margin: 8px 0 28px;
+            padding: 18px;
+            border: 1px solid #bbf7d0;
+            border-left: 4px solid #15803d;
+            border-radius: 8px;
+            background: #f7fef9;
+        }}
+        .strict-panel h2 {{
+            margin: 0 0 6px;
+            color: #14532d;
+            font-size: 19px;
+        }}
+        .strict-note {{
+            color: #475569;
+            font-size: 13px;
+            margin-bottom: 14px;
+        }}
+        .strict-grid {{
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+            gap: 10px;
+            margin-bottom: 18px;
+        }}
+        .strict-metric {{
+            border: 1px solid #d1d5db;
+            border-top: 3px solid #15803d;
+            border-radius: 6px;
+            background: white;
+            padding: 12px;
+        }}
+        .strict-metric span {{
+            display: block;
+            color: #64748b;
+            font-size: 12px;
+        }}
+        .strict-metric strong {{
+            display: block;
+            margin-top: 8px;
+            color: #0f172a;
+            font-size: 22px;
+        }}
+        .strict-metric small {{
+            display: block;
+            margin-top: 5px;
+            color: #64748b;
+            font-size: 11px;
+        }}
+        .strict-metric.status strong {{
+            font-size: 15px;
+            overflow-wrap: anywhere;
+        }}
+        .metric-table-wrap {{
+            overflow-x: auto;
+            margin-top: 10px;
+            border: 1px solid #e2e8f0;
+            border-radius: 6px;
+            background: white;
+        }}
+        .metric-table {{
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 13px;
+        }}
+        .metric-table th,
+        .metric-table td {{
+            padding: 9px 10px;
+            border-bottom: 1px solid #e2e8f0;
+            text-align: right;
+            white-space: nowrap;
+        }}
+        .metric-table th:first-child,
+        .metric-table td:first-child {{
+            text-align: left;
+        }}
+        .metric-table th {{
+            color: #475569;
+            background: #f8fafc;
+        }}
+        .metric-table tr:last-child td {{
+            border-bottom: 0;
+        }}
+        .strict-subtitle {{
+            margin: 16px 0 7px;
+            color: #334155;
+            font-size: 14px;
         }}
         .scope-panel {{
             margin: 8px 0 24px;
@@ -516,6 +808,80 @@ def generate_html_report(
             <div class="stat-card info"><div class="stat-value">{overview_rows}</div><div class="stat-label">HTTP overview 题数</div></div>
         </div>
 
+        <section class="strict-panel">
+            <h2>严格黑盒指标</h2>
+            <p class="strict-note">
+                仅统计评测平台在 API 边界直接观测到的状态、计时与模型 usage。
+                未由 API 返回权威 usage 的内部 Token 一律显示为 N/A。
+            </p>
+            <div class="strict-grid">
+                <div class="strict-metric">
+                    <span>QA 请求成功率</span>
+                    <strong>{format_percent(observed["request_success_rate"])}</strong>
+                    <small>{observed["request_success_count"]}/{observed["request_status_count"]} 条完整状态记录</small>
+                </div>
+                <div class="strict-metric">
+                    <span>空召回率</span>
+                    <strong>{format_percent(observed["empty_retrieval_rate"])}</strong>
+                    <small>{observed["empty_retrieval_count"]}/{observed["retrieval_observed_count"]} 条召回记录</small>
+                </div>
+                <div class="strict-metric">
+                    <span>超时或最终失败率</span>
+                    <strong>{format_percent(observed["failure_rate"])}</strong>
+                    <small>{observed["failure_count"]}/{observed["request_status_count"]} 条完整状态记录</small>
+                </div>
+                <div class="strict-metric">
+                    <span>外部可见模型重试率</span>
+                    <strong>{format_percent(observed["retry_rate"])}</strong>
+                    <small>{observed["retried_count"]}/{observed["retry_observed_count"]} 条重试记录</small>
+                </div>
+                <div class="strict-metric">
+                    <span>每个正确答案 Token</span>
+                    <strong>{format_number(observed["tokens_per_correct"])}</strong>
+                    <small>回答模型总 Token / 正确题数</small>
+                </div>
+                <div class="strict-metric">
+                    <span>消息提交率</span>
+                    <strong>{format_percent(observed["submission_rate"])}</strong>
+                    <small>{observed["submitted_messages"]}/{observed["expected_messages"]}，不代表记忆导入完成</small>
+                </div>
+                <div class="strict-metric status">
+                    <span>记忆导入状态</span>
+                    <strong>{safe(observed["import_status"])}</strong>
+                    <small>以后端导入摘要的最终状态为准</small>
+                </div>
+                <div class="strict-metric">
+                    <span>内部记忆注入 Token</span>
+                    <strong>N/A</strong>
+                    <small>黑盒 API 未返回权威 usage</small>
+                </div>
+            </div>
+
+            <h3 class="strict-subtitle">分类准确率</h3>
+            <div class="metric-table-wrap">
+                <table class="metric-table">
+                    <thead><tr><th>类别</th><th>题数</th><th>正确</th><th>错误</th><th>准确率</th></tr></thead>
+                    <tbody>{category_rows_html}</tbody>
+                </table>
+            </div>
+
+            <h3 class="strict-subtitle">时延分布</h3>
+            <div class="metric-table-wrap">
+                <table class="metric-table">
+                    <thead><tr><th>阶段</th><th>平均</th><th>P50</th><th>P95</th><th>P99</th><th>最大</th></tr></thead>
+                    <tbody>{latency_rows_html}</tbody>
+                </table>
+            </div>
+
+            <h3 class="strict-subtitle">回答模型 Token（API usage）</h3>
+            <div class="metric-table-wrap">
+                <table class="metric-table">
+                    <thead><tr><th>类型</th><th>平均</th><th>P50</th><th>P95</th><th>P99</th><th>合计</th></tr></thead>
+                    <tbody>{token_rows_html}</tbody>
+                </table>
+            </div>
+        </section>
+
         <div class="augmentation-panel">
             <div class="augmentation-title">平台补证据路径触发统计</div>
             <div class="augmentation-grid">
@@ -541,8 +907,16 @@ def generate_html_report(
         status = eval_data["status"]
         status_icon = {"correct": "OK", "wrong": "ERR", "check": "CHK"}[status]
         status_text = {"correct": "正确", "wrong": "错误", "check": "需检查"}[status]
-        retrieval_count = row.get("retrieval_count", "N/A")
+        retrieval_count = first_present(row, "retrieval_count", "memory_hit_count")
+        retrieval_count = retrieval_count if retrieval_count is not None else "N/A"
         time_cost = float(row.get("time_cost", 0) or 0)
+        end_to_end_ms = number(row.get("end_to_end_ms")) if str(row.get("end_to_end_ms") or "").strip() else None
+        retrieval_ms = number(row.get("retrieval_latency_ms")) if str(row.get("retrieval_latency_ms") or "").strip() else None
+        injection_ms = number(row.get("injection_total_ms")) if str(row.get("injection_total_ms") or "").strip() else None
+        llm_ms = number(row.get("llm_total_ms")) if str(row.get("llm_total_ms") or "").strip() else None
+        prompt_tokens = number(row.get("answer_prompt_tokens")) if str(row.get("answer_prompt_tokens") or "").strip() else None
+        completion_tokens = number(row.get("answer_completion_tokens")) if str(row.get("answer_completion_tokens") or "").strip() else None
+        total_tokens = number(row.get("answer_total_tokens")) if str(row.get("answer_total_tokens") or "").strip() else None
         active_augmentations = set(augmentations)
         chips = "".join(
             f'<span class="augmentation-chip">{label}</span>'
@@ -559,15 +933,15 @@ def generate_html_report(
                     <span class="question-number">{status_icon} Q{index}</span>
                     <span class="question-status {status}">{status_text}</span>
                 </div>
-                <div class="question-text">{row.get("question", "")}</div>
+                <div class="question-text">{safe(row.get("question", ""))}</div>
                 <div class="answer-section">
                     <div class="answer-row">
                         <span class="answer-label">标准答案:</span>
-                        <span class="answer-value">{row.get("answer", "")}</span>
+                        <span class="answer-value">{safe(row.get("answer", ""))}</span>
                     </div>
                     <div class="answer-row">
                         <span class="answer-label">模型回答:</span>
-                        <span class="answer-value response">{row.get("response", "")}</span>
+                        <span class="answer-value response">{safe(row.get("response", ""))}</span>
                     </div>
                 </div>
                 <div class="augmentation-row">
@@ -575,7 +949,14 @@ def generate_html_report(
                     {chips}
                 </div>
                 <div class="meta-info">
-                    检索数: {retrieval_count} | 耗时: {time_cost:.2f}s | 问题ID: {row.get("question_id", "N/A")}
+                    检索数: {safe(retrieval_count)} |
+                    端到端: {format_number(end_to_end_ms)} ms |
+                    检索: {format_number(retrieval_ms)} ms |
+                    平台编排注入: {format_number(injection_ms)} ms |
+                    回答模型: {format_number(llm_ms)} ms |
+                    Token: {format_number(prompt_tokens, 0)} prompt + {format_number(completion_tokens, 0)} completion = {format_number(total_tokens, 0)} total |
+                    兼容耗时: {time_cost:.2f}s |
+                    问题ID: {safe(row.get("question_id", "N/A"))}
                 </div>
             </div>
 """
@@ -611,13 +992,23 @@ def main() -> None:
     parser.add_argument("csv_path", help="Path to CSV results file")
     parser.add_argument("--output", "-o", help="Output HTML file path", default=None)
     parser.add_argument("--name", "-n", help="Report name", default="Memory QA 评测报告")
+    parser.add_argument(
+        "--import-summary",
+        type=Path,
+        help="Optional EchoMemory import summary JSON for submission and completion status",
+    )
     args = parser.parse_args()
 
     results = load_results(args.csv_path)
     summary_path = Path(args.csv_path).parent / "summary.json"
     run_summary = json.loads(summary_path.read_text(encoding="utf-8")) if summary_path.is_file() else {}
+    import_summary = (
+        json.loads(args.import_summary.read_text(encoding="utf-8"))
+        if args.import_summary
+        else {}
+    )
     output_path = args.output or (Path(args.csv_path).parent / f"{Path(args.csv_path).stem}_report.html")
-    generate_html_report(results, str(output_path), args.name, run_summary)
+    generate_html_report(results, str(output_path), args.name, run_summary, import_summary)
 
 
 if __name__ == "__main__":
