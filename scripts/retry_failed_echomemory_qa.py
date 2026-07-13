@@ -13,6 +13,7 @@ from typing import Any
 
 
 FAILURE_HEALTH = {"api_error", "timeout", "rate_limited", "retrieval_empty", "retrieval_error", "question_timeout"}
+FAILURE_ANSWER_STATUS = {"failed", "empty_or_unknown"}
 
 
 def retrieval_failed(row: dict[str, str]) -> bool:
@@ -44,7 +45,7 @@ def resolve_python_bin(echomem_root: str) -> str:
 def is_failed(row: dict[str, str]) -> bool:
     return (
         str(row.get("model_status") or "").lower() == "failed"
-        or str(row.get("answer_status") or "").lower() == "failed"
+        or str(row.get("answer_status") or "").lower() in FAILURE_ANSWER_STATUS
         or retrieval_failed(row)
         or str(row.get("health_status") or "").lower() in FAILURE_HEALTH
     )
@@ -53,7 +54,7 @@ def is_failed(row: dict[str, str]) -> bool:
 def is_recovered(row: dict[str, str]) -> bool:
     return (
         str(row.get("model_status") or "").lower() != "failed"
-        and str(row.get("answer_status") or "").lower() != "failed"
+        and str(row.get("answer_status") or "").lower() not in FAILURE_ANSWER_STATUS
         and not retrieval_failed(row)
         and str(row.get("health_status") or "").lower() not in FAILURE_HEALTH
     )
@@ -229,8 +230,8 @@ def main() -> None:
     parser.add_argument("--tool-log-chars", type=int, default=1200)
     parser.add_argument("--prefetch-read-count", type=int, default=4)
     parser.add_argument("--prefetch-context-chars", type=int, default=5000)
-    parser.add_argument("--max-iterations", type=int, default=8)
-    parser.add_argument("--vikingboat-tool-loop", dest="vikingboat_tool_loop", action="store_true", default=False)
+    parser.add_argument("--max-iterations", type=int, default=50)
+    parser.add_argument("--vikingboat-tool-loop", dest="vikingboat_tool_loop", action="store_true", default=True)
     parser.add_argument("--no-vikingboat-tool-loop", dest="vikingboat_tool_loop", action="store_false")
     parser.add_argument("--vikingboat-compat", dest="vikingboat_compat", action="store_true", default=False)
     parser.add_argument("--no-vikingboat-compat", dest="vikingboat_compat", action="store_false")

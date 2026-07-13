@@ -102,9 +102,9 @@ LOCOMO_JUDGE_TOKEN=$model_token
   --user-id default \
   --agent-id default \
   --identity-mode fixed \
-  --prompt-mode one_shot \
+  --prompt-mode vikingboat_lite \
   --top-k 25 \
-  --score-threshold 0.1 \
+  --score-threshold 0 \
   --memory-budget-chars 6000 \
   --user-memory-budget-chars 4000 \
   --agent-memory-budget-chars 2000 \
@@ -126,7 +126,12 @@ LOCOMO_JUDGE_TOKEN=$model_token
   --no-precision-grounded-projection \
   --no-longmemeval-current-session-summary-fallback \
   --no-hotpot-empty-overview-fallback \
-  --no-vikingboat-tool-loop \
+  --vikingboat-tool-loop \
+  --tool-set vikingbot_native_safe \
+  --tool-search-limit 25 \
+  --tool-min-score 0 \
+  --max-iterations "${LOCOMO_MAX_ITERATIONS:-50}" \
+  --max-tool-calls "${LOCOMO_MAX_TOOL_CALLS:-0}" \
   --no-initial-tool-prefetch \
   --no-fallback-to-one-shot \
   --no-toolloop-rescue-on-toollike-answer \
@@ -144,4 +149,5 @@ LOCOMO_JUDGE_TOKEN=$model_token
   --question-timeout-s 300 \
   --judge-timeout-s 180 \
   --model-retries 5 \
-  --judge-retries 5
+  --judge-retries 5 \
+  --qa-memory-injection

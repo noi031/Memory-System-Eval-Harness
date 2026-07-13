@@ -555,11 +555,14 @@ def build_echomemory_qa_command(
         raise ValueError("LoCoMo EchoMemory QA requires echomem_base_url; local SDK evaluation is not a black-box run")
     if requested_transport not in {"", "http"}:
         raise ValueError("LoCoMo EchoMemory QA only supports EchoMemory HTTP black-box transport")
-    prompt_mode = str(payload.get("prompt_mode") or "one_shot")
+    prompt_mode = str(payload.get("prompt_mode") or "vikingboat_lite")
     if prompt_mode not in {"vikingboat_lite", "vikingboat_compat", "one_shot"}:
-        prompt_mode = "one_shot"
+        prompt_mode = "vikingboat_lite"
     vikingboat_compat = bool_value(payload.get("vikingboat_compat"), prompt_mode == "vikingboat_compat")
-    vikingboat_tool_loop = bool_value(payload.get("vikingboat_tool_loop"), False)
+    vikingboat_tool_loop = bool_value(
+        payload.get("vikingboat_tool_loop"),
+        prompt_mode != "one_shot",
+    )
     initial_tool_prefetch = False
     max_iterations = int(payload_value(payload, "max_iterations", VIKINGBOT_MAX_ITERATIONS))
     score_threshold = float(payload_value(payload, "score_threshold", VIKINGBOT_INITIAL_MIN_SCORE))
@@ -735,6 +738,9 @@ def build_echomemory_qa_command(
             "echomem_base_url": echomem_base_url,
             "retrieval_mode": retrieval_mode,
             "retrieval_source_mode": retrieval_source_mode,
+            "retrieval_score_source": "echomemory_http_native",
+            "platform_score_recomputed": False,
+            "native_result_order_preserved": True,
             "neo4j_graph_evidence_enabled": False,
             "search_overview_enrichment_enabled": search_overview_enrichment,
             "overview_transport": "echomemory_http_fs_read" if search_overview_enrichment else "disabled",

@@ -116,6 +116,14 @@ def generate_html_report(
         if is_blackbox
         else str(run_summary.get("retrieval_source_mode") or "N/A")
     )
+    retrieval_score_source = str(
+        run_summary.get("retrieval_score_source")
+        or ("echomemory_http_native" if is_blackbox else "N/A")
+    )
+    platform_score_recomputed = bool(run_summary.get("platform_score_recomputed", False))
+    native_result_order_preserved = bool(
+        run_summary.get("native_result_order_preserved", is_blackbox)
+    )
     echomem_transport = str(run_summary.get("echomem_transport") or ("http" if is_blackbox else "N/A"))
     source_counts = run_summary.get("final_evidence_source_counts") or {}
     source_counts_text = ", ".join(
@@ -156,6 +164,7 @@ def generate_html_report(
         scope_description = (
             "仅使用 EchoMemory /api/retrieval/search 返回的证据；评测平台未直查 Neo4j，"
             "未调用 /fs/read，也未扫描本地 workspace、summaries、atoms、messages 或其他 artifacts。"
+            "证据分数和排序均保留 EchoMemory HTTP 原生结果，平台不重新打分。"
         )
     else:
         scope_description = "请结合 summary.json 中的 evidence_policy 与 augmentation 统计解释本次结果。"
@@ -472,6 +481,9 @@ def generate_html_report(
             <div class="scope-grid">
                 <div>evidence_policy: <code>{safe(evidence_policy or "N/A")}</code></div>
                 <div>retrieval_source_mode: <code>{safe(retrieval_source_mode)}</code></div>
+                <div>检索分数来源: <code>{safe(retrieval_score_source)}</code></div>
+                <div>平台重算分数: <code>{safe(platform_score_recomputed)}</code></div>
+                <div>保留原生排序: <code>{safe(native_result_order_preserved)}</code></div>
                 <div>EchoMemory transport: <code>{safe(echomem_transport)}</code></div>
                 <div>后端路由: <code>echomemory_http_api_blackbox</code></div>
                 <div>top_k: <code>{safe(run_summary.get("top_k") or "N/A")}</code></div>

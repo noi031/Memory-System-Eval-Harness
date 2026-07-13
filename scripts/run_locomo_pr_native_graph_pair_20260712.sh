@@ -11,8 +11,8 @@ PYTHON="${LOCOMO_PYTHON_BIN:-$PR_ROOT/.venv/bin/python}"
 AUTH_FILE="${LOCOMO_PR_AUTH_FILE:-$WORKSPACE/.echomem_http_auth_keys.json}"
 
 OUTPUT_ROOT="${1:-$ROOT/runs/locomo_pr_native_graph_pair_20260712}"
-MIXED_RUN="$OUTPUT_ROOT/membase_graph_overview"
-GRAPH_RUN="$OUTPUT_ROOT/graph_only_overview"
+MIXED_RUN="$OUTPUT_ROOT/membase_graph_native"
+GRAPH_RUN="$OUTPUT_ROOT/graph_only_native"
 GRAPH_CONFIG="$OUTPUT_ROOT/graph_only.override.json"
 GRAPH_SERVER_LOG="$OUTPUT_ROOT/graph_only_server.log"
 RESTORED_SERVER_LOG="$OUTPUT_ROOT/membase_graph_server_restored.log"
@@ -91,8 +91,7 @@ run_qa() {
   fi
   mkdir -p "$run_dir"
   log "starting QA: $run_dir"
-  LOCOMO_SEARCH_OVERVIEW_ENRICHMENT=1 \
-  LOCOMO_OVERVIEW_BUDGET_CHARS=3000 \
+  LOCOMO_SEARCH_OVERVIEW_ENRICHMENT=0 \
   LOCOMO_PR_ROOT="$PR_ROOT" \
   LOCOMO_PR_WORKSPACE="$WORKSPACE" \
   LOCOMO_PR_ACCOUNT="$ACCOUNT" \
@@ -106,7 +105,7 @@ run_qa() {
     2>&1 | tee "$run_dir/run.log"
 }
 
-log "scope: PR123+125 only; Membase+Graph and Graph-only; overview enabled"
+log "scope: PR123+125 only; native HTTP Membase+Graph and Graph-only; Agent tool loop enabled; overview disabled"
 [[ -f "$AUTH_FILE" ]] || {
   log "missing HTTP auth file: $AUTH_FILE"
   exit 2
@@ -126,20 +125,11 @@ SESSION_COUNT="$(
     -mindepth 2 -maxdepth 3 -path '*/current/session.json' -type f 2>/dev/null \
     | wc -l | tr -d ' '
 )"
-OVERVIEW_COUNT="$(
-  find "$WORKSPACE/tenants/$TENANT_ID/engines/echo0_plugin/sessions" \
-    -mindepth 2 -maxdepth 2 -name overview.md -type f 2>/dev/null \
-    | wc -l | tr -d ' '
-)"
 [[ "$SESSION_COUNT" == "19" ]] || {
   log "completed workspace required: tenant=$TENANT_ID sessions=$SESSION_COUNT/19"
   exit 2
 }
-[[ "$OVERVIEW_COUNT" == "19" ]] || {
-  log "overview-enabled run requires 19 session overviews: found=$OVERVIEW_COUNT"
-  exit 2
-}
-log "reuse completed workspace: tenant=$TENANT_ID sessions=$SESSION_COUNT/19 overviews=$OVERVIEW_COUNT/19"
+log "reuse completed workspace: tenant=$TENANT_ID sessions=$SESSION_COUNT/19"
 
 "$PYTHON" -m py_compile \
   "$ROOT/scripts/local_judge.py" \

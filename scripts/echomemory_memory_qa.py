@@ -6498,6 +6498,9 @@ async def answer_question(
             "evidence_policy": "blackbox",
             "evidence_origin": "echomemory_http_api",
             "retrieval_source_mode": "echo_http_native",
+            "retrieval_score_source": "echomemory_http_native",
+            "platform_score_recomputed": False,
+            "native_result_order_preserved": True,
             "platform_evidence_injection_enabled": False,
             "http_overview_enrichment_enabled": bool(getattr(args, "search_overview_enrichment", False)),
             "allowed_http_enrichment_flags": http_enrichment_flags,
@@ -6542,6 +6545,9 @@ async def answer_question(
         "vikingbot_prompt_aligned": str(aligned_prompt).lower(),
         "memory_tool_loop_enabled": str(bool(aligned_prompt and args.vikingboat_tool_loop)).lower(),
         "qa_memory_injection_enabled": str(bool(getattr(args, "qa_memory_injection", True))).lower(),
+        "qa_memory_context_injection_enabled": str(bool(getattr(args, "qa_memory_injection", True))).lower(),
+        "qa_memory_writeback_enabled": "false",
+        "memory_workspace_reusable": "true",
         "memory_tool_set": str(args.tool_set),
         "memory_tool_names": json.dumps(
             [tool["function"]["name"] for tool in echomemory_tool_definitions(args, normalize_tool_set_fn=normalize_echomemory_tool_set)],
@@ -6999,6 +7005,9 @@ async def run(args: argparse.Namespace) -> None:
         "vikingboat_compat": bool(args.vikingboat_compat),
         "memory_tool_loop_enabled": bool(args.prompt_mode in VIKINGBOT_ALIGNED_PROMPT_MODES and args.vikingboat_tool_loop),
         "qa_memory_injection_enabled": bool(args.qa_memory_injection),
+        "qa_memory_context_injection_enabled": bool(args.qa_memory_injection),
+        "qa_memory_writeback_enabled": False,
+        "memory_workspace_reusable": True,
         "qa_parallelism": int(args.qa_parallelism),
         "memory_tool_set": args.tool_set,
         "memory_tool_names": [
@@ -7020,6 +7029,9 @@ async def run(args: argparse.Namespace) -> None:
         "http_search_endpoint": "/api/retrieval/search",
         "http_fs_read_endpoint": "/fs/read",
         "retrieval_source_mode": "echo_http_native",
+        "retrieval_score_source": "echomemory_http_native",
+        "platform_score_recomputed": False,
+        "native_result_order_preserved": True,
         "platform_evidence_injection_enabled": False,
         "allowed_http_enrichment": ["overview.md"] if args.search_overview_enrichment else [],
         "overview_budget_chars": max(0, int(getattr(args, "overview_budget_chars", 0) or 0)),
@@ -7253,7 +7265,11 @@ def main() -> None:
     parser.add_argument("--user-id", default="default")
     parser.add_argument("--agent-id", default="default")
     parser.add_argument("--identity-mode", choices=["fixed", "sample_question"], default="fixed")
-    parser.add_argument("--prompt-mode", choices=["vikingboat_lite", "vikingboat_compat", "one_shot"], default="one_shot")
+    parser.add_argument(
+        "--prompt-mode",
+        choices=["vikingboat_lite", "vikingboat_compat", "one_shot"],
+        default="vikingboat_lite",
+    )
     parser.add_argument("--vikingboat-compat", dest="vikingboat_compat", action="store_true")
     parser.add_argument("--no-vikingboat-compat", dest="vikingboat_compat", action="store_false")
     parser.add_argument("--top-k", type=int, default=VIKINGBOT_INITIAL_SEARCH_LIMIT)
@@ -7378,7 +7394,12 @@ def main() -> None:
     parser.add_argument("--no-fallback-to-one-shot", dest="fallback_to_one_shot", action="store_false")
     parser.add_argument("--toolloop-rescue-on-toollike-answer", dest="toolloop_rescue_on_toollike_answer", action="store_true")
     parser.add_argument("--no-toolloop-rescue-on-toollike-answer", dest="toolloop_rescue_on_toollike_answer", action="store_false")
-    parser.add_argument("--max-tool-calls", type=int, default=5)
+    parser.add_argument(
+        "--max-tool-calls",
+        type=int,
+        default=0,
+        help="Maximum model-requested memory tool calls; 0 leaves the limit to max-iterations.",
+    )
     parser.add_argument(
         "--answer-base-url",
         default=os.environ.get("JUDGE_BASE_URL")
@@ -7417,7 +7438,7 @@ def main() -> None:
         local_messages=False,
         local_timeline_hints=False,
         local_memory_artifacts=False,
-        vikingboat_tool_loop=False,
+        vikingboat_tool_loop=True,
         vikingboat_compat=None,
         search_overview_enrichment=False,
         initial_tool_prefetch=False,

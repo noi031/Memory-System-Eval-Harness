@@ -15,9 +15,6 @@ from echomemory_qa_common import (
     MEMORY_SEARCH_TOOL_NAME,
     compact,
 )
-from memory.vikingboat_alignment import VIKINGBOT_TOOL_MIN_SCORE
-
-
 def memory_uri(item: dict[str, Any]) -> str:
     return str(item.get("uri") or item.get("path") or item.get("id") or "")
 
@@ -228,6 +225,10 @@ async def execute_echomemory_search_tool(
         min_score = float(tool_args.get("min_score") if tool_args.get("min_score") is not None else args.tool_min_score)
     except (TypeError, ValueError):
         min_score = args.tool_min_score
+    if str(getattr(args, "evidence_policy", "") or "").strip().lower() == "blackbox":
+        # A black-box benchmark consumes EchoMemory's native result set and
+        # ordering. Do not apply a second platform-side score threshold.
+        min_score = 0.0
 
     tool_query_args = argparse.Namespace(**vars(args))
     tool_query_args.top_k = max(int(args.top_k), int(args.tool_search_limit))
@@ -262,6 +263,43 @@ def execute_echomemory_multi_read_tool(
     if len(uris) > 20:
         lines.append(f"\nSkipped {len(uris) - 20} URIs to keep the tool result bounded.")
     return "\n".join(lines)
+
+
+async def execute_echomemory_http_multi_read_tool(
+    sdk: Any,
+    tool_args: dict[str, Any],
+    cache: dict[str, dict[str, Any]],
+) -> tuple[str, str, int]:
+    raw_uris = tool_args.get("uris")
+    if isinstance(raw_uris, str):
+        uris = [raw_uris]
+    elif isinstance(raw_uris, list):
+        uris = [str(uri) for uri in raw_uris if str(uri or "").strip()]
+    else:
+        uris = []
+    if not uris:
+        return "Error: No URIs provided.", "", 0
+
+    lines = [f"Multi-read results for {len(uris)} resources (level: read):"]
+    errors: list[str] = []
+    read_count = 0
+    for uri in uris[:20]:
+        lines.append(f"\n--- START OF {uri} ---")
+        content = ""
+        try:
+            payload = await sdk.fs_read(uri)
+            content = str((payload or {}).get("content") or "").strip()
+            if content:
+                read_count += 1
+        except Exception as exc:
+            errors.append(f"{uri}: {exc}")
+        if not content:
+            content = memory_content(cache.get(uri) or {})
+        lines.append(content if content else f"ERROR: EchoMemory returned empty content for {uri}")
+        lines.append(f"--- END OF {uri} ---")
+    if len(uris) > 20:
+        lines.append(f"\nSkipped {len(uris) - 20} URIs to keep the tool result bounded.")
+    return "\n".join(lines), "; ".join(errors[:5]), read_count
 
 
 def execute_echomemory_list_tool(cache: dict[str, dict[str, Any]], uri: str = "", recursive: bool = False) -> str:
@@ -356,8 +394,8 @@ def echomemory_search_tool_definition() -> dict[str, Any]:
                     "query": {"type": "string", "description": "The search query"},
                     "min_score": {
                         "type": "number",
-                        "description": "Minimum relevance score threshold",
-                        "default": VIKINGBOT_TOOL_MIN_SCORE,
+                        "description": "Minimum relevance score threshold; zero preserves all native EchoMemory results.",
+                        "default": 0.0,
                     },
                     "target_uri": {
                         "type": "string",
@@ -488,6 +526,8 @@ async def execute_echomemory_tool(
             hit_score_fn=hit_score_fn,
         )
     if name == MEMORY_MULTI_READ_TOOL_NAME:
+        if getattr(sdk, "_compat_layout", "") == "http":
+            return await execute_echomemory_http_multi_read_tool(sdk, parsed_args, cache)
         return execute_echomemory_multi_read_tool(parsed_args, cache), "", 0
     if name == MEMORY_LIST_TOOL_NAME:
         return execute_echomemory_list_tool(cache, str(parsed_args.get("uri") or ""), bool(parsed_args.get("recursive"))), "", 0
