@@ -71,6 +71,8 @@ def main() -> None:
         "submitted_messages": 3,
     }
     metrics = observed_blackbox_metrics(rows, import_summary)
+    assert metrics["accuracy"] == 0.5
+    assert metrics["graded_count"] == 2
     assert metrics["request_success_rate"] == 1.0
     assert metrics["empty_retrieval_rate"] == 0.5
     assert metrics["failure_rate"] == 0.0
@@ -122,7 +124,7 @@ def main() -> None:
         assert value in exported_report, f"exported report is missing {value!r}"
     assert "指标口径说明" in report
     assert "指标定义与黑盒边界" in exported_report
-    assert exported_report.count("class='strict-metric-card") == 9
+    assert exported_report.count("class='strict-metric-card") == 10
     assert exported_report.count("class='strict-definition'") == 15
     assert resolved_import_summary["status"] == "ECHOMEMORY_IMPORT_INCOMPLETE"
     assert resolved_import_summary["expected_messages"] == 4

@@ -120,6 +120,12 @@ def render_strict_blackbox_metrics_html(
 
     headline_items = [
         (
+            "准确率",
+            format_observed_percent(metrics.get("accuracy")),
+            format_observed_fraction(metrics.get("correct_count"), metrics.get("graded_count"), "已判题"),
+            "success",
+        ),
+        (
             "QA 请求成功率",
             format_observed_percent(metrics.get("request_success_rate")),
             format_observed_fraction(metrics.get("request_success_count"), metrics.get("request_status_count")),
@@ -251,7 +257,7 @@ def render_strict_blackbox_metrics_html(
     <section class="panel strict-panel" style="margin-bottom:16px">
       <header class="strict-head">
         <div>
-          <span>Observed at API boundary</span>
+          <span>API 边界实际观测</span>
           <h2>严格黑盒指标</h2>
           <p>只使用结果 CSV 和导入摘要中的实际观测字段；缺失值显示 N/A，不做 Token 或耗时推算。</p>
         </div>

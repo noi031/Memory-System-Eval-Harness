@@ -92,6 +92,7 @@ from memory import evidence_contract as evidence_contract_service  # noqa: E402
 from memory import report_export as report_export_service  # noqa: E402
 from memory import reports as report_service  # noqa: E402
 from memory import runs as run_service  # noqa: E402
+from memory import strict_blackbox as strict_blackbox_service  # noqa: E402
 from memory.services import RuntimeStatusContext  # noqa: E402
 from memory.services import TaskFactoryContext  # noqa: E402
 from memory.services import TaskOrchestratorContext  # noqa: E402
@@ -6375,6 +6376,32 @@ def merge_judge_summary(summary: dict[str, Any], csv_path: Path) -> dict[str, An
     return merged
 
 
+def run_dir_for_output(path: Path) -> Path | None:
+    for candidate in (path.parent, *path.parents):
+        if (candidate / "manifest.json").exists():
+            return candidate
+    return None
+
+
+def merge_matched_import_summary_for_output(summary: dict[str, Any], path: Path) -> dict[str, Any]:
+    run_dir = run_dir_for_output(path)
+    if run_dir is None:
+        return summary
+    try:
+        record = run_service.run_record(run_dir, active_run_ids(), compact=False)
+    except Exception:
+        return summary
+    record_summary = record.get("summary") if isinstance(record, dict) else None
+    if not isinstance(record_summary, dict):
+        return summary
+    import_summary = record_summary.get("import_summary")
+    if not isinstance(import_summary, dict):
+        return summary
+    merged = dict(summary)
+    merged["import_summary"] = import_summary
+    return merged
+
+
 def result_payload(path: Path) -> dict[str, Any]:
     if not path.exists():
         raise FileNotFoundError("file not found")
@@ -6383,6 +6410,8 @@ def result_payload(path: Path) -> dict[str, Any]:
     summary = parse_json_run_summary(path) if path.suffix.lower() == ".json" else parse_csv_summary(path)
     if path.suffix.lower() == ".csv":
         summary = merge_judge_summary(summary, path)
+        summary = merge_matched_import_summary_for_output(summary, path)
+        summary = strict_blackbox_service.merge_strict_blackbox_snapshot(summary, path)
     analysis_path = path.with_suffix(".wrong_analysis.json")
     analysis = read_json(analysis_path) if analysis_path.exists() else None
     return {"summary": summary, "analysis": analysis}
@@ -6431,6 +6460,36 @@ def analyze_wrong_answers(csv_path: Path, out_path: Path | None = None) -> dict[
 
 def wrong_clusters_for_csv(csv_path: Path) -> dict[str, Any]:
     return report_service.wrong_clusters_for_csv(csv_path)
+
+
+def attach_task_strict_blackbox_snapshot(task: Task, payload: dict[str, Any]) -> None:
+    output = Path(str(task.output_file or "")).expanduser()
+    if output.suffix.lower() != ".csv" or not output.exists():
+        return
+    summary = task.summary if isinstance(task.summary, dict) else {}
+    run_dir = Path(task.run_dir) if task.run_dir else None
+    if run_dir is not None:
+        try:
+            record = run_service.run_record(run_dir, active_run_ids(), compact=False)
+        except Exception:
+            record = None
+        record_summary = record.get("summary") if isinstance(record, dict) else None
+        if isinstance(record_summary, dict):
+            import_summary = record_summary.get("import_summary")
+            if isinstance(import_summary, dict):
+                summary = {**summary, "import_summary": import_summary}
+    merged = strict_blackbox_service.merge_strict_blackbox_snapshot(summary, output)
+    strict_snapshot = merged.get("strict_blackbox")
+    if not isinstance(strict_snapshot, dict):
+        return
+    with TASK_LOCK:
+        task.summary = {
+            **(task.summary if isinstance(task.summary, dict) else {}),
+            "strict_blackbox": strict_snapshot,
+            "strict_blackbox_metrics_path": strict_snapshot.get("artifact_path") or "",
+        }
+        if task.run_dir:
+            write_manifest(task, payload, Path(task.run_dir))
 
 
 def task_thread(task: Task) -> None:
@@ -6564,6 +6623,7 @@ def task_thread(task: Task) -> None:
             if task.status == "interrupted" and not task.error:
                 task.error = "任务已由用户停止。"
             write_manifest(task, payload, Path(task.run_dir))
+        attach_task_strict_blackbox_snapshot(task, payload)
         if task.status == "succeeded":
             _maybe_enqueue_locomo_judge_followup(task, payload)
             _maybe_export_locomo_report_followup(task, payload)

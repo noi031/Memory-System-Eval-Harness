@@ -1,3 +1,5 @@
+import { actionButton } from "./shared.js";
+
 function finiteNumber(value) {
   if (value === null || value === undefined || value === "") return null;
   const number = Number(value);
@@ -30,6 +32,13 @@ function formatFraction(numerator, denominator, suffix = "条观测") {
   const right = finiteNumber(denominator);
   if (left === null || right === null || right <= 0) return "无完整观测";
   return `${formatInteger(left)} / ${formatInteger(right)} ${suffix}`;
+}
+
+function accuracyNote(correct, graded) {
+  const correctNumber = finiteNumber(correct);
+  const gradedNumber = finiteNumber(graded);
+  if (correctNumber === null || gradedNumber === null || gradedNumber <= 0) return "无已判分题";
+  return `${formatInteger(correctNumber)} / ${formatInteger(gradedNumber)} 已判题`;
 }
 
 function headlineMetric(label, value, note, escapeHtml, tone = "") {
@@ -145,8 +154,17 @@ export function renderStrictBlackboxMetrics(strictBlackbox, {
 } = {}) {
   const metrics = strictBlackbox?.metrics;
   if (!metrics || typeof metrics !== "object") return "";
+  const artifactPath = String(strictBlackbox?.artifact_path || "").trim();
+  const generatedAt = String(strictBlackbox?.generated_at || "").trim();
 
   const headline = [
+    headlineMetric(
+      "准确率",
+      formatPercent(metrics.accuracy),
+      accuracyNote(metrics.correct_count, metrics.graded_count),
+      escapeHtml,
+      finiteNumber(metrics.accuracy) === null ? "" : "success",
+    ),
     headlineMetric(
       "QA 请求成功率",
       formatPercent(metrics.request_success_rate),
@@ -210,12 +228,29 @@ export function renderStrictBlackboxMetrics(strictBlackbox, {
     <section class="wb-strict-panel ${compact ? "compact" : ""}">
       <header class="wb-strict-head">
         <div>
-          <span>Observed at API boundary</span>
+          <span>API 边界实际观测</span>
           <h3>严格黑盒指标</h3>
           <p>只使用结果 CSV 和导入摘要中的实际观测字段；缺失值显示 N/A，不做 Token 或耗时推算。</p>
         </div>
-        <strong>${escapeHtml(formatInteger(strictBlackbox.row_count))} 题</strong>
+        <div class="wb-strict-head-meta">
+          <strong>${escapeHtml(formatInteger(strictBlackbox.row_count))} 题</strong>
+          ${generatedAt ? `<small title="${escapeHtml(generatedAt)}">${escapeHtml(generatedAt)}</small>` : ""}
+        </div>
       </header>
+      ${artifactPath ? `
+        <div class="wb-strict-artifact">
+          <div>
+            <span>本次运行指标快照</span>
+            <code title="${escapeHtml(artifactPath)}">${escapeHtml(artifactPath)}</code>
+          </div>
+          ${actionButton({
+            label: "打开 JSON",
+            tone: "ghost",
+            action: "open-path",
+            path: artifactPath,
+          }, escapeHtml)}
+        </div>
+      ` : ""}
       <div class="wb-strict-grid">${headline}</div>
       ${compact ? "" : `
         <div class="wb-strict-folds">

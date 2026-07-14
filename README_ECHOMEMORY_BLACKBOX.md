@@ -383,6 +383,14 @@ uses `retrieval_tokens_est` or `injection_tokens_est` as measured Token, and a
 100% message submission rate does not imply that asynchronous memory import
 completed successfully.
 
+Every completed CSV run also writes `strict_blackbox_metrics.json` beside the
+result CSV. The sidecar contains the raw counts, rates, category accuracy,
+latency and Token distributions, import status, unavailable fields, metric
+definitions, source CSV, and a source signature. The workbench report reads
+this file and exposes an `打开 JSON` action. If the result CSV or matched import
+summary changes, the API regenerates the sidecar from the authoritative
+observations.
+
 ## Required Output Audit
 
 For a strict black-box run, verify `summary.json`:

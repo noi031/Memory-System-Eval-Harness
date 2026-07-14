@@ -1210,12 +1210,52 @@ summary.wb-subpanel-head::after {
   font-size: 12px;
   line-height: 1.55;
 }
-.wb-strict-head > strong {
+.wb-strict-head-meta {
+  display: grid;
+  justify-items: end;
+  gap: 3px;
+  flex: 0 0 auto;
+}
+.wb-strict-head-meta > strong {
   flex: 0 0 auto;
   color: var(--text);
   font-size: 13px;
   font-variant-numeric: tabular-nums;
 }
+.wb-strict-head-meta > small {
+  color: var(--muted);
+  font-size: 10px;
+  white-space: nowrap;
+}
+.wb-strict-artifact {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-width: 0;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+}
+.wb-strict-artifact > div {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+.wb-strict-artifact span {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 700;
+}
+.wb-strict-artifact code {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text-soft-strong);
+  font: 11px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.wb-strict-artifact .wb-button { flex: 0 0 auto; }
 .wb-strict-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(148px, 1fr));
@@ -2070,6 +2110,9 @@ summary.wb-subpanel-head::after {
   .wb-shell[data-benchmark="locomo"] .wb-recovery-strip-items,
   .wb-recovery-actions { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .wb-strict-panel { padding: 12px; }
+  .wb-strict-head-meta { justify-items: start; }
+  .wb-strict-artifact { display: grid; }
+  .wb-strict-artifact .wb-button { width: 100%; }
   .wb-strict-grid,
   .wb-strict-panel.compact .wb-strict-grid { grid-template-columns: minmax(0, 1fr); }
   .wb-strict-definition p { grid-template-columns: minmax(0, 1fr); }

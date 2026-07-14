@@ -83,8 +83,16 @@ export function createReportRenderers({
           ...button,
           action: "open-path",
         })),
+        metrics.strictBlackbox?.artifact_path
+          ? {
+            label: "打开指标 JSON",
+            tone: "ghost",
+            action: "open-path",
+            path: metrics.strictBlackbox.artifact_path,
+          }
+          : null,
         {id: "wbExportReport", label: actionModel.exportLabel, tone: "primary"},
-      ],
+      ].filter(Boolean),
       escapeHtml,
     });
   }

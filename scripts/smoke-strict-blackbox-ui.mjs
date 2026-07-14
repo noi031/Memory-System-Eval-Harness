@@ -25,7 +25,13 @@ const definitions = Array.from({length: 15}, (_, index) => ({
 }));
 const html = renderStrictBlackboxMetrics({
   row_count: 2,
+  artifact_path: "/tmp/run/strict_blackbox_metrics.json",
+  generated_at: "2026-07-14T12:00:00+00:00",
   metrics: {
+    accuracy: 0.5,
+    graded_count: 2,
+    correct_count: 1,
+    wrong_count: 1,
     request_success_rate: 1,
     request_success_count: 2,
     request_status_count: 2,
@@ -55,6 +61,10 @@ const html = renderStrictBlackboxMetrics({
 }, {escapeHtml});
 
 assert(html.includes("严格黑盒指标"), "strict panel title must render");
+assert(html.includes("准确率"), "strict accuracy must render");
+assert(html.includes("本次运行指标快照"), "persisted metrics artifact must render");
+assert(html.includes("打开 JSON"), "metrics artifact action must render");
+assert(html.includes("strict_blackbox_metrics.json"), "metrics artifact path must render");
 assert(html.includes("指标定义与黑盒边界"), "strict definitions section must render");
 assert(html.includes("15 项"), "all strict metric definitions must be counted");
 assert(html.includes("QA 侧编排注入"), "QA-side orchestration latency must be named precisely");

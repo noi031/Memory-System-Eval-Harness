@@ -324,8 +324,10 @@ def observed_blackbox_metrics(
     retry_rows = [row for row in results if str(row.get("model_retry_count") or "").strip()]
     retried_rows = [row for row in retry_rows if integer(row.get("model_retry_count")) > 0]
 
-    token_rows = [row for row in results if str(row.get("answer_total_tokens") or "").strip()]
     correct = sum(1 for row in results if str(row.get("result") or "").strip().upper() == "CORRECT")
+    wrong = sum(1 for row in results if str(row.get("result") or "").strip().upper() == "WRONG")
+    graded = correct + wrong
+    token_rows = [row for row in results if str(row.get("answer_total_tokens") or "").strip()]
     total_answer_tokens = sum(number(row.get("answer_total_tokens")) for row in token_rows)
     complete_token_usage = len(token_rows) == len(results)
     tokens_per_correct = total_answer_tokens / correct if complete_token_usage and correct else None
@@ -343,6 +345,10 @@ def observed_blackbox_metrics(
 
     return {
         "categories": categories,
+        "graded_count": graded,
+        "correct_count": correct,
+        "wrong_count": wrong,
+        "accuracy": correct / graded if graded else None,
         "request_success_count": len(successful_rows),
         "request_status_count": len(status_rows),
         "request_success_rate": len(successful_rows) / len(status_rows) if status_rows else None,
@@ -1013,6 +1019,11 @@ def generate_html_report(
             </p>
             <div class="strict-grid">
                 <div class="strict-metric">
+                    <span>准确率</span>
+                    <strong>{format_percent(observed["accuracy"])}</strong>
+                    <small>{observed["correct_count"]}/{observed["graded_count"]} 道已判题</small>
+                </div>
+                <div class="strict-metric">
                     <span>QA 请求成功率</span>
                     <strong>{format_percent(observed["request_success_rate"])}</strong>
                     <small>{observed["request_success_count"]}/{observed["request_status_count"]} 条完整状态记录</small>
@@ -1051,6 +1062,11 @@ def generate_html_report(
                     <span>内部记忆注入 Token</span>
                     <strong>N/A</strong>
                     <small>黑盒 API 未返回权威 usage</small>
+                </div>
+                <div class="strict-metric">
+                    <span>初始记忆导入时间</span>
+                    <strong>N/A</strong>
+                    <small>缺少可靠的后台完成事件</small>
                 </div>
             </div>
 

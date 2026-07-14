@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import csv
+import json
 import sys
 import tempfile
 from pathlib import Path
@@ -62,12 +63,22 @@ def main() -> None:
             writer.writeheader()
             writer.writerows(rows)
         summary = merge_strict_blackbox_summary({}, csv_path)
+        strict = summary["strict_blackbox"]
+        artifact_path = Path(strict["artifact_path"])
+        assert artifact_path.exists()
+        persisted = json.loads(artifact_path.read_text(encoding="utf-8"))
+        assert persisted["source_signature"] == strict["source_signature"]
+        assert persisted["artifact_path"] == str(artifact_path)
 
-    strict = summary["strict_blackbox"]
     metrics = strict["metrics"]
     assert strict["mode"] == "strict_observed"
     assert strict["row_count"] == 2
     assert len(strict["definitions"]) == 15
+    assert Path(strict["artifact_path"]).name == "strict_blackbox_metrics.json"
+    assert metrics["accuracy"] == 0.5
+    assert metrics["graded_count"] == 2
+    assert metrics["correct_count"] == 1
+    assert metrics["wrong_count"] == 1
     assert metrics["request_success_rate"] == 0.5
     assert metrics["empty_retrieval_rate"] == 0.5
     assert metrics["answer_total_tokens"]["sum"] == 60.0
@@ -76,6 +87,8 @@ def main() -> None:
     assert metrics["submitted_messages"] is None
     assert strict["unavailable"]["internal_memory_injection_tokens"] is None
     assert strict["unavailable"]["initial_memory_import_time_ms"] is None
+    assert metrics["internal_memory_injection_tokens"] is None
+    assert metrics["initial_memory_import_time_ms"] is None
     print("strict black-box API smoke passed")
 
 
