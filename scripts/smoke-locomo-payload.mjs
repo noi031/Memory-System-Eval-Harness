@@ -202,6 +202,7 @@ assert(qaGate.checks.some((item) => item.name === "answer_model_probe" && item.o
 await locomo.startImport();
 const importPayload = echoSetup.calls.at(-1).payload;
 assert(importPayload.kind === "echomemory_import", "LoCoMo EchoMemory import must use echomemory_import");
+assert(importPayload.dataset_format === "locomo", "LoCoMo import must declare dataset_format=locomo");
 assert(importPayload.data === "/tmp/locomo.json", "LoCoMo import must preserve data path");
 assert(importPayload.sample === "conv-30", "LoCoMo import must preserve sample");
 assert(importPayload.workspace === "/tmp/locomo-payload-smoke", "LoCoMo import must preserve workspace");
@@ -219,6 +220,7 @@ assert(importPayload.memory_inject_model === "memory-model", "LoCoMo import must
 await locomo.startQa();
 const qaPayload = echoSetup.calls.at(-1).payload;
 assert(qaPayload.kind === "echomemory_qa", "LoCoMo EchoMemory QA must use echomemory_qa");
+assert(qaPayload.dataset_format === "locomo", "LoCoMo QA must declare dataset_format=locomo");
 assert(qaPayload.sample === "conv-30", "LoCoMo QA must preserve sample");
 assert(qaPayload.top_k === 30, "LoCoMo QA must preserve top_k");
 assert(qaPayload.prompt_mode === "vikingboat_lite", "LoCoMo QA must use the fixed VikingBoat-aligned prompt mode");

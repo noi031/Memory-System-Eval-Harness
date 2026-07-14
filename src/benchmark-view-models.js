@@ -429,8 +429,7 @@ export function buildJudgeMetricItems(benchmarkId, metrics) {
     {label: "正确", type: "int", value: metrics.correct},
     {label: "错误", type: "int", value: metrics.wrong},
     {label: "待判分", type: "int", value: metrics.pending},
-    importTokenMetricItem(metrics, "答案 Tokens", metrics.answerTotalTokens),
-    ...tokenBreakdownMetricItems(metrics, {includeImportTotal: false}),
+    ...tokenBreakdownMetricItems(metrics),
   ];
 }
 
@@ -510,8 +509,7 @@ export function buildReportMetricItems(benchmarkId, metrics) {
     {label: "准确率", type: "pct", value: metrics.accuracy},
     {label: "运行时长", type: "duration", value: metrics.runDurationS},
     {label: "平均 QA", type: "duration", value: metrics.avgQaTimeS},
-    importTokenMetricItem(metrics, "答案 Tokens", metrics.answerTotalTokens),
-    ...tokenBreakdownMetricItems(metrics, {includeImportTotal: false}),
+    ...tokenBreakdownMetricItems(metrics),
   ];
 }
 

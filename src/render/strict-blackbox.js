@@ -198,6 +198,12 @@ export function renderStrictBlackboxMetrics(strictBlackbox, {
       "黑盒 API 未返回权威 usage",
       escapeHtml,
     ),
+    headlineMetric(
+      "初始记忆导入时间",
+      "N/A",
+      "缺少可靠的后台完成事件",
+      escapeHtml,
+    ),
   ].join("");
 
   return `

@@ -98,6 +98,31 @@ summary:focus-visible, a:focus-visible {
 }
 input, select { min-width: 0; }
 
+.wb-global-alert {
+  position: fixed;
+  right: 20px;
+  bottom: 20px;
+  z-index: 1000;
+  width: min(460px, calc(100vw - 32px));
+  padding: 12px 14px;
+  border: 1px solid #fecaca;
+  border-radius: var(--radius-sm);
+  background: var(--danger-soft);
+  color: #991b1b;
+  box-shadow: var(--shadow-lg);
+  font-weight: 600;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+  opacity: 0;
+  transform: translateY(8px);
+  transition: opacity 140ms ease, transform 140ms ease;
+}
+
+.wb-global-alert.visible {
+  opacity: 1;
+  transform: translateY(0);
+}
+
 /* ============================================================
    SHELL LAYOUT
    ============================================================ */
@@ -1099,9 +1124,9 @@ summary.wb-subpanel-head::after {
 /* Current workbench (QA pages) */
 .wb-current-workbench {
   display: grid; gap: 12px;
-  padding: 14px 16px;
-  border: 1px solid var(--border); border-radius: var(--radius-sm);
-  background: var(--surface);
+  padding: 4px 0 0;
+  border: 0; border-radius: 0;
+  background: transparent;
 }
 .wb-current-workbench-main { min-width: 0; }
 .wb-current-workbench-copy { display: grid; gap: 4px; min-width: 0; }
@@ -1126,9 +1151,10 @@ summary.wb-subpanel-head::after {
 }
 .wb-current-workbench-metrics-shell, .wb-current-workbench-side-section {
   display: grid; gap: 10px; min-width: 0;
-  padding: 12px;
-  border: 1px solid var(--border); border-radius: var(--radius-sm);
-  background: var(--surface-muted);
+  padding: 10px 0 0;
+  border: 0; border-top: 1px solid var(--border);
+  border-radius: 0;
+  background: transparent;
 }
 .wb-current-workbench-metrics {
   display: grid;
@@ -1156,8 +1182,8 @@ summary.wb-subpanel-head::after {
   margin-top: 14px;
   padding: 16px;
   border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  background: var(--surface);
+  border-radius: 0;
+  background: var(--surface-muted-strong);
 }
 .wb-strict-head {
   display: flex;
@@ -1198,7 +1224,7 @@ summary.wb-subpanel-head::after {
   padding: 10px 12px;
   border: 1px solid var(--border);
   border-radius: 6px;
-  background: var(--surface-muted-strong);
+  background: var(--surface);
 }
 .wb-strict-metric span,
 .wb-strict-metric small {
@@ -1933,6 +1959,12 @@ summary.wb-subpanel-head::after {
 }
 
 @media (max-width: 720px) {
+  .wb-global-alert {
+    right: 12px;
+    bottom: 12px;
+    width: calc(100vw - 24px);
+  }
+
   .wb-side-nav .wb-side-group:first-child,
   .wb-shell[data-benchmark="longmemeval"] .wb-side-nav .wb-side-group:first-child,
   .wb-shell[data-benchmark="longmemeval"] .wb-flow-nav { grid-template-columns: minmax(0, 1fr); }
@@ -1976,6 +2008,22 @@ summary.wb-subpanel-head::after {
 @media (max-width: 720px) {
   .wb-shell.wb-shell-compact .wb-account-bar,
   .wb-shell.wb-shell-compact .wb-account-cluster { grid-template-columns: minmax(0, 1fr); }
+  .wb-shell[data-benchmark="locomo"].wb-shell-compact .wb-account-bar,
+  .wb-shell[data-benchmark="locomo"].wb-shell-compact .wb-account-cluster {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .wb-shell[data-benchmark="locomo"].wb-shell-compact .wb-account-bar { overflow: visible; }
+  .wb-shell[data-benchmark="locomo"].wb-shell-compact .wb-main {
+    padding: 10px 10px 18px;
+  }
+  .wb-shell[data-benchmark="locomo"].wb-shell-compact .wb-panel {
+    gap: 12px;
+    padding: 12px;
+  }
+  .wb-shell[data-benchmark="locomo"].wb-shell-compact .wb-form,
+  .wb-shell[data-benchmark="locomo"].wb-shell-compact .wb-stack {
+    padding: 12px;
+  }
   .wb-shell.wb-shell-compact .wb-flow-nav { grid-auto-columns: minmax(156px, 1fr); }
   .wb-shell.wb-shell-compact .wb-overview-strip { grid-auto-columns: minmax(148px, 1fr); }
 }

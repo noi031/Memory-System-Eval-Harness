@@ -983,13 +983,6 @@ def list_runs(
     query_l = query.strip().lower()
     dataset_format_l = dataset_format.strip().lower()
     for path in dirs:
-        if dataset_format_l:
-            name = path.name.lower()
-            if dataset_format_l == "locomo":
-                if "locomo" not in name and "conv30" not in name:
-                    continue
-            elif dataset_format_l not in name:
-                continue
         if query_l and query_l not in path.name.lower():
             manifest_path = path / "manifest.json"
             manifest_text = ""

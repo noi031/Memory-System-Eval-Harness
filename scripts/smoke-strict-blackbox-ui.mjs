@@ -59,6 +59,7 @@ assert(html.includes("指标定义与黑盒边界"), "strict definitions section
 assert(html.includes("15 项"), "all strict metric definitions must be counted");
 assert(html.includes("QA 侧编排注入"), "QA-side orchestration latency must be named precisely");
 assert(html.includes("内部记忆注入 Token"), "unavailable internal injection token must be explicit");
+assert(html.includes("初始记忆导入时间"), "unavailable initial import time must be explicit");
 assert(html.includes("N/A"), "unavailable metrics must render as N/A");
 assert(!html.includes("retrieval_tokens_est"), "estimated token fields must never render");
 console.log("strict black-box UI smoke passed");

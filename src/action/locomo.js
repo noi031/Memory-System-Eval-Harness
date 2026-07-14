@@ -401,6 +401,7 @@ export function createLocomoActions(deps) {
       : String(firstValue(cfg.echomemTransport, "")).trim().toLowerCase();
     const payload = {
       kind: qaKind(),
+      dataset_format: "locomo",
       data: normalizedForm.data,
       sample: normalizedForm.sample,
       ...buildWorkspaceTaskContext({ backendId, cfg, currentWorkspace, firstValue, state, workspace: normalizedForm.workspace }),
@@ -484,6 +485,7 @@ export function createLocomoActions(deps) {
       : String(firstValue(cfg.echomemTransport, "")).trim().toLowerCase();
     const payload = {
       kind: backendId() === "openviking" ? "openviking_import" : "echomemory_import",
+      dataset_format: "locomo",
       data: form.data,
       sample: form.sample,
       ...buildWorkspaceTaskContext({ backendId, cfg, currentWorkspace, firstValue, state, workspace: form.workspace }),

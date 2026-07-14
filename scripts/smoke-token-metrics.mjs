@@ -44,9 +44,13 @@ assert(openvikingLocomoMetrics.strictBlackbox?.row_count === 10, "LoCoMo strict 
 const locomoReportItems = buildReportMetricItems("locomo", openvikingLocomoMetrics);
 const locomoJudgeItems = buildJudgeMetricItems("locomo", openvikingLocomoMetrics);
 const locomoLabels = new Set([...locomoReportItems, ...locomoJudgeItems].map((item) => item.label));
+const locomoReportAnswerTokens = locomoReportItems.filter((item) => item.label === "答案 Tokens");
+const locomoJudgeAnswerTokens = locomoJudgeItems.filter((item) => item.label === "答案 Tokens");
 assert(!locomoLabels.has("导入 Tokens"), "LoCoMo report/judge metrics must omit unavailable import tokens");
 assert(!locomoLabels.has("检索 Tokens"), "LoCoMo report/judge metrics must omit estimated retrieval tokens");
 assert(locomoLabels.has("答案 Tokens"), "LoCoMo report/judge metrics must include answer tokens");
+assert(locomoReportAnswerTokens.length === 1, "LoCoMo report must render answer tokens exactly once");
+assert(locomoJudgeAnswerTokens.length === 1, "LoCoMo judge must render answer tokens exactly once");
 
 const longMemMetrics = summarizeBenchmarkRun(
   "longmemeval",

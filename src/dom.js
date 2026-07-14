@@ -31,7 +31,19 @@ export function onDocument(eventName, handler) {
 }
 
 export function alertUser(message) {
-  window.alert(message);
+  const toast = document.getElementById("wbGlobalAlert");
+  if (!toast) {
+    window.alert(message);
+    return;
+  }
+  window.clearTimeout(toast._hideTimer);
+  toast.textContent = String(message || "操作失败");
+  toast.hidden = false;
+  toast.classList.add("visible");
+  toast._hideTimer = window.setTimeout(() => {
+    toast.classList.remove("visible");
+    toast.hidden = true;
+  }, 9000);
 }
 
 export async function copyText(text) {
