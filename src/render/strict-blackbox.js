@@ -155,6 +155,7 @@ export function renderStrictBlackboxMetrics(strictBlackbox, {
   const metrics = strictBlackbox?.metrics;
   if (!metrics || typeof metrics !== "object") return "";
   const artifactPath = String(strictBlackbox?.artifact_path || "").trim();
+  const reportPath = String(strictBlackbox?.report_path || "").trim();
   const generatedAt = String(strictBlackbox?.generated_at || "").trim();
 
   const headline = [
@@ -243,12 +244,20 @@ export function renderStrictBlackboxMetrics(strictBlackbox, {
             <span>本次运行指标快照</span>
             <code title="${escapeHtml(artifactPath)}">${escapeHtml(artifactPath)}</code>
           </div>
-          ${actionButton({
-            label: "打开 JSON",
-            tone: "ghost",
-            action: "open-path",
-            path: artifactPath,
-          }, escapeHtml)}
+          <div class="wb-strict-artifact-actions">
+            ${reportPath ? actionButton({
+              label: "打开 HTML 报告",
+              tone: "primary",
+              action: "open-path",
+              path: reportPath,
+            }, escapeHtml) : ""}
+            ${actionButton({
+              label: "打开 JSON",
+              tone: "ghost",
+              action: "open-path",
+              path: artifactPath,
+            }, escapeHtml)}
+          </div>
         </div>
       ` : ""}
       <div class="wb-strict-grid">${headline}</div>

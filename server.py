@@ -6487,6 +6487,7 @@ def attach_task_strict_blackbox_snapshot(task: Task, payload: dict[str, Any]) ->
             **(task.summary if isinstance(task.summary, dict) else {}),
             "strict_blackbox": strict_snapshot,
             "strict_blackbox_metrics_path": strict_snapshot.get("artifact_path") or "",
+            "strict_blackbox_report_path": strict_snapshot.get("report_path") or "",
         }
         if task.run_dir:
             write_manifest(task, payload, Path(task.run_dir))

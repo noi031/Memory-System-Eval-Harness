@@ -91,6 +91,14 @@ export function createReportRenderers({
             path: metrics.strictBlackbox.artifact_path,
           }
           : null,
+        metrics.strictBlackbox?.report_path
+          ? {
+            label: "打开黑盒指标报告",
+            tone: "ghost",
+            action: "open-path",
+            path: metrics.strictBlackbox.report_path,
+          }
+          : null,
         {id: "wbExportReport", label: actionModel.exportLabel, tone: "primary"},
       ].filter(Boolean),
       escapeHtml,

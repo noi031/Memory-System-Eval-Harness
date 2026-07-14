@@ -404,6 +404,7 @@ def _merge_output_sidecar_summary(summary: dict[str, Any], output_path: Path | N
     summary_path = output_path.parent / "summary.json"
     merged = dict(summary)
     strict_path = output_path.parent / "strict_blackbox_metrics.json"
+    strict_report_path = output_path.parent / "strict_blackbox_report.html"
     if strict_path.exists():
         try:
             strict_snapshot = read_json(strict_path)
@@ -412,6 +413,8 @@ def _merge_output_sidecar_summary(summary: dict[str, Any], output_path: Path | N
         if isinstance(strict_snapshot, dict):
             merged["strict_blackbox"] = strict_snapshot
             merged["strict_blackbox_metrics_path"] = str(strict_path)
+            if strict_report_path.exists():
+                merged["strict_blackbox_report_path"] = str(strict_report_path)
     if not summary_path.exists():
         return merged
     try:

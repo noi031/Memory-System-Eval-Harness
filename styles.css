@@ -1255,6 +1255,12 @@ summary.wb-subpanel-head::after {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+.wb-strict-artifact > .wb-strict-artifact-actions {
+  display: flex;
+  grid-auto-flow: column;
+  gap: 8px;
+  min-width: max-content;
+}
 .wb-strict-artifact .wb-button { flex: 0 0 auto; }
 .wb-strict-grid {
   display: grid;
@@ -2112,6 +2118,10 @@ summary.wb-subpanel-head::after {
   .wb-strict-panel { padding: 12px; }
   .wb-strict-head-meta { justify-items: start; }
   .wb-strict-artifact { display: grid; }
+  .wb-strict-artifact > .wb-strict-artifact-actions {
+    grid-auto-flow: row;
+    min-width: 0;
+  }
   .wb-strict-artifact .wb-button { width: 100%; }
   .wb-strict-grid,
   .wb-strict-panel.compact .wb-strict-grid { grid-template-columns: minmax(0, 1fr); }

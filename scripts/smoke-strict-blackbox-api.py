@@ -69,12 +69,20 @@ def main() -> None:
         persisted = json.loads(artifact_path.read_text(encoding="utf-8"))
         assert persisted["source_signature"] == strict["source_signature"]
         assert persisted["artifact_path"] == str(artifact_path)
+        report_path = Path(strict["report_path"])
+        assert report_path.exists()
+        report_html = report_path.read_text(encoding="utf-8")
+        assert "严格黑盒指标报告" in report_html
+        assert "核心比例" in report_html
+        assert "初始记忆导入时间 · N/A" in report_html
+        assert summary["strict_blackbox_report_path"] == str(report_path)
 
     metrics = strict["metrics"]
     assert strict["mode"] == "strict_observed"
     assert strict["row_count"] == 2
     assert len(strict["definitions"]) == 15
     assert Path(strict["artifact_path"]).name == "strict_blackbox_metrics.json"
+    assert Path(strict["report_path"]).name == "strict_blackbox_report.html"
     assert metrics["accuracy"] == 0.5
     assert metrics["graded_count"] == 2
     assert metrics["correct_count"] == 1
