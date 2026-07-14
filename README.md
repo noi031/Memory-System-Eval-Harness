@@ -44,6 +44,10 @@ For the exact HTTP contract, authentication behavior, CLI commands, strict
 black-box guarantees, and the complete 81-question workflow, read
 [README_ECHOMEMORY_BLACKBOX.md](README_ECHOMEMORY_BLACKBOX.md).
 
+For the report command, required CSV fields, metric formulas, percentile
+definitions, Token accounting, and black-box boundaries, read
+[docs/blackbox-metrics-guide.md](docs/blackbox-metrics-guide.md).
+
 ## Architecture
 
 ```text
@@ -151,6 +155,7 @@ BENCHMARK_CONSOLE_V2_ORIGIN=http://127.0.0.1:4174 \
 - `scripts/check-v2.mjs`: architecture, syntax, and workflow smoke checks
 - `scripts/check-v2-runtime.mjs`: live static/API proxy check
 - `docs/api-contract.md`: bundled API surface
+- `docs/blackbox-metrics-guide.md`: strict black-box metric inputs, commands, formulas, and boundaries
 
 ## Supported Workflows
 
