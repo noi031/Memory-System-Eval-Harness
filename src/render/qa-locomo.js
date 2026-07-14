@@ -884,26 +884,32 @@ function renderCurrentQaResultCard({ run, diagnostics, runConfig, metrics, compa
     metrics?.importEmbeddingTotalTokens != null ? { label: "Embedding", value: formatCountLabel(metrics.importEmbeddingTotalTokens) } : null,
   ].filter(Boolean);
   const primaryMetricItems = [
-    { value: escapeHtml(scope), label: "Scope" },
-    { value: escapeHtml(String(rows || 0)), label: "Rows" },
-    { value: escapeHtml(String(graded || 0)), label: "Graded" },
-    { value: escapeHtml(String(pending || 0)), label: "Pending" },
-    { value: escapeHtml(accuracy), label: "Accuracy" },
-    { value: escapeHtml(runDuration), label: "Run" },
-    { value: escapeHtml(avgQa), label: "Avg QA" },
-    { value: escapeHtml(importDuration), label: "Import" },
-    { value: escapeHtml(String(missing || 0)), label: "Missing" },
-    { value: escapeHtml(String(retryFailed || 0)), label: "Retry Failed" },
+    { value: escapeHtml(scope), label: "范围" },
+    { value: escapeHtml(String(rows || 0)), label: "题数" },
+    { value: escapeHtml(String(graded || 0)), label: "已判" },
+    { value: escapeHtml(String(pending || 0)), label: "待判" },
+    { value: escapeHtml(accuracy), label: "准确率" },
+    { value: escapeHtml(runDuration), label: "运行耗时" },
+    { value: escapeHtml(avgQa), label: "平均 QA" },
+    { value: escapeHtml(importDuration), label: "导入耗时" },
+    { value: escapeHtml(String(missing || 0)), label: "缺失题" },
+    { value: escapeHtml(String(retryFailed || 0)), label: "失败题" },
   ];
   const allMetricItems = primaryMetricItems;
   return `
     <article class="wb-current-result-strip wb-current-result-card">
       <div class="wb-current-result-main">
-        <div class="wb-current-result-copy">
-          <span>当前结果</span>
-          <strong title="${escapeHtml(run.name || run.id || "-")}">${escapeHtml(compactText(run.name || run.id || "-", 52))}</strong>
+        <div class="wb-current-result-head">
+          <div class="wb-current-result-copy">
+            <span>当前结果</span>
+            <strong title="${escapeHtml(run.name || run.id || "-")}">${escapeHtml(compactText(run.name || run.id || "-", 52))}</strong>
+          </div>
+          <button id="wbRefreshQaCurrentResult" class="wb-button ghost wb-current-result-refresh" type="button">
+            <span class="wb-button-icon wb-button-icon-leading" aria-hidden="true">${icon("refreshCw")}</span>
+            <span>刷新</span>
+          </button>
         </div>
-        <small title="${escapeHtml(run.output_file || run.run_dir || "-")}">${escapeHtml(compactPath(run.output_file || run.run_dir || "-"))}</small>
+        <small class="wb-current-result-path" title="${escapeHtml(run.output_file || run.run_dir || "-")}">${escapeHtml(compactPath(run.output_file || run.run_dir || "-"))}</small>
         ${tokenSummaryItems.length ? `
           <div class="wb-current-result-token-strip" aria-label="当前结果 token 消耗">
             ${tokenSummaryItems.map((item) => `
@@ -917,9 +923,6 @@ function renderCurrentQaResultCard({ run, diagnostics, runConfig, metrics, compa
         <div class="wb-current-result-metrics">
           ${allMetricItems.map((item) => `<span><strong>${item.value}</strong><small>${escapeHtml(item.label)}</small></span>`).join("")}
         </div>
-      </div>
-      <div class="wb-current-result-actions">
-        <button id="wbRefreshQaCurrentResult" class="wb-button ghost" type="button">刷新当前结果</button>
       </div>
     </article>
   `;
@@ -940,13 +943,13 @@ function renderRecoveryStrip({
 }) {
   const items = [
     {
-      label: "Selected",
+      label: "已选题",
       value: selectedIds.length ? `${selectedIds.length} 题` : "未选择",
       ok: selectedIds.length > 0,
       action: { id: "wbRunQaSelected", label: "运行指定题", tone: "ghost", disabled: selectedIds.length === 0, title: selectedIds.length === 0 ? "请先填写 question ids" : "" },
     },
     {
-      label: "Wrong CSV",
+      label: "错题 CSV",
       value: wrongCsvEnabled && wrongCsvValue ? compactPath(wrongCsvValue) : "无错题 CSV",
       ok: Boolean(wrongCsvEnabled && wrongCsvValue),
       action: {
@@ -958,13 +961,13 @@ function renderRecoveryStrip({
       },
     },
     {
-      label: "Retry Failed",
+      label: "失败题",
       value: retryFailedCount > 0 ? `${retryFailedCount} 题` : "无失败题",
       ok: retryFailedCount > 0,
       action: { id: "wbRunQaRetryFailed", label: "重跑失败题", tone: "secondary", disabled: retryFailedCount === 0, title: retryFailedCount === 0 ? "当前结果没有可恢复失败题" : "" },
     },
     {
-      label: "Retry Missing",
+      label: "缺失题",
       value: retryMissingValue,
       ok: retryMissingEnabled,
       action: { id: "wbRunQaRetryMissing", label: "补跑缺失题", tone: "secondary", disabled: !retryMissingEnabled, title: retryMissingTitle },
@@ -975,7 +978,7 @@ function renderRecoveryStrip({
       <div class="wb-recovery-strip-main">
         <div class="wb-recovery-strip-copy">
           <span>补跑与恢复</span>
-          <small>保留当前选题、错题 CSV、失败题和缺失题的恢复入口。</small>
+          <small>从当前结果继续运行指定题、错题、失败题或缺失题。</small>
         </div>
         <div class="wb-recovery-strip-items">
         ${items.map((item) => `
@@ -1282,12 +1285,12 @@ export function renderLocomoQaConfig({
           <small>${retrievalModeHint}</small>
         </div>
         ${chipList([
-          textChip("Prompt", escapeHtml(currentPromptMode)),
-          textChip("Retrieval", escapeHtml(currentRetrievalMode)),
-          textChip("Use Tools", currentUseTools ? "on" : "off", currentUseTools ? "ok" : "muted"),
-          textChip("Tool Loop", currentToolLoop ? "on" : "off", currentToolLoop ? "ok" : "muted"),
-          textChip("Memory Injection", currentQaMemoryInjection ? "on" : "off", currentQaMemoryInjection ? "ok" : "muted"),
-          textChip("Tool Set", escapeHtml(compactText(liveValue("wbQaToolSet", firstValue(cfg.echomemQaToolSet, "vikingbot_native_safe")), 26)), "default", escapeHtml(liveValue("wbQaToolSet", firstValue(cfg.echomemQaToolSet, "vikingbot_native_safe")))),
+          textChip("提示词", escapeHtml(currentPromptMode)),
+          textChip("检索模式", escapeHtml(currentRetrievalMode)),
+          textChip("工具调用", currentUseTools ? "开启" : "关闭", currentUseTools ? "ok" : "muted"),
+          textChip("工具循环", currentToolLoop ? "开启" : "关闭", currentToolLoop ? "ok" : "muted"),
+          textChip("记忆注入", currentQaMemoryInjection ? "开启" : "关闭", currentQaMemoryInjection ? "ok" : "muted"),
+          textChip("工具集", escapeHtml(compactText(liveValue("wbQaToolSet", firstValue(cfg.echomemQaToolSet, "vikingbot_native_safe")), 26)), "default", escapeHtml(liveValue("wbQaToolSet", firstValue(cfg.echomemQaToolSet, "vikingbot_native_safe")))),
         ])}
         ${fieldGrid([
           ...(activeBackend === "echomemory" ? [
@@ -1318,9 +1321,9 @@ export function renderLocomoQaConfig({
             configField("初始证据总字符数", `<input id="wbQaMemoryBudgetChars" type="number" min="0" step="100" value="${escapeHtml(liveValue("wbQaMemoryBudgetChars", firstValue(cfg.echomemQaMemoryBudgetChars, "6000")))}">`, escapeHtml),
             configField("用户证据字符数", `<input id="wbQaUserMemoryBudgetChars" type="number" min="0" step="100" value="${escapeHtml(liveValue("wbQaUserMemoryBudgetChars", firstValue(cfg.echomemQaUserMemoryBudgetChars, "4000")))}">`, escapeHtml),
             configField("代理证据字符数", `<input id="wbQaAgentMemoryBudgetChars" type="number" min="0" step="100" value="${escapeHtml(liveValue("wbQaAgentMemoryBudgetChars", firstValue(cfg.echomemQaAgentMemoryBudgetChars, "2000")))}">`, escapeHtml),
-            configField("Prefetch Read Count", `<input id="wbQaPrefetchReadCount" type="number" min="0" step="1" value="${escapeHtml(liveValue("wbQaPrefetchReadCount", firstValue(cfg.echomemQaPrefetchReadCount, "4")))}">`, escapeHtml),
-            configField("Prefetch Context Chars", `<input id="wbQaPrefetchContextChars" type="number" min="0" step="100" value="${escapeHtml(liveValue("wbQaPrefetchContextChars", firstValue(cfg.echomemQaPrefetchContextChars, "5000")))}">`, escapeHtml),
-            configField("Tool Log Chars", `<input id="wbQaToolLogChars" type="number" min="200" step="100" value="${escapeHtml(liveValue("wbQaToolLogChars", firstValue(cfg.echomemQaToolLogChars, "1200")))}">`, escapeHtml),
+            configField("预取读取数", `<input id="wbQaPrefetchReadCount" type="number" min="0" step="1" value="${escapeHtml(liveValue("wbQaPrefetchReadCount", firstValue(cfg.echomemQaPrefetchReadCount, "4")))}">`, escapeHtml),
+            configField("预取上下文字符数", `<input id="wbQaPrefetchContextChars" type="number" min="0" step="100" value="${escapeHtml(liveValue("wbQaPrefetchContextChars", firstValue(cfg.echomemQaPrefetchContextChars, "5000")))}">`, escapeHtml),
+            configField("工具日志字符数", `<input id="wbQaToolLogChars" type="number" min="200" step="100" value="${escapeHtml(liveValue("wbQaToolLogChars", firstValue(cfg.echomemQaToolLogChars, "1200")))}">`, escapeHtml),
           ])}
         </div>
       `,
@@ -1333,8 +1336,8 @@ export function renderLocomoQaConfig({
         configField("测试会话", `<select id="wbQaSample"><option value="all"${currentSample === "all" ? " selected" : ""}>全部对话</option>${sampleOptions}</select>`, escapeHtml),
         configField("题目范围", `<select id="wbQaMode"><option value="full"${currentMode === "full" ? " selected" : ""}>当前会话全量</option><option value="time"${currentMode === "time" ? " selected" : ""}>时间题 quick test</option><option value="selected"${currentMode === "selected" ? " selected" : ""}>指定题号</option><option value="wrong_csv"${currentMode === "wrong_csv" ? " selected" : ""}>错题 CSV</option></select>`, escapeHtml),
         configField("记忆目录", `<input id="wbWorkspace" type="text" value="${escapeHtml(liveValue("wbWorkspace", currentWorkspace ? currentWorkspace() : ""))}" placeholder="/path/to/echomem_workspace">`, escapeHtml, { full: true }),
-        configField("Memory User", `<input id="wbQaMemoryUserId" type="text" value="${escapeHtml(currentMemoryUser)}" placeholder="default">`, escapeHtml),
-        configField("Memory Agent", `<input id="wbQaMemoryAgentId" type="text" value="${escapeHtml(currentMemoryAgent)}" placeholder="default">`, escapeHtml),
+        configField("记忆用户 ID", `<input id="wbQaMemoryUserId" type="text" value="${escapeHtml(currentMemoryUser)}" placeholder="default">`, escapeHtml),
+        configField("记忆代理 ID", `<input id="wbQaMemoryAgentId" type="text" value="${escapeHtml(currentMemoryAgent)}" placeholder="default">`, escapeHtml),
         ...modeSpecificFields,
       ]),
       actionsHtml,
