@@ -176,32 +176,32 @@ def strict_metric_definitions() -> list[dict[str, str]]:
         {
             "name": "端到端 QA 时延",
             "kind": "严格计算",
-            "formula": "逐题 end_to_end_ms 的平均、P50、P95、P99、最大值",
-            "source": "CSV: end_to_end_ms",
+            "formula": "逐题墙钟时延换算为秒后的平均、P50、P95、P99、最大值",
+            "source": "CSV 逐题端到端时延观测，统一换算为秒",
             "meaning": "从评测平台开始处理该题到最终回答阶段完成的逐题墙钟时间。",
             "boundary": "只覆盖 QA 阶段，不含预先导入背景记忆的耗时。",
         },
         {
             "name": "记忆检索时延",
             "kind": "严格计算",
-            "formula": "逐题 retrieval_latency_ms 的平均、P50、P95、P99、最大值",
-            "source": "CSV: retrieval_latency_ms",
+            "formula": "逐题检索时延换算为秒后的平均、P50、P95、P99、最大值",
+            "source": "CSV 逐题检索时延观测，统一换算为秒",
             "meaning": "评测平台调用记忆检索 API 并获得结果所记录的墙钟时间。",
             "boundary": "这是 API 边界时延，无法拆分记忆系统内部的向量检索、图检索、重排等耗时。",
         },
         {
             "name": "QA 侧编排注入时延",
             "kind": "严格计算",
-            "formula": "逐题 injection_total_ms 的平均、P50、P95、P99、最大值",
-            "source": "CSV: injection_total_ms",
+            "formula": "逐题编排时延换算为秒后的平均、P50、P95、P99、最大值",
+            "source": "CSV 逐题检索、格式化和消息构建时延，统一换算为秒",
             "meaning": "本实现中等于检索加记忆格式化和消息构建的 QA 侧时间。",
             "boundary": "它不是初始记忆写入、抽取或生成完成时间。没有可靠导入完成标志时，不能据此计算平均记忆导入时间。",
         },
         {
             "name": "回答模型时延",
             "kind": "严格计算",
-            "formula": "逐题 llm_total_ms 的平均、P50、P95、P99、最大值",
-            "source": "CSV: llm_total_ms",
+            "formula": "逐题回答模型时延换算为秒后的平均、P50、P95、P99、最大值",
+            "source": "CSV 逐题回答模型时延观测，统一换算为秒",
             "meaning": "回答阶段对外部模型的全部可见调用耗时。",
             "boundary": "模型服务内部排队、推理和网络传输无法继续拆分，除非模型 API 额外返回这些字段。",
         },
@@ -212,6 +212,22 @@ def strict_metric_definitions() -> list[dict[str, str]]:
             "source": "CSV: answer_prompt_tokens、answer_completion_tokens、answer_total_tokens",
             "meaning": "只统计回答模型 API 实际返回并落盘的 usage。",
             "boundary": "不使用字符数换算或非权威推算字段。缺失 usage 时显示 N/A，不按 0 处理。",
+        },
+        {
+            "name": "Judge 模型 Token",
+            "kind": "严格计算",
+            "formula": "逐题 Judge API usage 的平均、P50、P95、P99 与合计",
+            "source": "CSV: judge_prompt_tokens、judge_completion_tokens、judge_total_tokens",
+            "meaning": "只统计 Judge 模型 API 实际返回并落盘的 usage。",
+            "boundary": "旧运行或未返回 usage 的 Judge 调用显示 N/A，不按 0 处理。",
+        },
+        {
+            "name": "外部可见模型总 Token",
+            "kind": "严格计算",
+            "formula": "QA 回答总 Token + Judge 总 Token",
+            "source": "QA 与 Judge 模型 API 实际返回的 usage",
+            "meaning": "汇总评测平台在黑盒边界能够直接观察到的模型 Token。",
+            "boundary": "仅在 QA 和 Judge usage 都完整时计算；不包含记忆系统内部注入、检索或重排 Token。",
         },
         {
             "name": "每个正确答案 Token",
@@ -355,6 +371,14 @@ def observed_blackbox_metrics(
     total_answer_tokens = sum(number(row.get("answer_total_tokens")) for row in token_rows)
     complete_token_usage = len(token_rows) == len(results)
     tokens_per_correct = total_answer_tokens / correct if complete_token_usage and correct else None
+    judge_token_rows = [row for row in results if str(row.get("judge_total_tokens") or "").strip()]
+    total_judge_tokens = sum(number(row.get("judge_total_tokens")) for row in judge_token_rows)
+    judge_expected_rows = [
+        row
+        for row in results
+        if str(row.get("result") or "").strip().upper() in {"CORRECT", "WRONG"}
+    ]
+    complete_judge_usage = bool(judge_expected_rows) and len(judge_token_rows) == len(judge_expected_rows)
 
     import_summary = import_summary or {}
     expected_messages = optional_integer(import_summary.get("expected_messages"))
@@ -366,6 +390,9 @@ def observed_blackbox_metrics(
             for row in results
             if str(row.get(field) or "").strip()
         ]
+
+    def seconds_values(field: str) -> list[float]:
+        return [value / 1000.0 for value in values(field)]
 
     return {
         "categories": categories,
@@ -387,11 +414,23 @@ def observed_blackbox_metrics(
         "answer_prompt_tokens": metric_stats(values("answer_prompt_tokens")),
         "answer_completion_tokens": metric_stats(values("answer_completion_tokens")),
         "answer_total_tokens": metric_stats(values("answer_total_tokens")),
+        "answer_usage_observed_count": len(token_rows),
+        "answer_usage_expected_count": len(results),
+        "answer_usage_complete": complete_token_usage,
+        "judge_prompt_tokens": metric_stats(values("judge_prompt_tokens")),
+        "judge_completion_tokens": metric_stats(values("judge_completion_tokens")),
+        "judge_total_tokens": metric_stats(values("judge_total_tokens")),
+        "judge_usage_observed_count": len(judge_token_rows),
+        "judge_usage_expected_count": len(judge_expected_rows),
+        "judge_usage_complete": complete_judge_usage,
+        "visible_model_total_tokens": total_answer_tokens + total_judge_tokens
+        if complete_token_usage and complete_judge_usage
+        else None,
         "tokens_per_correct": tokens_per_correct,
-        "end_to_end_ms": metric_stats(values("end_to_end_ms")),
-        "retrieval_latency_ms": metric_stats(values("retrieval_latency_ms")),
-        "injection_total_ms": metric_stats(values("injection_total_ms")),
-        "llm_total_ms": metric_stats(values("llm_total_ms")),
+        "end_to_end_s": metric_stats(seconds_values("end_to_end_ms")),
+        "retrieval_latency_s": metric_stats(seconds_values("retrieval_latency_ms")),
+        "injection_total_s": metric_stats(seconds_values("injection_total_ms")),
+        "llm_total_s": metric_stats(seconds_values("llm_total_ms")),
         "expected_messages": expected_messages,
         "submitted_messages": submitted_messages,
         "submission_rate": submitted_messages / expected_messages
@@ -550,20 +589,20 @@ def generate_html_report(
 
     latency_rows_html = ""
     for label, key in (
-        ("端到端 QA", "end_to_end_ms"),
-        ("记忆检索", "retrieval_latency_ms"),
-        ("平台编排注入", "injection_total_ms"),
-        ("回答模型", "llm_total_ms"),
+        ("端到端 QA", "end_to_end_s"),
+        ("记忆检索", "retrieval_latency_s"),
+        ("平台编排注入", "injection_total_s"),
+        ("回答模型", "llm_total_s"),
     ):
         item = observed[key]
         latency_rows_html += (
             "<tr>"
             f"<td><strong>{label}</strong></td>"
-            f"<td>{format_number(item['avg'])} ms</td>"
-            f"<td>{format_number(item['p50'])} ms</td>"
-            f"<td>{format_number(item['p95'])} ms</td>"
-            f"<td>{format_number(item['p99'])} ms</td>"
-            f"<td>{format_number(item['max'])} ms</td>"
+            f"<td>{format_number(item['avg'], 3)} 秒</td>"
+            f"<td>{format_number(item['p50'], 3)} 秒</td>"
+            f"<td>{format_number(item['p95'], 3)} 秒</td>"
+            f"<td>{format_number(item['p99'], 3)} 秒</td>"
+            f"<td>{format_number(item['max'], 3)} 秒</td>"
             "</tr>"
         )
 
@@ -572,6 +611,9 @@ def generate_html_report(
         ("Prompt Token", "answer_prompt_tokens"),
         ("Completion Token", "answer_completion_tokens"),
         ("回答总 Token", "answer_total_tokens"),
+        ("Judge Prompt Token", "judge_prompt_tokens"),
+        ("Judge Completion Token", "judge_completion_tokens"),
+        ("Judge 总 Token", "judge_total_tokens"),
     ):
         item = observed[key]
         token_rows_html += (
@@ -1110,7 +1152,7 @@ def generate_html_report(
                 </table>
             </div>
 
-            <h3 class="strict-subtitle">回答模型 Token（API usage）</h3>
+            <h3 class="strict-subtitle">外部可见模型 Token（API usage）</h3>
             <div class="metric-table-wrap">
                 <table class="metric-table">
                     <thead><tr><th>类型</th><th>平均</th><th>P50</th><th>P95</th><th>P99</th><th>合计</th></tr></thead>
@@ -1154,10 +1196,10 @@ def generate_html_report(
         retrieval_count = first_present(row, "retrieval_count", "memory_hit_count")
         retrieval_count = retrieval_count if retrieval_count is not None else "N/A"
         time_cost = float(row.get("time_cost", 0) or 0)
-        end_to_end_ms = number(row.get("end_to_end_ms")) if str(row.get("end_to_end_ms") or "").strip() else None
-        retrieval_ms = number(row.get("retrieval_latency_ms")) if str(row.get("retrieval_latency_ms") or "").strip() else None
-        injection_ms = number(row.get("injection_total_ms")) if str(row.get("injection_total_ms") or "").strip() else None
-        llm_ms = number(row.get("llm_total_ms")) if str(row.get("llm_total_ms") or "").strip() else None
+        end_to_end_s = number(row.get("end_to_end_ms")) / 1000 if str(row.get("end_to_end_ms") or "").strip() else None
+        retrieval_s = number(row.get("retrieval_latency_ms")) / 1000 if str(row.get("retrieval_latency_ms") or "").strip() else None
+        injection_s = number(row.get("injection_total_ms")) / 1000 if str(row.get("injection_total_ms") or "").strip() else None
+        llm_s = number(row.get("llm_total_ms")) / 1000 if str(row.get("llm_total_ms") or "").strip() else None
         prompt_tokens = number(row.get("answer_prompt_tokens")) if str(row.get("answer_prompt_tokens") or "").strip() else None
         completion_tokens = number(row.get("answer_completion_tokens")) if str(row.get("answer_completion_tokens") or "").strip() else None
         total_tokens = number(row.get("answer_total_tokens")) if str(row.get("answer_total_tokens") or "").strip() else None
@@ -1194,10 +1236,10 @@ def generate_html_report(
                 </div>
                 <div class="meta-info">
                     检索数: {safe(retrieval_count)} |
-                    端到端: {format_number(end_to_end_ms)} ms |
-                    检索: {format_number(retrieval_ms)} ms |
-                    平台编排注入: {format_number(injection_ms)} ms |
-                    回答模型: {format_number(llm_ms)} ms |
+                    端到端: {format_number(end_to_end_s, 3)} 秒 |
+                    检索: {format_number(retrieval_s, 3)} 秒 |
+                    平台编排注入: {format_number(injection_s, 3)} 秒 |
+                    回答模型: {format_number(llm_s, 3)} 秒 |
                     Token: {format_number(prompt_tokens, 0)} prompt + {format_number(completion_tokens, 0)} completion = {format_number(total_tokens, 0)} total |
                     兼容耗时: {time_cost:.2f}s |
                     问题ID: {safe(row.get("question_id", "N/A"))}

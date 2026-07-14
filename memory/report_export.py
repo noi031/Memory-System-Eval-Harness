@@ -156,6 +156,22 @@ def render_strict_blackbox_metrics_html(
             "",
         ),
         (
+            "Judge 模型 Token",
+            format_observed_number((metrics.get("judge_total_tokens") or {}).get("sum"), 0),
+            format_observed_fraction(
+                metrics.get("judge_usage_observed_count"),
+                metrics.get("judge_usage_expected_count"),
+                "条 Judge usage",
+            ),
+            "",
+        ),
+        (
+            "外部可见模型总 Token",
+            format_observed_number(metrics.get("visible_model_total_tokens"), 0),
+            "QA 回答 + Judge；任一不完整则 N/A",
+            "",
+        ),
+        (
             "消息提交率",
             format_observed_percent(metrics.get("submission_rate")),
             format_observed_fraction(
@@ -219,23 +235,26 @@ def render_strict_blackbox_metrics_html(
             )
             formatted = []
             for value in values:
-                text = format_observed_number(value, 0 if token else 1)
+                text = format_observed_number(value, 0 if token else 3)
                 if not token and text != "N/A":
-                    text += " ms"
+                    text += " 秒"
                 formatted.append(f"<td>{html.escape(text)}</td>")
             cells.append(f"<tr><th>{html.escape(label)}</th>{''.join(formatted)}</tr>")
         return "".join(cells)
 
     latency_html = stats_rows([
-        ("端到端 QA", "end_to_end_ms"),
-        ("记忆检索", "retrieval_latency_ms"),
-        ("QA 侧编排注入", "injection_total_ms"),
-        ("回答模型", "llm_total_ms"),
+        ("端到端 QA", "end_to_end_s"),
+        ("记忆检索", "retrieval_latency_s"),
+        ("QA 侧编排注入", "injection_total_s"),
+        ("回答模型", "llm_total_s"),
     ])
     token_html = stats_rows([
         ("Prompt Token", "answer_prompt_tokens"),
         ("Completion Token", "answer_completion_tokens"),
         ("回答总 Token", "answer_total_tokens"),
+        ("Judge Prompt Token", "judge_prompt_tokens"),
+        ("Judge Completion Token", "judge_completion_tokens"),
+        ("Judge 总 Token", "judge_total_tokens"),
     ], token=True)
     definition_html = "".join(
         "<details class='strict-definition'>"
@@ -283,7 +302,7 @@ def render_strict_blackbox_metrics_html(
         </div>
       </details>
       <details class="strict-fold">
-        <summary><strong>回答模型 Token（API usage）</strong><span>3 项严格观测</span></summary>
+        <summary><strong>外部可见模型 Token（API usage）</strong><span>6 项严格观测</span></summary>
         <div class="strict-table-wrap">
           <table class="strict-table">
             <thead><tr><th>指标</th><th>平均</th><th>P50</th><th>P95</th><th>P99</th><th>合计</th></tr></thead>
@@ -1294,17 +1313,13 @@ def export_report(run_dir: Path, active_run_ids: set[str] | None = None) -> dict
     avg_end_to_end_time_text = format_metric_seconds(summary.get("avg_end_to_end_time_s", summary_json.get("avg_end_to_end_time_s")))
     total_end_to_end_time_text = format_metric_seconds(summary.get("total_end_to_end_time_s", summary_json.get("total_end_to_end_time_s")))
     if strict_blackbox_mode:
-        end_to_end_stats = strict_observed_metrics.get("end_to_end_ms") or {}
+        end_to_end_stats = strict_observed_metrics.get("end_to_end_s") or {}
         avg_end_to_end_time_text = format_metric_seconds(
-            float(end_to_end_stats["avg"]) / 1000
-            if end_to_end_stats.get("avg") is not None
-            else None,
+            end_to_end_stats.get("avg"),
             fallback="N/A",
         )
         total_end_to_end_time_text = format_metric_seconds(
-            float(end_to_end_stats["sum"]) / 1000
-            if end_to_end_stats.get("sum") is not None
-            else None,
+            end_to_end_stats.get("sum"),
             fallback="N/A",
         )
 

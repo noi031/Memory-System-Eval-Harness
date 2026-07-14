@@ -16,7 +16,7 @@ from scripts.generate_html_report import (
 
 STRICT_BLACKBOX_METRICS_FILENAME = "strict_blackbox_metrics.json"
 STRICT_BLACKBOX_REPORT_FILENAME = "strict_blackbox_report.html"
-STRICT_BLACKBOX_SCHEMA_VERSION = 3
+STRICT_BLACKBOX_SCHEMA_VERSION = 4
 
 
 def _import_summary(summary: dict[str, Any] | None) -> dict[str, Any] | None:
@@ -165,8 +165,8 @@ def _stats_table(title: str, rows: list[tuple[str, dict[str, Any] | None]], toke
         keys = ("avg", "p50", "p95", "p99", "sum" if token else "max")
         cells = []
         for key in keys:
-            value = _format_number(values.get(key), 0 if token else 1)
-            suffix = "" if token or value == "N/A" else " ms"
+            value = _format_number(values.get(key), 0 if token else 3)
+            suffix = "" if token or value == "N/A" else " 秒"
             cells.append(f"<td>{html.escape(value + suffix)}</td>")
         body.append(f"<tr><th>{html.escape(label)}</th>{''.join(cells)}</tr>")
     return (
@@ -219,6 +219,20 @@ def render_strict_blackbox_report(snapshot: dict[str, Any]) -> str:
             "每个正确答案 Token",
             _format_number(metrics.get("tokens_per_correct"), 1),
             "回答总 Token / 正确题数",
+        ),
+        _metric_card(
+            "Judge 模型 Token",
+            _format_number((metrics.get("judge_total_tokens") or {}).get("sum"), 0),
+            _fraction(
+                metrics.get("judge_usage_observed_count"),
+                metrics.get("judge_usage_expected_count"),
+                "条 Judge usage",
+            ),
+        ),
+        _metric_card(
+            "外部可见模型总 Token",
+            _format_number(metrics.get("visible_model_total_tokens"), 0),
+            "QA 回答 + Judge；任一不完整则 N/A",
         ),
         _metric_card(
             "消息提交率",
@@ -424,15 +438,18 @@ def render_strict_blackbox_report(snapshot: dict[str, Any]) -> str:
   </section>
   {category_html}
   {_stats_table("时延分布", [
-      ("端到端 QA", metrics.get("end_to_end_ms")),
-      ("记忆检索", metrics.get("retrieval_latency_ms")),
-      ("QA 侧编排注入", metrics.get("injection_total_ms")),
-      ("回答模型", metrics.get("llm_total_ms")),
+      ("端到端 QA", metrics.get("end_to_end_s")),
+      ("记忆检索", metrics.get("retrieval_latency_s")),
+      ("QA 侧编排注入", metrics.get("injection_total_s")),
+      ("回答模型", metrics.get("llm_total_s")),
   ])}
-  {_stats_table("回答模型 Token（API usage）", [
+  {_stats_table("外部可见模型 Token（API usage）", [
       ("Prompt Token", metrics.get("answer_prompt_tokens")),
       ("Completion Token", metrics.get("answer_completion_tokens")),
       ("回答总 Token", metrics.get("answer_total_tokens")),
+      ("Judge Prompt Token", metrics.get("judge_prompt_tokens")),
+      ("Judge Completion Token", metrics.get("judge_completion_tokens")),
+      ("Judge 总 Token", metrics.get("judge_total_tokens")),
   ], token=True)}
   <section class="data-section">
     <h2>指标定义与黑盒边界</h2>
@@ -499,7 +516,7 @@ def build_strict_blackbox_snapshot(
     metrics["run_started_at"] = run_observation.get("run_started_at")
     metrics["run_finished_at"] = run_observation.get("run_finished_at")
     metrics["internal_memory_injection_tokens"] = None
-    metrics["initial_memory_import_time_ms"] = None
+    metrics["initial_memory_import_time_s"] = None
     return {
         "schema_version": STRICT_BLACKBOX_SCHEMA_VERSION,
         "kind": "strict_blackbox_metrics",
@@ -515,7 +532,7 @@ def build_strict_blackbox_snapshot(
         "definitions": strict_metric_definitions(),
         "unavailable": {
             "internal_memory_injection_tokens": None,
-            "initial_memory_import_time_ms": None,
+            "initial_memory_import_time_s": None,
         },
     }
 

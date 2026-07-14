@@ -12,9 +12,19 @@ if str(ROOT) not in sys.path:
 
 from memory.report_export import render_strict_blackbox_metrics_html, strict_import_summary
 from scripts.generate_html_report import generate_html_report, observed_blackbox_metrics
+from scripts.local_judge import extract_usage
 
 
 def main() -> None:
+    assert extract_usage(
+        json.dumps(
+            {
+                "choices": [{"message": {"content": "{}"}}],
+                "usage": {"prompt_tokens": 11, "completion_tokens": 3, "total_tokens": 14},
+            }
+        )
+    ) == {"prompt_tokens": 11, "completion_tokens": 3, "total_tokens": 14}
+    assert extract_usage(json.dumps({"choices": [{"message": {"content": "{}"}}]})) is None
     rows = [
         {
             "question_id": "q1",
@@ -36,6 +46,9 @@ def main() -> None:
             "answer_prompt_tokens": "10",
             "answer_completion_tokens": "5",
             "answer_total_tokens": "15",
+            "judge_prompt_tokens": "8",
+            "judge_completion_tokens": "2",
+            "judge_total_tokens": "10",
             "time_cost": "0.1",
             "retrieval_tokens_est": "99999",
             "injection_tokens_est": "99999",
@@ -60,6 +73,9 @@ def main() -> None:
             "answer_prompt_tokens": "30",
             "answer_completion_tokens": "15",
             "answer_total_tokens": "45",
+            "judge_prompt_tokens": "16",
+            "judge_completion_tokens": "4",
+            "judge_total_tokens": "20",
             "time_cost": "0.3",
             "retrieval_tokens_est": "99999",
             "injection_tokens_est": "99999",
@@ -79,7 +95,9 @@ def main() -> None:
     assert metrics["retry_rate"] == 0.5
     assert metrics["answer_total_tokens"]["sum"] == 60.0
     assert metrics["tokens_per_correct"] == 60.0
-    assert metrics["end_to_end_ms"]["p50"] == 200.0
+    assert metrics["judge_total_tokens"]["sum"] == 30.0
+    assert metrics["visible_model_total_tokens"] == 90.0
+    assert metrics["end_to_end_s"]["p50"] == 0.2
     assert metrics["submission_rate"] == 0.75
 
     with tempfile.TemporaryDirectory(prefix="blackbox-report-smoke-") as temp_dir:
@@ -115,6 +133,9 @@ def main() -> None:
         "ECHOMEMORY_IMPORT_INCOMPLETE",
         "内部记忆注入 Token",
         "QA 侧编排注入时延",
+        "Judge 模型 Token",
+        "外部可见模型总 Token",
+        "0.200 秒",
         "初始记忆导入时间",
         "当前不可严格计算",
         "<strong>N/A</strong>",
@@ -124,8 +145,10 @@ def main() -> None:
         assert value in exported_report, f"exported report is missing {value!r}"
     assert "指标口径说明" in report
     assert "指标定义与黑盒边界" in exported_report
-    assert exported_report.count("class='strict-metric-card") == 10
-    assert exported_report.count("class='strict-definition'") == 18
+    assert exported_report.count("class='strict-metric-card") == 12
+    assert exported_report.count("class='strict-definition'") == 20
+    assert " ms" not in report
+    assert " ms" not in exported_report
     assert resolved_import_summary["status"] == "ECHOMEMORY_IMPORT_INCOMPLETE"
     assert resolved_import_summary["expected_messages"] == 4
     assert resolved_import_summary["submitted_messages"] == 3

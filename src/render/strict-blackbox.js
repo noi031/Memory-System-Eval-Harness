@@ -86,7 +86,7 @@ function statsTable(title, rows, escapeHtml, { token = false } = {}) {
               return `
                 <tr>
                   <th>${escapeHtml(row.label)}</th>
-                  ${values.map((value) => `<td>${escapeHtml(formatNumber(value, token ? 0 : 1))}${token || finiteNumber(value) === null ? "" : " ms"}</td>`).join("")}
+                  ${values.map((value) => `<td>${escapeHtml(formatNumber(value, token ? 0 : 3))}${token || finiteNumber(value) === null ? "" : " 秒"}</td>`).join("")}
                 </tr>
               `;
             }).join("")}
@@ -211,6 +211,22 @@ export function renderStrictBlackboxMetrics(strictBlackbox, {
       escapeHtml,
     ),
     headlineMetric(
+      "Judge 模型 Token",
+      formatNumber(metrics.judge_total_tokens?.sum, 0),
+      formatFraction(
+        metrics.judge_usage_observed_count,
+        metrics.judge_usage_expected_count,
+        "条 Judge usage",
+      ),
+      escapeHtml,
+    ),
+    headlineMetric(
+      "外部可见模型总 Token",
+      formatNumber(metrics.visible_model_total_tokens, 0),
+      "QA 回答 + Judge；任一不完整则 N/A",
+      escapeHtml,
+    ),
+    headlineMetric(
       "消息提交率",
       formatPercent(metrics.submission_rate),
       formatFraction(metrics.submitted_messages, metrics.expected_messages, "条消息"),
@@ -297,15 +313,18 @@ export function renderStrictBlackboxMetrics(strictBlackbox, {
         <div class="wb-strict-folds">
           ${categoryTable(metrics.categories, escapeHtml)}
           ${statsTable("时延分布", [
-            {label: "端到端 QA", stats: metrics.end_to_end_ms},
-            {label: "记忆检索", stats: metrics.retrieval_latency_ms},
-            {label: "QA 侧编排注入", stats: metrics.injection_total_ms},
-            {label: "回答模型", stats: metrics.llm_total_ms},
+            {label: "端到端 QA", stats: metrics.end_to_end_s},
+            {label: "记忆检索", stats: metrics.retrieval_latency_s},
+            {label: "QA 侧编排注入", stats: metrics.injection_total_s},
+            {label: "回答模型", stats: metrics.llm_total_s},
           ], escapeHtml)}
-          ${statsTable("回答模型 Token（API usage）", [
+          ${statsTable("外部可见模型 Token（API usage）", [
             {label: "Prompt Token", stats: metrics.answer_prompt_tokens},
             {label: "Completion Token", stats: metrics.answer_completion_tokens},
             {label: "回答总 Token", stats: metrics.answer_total_tokens},
+            {label: "Judge Prompt Token", stats: metrics.judge_prompt_tokens},
+            {label: "Judge Completion Token", stats: metrics.judge_completion_tokens},
+            {label: "Judge 总 Token", stats: metrics.judge_total_tokens},
           ], escapeHtml, {token: true})}
           ${definitions(strictBlackbox.definitions, escapeHtml)}
         </div>

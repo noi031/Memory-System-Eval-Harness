@@ -33,6 +33,9 @@ def main() -> None:
             "answer_prompt_tokens": "10",
             "answer_completion_tokens": "5",
             "answer_total_tokens": "15",
+            "judge_prompt_tokens": "8",
+            "judge_completion_tokens": "2",
+            "judge_total_tokens": "10",
             "retrieval_tokens_est": "99999",
             "injection_tokens_est": "99999",
         },
@@ -52,6 +55,9 @@ def main() -> None:
             "answer_prompt_tokens": "30",
             "answer_completion_tokens": "15",
             "answer_total_tokens": "45",
+            "judge_prompt_tokens": "16",
+            "judge_completion_tokens": "4",
+            "judge_total_tokens": "20",
             "retrieval_tokens_est": "99999",
             "injection_tokens_est": "99999",
         },
@@ -90,7 +96,7 @@ def main() -> None:
     metrics = strict["metrics"]
     assert strict["mode"] == "strict_observed"
     assert strict["row_count"] == 2
-    assert len(strict["definitions"]) == 18
+    assert len(strict["definitions"]) == 20
     assert Path(strict["artifact_path"]).name == "strict_blackbox_metrics.json"
     assert Path(strict["report_path"]).name == "strict_blackbox_report.html"
     assert metrics["accuracy"] == 0.5
@@ -100,6 +106,10 @@ def main() -> None:
     assert metrics["request_success_rate"] == 0.5
     assert metrics["empty_retrieval_rate"] == 0.5
     assert metrics["answer_total_tokens"]["sum"] == 60.0
+    assert metrics["judge_total_tokens"]["sum"] == 30.0
+    assert metrics["visible_model_total_tokens"] == 90.0
+    assert metrics["end_to_end_s"]["p50"] == 0.2
+    assert metrics["retrieval_latency_s"]["max"] == 0.12
     assert metrics["tokens_per_correct"] == 60.0
     assert metrics["expected_messages"] is None
     assert metrics["submitted_messages"] is None
@@ -107,9 +117,9 @@ def main() -> None:
     assert metrics["batch_wall_clock_s"] == 8.0
     assert metrics["qa_throughput_qps"] == 0.25
     assert strict["unavailable"]["internal_memory_injection_tokens"] is None
-    assert strict["unavailable"]["initial_memory_import_time_ms"] is None
+    assert strict["unavailable"]["initial_memory_import_time_s"] is None
     assert metrics["internal_memory_injection_tokens"] is None
-    assert metrics["initial_memory_import_time_ms"] is None
+    assert metrics["initial_memory_import_time_s"] is None
     print("strict black-box API smoke passed")
 
 
