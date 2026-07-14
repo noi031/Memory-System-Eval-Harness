@@ -16,7 +16,7 @@ from scripts.generate_html_report import (
 
 STRICT_BLACKBOX_METRICS_FILENAME = "strict_blackbox_metrics.json"
 STRICT_BLACKBOX_REPORT_FILENAME = "strict_blackbox_report.html"
-STRICT_BLACKBOX_SCHEMA_VERSION = 2
+STRICT_BLACKBOX_SCHEMA_VERSION = 3
 
 
 def _import_summary(summary: dict[str, Any] | None) -> dict[str, Any] | None:
@@ -29,6 +29,47 @@ def _import_summary(summary: dict[str, Any] | None) -> dict[str, Any] | None:
     if isinstance(summary_json, dict) and isinstance(summary_json.get("import_summary"), dict):
         return summary_json["import_summary"]
     return None
+
+
+def _run_observation(csv_path: Path, summary: dict[str, Any] | None) -> dict[str, Any]:
+    candidates: list[dict[str, Any]] = []
+    sidecar_path = csv_path.parent / "summary.json"
+    if sidecar_path.exists():
+        try:
+            sidecar = json.loads(sidecar_path.read_text(encoding="utf-8"))
+        except Exception:
+            sidecar = None
+        if isinstance(sidecar, dict):
+            candidates.append(sidecar)
+    if isinstance(summary, dict):
+        summary_json = summary.get("summary_json")
+        if isinstance(summary_json, dict):
+            candidates.append(summary_json)
+        candidates.append(summary)
+
+    resolved: dict[str, Any] = {}
+    for key in ("qa_parallelism", "run_started_at", "run_finished_at"):
+        for candidate in candidates:
+            value = candidate.get(key)
+            if value not in (None, ""):
+                resolved[key] = value
+                break
+    return resolved
+
+
+def _elapsed_seconds(started_at: Any, finished_at: Any) -> float | None:
+    if not started_at or not finished_at:
+        return None
+    try:
+        started = datetime.fromisoformat(str(started_at).replace("Z", "+00:00"))
+        finished = datetime.fromisoformat(str(finished_at).replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return None
+    try:
+        seconds = (finished - started).total_seconds()
+    except TypeError:
+        return None
+    return round(seconds, 4) if seconds >= 0 else None
 
 
 def strict_blackbox_metrics_path(csv_path: Path) -> Path:
@@ -49,6 +90,16 @@ def _number(value: Any) -> float | None:
     return number
 
 
+def _integer(value: Any) -> int | None:
+    number = _number(value)
+    if number is None:
+        return None
+    try:
+        return int(number)
+    except (OverflowError, ValueError):
+        return None
+
+
 def _format_number(value: Any, digits: int = 1) -> str:
     number = _number(value)
     return "N/A" if number is None else f"{number:,.{digits}f}"
@@ -62,6 +113,19 @@ def _format_integer(value: Any) -> str:
 def _format_percent(value: Any) -> str:
     number = _number(value)
     return "N/A" if number is None else f"{number * 100:.2f}%"
+
+
+def _format_duration(value: Any) -> str:
+    seconds = _number(value)
+    if seconds is None:
+        return "N/A"
+    if seconds < 60:
+        return f"{seconds:.2f} 秒"
+    minutes, remaining = divmod(seconds, 60)
+    if minutes < 60:
+        return f"{int(minutes)} 分 {remaining:.1f} 秒"
+    hours, remaining_minutes = divmod(int(minutes), 60)
+    return f"{hours} 小时 {remaining_minutes} 分"
 
 
 def _fraction(numerator: Any, denominator: Any, suffix: str = "条观测") -> str:
@@ -166,6 +230,24 @@ def render_strict_blackbox_report(snapshot: dict[str, Any]) -> str:
             str(metrics.get("import_status") or "N/A"),
             "直接读取后端导入摘要",
             "status",
+        ),
+        _metric_card(
+            "QA 并发数",
+            _format_integer(metrics.get("qa_parallelism")),
+            "本次运行实际配置",
+            "status",
+        ),
+        _metric_card(
+            "整批评测墙钟时间",
+            _format_duration(metrics.get("batch_wall_clock_s")),
+            "运行开始至结束的现实经过时间",
+        ),
+        _metric_card(
+            "QA 吞吐量",
+            f"{_format_number(metrics.get('qa_throughput_qps'), 3)} 题/秒"
+            if _number(metrics.get("qa_throughput_qps")) is not None
+            else "N/A",
+            "完成题数 / 整批墙钟时间",
         ),
     ]
 
@@ -366,7 +448,11 @@ def render_strict_blackbox_report(snapshot: dict[str, Any]) -> str:
 """
 
 
-def _source_signature(csv_path: Path, import_summary: dict[str, Any] | None) -> str:
+def _source_signature(
+    csv_path: Path,
+    import_summary: dict[str, Any] | None,
+    run_observation: dict[str, Any] | None,
+) -> str:
     stat = csv_path.stat()
     payload = {
         "schema_version": STRICT_BLACKBOX_SCHEMA_VERSION,
@@ -374,6 +460,7 @@ def _source_signature(csv_path: Path, import_summary: dict[str, Any] | None) -> 
         "csv_size": stat.st_size,
         "csv_mtime_ns": stat.st_mtime_ns,
         "import_summary": import_summary or {},
+        "run_observation": run_observation or {},
     }
     encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
@@ -398,9 +485,19 @@ def build_strict_blackbox_snapshot(
     resolved_csv = csv_path.expanduser().resolve()
     rows = load_results(str(resolved_csv))
     import_summary = _import_summary(summary)
+    run_observation = _run_observation(resolved_csv, summary)
     artifact_path = strict_blackbox_metrics_path(resolved_csv).resolve()
     report_path = strict_blackbox_report_path(resolved_csv).resolve()
     metrics = observed_blackbox_metrics(rows, import_summary)
+    wall_clock_s = _elapsed_seconds(
+        run_observation.get("run_started_at"),
+        run_observation.get("run_finished_at"),
+    )
+    metrics["qa_parallelism"] = _integer(run_observation.get("qa_parallelism"))
+    metrics["batch_wall_clock_s"] = wall_clock_s
+    metrics["qa_throughput_qps"] = round(len(rows) / wall_clock_s, 6) if wall_clock_s else None
+    metrics["run_started_at"] = run_observation.get("run_started_at")
+    metrics["run_finished_at"] = run_observation.get("run_finished_at")
     metrics["internal_memory_injection_tokens"] = None
     metrics["initial_memory_import_time_ms"] = None
     return {
@@ -412,7 +509,7 @@ def build_strict_blackbox_snapshot(
         "report_path": str(report_path),
         "source": str(resolved_csv),
         "source_csv": str(resolved_csv),
-        "source_signature": _source_signature(resolved_csv, import_summary),
+        "source_signature": _source_signature(resolved_csv, import_summary, run_observation),
         "row_count": len(rows),
         "metrics": metrics,
         "definitions": strict_metric_definitions(),
@@ -431,7 +528,8 @@ def ensure_strict_blackbox_snapshot(
     if resolved_csv.suffix.lower() != ".csv" or not resolved_csv.exists() or not resolved_csv.is_file():
         return None
     import_summary = _import_summary(summary)
-    signature = _source_signature(resolved_csv, import_summary)
+    run_observation = _run_observation(resolved_csv, summary)
+    signature = _source_signature(resolved_csv, import_summary, run_observation)
     artifact_path = strict_blackbox_metrics_path(resolved_csv)
     existing = _read_existing_snapshot(artifact_path, signature)
     if existing is not None:

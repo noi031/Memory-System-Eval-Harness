@@ -15,7 +15,7 @@ function escapeHtml(value) {
 }
 
 const stats = {avg: 10, p50: 9, p95: 15, p99: 18, max: 20, sum: 100};
-const definitions = Array.from({length: 15}, (_, index) => ({
+const definitions = Array.from({length: 18}, (_, index) => ({
   name: `指标 ${index + 1}`,
   kind: index > 12 ? "不可黑盒计算" : "严格计算",
   formula: index > 12 ? "N/A" : "observed / total",
@@ -26,6 +26,7 @@ const definitions = Array.from({length: 15}, (_, index) => ({
 const html = renderStrictBlackboxMetrics({
   row_count: 2,
   artifact_path: "/tmp/run/strict_blackbox_metrics.json",
+  report_path: "/tmp/run/strict_blackbox_report.html",
   generated_at: "2026-07-14T12:00:00+00:00",
   metrics: {
     accuracy: 0.5,
@@ -48,6 +49,9 @@ const html = renderStrictBlackboxMetrics({
     submitted_messages: null,
     expected_messages: null,
     import_status: "N/A",
+    qa_parallelism: 4,
+    batch_wall_clock_s: 8,
+    qa_throughput_qps: 0.25,
     categories: {"multi-hop": {correct: 1, wrong: 1, total: 2}},
     end_to_end_ms: stats,
     retrieval_latency_ms: stats,
@@ -64,9 +68,14 @@ assert(html.includes("严格黑盒指标"), "strict panel title must render");
 assert(html.includes("准确率"), "strict accuracy must render");
 assert(html.includes("本次运行指标快照"), "persisted metrics artifact must render");
 assert(html.includes("打开 JSON"), "metrics artifact action must render");
+assert(html.includes("打开 HTML 报告"), "standalone HTML report action must render");
 assert(html.includes("strict_blackbox_metrics.json"), "metrics artifact path must render");
 assert(html.includes("指标定义与黑盒边界"), "strict definitions section must render");
-assert(html.includes("15 项"), "all strict metric definitions must be counted");
+assert(html.includes("18 项"), "all strict metric definitions must be counted");
+assert(html.includes("QA 并发数"), "QA parallelism must render");
+assert(html.includes("整批评测墙钟时间"), "batch wall-clock time must render");
+assert(html.includes("QA 吞吐量"), "QA throughput must render");
+assert(html.includes("0.250 题/秒"), "QA throughput value must render");
 assert(html.includes("QA 侧编排注入"), "QA-side orchestration latency must be named precisely");
 assert(html.includes("内部记忆注入 Token"), "unavailable internal injection token must be explicit");
 assert(html.includes("初始记忆导入时间"), "unavailable initial import time must be explicit");

@@ -62,6 +62,16 @@ def main() -> None:
             writer = csv.DictWriter(handle, fieldnames=list(rows[0]))
             writer.writeheader()
             writer.writerows(rows)
+        (Path(temp_dir) / "summary.json").write_text(
+            json.dumps(
+                {
+                    "qa_parallelism": 4,
+                    "run_started_at": "2026-07-14T00:00:00+00:00",
+                    "run_finished_at": "2026-07-14T00:00:08+00:00",
+                }
+            ),
+            encoding="utf-8",
+        )
         summary = merge_strict_blackbox_summary({}, csv_path)
         strict = summary["strict_blackbox"]
         artifact_path = Path(strict["artifact_path"])
@@ -80,7 +90,7 @@ def main() -> None:
     metrics = strict["metrics"]
     assert strict["mode"] == "strict_observed"
     assert strict["row_count"] == 2
-    assert len(strict["definitions"]) == 15
+    assert len(strict["definitions"]) == 18
     assert Path(strict["artifact_path"]).name == "strict_blackbox_metrics.json"
     assert Path(strict["report_path"]).name == "strict_blackbox_report.html"
     assert metrics["accuracy"] == 0.5
@@ -93,6 +103,9 @@ def main() -> None:
     assert metrics["tokens_per_correct"] == 60.0
     assert metrics["expected_messages"] is None
     assert metrics["submitted_messages"] is None
+    assert metrics["qa_parallelism"] == 4
+    assert metrics["batch_wall_clock_s"] == 8.0
+    assert metrics["qa_throughput_qps"] == 0.25
     assert strict["unavailable"]["internal_memory_injection_tokens"] is None
     assert strict["unavailable"]["initial_memory_import_time_ms"] is None
     assert metrics["internal_memory_injection_tokens"] is None

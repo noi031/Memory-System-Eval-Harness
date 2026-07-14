@@ -27,6 +27,17 @@ function formatPercent(value) {
   return `${(number * 100).toFixed(2)}%`;
 }
 
+function formatDuration(value) {
+  const seconds = finiteNumber(value);
+  if (seconds === null) return "N/A";
+  if (seconds < 60) return `${seconds.toFixed(2)} 秒`;
+  const minutes = Math.floor(seconds / 60);
+  const remainingSeconds = seconds % 60;
+  if (minutes < 60) return `${minutes} 分 ${remainingSeconds.toFixed(1)} 秒`;
+  const hours = Math.floor(minutes / 60);
+  return `${hours} 小时 ${minutes % 60} 分`;
+}
+
 function formatFraction(numerator, denominator, suffix = "条观测") {
   const left = finiteNumber(numerator);
   const right = finiteNumber(denominator);
@@ -209,6 +220,27 @@ export function renderStrictBlackboxMetrics(strictBlackbox, {
       "记忆导入状态",
       String(metrics.import_status || "N/A"),
       "直接读取导入摘要，不推断后台完成",
+      escapeHtml,
+    ),
+    headlineMetric(
+      "QA 并发数",
+      formatInteger(metrics.qa_parallelism),
+      "本次运行实际配置",
+      escapeHtml,
+      "status",
+    ),
+    headlineMetric(
+      "整批评测墙钟时间",
+      formatDuration(metrics.batch_wall_clock_s),
+      "运行开始至结束的现实经过时间",
+      escapeHtml,
+    ),
+    headlineMetric(
+      "QA 吞吐量",
+      finiteNumber(metrics.qa_throughput_qps) === null
+        ? "N/A"
+        : `${formatNumber(metrics.qa_throughput_qps, 3)} 题/秒`,
+      "完成题数 / 整批墙钟时间",
       escapeHtml,
     ),
     headlineMetric(

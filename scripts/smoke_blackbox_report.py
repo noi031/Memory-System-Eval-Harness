@@ -125,7 +125,7 @@ def main() -> None:
     assert "指标口径说明" in report
     assert "指标定义与黑盒边界" in exported_report
     assert exported_report.count("class='strict-metric-card") == 10
-    assert exported_report.count("class='strict-definition'") == 15
+    assert exported_report.count("class='strict-definition'") == 18
     assert resolved_import_summary["status"] == "ECHOMEMORY_IMPORT_INCOMPLETE"
     assert resolved_import_summary["expected_messages"] == 4
     assert resolved_import_summary["submitted_messages"] == 3
