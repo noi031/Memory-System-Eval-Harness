@@ -77,6 +77,11 @@
       "purpose": "Tool-task benchmark entry; official tool environment work remains separate from LoCoMo scoring."
     },
     {
+      "view": "dynamicEvalView",
+      "label": "动态评测",
+      "purpose": "Dynamic evaluation with LLM-generated scenarios and queries for memory recall testing."
+    },
+    {
       "view": "systemConfigView",
       "label": "系统配置",
       "purpose": "Per-account backend selection, workspace, model configuration, readiness, and handoff gates."

@@ -57,6 +57,13 @@
           </button>
         </div>
         <div class="nav-group">
+          <span>动态评测</span>
+          <button class="nav-item" data-view="dynamicEvalView" title="动态评测">
+            <span class="nav-icon ui-icon" data-ui-icon="bot" data-ui-icon-size="18" aria-hidden="true"></span>
+            <span class="nav-label">动态评测</span>
+          </button>
+        </div>
+        <div class="nav-group">
           <span>系统管理</span>
           <button class="nav-item" data-view="systemConfigView" title="系统配置">
             <span class="nav-icon ui-icon" data-ui-icon="settings" data-ui-icon-size="18" aria-hidden="true"></span>
@@ -2534,6 +2541,234 @@
       </div>
     </section>
 
+    <!-- Dynamic Evaluation View -->
+    <section class="panel view-panel dynamic-eval-view" id="dynamicEvalView" data-title="动态评测" data-subtitle="LLM 扮演用户进行记忆召回评测。">
+      <div class="dynamic-eval-hero">
+        <div class="dynamic-eval-hero-copy">
+          <span class="label">动态评测</span>
+          <h2>用 LLM 生成场景和查询，测试记忆召回能力</h2>
+          <p>动态生成背景记忆和用户查询，或从数据集加载，测试 EchoAgent 的跨会话记忆召回和 prefill 预热效果。</p>
+        </div>
+        <div class="dynamic-eval-hero-meta">
+          <strong id="dynamicEvalStatus">未启动</strong>
+          <span>当前状态</span>
+        </div>
+      </div>
+
+      <div class="dynamic-eval-shell">
+        <div class="dynamic-eval-main">
+          <!-- Configuration Panel -->
+          <section class="dynamic-eval-panel">
+            <div class="dynamic-eval-panel-header">
+              <div class="dynamic-eval-panel-title">
+                <span class="ui-icon" data-ui-icon="sliders-horizontal" data-ui-icon-size="16" aria-hidden="true"></span>
+                <h3>评测配置</h3>
+              </div>
+              <div class="dynamic-eval-panel-actions">
+                <button class="dynamic-eval-button dynamic-eval-button-primary" id="startDynamicEval" type="button">
+                  <span class="ui-icon" data-ui-icon="play"></span><span>开始评测</span>
+                </button>
+                <button class="dynamic-eval-button dynamic-eval-button-danger" id="stopDynamicEval" type="button" disabled>
+                  <span class="ui-icon" data-ui-icon="square"></span><span>停止评测</span>
+                </button>
+              </div>
+            </div>
+            <div class="dynamic-eval-panel-body">
+              <div class="dynamic-eval-form-row">
+                <label class="dynamic-eval-field">
+                  <span class="dynamic-eval-label">评测模式</span>
+                  <select id="dynamicEvalMode" class="dynamic-eval-select">
+                    <option value="dynamic">动态生成（LLM 生成场景）</option>
+                    <option value="static">静态数据集</option>
+                  </select>
+                </label>
+                <label class="dynamic-eval-field">
+                  <span class="dynamic-eval-label">记忆数量</span>
+                  <input type="number" id="dynamicEvalNumMemories" class="dynamic-eval-input" value="10" min="1" max="50">
+                </label>
+                <label class="dynamic-eval-field">
+                  <span class="dynamic-eval-label">查询轮次</span>
+                  <input type="number" id="dynamicEvalNumQueries" class="dynamic-eval-input" value="5" min="1" max="20">
+                </label>
+              </div>
+              <div class="dynamic-eval-form-row" id="dynamicEvalDatasetRow" style="display: none;">
+                <label class="dynamic-eval-field dynamic-eval-field-full">
+                  <span class="dynamic-eval-label">静态数据集文件</span>
+                  <input type="file" id="dynamicEvalDatasetFile" class="dynamic-eval-input" accept=".json" style="padding: 6px;">
+                  <span id="dynamicEvalDatasetFileName" style="font-size: 12px; color: #666; margin-top: 4px; display: block;"></span>
+                </label>
+              </div>
+              <div class="dynamic-eval-form-row" id="dynamicEvalThemeRow">
+                <label class="dynamic-eval-field dynamic-eval-field-full">
+                  <span class="dynamic-eval-label">主题（留空自动选择）</span>
+                  <input type="text" id="dynamicEvalTheme" class="dynamic-eval-input" placeholder="如：职场与项目管理、旅行规划与出行">
+                </label>
+              </div>
+              <div class="dynamic-eval-form-row">
+                <label class="dynamic-eval-field">
+                  <span class="dynamic-eval-label">新会话概率</span>
+                  <input type="number" id="dynamicEvalNewSessionRatio" class="dynamic-eval-input" value="0.3" min="0" max="1" step="0.1">
+                </label>
+                <label class="dynamic-eval-field">
+                  <span class="dynamic-eval-label">打字速度 (ms)</span>
+                  <input type="number" id="dynamicEvalTypingSpeed" class="dynamic-eval-input" value="200" min="50" max="1000">
+                </label>
+              </div>
+              <details class="dynamic-eval-advanced">
+                <summary>高级配置</summary>
+                <div class="dynamic-eval-advanced-body">
+                  <div class="dynamic-eval-form-row">
+                    <label class="dynamic-eval-field">
+                      <span class="dynamic-eval-label">生成模型</span>
+                      <input type="text" id="dynamicEvalModel" class="dynamic-eval-input" value="deepseek-v4-flash">
+                    </label>
+                    <label class="dynamic-eval-field">
+                      <span class="dynamic-eval-label">MaaS 服务端点</span>
+                      <input type="text" id="dynamicEvalModelBaseUrl" class="dynamic-eval-input" placeholder="留空使用默认；环境变量 JUDGE_BASE_URL">
+                    </label>
+                  </div>
+                  <div class="dynamic-eval-form-row">
+                    <label class="dynamic-eval-field dynamic-eval-field-full">
+                      <span class="dynamic-eval-label">生成模型 API Key</span>
+                      <input type="password" id="dynamicEvalModelApiKey" class="dynamic-eval-input" placeholder="留空使用环境变量 JUDGE_TOKEN / OPENAI_API_KEY">
+                    </label>
+                  </div>
+                  <div class="dynamic-eval-form-row">
+                    <label class="dynamic-eval-field">
+                      <span class="dynamic-eval-label">EchoAgent 地址</span>
+                      <input type="text" id="dynamicEvalEchoAgentUrl" class="dynamic-eval-input" value="http://127.0.0.1:31020">
+                    </label>
+                    <label class="dynamic-eval-field">
+                      <span class="dynamic-eval-label">EchoMem 地址</span>
+                      <input type="text" id="dynamicEvalEchoMemUrl" class="dynamic-eval-input" value="http://127.0.0.1:8010">
+                    </label>
+                  </div>
+                  <div class="dynamic-eval-form-row">
+                    <label class="dynamic-eval-field">
+                      <span class="dynamic-eval-label">EchoAgent 用户名</span>
+                      <input type="text" id="dynamicEvalEchoAgentUsername" class="dynamic-eval-input" placeholder="EchoAgent 登录用户名">
+                    </label>
+                    <label class="dynamic-eval-field">
+                      <span class="dynamic-eval-label">EchoAgent 密码</span>
+                      <input type="password" id="dynamicEvalEchoAgentPassword" class="dynamic-eval-input" placeholder="EchoAgent 登录密码">
+                    </label>
+                  </div>
+                  <div class="dynamic-eval-form-row">
+                    <label class="dynamic-eval-field">
+                      <span class="dynamic-eval-label">记忆引擎 Endpoint</span>
+                      <input type="text" id="dynamicEvalMemoryEngine" class="dynamic-eval-input" value="http://127.0.0.1:31030">
+                    </label>
+                  </div>
+                </div>
+              </details>
+            </div>
+          </section>
+
+          <!-- Progress Panel -->
+          <section class="dynamic-eval-panel dynamic-eval-progress-panel">
+            <div class="dynamic-eval-panel-header">
+              <div class="dynamic-eval-panel-title">
+                <span class="ui-icon" data-ui-icon="gauge" data-ui-icon-size="16" aria-hidden="true"></span>
+                <h3>评测进度</h3>
+              </div>
+            </div>
+            <div class="dynamic-eval-panel-body">
+              <div class="dynamic-eval-progress-track">
+                <span id="dynamicEvalProgressBar" style="width: 0%"></span>
+              </div>
+              <div class="dynamic-eval-progress-text">
+                <span id="dynamicEvalProgressText">等待开始</span>
+                <span id="dynamicEvalProgressPct">0%</span>
+              </div>
+              <div class="dynamic-eval-metrics-grid" id="dynamicEvalMetricsGrid">
+                <div class="dynamic-eval-metric">
+                  <span class="dynamic-eval-metric-label">当前轮次</span>
+                  <strong class="dynamic-eval-metric-value" id="dynamicEvalCurrentRound">-</strong>
+                </div>
+                <div class="dynamic-eval-metric">
+                  <span class="dynamic-eval-metric-label">平均 TTFT</span>
+                  <strong class="dynamic-eval-metric-value" id="dynamicEvalAvgTtft">-</strong>
+                </div>
+                <div class="dynamic-eval-metric">
+                  <span class="dynamic-eval-metric-label">平均缓存 Token</span>
+                  <strong class="dynamic-eval-metric-value" id="dynamicEvalAvgCached">-</strong>
+                </div>
+                <div class="dynamic-eval-metric">
+                  <span class="dynamic-eval-metric-label">新会话数</span>
+                  <strong class="dynamic-eval-metric-value" id="dynamicEvalNewSessions">-</strong>
+                </div>
+              </div>
+            </div>
+          </section>
+        </div>
+
+        <div class="dynamic-eval-side">
+          <!-- Current Round Panel -->
+          <section class="dynamic-eval-panel dynamic-eval-round-panel">
+            <div class="dynamic-eval-panel-header">
+              <div class="dynamic-eval-panel-title">
+                <span class="ui-icon" data-ui-icon="message-circle" data-ui-icon-size="16" aria-hidden="true"></span>
+                <h3>当前轮次</h3>
+              </div>
+            </div>
+            <div class="dynamic-eval-panel-body">
+              <div class="dynamic-eval-round-query">
+                <span class="dynamic-eval-round-label">用户查询</span>
+                <p id="dynamicEvalCurrentQuery">等待生成...</p>
+              </div>
+              <div class="dynamic-eval-round-reply">
+                <span class="dynamic-eval-round-label">助手回复</span>
+                <p id="dynamicEvalCurrentReply">等待回复...</p>
+              </div>
+              <div class="dynamic-eval-round-meta">
+                <span class="dynamic-eval-round-tag" id="dynamicEvalComplexity">-</span>
+                <span class="dynamic-eval-round-tag" id="dynamicEvalIsNewSession">-</span>
+                <span class="dynamic-eval-round-tag" id="dynamicEvalPrefetchCommitted">-</span>
+              </div>
+            </div>
+          </section>
+
+          <!-- Ground Facts Panel -->
+          <section class="dynamic-eval-panel dynamic-eval-facts-panel">
+            <div class="dynamic-eval-panel-header">
+              <div class="dynamic-eval-panel-title">
+                <span class="ui-icon" data-ui-icon="database" data-ui-icon-size="16" aria-hidden="true"></span>
+                <h3>背景记忆</h3>
+              </div>
+            </div>
+            <div class="dynamic-eval-panel-body">
+              <div class="dynamic-eval-facts-list" id="dynamicEvalFactsList">
+                <p class="dynamic-eval-empty">开始评测后显示生成的背景记忆</p>
+              </div>
+            </div>
+          </section>
+        </div>
+      </div>
+
+      <!-- Results Panel -->
+      <section class="dynamic-eval-panel dynamic-eval-results-panel" id="dynamicEvalResultsPanel" hidden>
+        <div class="dynamic-eval-panel-header">
+          <div class="dynamic-eval-panel-title">
+            <span class="ui-icon" data-ui-icon="file-text" data-ui-icon-size="16" aria-hidden="true"></span>
+            <h3>评测结果</h3>
+          </div>
+          <div class="dynamic-eval-panel-actions">
+            <button class="dynamic-eval-button dynamic-eval-button-secondary" id="exportDynamicEvalResults" type="button">
+              <span class="ui-icon" data-ui-icon="download"></span><span>导出结果</span>
+            </button>
+          </div>
+        </div>
+        <div class="dynamic-eval-panel-body">
+          <div class="dynamic-eval-results-summary" id="dynamicEvalResultsSummary">
+            <!-- Results will be rendered here -->
+          </div>
+          <div class="dynamic-eval-results-table" id="dynamicEvalResultsTable">
+            <!-- Per-round results table -->
+          </div>
+        </div>
+      </section>
+    </section>
+
     <section class="panel view-panel system-config-view" id="systemConfigView" data-title="系统配置" data-subtitle="账户、后端、模型和安全门禁。">
       <div class="system-config-hero">
         <div class="system-config-hero-copy">
@@ -2932,6 +3167,6 @@
   <script src="/app-state.js?v=20260629hotpottabs5"></script>
   <script src="/app-core.js?v=20260629longmemevalworkbench2"></script>
   <script src="/app-format.js?v=20260629longmemevalworkbench2"></script>
-  <script src="/app.js?v=20260630hotpotrunsetup2"></script>
+  <script src="/app.js?v=20260715dynamicEval15"></script>
 </body>
 </html>

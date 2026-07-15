@@ -9797,6 +9797,10 @@ function showView(viewId, options = {}) {
   if (viewId === "hotpotQaView" && normalizeBenchmarkFlowStage(state.activeBenchmarkFlowStage || requestedBenchmarkStage || "") === "report") {
     queueHotpotQaReportHydration();
   }
+  // Invoke view-specific handler if registered
+  if (state.viewHandlers && typeof state.viewHandlers[viewId] === "function") {
+    state.viewHandlers[viewId]();
+  }
 }
 
 function syncViewUrl(viewId, options = {}) {
@@ -23257,6 +23261,7 @@ function syncStandaloneBenchmarkChrome(viewId = "") {
 const SIDEBAR_GROUP_ORDER = [
   {key: "workspace", label: "工作台"},
   {key: "datasets", label: "评测数据集"},
+  {key: "dynamic", label: "动态评测"},
   {key: "system", label: "系统管理"},
 ];
 
@@ -23268,6 +23273,7 @@ const SIDEBAR_VIEW_META = {
   hotpotQaView: {group: "datasets", label: "HotpotQA", icon: "brain"},
   proAgentBenchView: {group: "datasets", label: "ProAgentBench", icon: "bot"},
   tauBenchView: {group: "datasets", label: "Tau2-bench", icon: "boxes"},
+  dynamicEvalView: {group: "dynamic", label: "动态评测", icon: "bot"},
   systemConfigView: {group: "system", label: "系统配置", icon: "settings"},
 };
 
@@ -24085,6 +24091,1571 @@ function hydrateUiIcons(root = document) {
     node.innerHTML = renderUiIcon(node.dataset.uiIcon || "", size);
   });
 }
+
+// ---------------------------------------------------------------------------
+// Dynamic Evaluation View
+// ---------------------------------------------------------------------------
+
+const DynamicEvalState = {
+  evaluatorId: null,
+  isRunning: false,
+  currentRound: 0,
+  totalRounds: 0,
+  results: [],
+  memories: [],
+  theme: "",
+  avgTtft: null,
+  avgCachedTokens: null,
+  newSessionCount: 0,
+  // EchoAgent state
+  echoAgentToken: "",
+  echoAgentSessionId: "",
+  echoAgentContextSeq: 0,
+  initialized: false,
+  // For static dataset reuse
+  parsedMemories: null,
+  parsedQueries: null,
+  injectSessionId: null,  // Session ID for memory injection
+  injectUserId: null,     // User ID for memory injection
+};
+
+// Global state for selected dataset file
+var DynamicEvalDatasetFile = null;
+
+function initDynamicEvalView() {
+  const modeSelect = $("dynamicEvalMode");
+  const datasetRow = $("dynamicEvalDatasetRow");
+  const themeRow = $("dynamicEvalThemeRow");
+  const startBtn = $("startDynamicEval");
+  const stopBtn = $("stopDynamicEval");
+
+  if (!modeSelect) return;
+
+  // Helper to update visibility based on mode
+  function updateModeVisibility() {
+    const isStaticMode = modeSelect.value === "static";
+    const dsRow = $("dynamicEvalDatasetRow");
+    const thRow = $("dynamicEvalThemeRow");
+    if (dsRow) dsRow.style.display = isStaticMode ? "flex" : "none";
+    if (thRow) thRow.style.display = isStaticMode ? "none" : "flex";
+    
+    const numMemoriesInput = $("dynamicEvalNumMemories");
+    const numQueriesInput = $("dynamicEvalNumQueries");
+    const fileInput = $("dynamicEvalDatasetFile");
+    
+    if (isStaticMode) {
+      // In static mode, check if we have parsed data to disable inputs
+      if (DynamicEvalState.parsedMemories && DynamicEvalState.parsedMemories.length > 0) {
+        if (numMemoriesInput) {
+          numMemoriesInput.disabled = true;
+          numMemoriesInput.style.backgroundColor = "#f0f0f0";
+        }
+        if (numQueriesInput) {
+          numQueriesInput.disabled = true;
+          numQueriesInput.style.backgroundColor = "#f0f0f0";
+        }
+      } else if (fileInput && fileInput.files && fileInput.files.length > 0) {
+        // No parsed data but file is still selected - re-trigger file parsing
+        const event = { target: fileInput };
+        handleDynamicEvalDatasetFile(event);
+      }
+    } else {
+      // When switching to dynamic mode, re-enable the inputs
+      if (numMemoriesInput) {
+        numMemoriesInput.disabled = false;
+        numMemoriesInput.style.backgroundColor = "";
+      }
+      if (numQueriesInput) {
+        numQueriesInput.disabled = false;
+        numQueriesInput.style.backgroundColor = "";
+      }
+      // Clear parsed data when switching to dynamic mode
+      DynamicEvalState.parsedMemories = null;
+      DynamicEvalState.parsedQueries = null;
+      DynamicEvalState.injectSessionId = null;
+      DynamicEvalState.injectUserId = null;
+      DynamicEvalDatasetFile = null;
+      const fileNameDisplay = $("dynamicEvalDatasetFileName");
+      if (fileNameDisplay) {
+        fileNameDisplay.textContent = "";
+      }
+      renderDynamicEvalFacts([]);
+    }
+  }
+
+  // Set initial state based on current mode
+  updateModeVisibility();
+
+  // Bind mode change listener (remove old listener first)
+  modeSelect.removeEventListener("change", updateModeVisibility);
+  modeSelect.addEventListener("change", updateModeVisibility);
+
+  // Bind file input change handler
+  const fileInput = $("dynamicEvalDatasetFile");
+  const fileNameDisplay = $("dynamicEvalDatasetFileName");
+  if (fileInput) {
+    fileInput.removeEventListener("change", handleDynamicEvalDatasetFile);
+    fileInput.addEventListener("change", handleDynamicEvalDatasetFile);
+  }
+
+  // Bind start/stop buttons (remove old listeners first)
+  if (startBtn) {
+    startBtn.removeEventListener("click", startDynamicEval);
+    startBtn.addEventListener("click", startDynamicEval);
+  }
+  if (stopBtn) {
+    stopBtn.removeEventListener("click", stopDynamicEval);
+    stopBtn.addEventListener("click", stopDynamicEval);
+  }
+  
+  // Bind export button
+  const exportBtn = $("exportDynamicEvalResults");
+  if (exportBtn) {
+    exportBtn.removeEventListener("click", exportDynamicEvalResults);
+    exportBtn.addEventListener("click", exportDynamicEvalResults);
+  }
+}
+
+function handleDynamicEvalDatasetFile(event) {
+  const file = event.target.files[0];
+  const fileNameDisplay = $("dynamicEvalDatasetFileName");
+  
+  if (file) {
+    DynamicEvalDatasetFile = file;
+    if (fileNameDisplay) {
+      fileNameDisplay.textContent = `已选择: ${file.name} (${(file.size / 1024).toFixed(1)} KB)`;
+    }
+    
+    // Read and parse dataset to extract background memories
+    const reader = new FileReader();
+    reader.onload = function(e) {
+      try {
+        const data = JSON.parse(e.target.result);
+        const memories = extractBackgroundMemoriesFromDataset(data);
+        if (memories.length > 0) {
+          // Store memories for later use
+          DynamicEvalState.parsedMemories = memories;
+          // Extract inject_session_id and user_id if available (for reuse)
+          if (data.inject_session_id) {
+            DynamicEvalState.injectSessionId = data.inject_session_id;
+          }
+          if (data.inject_user_id) {
+            DynamicEvalState.injectUserId = data.inject_user_id;
+          }
+          // Also extract queries if available
+          if (data.dataset_queries && Array.isArray(data.dataset_queries)) {
+            DynamicEvalState.parsedQueries = data.dataset_queries;
+          }
+          // Display in facts list
+          renderDynamicEvalFacts(memories);
+          
+          // Update UI with parsed values and disable inputs in static mode
+          const numMemoriesInput = $("dynamicEvalNumMemories");
+          const numQueriesInput = $("dynamicEvalNumQueries");
+          
+          // Set the number of memories from parsed data
+          if (numMemoriesInput) {
+            numMemoriesInput.value = memories.length;
+            numMemoriesInput.disabled = true;
+            numMemoriesInput.style.backgroundColor = "#f0f0f0";
+          }
+          
+          // Set the number of queries from parsed queries (or default to memories count)
+          const queryCount = DynamicEvalState.parsedQueries ? DynamicEvalState.parsedQueries.length : memories.length;
+          if (numQueriesInput) {
+            numQueriesInput.value = queryCount;
+            numQueriesInput.disabled = true;
+            numQueriesInput.style.backgroundColor = "#f0f0f0";
+          }
+          
+          updateStatus(`从数据集解析出 ${memories.length} 条背景记忆，${queryCount} 条查询`);
+        } else {
+          updateStatus("未能从数据集解析出背景记忆");
+        }
+      } catch (err) {
+        console.error("Failed to parse dataset file:", err);
+        updateStatus(`解析数据集失败: ${err.message}`);
+      }
+    };
+    reader.onerror = function() {
+      updateStatus("读取数据集文件失败");
+    };
+    reader.readAsText(file);
+  } else {
+    DynamicEvalDatasetFile = null;
+    if (fileNameDisplay) {
+      fileNameDisplay.textContent = "";
+    }
+    DynamicEvalState.parsedMemories = null;
+    DynamicEvalState.parsedQueries = null;
+    DynamicEvalState.injectSessionId = null;
+    DynamicEvalState.injectUserId = null;
+    renderDynamicEvalFacts([]);
+    
+    // Re-enable inputs when no dataset is selected
+    const numMemoriesInput = $("dynamicEvalNumMemories");
+    const numQueriesInput = $("dynamicEvalNumQueries");
+    if (numMemoriesInput) {
+      numMemoriesInput.disabled = false;
+      numMemoriesInput.style.backgroundColor = "";
+    }
+    if (numQueriesInput) {
+      numQueriesInput.disabled = false;
+      numQueriesInput.style.backgroundColor = "";
+    }
+  }
+}
+
+function extractBackgroundMemoriesFromDataset(data) {
+  const memories = [];
+  
+  // Handle background_memories field (our exported format)
+  if (data.background_memories && Array.isArray(data.background_memories)) {
+    for (const mem of data.background_memories) {
+      const text = typeof mem === "string" ? mem : (mem.text || mem.content || "");
+      if (text && text.length > 2) {
+        memories.push({
+          id: mem.id || `f${memories.length + 1}`,
+          text: text,
+          source: mem.source || "background_memories",
+        });
+      }
+    }
+    if (memories.length > 0) {
+      return memories.slice(0, 50);  // Limit to 50
+    }
+  }
+  
+  // Handle memories field
+  if (data.memories && Array.isArray(data.memories)) {
+    for (const mem of data.memories) {
+      const text = typeof mem === "string" ? mem : (mem.text || mem.content || "");
+      if (text) {
+        memories.push({
+          id: `f${memories.length + 1}`,
+          text: text,
+          source: "memories_field",
+        });
+      }
+    }
+  }
+  
+  // Handle facts field
+  if (data.facts && Array.isArray(data.facts)) {
+    for (const fact of data.facts) {
+      const text = typeof fact === "string" ? fact : (fact.text || fact.content || "");
+      if (text) {
+        memories.push({
+          id: `f${memories.length + 1}`,
+          text: text,
+          source: "facts_field",
+        });
+      }
+    }
+  }
+  
+  // Handle array format (LoCoMo, LongMemEval style)
+  if (Array.isArray(data)) {
+    for (let sampleIdx = 0; sampleIdx < Math.min(data.length, 1); sampleIdx++) {
+      const sample = data[sampleIdx];
+      if (!sample || typeof sample !== "object") continue;
+      
+      // Try to extract from conversation
+      const conversation = sample.conversation || sample.dialogue || sample.history;
+      if (conversation && typeof conversation === "object") {
+        for (const [key, turns] of Object.entries(conversation)) {
+          if (key.endsWith("_date_time")) continue;
+          if (!Array.isArray(turns)) continue;
+          
+          for (let turnIdx = 0; turnIdx < turns.length; turnIdx++) {
+            const turn = turns[turnIdx];
+            if (!turn || typeof turn !== "object") continue;
+            
+            // speaker_a typically provides facts
+            const speaker = turn.speaker || turn.role || "";
+            if (speaker === "speaker_a" || speaker === "user") {
+              const text = turn.text || turn.content || "";
+              if (text && text.length > 10) {
+                memories.push({
+                  id: `f${memories.length + 1}`,
+                  text: text,
+                  source: `${key}_turn_${turnIdx}`,
+                });
+              }
+            }
+          }
+        }
+      }
+      
+      // Try event_summary
+      const events = sample.event_summary || sample.facts || sample.background;
+      if (events && typeof events === "object") {
+        for (const [eventId, eventText] of Object.entries(events)) {
+          if (typeof eventText === "string" && eventText) {
+            memories.push({
+              id: `f${memories.length + 1}`,
+              text: eventText,
+              source: `event_${eventId}`,
+            });
+          }
+        }
+      }
+      
+      // Try facts array
+      if (Array.isArray(sample.facts)) {
+        for (const fact of sample.facts) {
+          const factText = typeof fact === "string" ? fact : (fact.text || fact.fact || "");
+          if (factText) {
+            memories.push({
+              id: `f${memories.length + 1}`,
+              text: factText,
+              source: "facts_array",
+            });
+          }
+        }
+      }
+    }
+  }
+  
+  // Limit to 50 memories to avoid UI overflow
+  return memories.slice(0, 50);
+}
+
+// ---------------------------------------------------------------------------
+// EchoAgent Client Functions
+// ---------------------------------------------------------------------------
+
+// Session state for EchoAgent (cookie-based auth)
+var EchoAgentSession = {
+  csrfToken: "",
+  cookies: [],
+  directAccess: false,
+};
+
+// Direct fetch to EchoAgent with credentials
+async function echoAgentDirectFetch(baseUrl, method, path, headers, body) {
+  var url = baseUrl.replace(/\/$/, "") + path;
+  var fetchOptions = {
+    method: method,
+    credentials: "include", // Send cookies
+    headers: headers || {},
+  };
+  if (body) {
+    fetchOptions.body = JSON.stringify(body);
+    fetchOptions.headers["Content-Type"] = "application/json";
+  }
+  // Add CSRF token for mutation requests
+  if (EchoAgentSession.csrfToken && method !== "GET" && method !== "HEAD") {
+    fetchOptions.headers["X-CSRF-Token"] = EchoAgentSession.csrfToken;
+  }
+  
+  var response = await fetch(url, fetchOptions);
+  var responseText = await response.text();
+  
+  // Try to parse as JSON
+  var data;
+  try {
+    data = JSON.parse(responseText);
+  } catch (e) {
+    data = { raw: responseText };
+  }
+  
+  if (!response.ok) {
+    var errorMsg = data.error || data.message || ("Request failed: " + response.status);
+    throw new Error(String(errorMsg));
+  }
+  return data;
+}
+
+// Proxy request via backend (fallback)
+async function echoAgentProxy(baseUrl, method, path, headers, body) {
+  headers = headers || {};
+  var reqHeaders = {};
+  for (var key in headers) {
+    reqHeaders[key] = headers[key];
+  }
+  if (EchoAgentSession.csrfToken && method !== "GET" && method !== "HEAD") {
+    reqHeaders["X-CSRF-Token"] = EchoAgentSession.csrfToken;
+  }
+  
+  var response = await fetch("/api/dynamic/echo_agent", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      base_url: baseUrl,
+      method: method,
+      path: path,
+      headers: reqHeaders,
+      body: body ? JSON.stringify(body) : null,
+      cookies: EchoAgentSession.cookies,
+    }),
+  });
+  var respData = await response.json();
+  
+  if (respData.cookies && respData.cookies.length > 0) {
+    EchoAgentSession.cookies = respData.cookies;
+  }
+  
+  if (respData.status >= 400) {
+    var errorBody = respData.body || {};
+    throw new Error(String(errorBody.error || errorBody.message || respData.status));
+  }
+  return respData.body;
+}
+
+// Smart fetch: try direct first, fallback to proxy
+async function echoAgentFetch(baseUrl, method, path, headers, body) {
+  // For SSE streaming, always use direct connection
+  if (path.indexOf("/streaming") !== -1) {
+    EchoAgentSession.directAccess = true;
+  }
+  
+  if (EchoAgentSession.directAccess) {
+    return echoAgentDirectFetch(baseUrl, method, path, headers, body);
+  } else {
+    return echoAgentProxy(baseUrl, method, path, headers, body);
+  }
+}
+
+// Login to EchoAgent
+async function echoAgentLogin(baseUrl, username, password) {
+  try {
+    // Try direct access first (works if CORS is configured)
+    try {
+      var data = await echoAgentDirectFetch(baseUrl, "POST", "/v1/auth/login", {}, { username: username, password: password });
+      EchoAgentSession.directAccess = true;
+      if (data.csrfToken) {
+        EchoAgentSession.csrfToken = data.csrfToken;
+      }
+      return { csrfToken: data.csrfToken || "", user: data.user || null };
+    } catch (directError) {
+      console.log("Direct access failed, using proxy:", directError.message);
+      EchoAgentSession.directAccess = false;
+      // Fallback to proxy
+      var proxyData = await echoAgentProxy(baseUrl, "POST", "/v1/auth/login", {}, { username: username, password: password });
+      if (proxyData.csrfToken) {
+        EchoAgentSession.csrfToken = proxyData.csrfToken;
+      }
+      return { csrfToken: proxyData.csrfToken || "", user: proxyData.user || null };
+    }
+  } catch (e) {
+    throw new Error("登录失败: " + e.message);
+  }
+}
+
+// Create a new session
+async function echoAgentCreateSession(baseUrl, _token, title, memoryEngineEndpoint) {
+  var data = await echoAgentFetch(baseUrl, "POST", "/v1/sessions", {}, { title: title || "Dynamic Eval Session" });
+  var sessionId = data.id || (data.data && data.data.id) || "";
+  
+  // Enable memory engine if provided
+  if (sessionId && memoryEngineEndpoint) {
+    try {
+      // Step 1: Test the memory engine endpoint first (required before enabling)
+      await echoAgentFetch(
+        baseUrl,
+        "POST",
+        "/v1/sessions/" + sessionId + "/memory-engine/test",
+        {},
+        { endpoint: memoryEngineEndpoint }
+      );
+      
+      // Step 2: Enable the memory engine
+      await echoAgentFetch(
+        baseUrl,
+        "PUT",
+        "/v1/sessions/" + sessionId + "/memory-engine",
+        {},
+        { enabled: true, endpoint: memoryEngineEndpoint }
+      );
+    } catch (e) {
+      console.warn("Failed to enable memory engine:", e);
+    }
+  }
+  return sessionId;
+}
+
+// Start SSE listener to collect recalled memories during message processing
+// Returns {stop: function, getMemories: function, ready: Promise}
+function startMemoryEventListener(baseUrl, sessionId) {
+  var eventUrl = baseUrl + "/v1/sessions/" + sessionId + "/session-events?include_snapshot=0";
+  var recalledMemories = [];
+  var done = false;
+  var reader = null;
+  var readyResolve = null;
+  var readyPromise = new Promise(function(resolve) {
+    readyResolve = resolve;
+  });
+  
+  // Start SSE connection
+  fetch(eventUrl, {
+    method: "GET",
+    credentials: "include",
+    headers: {
+      "Accept": "text/event-stream",
+      "Last-Event-ID": "-1"
+    }
+  }).then(function(response) {
+    if (!response.ok) {
+      readyResolve();  // Resolve anyway to not block
+      return;
+    }
+    
+    // Connection established, signal ready
+    readyResolve();
+    
+    reader = response.body.getReader();
+    var decoder = new TextDecoder();
+    var buffer = "";
+    
+    function readChunk() {
+      if (done) return;
+      reader.read().then(function(result) {
+        if (result.done || done) {
+          return;
+        }
+        
+        buffer += decoder.decode(result.value, { stream: true });
+        var lines = buffer.split("\n");
+        buffer = lines.pop() || "";
+        
+        var eventType = "";
+        var eventData = "";
+        
+        for (var i = 0; i < lines.length; i++) {
+          var line = lines[i];
+          if (line.startsWith("event:")) {
+            eventType = line.substring(6).trim();
+          } else if (line.startsWith("data:")) {
+            eventData = line.substring(5).trim();
+          } else if (line === "" && eventType && eventData) {
+            // Process debug_prefill event with memory entries
+            if (eventType === "debug_prefill") {
+              try {
+                var data = JSON.parse(eventData);
+                if (data.entries && data.entries.length > 0) {
+                  recalledMemories = data.entries.map(function(e) {
+                    return {
+                      memoryId: e.memoryId || "",
+                      text: e.text || "",
+                      score: e.score || 0,
+                      kind: e.kind || ""
+                    };
+                  });
+                }
+              } catch (parseErr) {}
+            }
+            eventType = "";
+            eventData = "";
+          }
+        }
+        
+        readChunk();
+      }).catch(function(err) {
+        // Ignore errors
+      });
+    }
+    
+    readChunk();
+  }).catch(function(err) {
+    readyResolve();  // Resolve anyway to not block
+  });
+  
+  return {
+    stop: function() {
+      done = true;
+      if (reader) {
+        try { reader.cancel(); } catch (e) {}
+      }
+    },
+    getMemories: function() {
+      return recalledMemories;
+    },
+    ready: readyPromise
+  };
+}
+
+// Simulate typing by sending tick events to EchoAgent prefetch API
+async function simulateTyping(baseUrl, sessionId, content, typingSpeedMs, onChar) {
+  if (!typingSpeedMs || typingSpeedMs <= 0) {
+    typingSpeedMs = 200; // Default 200ms
+  }
+  
+  const clientTurnId = "eval_turn_" + Date.now();
+  const contextPath = encodeURIComponent("/");
+  
+  console.log(`[simulateTyping] Starting typing simulation: sessionId=${sessionId}, clientTurnId=${clientTurnId}, content.length=${content.length}, speed=${typingSpeedMs}ms`);
+  
+  // Generate a random clientTurnId for this turn
+  var tickRevision = 1;
+  var currentText = "";
+  
+  // Send tick events character by character
+  for (let i = 0; i < content.length; i++) {
+    currentText += content[i];
+    
+    // Update UI to show typing progress
+    if (onChar) {
+      onChar(currentText);
+    }
+    
+    try {
+      const tickResult = await echoAgentFetch(
+        baseUrl,
+        "POST",
+        "/v1/sessions/" + sessionId + "/context-paths/" + contextPath + "/prefetch/tick",
+        {},
+        {
+          clientTurnId: clientTurnId,
+          revision: tickRevision++,
+          draftText: currentText,
+        }
+      );
+      console.log(`[simulateTyping] tick ${i+1}/${content.length}: accepted=${tickResult?.data?.accepted}, reason=${tickResult?.data?.reason || 'ok'}`);
+    } catch (tickErr) {
+      console.warn(`[simulateTyping] tick ${i+1} failed:`, tickErr);
+      // Continue anyway - tick is optional
+    }
+    
+    // Wait for the typing speed duration
+    await new Promise(resolve => setTimeout(resolve, typingSpeedMs));
+  }
+  
+  // Send finalize to complete the typing
+  try {
+    const finalizeResult = await echoAgentFetch(
+      baseUrl,
+      "POST",
+      "/v1/sessions/" + sessionId + "/context-paths/" + contextPath + "/prefetch/finalize",
+      {},
+      {
+        clientTurnId: clientTurnId,
+        revision: tickRevision,
+        fullContent: content,
+      }
+    );
+    console.log(`[simulateTyping] finalize: accepted=${finalizeResult?.data?.accepted}, committedCount=${finalizeResult?.data?.committedCount}`);
+  } catch (finalizeErr) {
+    console.warn("[simulateTyping] finalize failed:", finalizeErr);
+    // Continue anyway - finalize is optional
+  }
+  
+  return clientTurnId;
+}
+
+// Send a message to the session
+async function echoAgentSendMessage(baseUrl, _token, sessionId, content) {
+  var contextPath = encodeURIComponent("/");
+  var data = await echoAgentFetch(
+    baseUrl,
+    "POST",
+    "/v1/sessions/" + sessionId + "/context-paths/" + contextPath + "/messages",
+    {},
+    { content: content, afterSeq: DynamicEvalState.echoAgentContextSeq }
+  );
+  
+  // Parse response - handle both {code, data} and direct data formats
+  var messages = [];
+  var latestContextSeq = 0;
+  
+  if (data && data.data) {
+    // Standard format: {code: 0, data: {messages: [...], latestContextSeq: N}}
+    messages = data.data.messages || [];
+    latestContextSeq = data.data.latestContextSeq || 0;
+  } else if (data && data.messages) {
+    messages = data.messages;
+    latestContextSeq = data.latestContextSeq || 0;
+  }
+  
+  // Find the assistant message (status: generating or completed)
+  // The response includes both user message and the new assistant message
+  var foundSeq = 0;
+  for (var i = messages.length - 1; i >= 0; i--) {
+    var m = messages[i];
+    // Assistant messages have status field
+    if (m.status === "generating" || m.status === "completed") {
+      foundSeq = m.seq;
+      break;
+    }
+  }
+  
+  if (!foundSeq) {
+    // If no assistant message found, try to infer from latestContextSeq
+    console.warn("No assistant message found in response, using latestContextSeq:", latestContextSeq);
+    foundSeq = latestContextSeq;
+  }
+  
+  DynamicEvalState.echoAgentContextSeq = latestContextSeq;
+  console.log("echoAgentSendMessage: seq=" + foundSeq + ", latestContextSeq=" + latestContextSeq);
+  return foundSeq;
+}
+
+// Stream reply using fetch + manual SSE parsing (required for custom headers)
+async function echoAgentStreamReply(baseUrl, _token, sessionId, seq, onChunk) {
+  var startTime = performance.now();
+  var reply = "";
+  var ttftMs = null;
+  var cachedTokens = 0;
+  var promptTokens = 0;
+  var contextPath = encodeURIComponent("/");
+  var streamUrl = baseUrl + "/v1/sessions/" + sessionId + "/context-paths/" + contextPath + "/streaming?seq=" + seq;
+  
+  // Use fetch with Last-Event-ID header (required by EchoAgent)
+  var response;
+  try {
+    response = await fetch(streamUrl, {
+      method: "GET",
+      credentials: "include",
+      headers: {
+        "Accept": "text/event-stream",
+        "Last-Event-ID": "-1"  // Required by EchoAgent for initial connection
+      }
+    });
+  } catch (e) {
+    throw new Error("SSE connection failed: " + e.message);
+  }
+  
+  if (!response.ok) {
+    var errorText = await response.text();
+    throw new Error("SSE request failed: " + response.status + " " + errorText);
+  }
+  
+  var reader = response.body.getReader();
+  var decoder = new TextDecoder();
+  var buffer = "";
+  var done = false;
+  var timeoutId = setTimeout(function() {
+    done = true;
+    reader.cancel();
+  }, 180000);
+  
+  try {
+    while (!done) {
+      var result = await reader.read();
+      if (result.done) {
+        break;
+      }
+      
+      buffer += decoder.decode(result.value, { stream: true });
+      var lines = buffer.split("\n");
+      buffer = lines.pop() || "";  // Keep incomplete line in buffer
+      
+      var eventType = "";
+      var eventData = "";
+      
+      for (var i = 0; i < lines.length; i++) {
+        var line = lines[i];
+        if (line.startsWith("event:")) {
+          eventType = line.substring(6).trim();
+        } else if (line.startsWith("data:")) {
+          eventData = line.substring(5).trim();
+        } else if (line === "" && eventType && eventData) {
+          // Empty line marks end of event
+          if (eventType === "append") {
+            if (ttftMs === null) {
+              ttftMs = Math.round(performance.now() - startTime);
+            }
+            try {
+              var data = JSON.parse(eventData);
+              var content = data.content || data.fragment || "";
+              if (typeof content === "object" && content.content) {
+                content = content.content;
+              }
+              reply += String(content);
+              if (onChunk) {
+                onChunk(reply);
+              }
+            } catch (e) {}
+          } else if (eventType === "done") {
+            done = true;
+            try {
+              var data = JSON.parse(eventData);
+              cachedTokens = data.cachedTokens || data.cached_tokens || 0;
+              promptTokens = data.promptTokens || data.prompt_tokens || 0;
+            } catch (e) {}
+          } else if (eventType === "error") {
+            done = true;
+            console.error("Stream error event:", eventData);
+          }
+          eventType = "";
+          eventData = "";
+        }
+      }
+    }
+  } finally {
+    clearTimeout(timeoutId);
+  }
+  
+  return {
+    reply: reply,
+    ttftMs: ttftMs || Math.round(performance.now() - startTime),
+    cachedTokens: cachedTokens,
+    promptTokens: promptTokens
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Dynamic Evaluation Logic
+// ---------------------------------------------------------------------------
+
+async function startDynamicEval() {
+  const startBtn = $("startDynamicEval");
+  const stopBtn = $("stopDynamicEval");
+  const statusEl = $("dynamicEvalStatus");
+  const resultsPanel = $("dynamicEvalResultsPanel");
+
+  if (startBtn) startBtn.disabled = true;
+  if (stopBtn) stopBtn.disabled = false;
+  if (resultsPanel) resultsPanel.hidden = true;
+
+  DynamicEvalState.isRunning = true;
+  DynamicEvalState.currentRound = 0;
+  DynamicEvalState.results = [];
+  DynamicEvalState.echoAgentToken = "";
+  DynamicEvalState.echoAgentSessionId = "";
+  DynamicEvalState.echoAgentContextSeq = 0;
+  DynamicEvalState.avgTtft = null;
+  DynamicEvalState.avgCachedTokens = null;
+  DynamicEvalState.newSessionCount = 0;
+
+  // Read configuration
+  const mode = $("dynamicEvalMode")?.value || "dynamic";
+  // In static mode with parsed data, use parsed values instead of input values
+  let numMemories, numQueries;
+  if (mode === "static" && DynamicEvalState.parsedMemories) {
+    numMemories = DynamicEvalState.parsedMemories.length;
+    numQueries = DynamicEvalState.parsedQueries ? DynamicEvalState.parsedQueries.length : numMemories;
+  } else {
+    numMemories = parseInt($("dynamicEvalNumMemories")?.value || "10", 10);
+    numQueries = parseInt($("dynamicEvalNumQueries")?.value || "5", 10);
+  }
+  const theme = $("dynamicEvalTheme")?.value || "";
+  const newSessionRatio = parseFloat($("dynamicEvalNewSessionRatio")?.value || "0.3");
+  const echoAgentUrl = $("dynamicEvalEchoAgentUrl")?.value || "http://127.0.0.1:31020";
+  const model = $("dynamicEvalModel")?.value || "deepseek-v4-flash";
+  const modelBaseUrl = $("dynamicEvalModelBaseUrl")?.value?.trim() || "";
+  const modelApiKey = $("dynamicEvalModelApiKey")?.value?.trim() || "";
+  const memoryEngineEndpoint = $("dynamicEvalMemoryEngine")?.value || "http://127.0.0.1:31030";
+  const username = $("dynamicEvalEchoAgentUsername")?.value?.trim() || "";
+  const password = $("dynamicEvalEchoAgentPassword")?.value || "";
+
+  if (!username || !password) {
+    toast("请在高级配置中填写 EchoAgent 用户名和密码");
+    if (startBtn) startBtn.disabled = false;
+    return;
+  }
+
+  DynamicEvalState.totalRounds = numQueries;
+
+  try {
+    // Step 1: Login to EchoAgent
+    updateStatus("正在登录 EchoAgent...");
+    const loginResult = await echoAgentLogin(echoAgentUrl, username, password);
+    DynamicEvalState.echoAgentToken = loginResult.csrfToken || "";
+    DynamicEvalState.echoAgentUser = loginResult.user || null;
+    updateStatus(`登录成功 (${loginResult.user?.username || username})`);
+
+    // Step 2: Create evaluator and generate background memories
+    // In static mode, use pre-parsed memories from dataset file
+    let config;
+    if (mode === "static" && DynamicEvalState.parsedMemories && DynamicEvalState.parsedMemories.length > 0) {
+      // Use pre-parsed memories from dataset
+      updateStatus("使用数据集中的背景记忆...");
+      config = {
+        mode: "static",
+        num_memories: DynamicEvalState.parsedMemories.length,
+        custom_scenario: DynamicEvalState.parsedMemories.map(m => m.text).join("\n"),
+        llm_config: {
+          model,
+          base_url: modelBaseUrl || undefined,
+          api_key: modelApiKey || undefined,
+        },
+      };
+    } else {
+      updateStatus("正在生成背景记忆...");
+      config = {
+        mode,
+        num_memories: numMemories,
+        theme,
+        llm_config: {
+          model,
+          base_url: modelBaseUrl || undefined,
+          api_key: modelApiKey || undefined,
+        },
+      };
+    }
+
+    const response = await fetch("/api/dynamic/generate_background_memories", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ config }),
+    });
+
+    if (!response.ok) {
+      const errData = await response.json().catch(() => ({}));
+      throw new Error(errData.error || `生成记忆失败: ${response.status}`);
+    }
+
+    const data = await response.json();
+    DynamicEvalState.evaluatorId = data.evaluator_id;
+    DynamicEvalState.memories = data.memories || [];
+    DynamicEvalState.theme = data.theme || "";
+
+    renderDynamicEvalFacts(DynamicEvalState.memories);
+    if (mode === "static" && DynamicEvalState.parsedMemories) {
+      updateStatus(`使用数据集的 ${DynamicEvalState.memories.length} 条背景记忆`);
+    } else {
+      updateStatus(`已生成 ${DynamicEvalState.memories.length} 条记忆，主题: ${DynamicEvalState.theme || "随机"}`);
+    }
+
+    // Step 2.5: Inject memories into EchoMem for retrieval
+    // Use dataset's inject_session_id if available (for reuse), otherwise generate new
+    // Use dataset's inject_user_id if available, otherwise use current EchoAgent user
+    const evalUserId = DynamicEvalState.injectUserId || DynamicEvalState.echoAgentUser?.id || "anonymous";
+    if (DynamicEvalState.memories.length > 0) {
+      updateStatus("正在注入记忆到 EchoMem...");
+      // Reuse session_id from dataset if available, otherwise generate new
+      const injectSessionId = DynamicEvalState.injectSessionId || `bg_memories_${Date.now()}`;
+      try {
+        const injectResponse = await fetch("/api/dynamic/inject_memories", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            echomem_url: memoryEngineEndpoint.replace(/:\d+$/, ":8010"),  // Use EchoMem direct port
+            agent_id: "dynamic_eval",
+            session_id: injectSessionId,
+            memories: DynamicEvalState.memories,
+            user_id: evalUserId,  // Use the same user as EchoAgent session
+          }),
+        });
+        const injectResult = await injectResponse.json();
+        if (injectResult.success) {
+          DynamicEvalState.echomemAuthKey = injectResult.auth_key;  // Save auth_key for later use
+          // Save inject_session_id and user_id for export
+          DynamicEvalState.injectSessionId = injectSessionId;
+          DynamicEvalState.injectUserId = evalUserId;
+          if (injectResult.skipped) {
+            updateStatus(`记忆已存在，跳过注入 (${injectResult.reason})`);
+          } else {
+            updateStatus(`已注入 ${injectResult.messages_added} 条记忆并完成索引，archive_id: ${injectResult.archive_id || 'N/A'}`);
+          }
+        } else {
+          console.warn("注入记忆失败:", injectResult.error);
+          updateStatus(`注入记忆失败: ${injectResult.error}`);
+        }
+      } catch (injectErr) {
+        console.warn("注入记忆异常:", injectErr);
+        updateStatus(`注入记忆异常: ${injectErr.message}`);
+      }
+    }
+
+    // Step 3: Run evaluation rounds
+    for (let round = 0; round < numQueries && DynamicEvalState.isRunning; round++) {
+      await runDynamicEvalRound(round, {
+        echoAgentUrl,
+        memoryEngineEndpoint,
+        newSessionRatio,
+      });
+    }
+
+    // Step 4: Show results
+    if (DynamicEvalState.isRunning) {
+      showDynamicEvalResults();
+      updateStatus("评测完成");
+    }
+  } catch (error) {
+    console.error("Dynamic eval error:", error);
+    updateStatus(`错误: ${error.message}`);
+    toast(`评测失败: ${error.message}`);
+  } finally {
+    DynamicEvalState.isRunning = false;
+    if (startBtn) startBtn.disabled = false;
+    if (stopBtn) stopBtn.disabled = true;
+  }
+}
+
+async function runDynamicEvalRound(roundIndex, options) {
+  const { echoAgentUrl, memoryEngineEndpoint, newSessionRatio } = options;
+
+  DynamicEvalState.currentRound = roundIndex + 1;
+  updateProgress();
+
+  // Determine if we need a new session
+  const needNewSession = roundIndex === 0 ||
+    (DynamicEvalState.results.length > 0 && Math.random() < newSessionRatio);
+
+  if (needNewSession || !DynamicEvalState.echoAgentSessionId) {
+    updateStatus(`正在创建新会话...`);
+    DynamicEvalState.echoAgentSessionId = await echoAgentCreateSession(
+      echoAgentUrl,
+      DynamicEvalState.echoAgentToken,
+      `eval-${DynamicEvalState.theme || "test"}-${roundIndex}`,
+      memoryEngineEndpoint
+    );
+    DynamicEvalState.echoAgentContextSeq = 0;
+    DynamicEvalState.newSessionCount++;
+    updateMetrics();
+  }
+
+  // Generate next query
+  updateStatus(`正在生成查询 (${roundIndex + 1}/${DynamicEvalState.totalRounds})...`);
+  const queryResponse = await fetch("/api/dynamic/generate_user_query", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      evaluator_id: DynamicEvalState.evaluatorId,
+      context: {
+        round_index: roundIndex,
+        previous_queries: DynamicEvalState.results.map((r) => r.query),
+        previous_replies: DynamicEvalState.results.map((r) => r.reply),
+        is_new_session: needNewSession,
+      },
+    }),
+  });
+
+  if (!queryResponse.ok) {
+    throw new Error(`生成查询失败: ${queryResponse.status}`);
+  }
+
+  const queryData = await queryResponse.json();
+  const query = queryData.query;
+  const groundFacts = queryData.ground_facts || [];
+  const complexity = queryData.complexity || "simple";
+  const newSessionHint = queryData.new_session_hint || false;
+
+  // Update current query display
+  updateCurrentRound(query, "", complexity, needNewSession);
+
+  // Start SSE listener BEFORE sending message to capture recall events
+  const memoryListener = startMemoryEventListener(echoAgentUrl, DynamicEvalState.echoAgentSessionId);
+  
+  // Wait for SSE connection to be ready before sending message
+  await memoryListener.ready;
+
+  // Send message to EchoAgent
+  updateStatus(`正在发送查询到 EchoAgent...`);
+  
+  // Read typing speed configuration
+  const typingSpeedMs = parseInt($("dynamicEvalTypingSpeed")?.value || "200", 10);
+  
+  // Simulate typing before sending message
+  if (typingSpeedMs > 0) {
+    // Update UI to show typing progress
+    const queryEl = $("dynamicEvalCurrentQuery");
+    const onTypingChar = function(currentText) {
+      if (queryEl) {
+        queryEl.textContent = currentText;
+        // Add a cursor effect
+        queryEl.innerHTML = currentText + '<span class="typing-cursor">|</span>';
+      }
+    };
+    
+    await simulateTyping(
+      echoAgentUrl,
+      DynamicEvalState.echoAgentSessionId,
+      query,
+      typingSpeedMs,
+      onTypingChar
+    );
+    
+    // Remove cursor after typing complete
+    if (queryEl) {
+      queryEl.textContent = query;
+    }
+  }
+  
+  const seq = await echoAgentSendMessage(
+    echoAgentUrl,
+    DynamicEvalState.echoAgentToken,
+    DynamicEvalState.echoAgentSessionId,
+    query
+  );
+
+  // Stream reply
+  updateStatus(`正在接收回复...`);
+  let replyResult;
+  try {
+    // onChunk callback to update UI in real-time
+    const onChunk = function(reply) {
+      const replyEl = $("dynamicEvalCurrentReply");
+      if (replyEl) replyEl.textContent = reply;
+    };
+    replyResult = await echoAgentStreamReply(
+      echoAgentUrl,
+      DynamicEvalState.echoAgentToken,
+      DynamicEvalState.echoAgentSessionId,
+      seq,
+      onChunk
+    );
+  } catch (e) {
+    replyResult = { reply: "", ttftMs: null, cachedTokens: 0, promptTokens: 0, error: e.message };
+  }
+
+  // Update reply display (final)
+  const replyEl = $("dynamicEvalCurrentReply");
+  if (replyEl) replyEl.textContent = replyResult.reply || "(无回复)";
+
+  // Stop SSE listener and collect recalled memories
+  updateStatus(`正在收集召回记忆...`);
+  memoryListener.stop();
+  const recalledMemories = memoryListener.getMemories();
+
+  // Evaluate response quality (call backend API)
+  updateStatus(`正在评估回复质量...`);
+  let qualityScore = null;
+  let qualityReason = "";
+  let factCoverageScore = null;
+  let accuracyScore = null;
+  let relevanceScore = null;
+  let recallQualityScore = null;
+  try {
+    const evalResponse = await fetch("/api/dynamic/evaluate_response", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        evaluator_id: DynamicEvalState.evaluatorId,
+        query: query,
+        reply: replyResult.reply || "",
+        ground_facts: groundFacts,
+        recalled_memories: recalledMemories,
+      }),
+    });
+    if (evalResponse.ok) {
+      const evalData = await evalResponse.json();
+      qualityScore = evalData.score;
+      qualityReason = evalData.reason || "";
+      factCoverageScore = evalData.fact_coverage_score;
+      accuracyScore = evalData.accuracy_score;
+      relevanceScore = evalData.relevance_score;
+      recallQualityScore = evalData.recall_quality_score;
+    }
+  } catch (e) {
+    console.warn("Quality evaluation failed:", e);
+  }
+
+  // Record result
+  const roundResult = {
+    round_id: `r${roundIndex}`,
+    session_id: DynamicEvalState.echoAgentSessionId,
+    query,
+    reply: replyResult.reply || "",
+    ttft_ms: replyResult.ttftMs,
+    cached_tokens: replyResult.cachedTokens || 0,
+    prompt_tokens: replyResult.promptTokens || 0,
+    ground_facts: groundFacts,
+    recalled_memories: recalledMemories,
+    quality_score: qualityScore,
+    fact_coverage_score: factCoverageScore,
+    accuracy_score: accuracyScore,
+    relevance_score: relevanceScore,
+    recall_quality_score: recallQualityScore,
+    quality_reason: qualityReason,
+    complexity,
+    is_new_session: needNewSession,
+    prefetch_committed: false,
+    error: replyResult.error || "",
+  };
+
+  DynamicEvalState.results.push(roundResult);
+  updateMetrics();
+}
+
+function updateStatus(text) {
+  const statusEl = $("dynamicEvalStatus");
+  if (statusEl) statusEl.textContent = text;
+}
+
+function updateProgress() {
+  const progressBar = $("dynamicEvalProgressBar");
+  const progressText = $("dynamicEvalProgressText");
+  const progressPct = $("dynamicEvalProgressPct");
+  const currentRoundEl = $("dynamicEvalCurrentRound");
+
+  const pct = Math.round((DynamicEvalState.currentRound / DynamicEvalState.totalRounds) * 100);
+
+  if (progressBar) progressBar.style.width = `${pct}%`;
+  if (progressText) progressText.textContent = `第 ${DynamicEvalState.currentRound}/${DynamicEvalState.totalRounds} 轮`;
+  if (progressPct) progressPct.textContent = `${pct}%`;
+  if (currentRoundEl) currentRoundEl.textContent = `${DynamicEvalState.currentRound}/${DynamicEvalState.totalRounds}`;
+}
+
+function updateCurrentRound(query, reply, complexity, isNewSession) {
+  const queryEl = $("dynamicEvalCurrentQuery");
+  const replyEl = $("dynamicEvalCurrentReply");
+  const complexityEl = $("dynamicEvalComplexity");
+  const isNewSessionEl = $("dynamicEvalIsNewSession");
+
+  if (queryEl) queryEl.textContent = query || "";
+  if (replyEl) replyEl.textContent = reply || "等待回复...";
+  if (complexityEl) complexityEl.textContent = complexity || "-";
+  if (isNewSessionEl) isNewSessionEl.textContent = isNewSession ? "新会话" : "同会话";
+}
+
+function updateMetrics() {
+  const avgTtftEl = $("dynamicEvalAvgTtft");
+  const avgCachedEl = $("dynamicEvalAvgCached");
+  const newSessionsEl = $("dynamicEvalNewSessions");
+
+  const results = DynamicEvalState.results;
+  const ttftValues = results.filter((r) => r.ttft_ms != null).map((r) => r.ttft_ms);
+  const cachedValues = results.filter((r) => r.cached_tokens > 0).map((r) => r.cached_tokens);
+
+  DynamicEvalState.avgTtft = ttftValues.length > 0 ? Math.round(ttftValues.reduce((a, b) => a + b, 0) / ttftValues.length) : null;
+  DynamicEvalState.avgCachedTokens = cachedValues.length > 0 ? Math.round(cachedValues.reduce((a, b) => a + b, 0) / cachedValues.length) : null;
+
+  if (avgTtftEl) avgTtftEl.textContent = DynamicEvalState.avgTtft != null ? `${DynamicEvalState.avgTtft}ms` : "-";
+  if (avgCachedEl) avgCachedEl.textContent = DynamicEvalState.avgCachedTokens != null ? DynamicEvalState.avgCachedTokens : "-";
+  if (newSessionsEl) newSessionsEl.textContent = DynamicEvalState.newSessionCount;
+}
+
+function renderDynamicEvalFacts(memories) {
+  const factsList = $("dynamicEvalFactsList");
+  if (!factsList) return;
+
+  if (!memories || memories.length === 0) {
+    factsList.innerHTML = '<p class="dynamic-eval-empty">没有生成记忆</p>';
+    return;
+  }
+
+  factsList.innerHTML = memories.map((m, i) => `
+    <div class="dynamic-eval-fact-item">
+      <span class="dynamic-eval-fact-id">${m.id || `f${i + 1}`}</span>
+      <p class="dynamic-eval-fact-text">${escapeHtml(m.text || "")}</p>
+    </div>
+  `).join("");
+}
+
+function showDynamicEvalResults() {
+  const resultsPanel = $("dynamicEvalResultsPanel");
+  if (resultsPanel) resultsPanel.hidden = false;
+
+  // Calculate average quality score
+  const qualityScores = DynamicEvalState.results.filter((r) => r.quality_score != null).map((r) => r.quality_score);
+  const avgQuality = qualityScores.length > 0 ? Math.round(qualityScores.reduce((a, b) => a + b, 0) / qualityScores.length) : null;
+
+  // Count total recalled memories
+  const totalRecalled = DynamicEvalState.results.reduce((sum, r) => sum + (r.recalled_memories?.length || 0), 0);
+
+  // Calculate average individual scores
+  const avgFactCoverage = qualityScores.length > 0 ? Math.round(qualityScores.reduce((a, b) => a + (DynamicEvalState.results[qualityScores.indexOf(b)]?.fact_coverage_score || 0), 0) / qualityScores.length) : null;
+  const avgAccuracy = qualityScores.length > 0 ? Math.round(qualityScores.reduce((a, b) => a + (DynamicEvalState.results[qualityScores.indexOf(b)]?.accuracy_score || 0), 0) / qualityScores.length) : null;
+  const avgRelevance = qualityScores.length > 0 ? Math.round(qualityScores.reduce((a, b) => a + (DynamicEvalState.results[qualityScores.indexOf(b)]?.relevance_score || 0), 0) / qualityScores.length) : null;
+  const avgRecallQuality = qualityScores.length > 0 ? Math.round(qualityScores.reduce((a, b) => a + (DynamicEvalState.results[qualityScores.indexOf(b)]?.recall_quality_score || 0), 0) / qualityScores.length) : null;
+
+  const summaryEl = $("dynamicEvalResultsSummary");
+  if (summaryEl) {
+    summaryEl.innerHTML = `
+      <div class="dynamic-eval-results-card">
+        <div class="dynamic-eval-results-card-value">${DynamicEvalState.results.length}</div>
+        <div class="dynamic-eval-results-card-label">总查询数</div>
+      </div>
+      <div class="dynamic-eval-results-card">
+        <div class="dynamic-eval-results-card-value">${DynamicEvalState.avgTtft != null ? `${DynamicEvalState.avgTtft}ms` : "-"}</div>
+        <div class="dynamic-eval-results-card-label">平均 TTFT</div>
+      </div>
+      <div class="dynamic-eval-results-card">
+        <div class="dynamic-eval-results-card-value">${DynamicEvalState.avgCachedTokens != null ? DynamicEvalState.avgCachedTokens : "-"}</div>
+        <div class="dynamic-eval-results-card-label">平均缓存 Token</div>
+      </div>
+      <div class="dynamic-eval-results-card">
+        <div class="dynamic-eval-results-card-value">${avgQuality != null ? `${avgQuality}/100` : "-"}</div>
+        <div class="dynamic-eval-results-card-label">平均质量评分</div>
+      </div>
+      <div class="dynamic-eval-results-card">
+        <div class="dynamic-eval-results-card-value">${avgFactCoverage != null ? `${avgFactCoverage}/40` : "0/40"}</div>
+        <div class="dynamic-eval-results-card-label">平均事实覆盖</div>
+      </div>
+      <div class="dynamic-eval-results-card">
+        <div class="dynamic-eval-results-card-value">${avgAccuracy != null ? `${avgAccuracy}/30` : "0/30"}</div>
+        <div class="dynamic-eval-results-card-label">平均准确性</div>
+      </div>
+      <div class="dynamic-eval-results-card">
+        <div class="dynamic-eval-results-card-value">${totalRecalled}</div>
+        <div class="dynamic-eval-results-card-label">召回记忆总数</div>
+      </div>
+      <div class="dynamic-eval-results-card">
+        <div class="dynamic-eval-results-card-value">${DynamicEvalState.newSessionCount}</div>
+        <div class="dynamic-eval-results-card-label">新会话数</div>
+      </div>
+    `;
+  }
+
+  const tableEl = $("dynamicEvalResultsTable");
+  if (tableEl) {
+    // Build expandable detail rows
+    const detailRows = DynamicEvalState.results.map((r, idx) => {
+      // Build recalled memories list
+      let memoriesHtml = "<em>无召回记录</em>";
+      if (r.recalled_memories && r.recalled_memories.length > 0) {
+        memoriesHtml = r.recalled_memories.map((m, mi) => {
+          const memText = m.text || m.query || JSON.stringify(m).substring(0, 200);
+          const memScore = m.score != null ? ` (score: ${m.score})` : "";
+          return `<div class="dynamic-eval-memory-item">
+            <span class="dynamic-eval-memory-index">#${mi + 1}</span>
+            <span class="dynamic-eval-memory-text">${escapeHtml(memText)}${memScore}</span>
+          </div>`;
+        }).join("");
+      }
+
+      // Build ground facts list
+      let factsHtml = "<em>无预设事实</em>";
+      if (r.ground_facts && r.ground_facts.length > 0) {
+        factsHtml = r.ground_facts.map((f, fi) => {
+          const factText = typeof f === "string" ? f : (f.text || f.fact || JSON.stringify(f));
+          return `<span class="dynamic-eval-fact-tag">${escapeHtml(factText.substring(0, 50))}${factText.length > 50 ? "..." : ""}</span>`;
+        }).join(" ");
+      }
+
+      return `
+        <div class="dynamic-eval-round-card" data-round="${idx}">
+          <div class="dynamic-eval-round-header" onclick="toggleDynamicEvalRoundDetail(${idx})">
+            <span class="dynamic-eval-round-id">${r.round_id}</span>
+            <span class="dynamic-eval-round-query">${escapeHtml(r.query.substring(0, 50))}${r.query.length > 50 ? "..." : ""}</span>
+            <span class="dynamic-eval-round-metrics">
+              TTFT: ${r.ttft_ms != null ? `${r.ttft_ms}ms` : "-"} | 
+              缓存: ${r.cached_tokens != null ? r.cached_tokens : "0"} | 
+              质量: ${r.quality_score != null ? `${r.quality_score}/100` : "-"} | 
+              召回: ${r.recalled_memories?.length || 0}
+            </span>
+            <span class="dynamic-eval-round-session ${r.is_new_session ? "new-session" : ""}" title="${r.session_id}">
+              ${r.is_new_session ? "🆕 " : ""}${r.session_id?.substring(0, 8) || "-"}
+            </span>
+            <span class="dynamic-eval-round-toggle" id="toggle-${idx}">展开</span>
+          </div>
+          <div class="dynamic-eval-round-detail" id="detail-${idx}" style="display: none;">
+            <div class="dynamic-eval-detail-section">
+              <div class="dynamic-eval-detail-label">用户查询</div>
+              <div class="dynamic-eval-detail-content">${escapeHtml(r.query)}</div>
+            </div>
+            <div class="dynamic-eval-detail-section">
+              <div class="dynamic-eval-detail-label">AI 回复</div>
+              <div class="dynamic-eval-detail-content">${escapeHtml(r.reply) || "(无回复)"}</div>
+            </div>
+            <div class="dynamic-eval-detail-section">
+              <div class="dynamic-eval-detail-label">预设事实 (Ground Facts)</div>
+              <div class="dynamic-eval-detail-content dynamic-eval-facts">${factsHtml}</div>
+            </div>
+            <div class="dynamic-eval-detail-section">
+              <div class="dynamic-eval-detail-label">召回的记忆 (${r.recalled_memories?.length || 0} 条)</div>
+              <div class="dynamic-eval-detail-content dynamic-eval-memories">${memoriesHtml}</div>
+            </div>
+            <div class="dynamic-eval-detail-section">
+              <div class="dynamic-eval-detail-label">质量评估</div>
+              <div class="dynamic-eval-detail-content">
+                <div class="quality-score-summary">
+                  总分: <strong>${r.quality_score != null ? `${r.quality_score}/100` : "-"}</strong>
+                  ${r.quality_reason ? `<br/>${escapeHtml(r.quality_reason)}` : ""}
+                </div>
+                <div class="quality-score-breakdown">
+                  <span class="score-item">事实覆盖: <strong>${r.fact_coverage_score != null ? `${r.fact_coverage_score}/40` : "0/40"}</strong></span>
+                  <span class="score-item">准确性: <strong>${r.accuracy_score != null ? `${r.accuracy_score}/30` : "0/30"}</strong></span>
+                  <span class="score-item">相关性: <strong>${r.relevance_score != null ? `${r.relevance_score}/20` : "0/20"}</strong></span>
+                  <span class="score-item">召回质量: <strong>${r.recall_quality_score != null ? `${r.recall_quality_score}/10` : "0/10"}</strong></span>
+                </div>
+              </div>
+            </div>
+            <div class="dynamic-eval-detail-section">
+              <div class="dynamic-eval-detail-label">性能指标</div>
+              <div class="dynamic-eval-detail-content">
+                TTFT: ${r.ttft_ms != null ? `${r.ttft_ms}ms` : "-"} | 
+                缓存Token: ${r.cached_tokens || 0} | 
+                PromptToken: ${r.prompt_tokens || "-"}
+              </div>
+            </div>
+            <div class="dynamic-eval-detail-section">
+              <div class="dynamic-eval-detail-label">会话信息</div>
+              <div class="dynamic-eval-detail-content">
+                <span class="session-id-badge" title="${r.session_id}">${r.session_id || "-"}</span>
+                ${r.is_new_session ? '<span class="new-session-badge">新会话</span>' : '<span class="same-session-badge">复用会话</span>'}
+              </div>
+            </div>
+          </div>
+        </div>
+      `;
+    }).join("");
+
+    tableEl.innerHTML = `<div class="dynamic-eval-rounds">${detailRows}</div>`;
+  }
+}
+
+function toggleDynamicEvalRoundDetail(idx) {
+  const detailEl = $("detail-" + idx);
+  const toggleEl = $("toggle-" + idx);
+  if (detailEl && toggleEl) {
+    if (detailEl.style.display === "none") {
+      detailEl.style.display = "block";
+      toggleEl.textContent = "收起";
+    } else {
+      detailEl.style.display = "none";
+      toggleEl.textContent = "展开";
+    }
+  }
+}
+
+function stopDynamicEval() {
+  DynamicEvalState.isRunning = false;
+  updateStatus("已停止");
+}
+
+function exportDynamicEvalResults() {
+  if (!DynamicEvalState.results || DynamicEvalState.results.length === 0) {
+    toast("没有可导出的结果");
+    return;
+  }
+
+  const timestamp = new Date().toISOString().slice(0, 19).replace(/[:-]/g, "");
+
+  // 1. Export Quality Assessment Report
+  const qualityReport = {
+    exported_at: new Date().toISOString(),
+    theme: DynamicEvalState.theme,
+    total_queries: DynamicEvalState.results.length,
+    avg_ttft_ms: DynamicEvalState.avgTtft,
+    avg_cached_tokens: DynamicEvalState.avgCachedTokens,
+    new_session_count: DynamicEvalState.newSessionCount,
+    summary: {
+      avg_quality_score: DynamicEvalState.results.reduce((a, b) => a + (b.quality_score || 0), 0) / DynamicEvalState.results.length,
+      avg_fact_coverage: DynamicEvalState.results.reduce((a, b) => a + (b.fact_coverage_score || 0), 0) / DynamicEvalState.results.length,
+      avg_accuracy: DynamicEvalState.results.reduce((a, b) => a + (b.accuracy_score || 0), 0) / DynamicEvalState.results.length,
+      avg_relevance: DynamicEvalState.results.reduce((a, b) => a + (b.relevance_score || 0), 0) / DynamicEvalState.results.length,
+      avg_recall_quality: DynamicEvalState.results.reduce((a, b) => a + (b.recall_quality_score || 0), 0) / DynamicEvalState.results.length,
+      total_recalled_memories: DynamicEvalState.results.reduce((sum, r) => sum + (r.recalled_memories?.length || 0), 0),
+    },
+    results: DynamicEvalState.results.map((r) => ({
+      round_id: r.round_id,
+      query: r.query,
+      reply: r.reply,
+      session_id: r.session_id,
+      is_new_session: r.is_new_session,
+      quality_score: r.quality_score,
+      fact_coverage_score: r.fact_coverage_score,
+      accuracy_score: r.accuracy_score,
+      relevance_score: r.relevance_score,
+      recall_quality_score: r.recall_quality_score,
+      quality_reason: r.quality_reason,
+      ttft_ms: r.ttft_ms,
+      cached_tokens: r.cached_tokens,
+      prompt_tokens: r.prompt_tokens,
+      recalled_memories_count: r.recalled_memories?.length || 0,
+      ground_facts_count: r.ground_facts?.length || 0,
+    })),
+  };
+
+  // 2. Export LoCoMo Format Dataset
+  // Build conversation structure grouped by session
+  const sessions = {};
+  const backgroundMemories = [];
+
+  // Build a lookup map from memory ID to text
+  const memoryLookup = {};
+  if (DynamicEvalState.memories && Array.isArray(DynamicEvalState.memories)) {
+    DynamicEvalState.memories.forEach((m) => {
+      if (m.id) {
+        memoryLookup[m.id] = m.text || "";
+      }
+    });
+  }
+
+  // Extract background memories from results - look up actual text by ID
+  DynamicEvalState.results.forEach((r, idx) => {
+    if (r.ground_facts) {
+      r.ground_facts.forEach((f, fidx) => {
+        // ground_facts may be IDs like "f1", "f2" - look up actual text
+        let factText = "";
+        if (typeof f === "string") {
+          // It's an ID, look up the text
+          factText = memoryLookup[f] || f;
+        } else if (typeof f === "object") {
+          factText = f.text || f.fact || JSON.stringify(f);
+        }
+        
+        if (factText && factText.length > 2) {
+          backgroundMemories.push({
+            id: typeof f === "string" ? f : `f${backgroundMemories.length + 1}`,
+            text: factText,
+            source_round: idx,
+          });
+        }
+      });
+    }
+  });
+
+  // Build conversation sessions
+  DynamicEvalState.results.forEach((r, idx) => {
+    const sessionId = r.session_id || `session_${idx}`;
+    if (!sessions[sessionId]) {
+      sessions[sessionId] = {
+        session_id: sessionId,
+        turns: [],
+        is_new: r.is_new_session,
+      };
+    }
+    sessions[sessionId].turns.push({
+      round_id: r.round_id,
+      speaker: "user",
+      text: r.query,
+      timestamp: r.timestamp,
+    });
+    if (r.reply) {
+      sessions[sessionId].turns.push({
+        round_id: r.round_id,
+        speaker: "assistant",
+        text: r.reply,
+        recalled_memories: r.recalled_memories || [],
+        quality_score: r.quality_score,
+      });
+    }
+  });
+
+  const locomoDataset = {
+    exported_at: new Date().toISOString(),
+    theme: DynamicEvalState.theme,
+    // Save inject session and user for reuse (skip re-injection when importing)
+    inject_session_id: DynamicEvalState.injectSessionId || null,
+    inject_user_id: DynamicEvalState.injectUserId || null,
+    background_memories: backgroundMemories,
+    // Save queries for static mode replay
+    dataset_queries: DynamicEvalState.parsedQueries || null,
+    samples: [{
+      sample_id: `dynamic_eval_${timestamp}`,
+      conversation: sessions,
+      metadata: {
+        total_rounds: DynamicEvalState.results.length,
+        new_session_count: DynamicEvalState.newSessionCount,
+        avg_quality_score: qualityReport.summary.avg_quality_score,
+      },
+    }],
+  };
+
+  // Download both files
+  const reportBlob = new Blob([JSON.stringify(qualityReport, null, 2)], { type: "application/json" });
+  const reportUrl = URL.createObjectURL(reportBlob);
+  const reportLink = document.createElement("a");
+  reportLink.href = reportUrl;
+  reportLink.download = `quality_report_${timestamp}.json`;
+  document.body.appendChild(reportLink);
+  reportLink.click();
+  document.body.removeChild(reportLink);
+  URL.revokeObjectURL(reportUrl);
+
+  const datasetBlob = new Blob([JSON.stringify(locomoDataset, null, 2)], { type: "application/json" });
+  const datasetUrl = URL.createObjectURL(datasetBlob);
+  const datasetLink = document.createElement("a");
+  datasetLink.href = datasetUrl;
+  datasetLink.download = `locomo_dataset_${timestamp}.json`;
+  document.body.appendChild(datasetLink);
+  datasetLink.click();
+  document.body.removeChild(datasetLink);
+  URL.revokeObjectURL(datasetUrl);
+
+  toast("已导出质量评估报告和LoCoMo格式数据集");
+}
+
+// Register view handler
+state.viewHandlers = state.viewHandlers || {};
+state.viewHandlers.dynamicEvalView = () => {
+  initDynamicEvalView();
+};
 
 renderSidebarNavigation();
 bind();

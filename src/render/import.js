@@ -3,6 +3,7 @@ import { buildImportProgressModel, findLatestImportOnlyRun } from "../benchmark-
 import { renderLocomoImportConfig, renderLocomoImportProgress } from "./import-locomo.js";
 import { getActiveHotpotImportTask, renderHotpotImportConfig } from "./import-hotpotqa.js";
 import { getActiveLongMemEvalImportTask, renderLongMemEvalImportConfig } from "./import-longmemeval.js";
+import { renderEchoAgentLiveImportConfig } from "./import-echoagent.js";
 
 export function createImportRenderers({
   $,
@@ -60,6 +61,11 @@ export function createImportRenderers({
       firstValue,
       tasksForBenchmark,
     }),
+    echoagent_live: () => renderEchoAgentLiveImportConfig({
+      currentAccountConfig,
+      escapeHtml,
+      firstValue,
+    }),
   };
   const benchmarkImportProgress = {
     locomo: (tasks) => ({
@@ -73,6 +79,10 @@ export function createImportRenderers({
     longmemeval: () => ({
       importTask: getActiveLongMemEvalImportTask(tasksForBenchmark),
       importRun: latestImportRun("longmemeval"),
+    }),
+    echoagent_live: (tasks) => ({
+      importTask: tasks.find((task) => task.kind === "echoagent_live") || null,
+      importRun: null,
     }),
   };
 

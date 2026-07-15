@@ -185,4 +185,13 @@ def build_single_command(
         )
         return task_spec.command, task_spec.output_file, task_spec.name
 
+    if kind == "echoagent_live":
+        task_spec = task_spec_service.build_echoagent_live_task(
+            payload,
+            run_dir,
+            context.root,
+            context.safe_path,
+        )
+        return task_spec.command, task_spec.output_file, task_spec.name
+
     raise ValueError(f"unknown task kind: {kind}")

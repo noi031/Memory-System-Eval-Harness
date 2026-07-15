@@ -35,6 +35,7 @@ DIRECT_COMMAND_KINDS = {
     "openviking_qa_retry_missing",
     "judge",
     "stats",
+    "echoagent_live",
 }
 
 WORKSPACE_SCOPED_TASK_KINDS = ECHOMEMORY_TASK_KINDS | {

@@ -1,0 +1,48 @@
+# 静态评测配置模板
+# 从已有数据集加载背景记忆和用户查询
+
+# 评测模式: static | dynamic
+mode: static
+
+# 数据集路径 (支持 LoCoMo, LongMemEval 等格式)
+dataset_path: ""
+
+# 要加载的记忆数量 (从数据集中提取)
+num_memories: 10
+
+# 主题 (用于日志和报告)
+theme: ""
+
+# 每次测试的查询轮数
+queries_per_test: 5
+
+# 新会话概率 (0.0-1.0，用于测试跨会话召回)
+new_session_ratio: 0.3
+
+# LLM 配置 (用于精度评估)
+llm_config:
+  model: deepseek-v4-flash
+  base_url: ""
+  api_key: ""
+  temperature: 0.3
+  timeout: 60
+
+# EchoAgent 配置
+echoagent:
+  url: http://127.0.0.1:31020
+  username: test_user
+  password: test_password
+  memory_engine_endpoint: http://127.0.0.1:31030
+
+# EchoMem 配置
+echomem:
+  url: http://127.0.0.1:8010
+
+# 输出配置
+output:
+  out_dir: runs/dynamic_eval/static
+  files:
+    - full_results.json
+    - accuracy.json
+    - summary.json
+    - results.csv

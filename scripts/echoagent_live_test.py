@@ -33,6 +33,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from memory import llm
+from memory import dynamic_evaluator
 
 # Import new metrics modules
 try:
@@ -250,93 +251,6 @@ class EchoAgentClient:
             return self._get(f"/v1/sessions/{session_id}/primary-model/last-request?contextPath={_encode_context_path(context_path)}")
         except Exception:
             return {}
-
-
-# ---------------------------------------------------------------------------
-# Scenario generation
-# ---------------------------------------------------------------------------
-
-SCENARIO_PROMPT_PATH = ROOT / "configs" / "echoagent_live_test" / "scenario_prompt.txt"
-
-
-THEME_POOL = [
-    "职场与项目管理", "旅行规划与出行", "健康管理与就医", "学习与考试备考",
-    "社交活动与聚会", "购物与消费决策", "烹饪与饮食计划", "运动与健身安排",
-    "宠物养护与训练", "家庭财务与投资", "子女教育与成长", "房屋维修与改造",
-    "汽车保养与驾驶", "园艺与种植", "摄影与创作", "志愿活动与社区服务",
-]
-
-
-def load_scenario_prompt(theme_hint: str = "") -> str:
-    if SCENARIO_PROMPT_PATH.exists():
-        text = SCENARIO_PROMPT_PATH.read_text(encoding="utf-8")
-        if theme_hint:
-            text = text.replace("{theme_hint}", theme_hint)
-        return text
-    return "Generate a daily-life test scenario with facts and queries for memory recall evaluation. Output JSON."
-
-
-def generate_scenario(
-    model: str = "deepseek-v4-flash",
-    base_url: str = "",
-    api_key: str = "",
-    max_retries: int = 3,
-) -> dict[str, Any]:
-    """Call an LLM to generate a test scenario, with retries for timeout."""
-    theme_hint = random.choice(THEME_POOL)
-    prompt = load_scenario_prompt(theme_hint)
-    messages = [
-        {"role": "system", "content": "You are a test scenario generator. Output only valid JSON."},
-        {"role": "user", "content": prompt},
-    ]
-    last_error: Exception | None = None
-    for attempt in range(1, max_retries + 1):
-        try:
-            result = llm.openai_chat(
-                messages,
-                model=model,
-                temperature=0.9,
-                api_key=api_key or None,
-                base_url=base_url or None,
-                timeout=180,
-            )
-            if "error" in result:
-                raise RuntimeError(f"Scenario generation failed: {result['error']}")
-            text = str(result.get("answer") or "")
-            json_match = re.search(r"\{[\s\S]*\}", text)
-            if not json_match:
-                raise RuntimeError(f"Scenario generation returned no JSON: {text[:200]}")
-            return json.loads(json_match.group())
-        except Exception as exc:
-            last_error = exc
-            if attempt < max_retries:
-                time.sleep(5 * attempt)
-    raise last_error  # type: ignore[misc]
-
-
-def build_fact_injection_queries(scenario: dict[str, Any]) -> list[dict[str, Any]]:
-    """Build queries that first inject facts, then ask about them.
-
-    The first few rounds tell the agent the facts naturally.
-    Later rounds ask questions that require recalling those facts.
-    """
-    facts = scenario.get("facts") or []
-    rounds = list(scenario.get("rounds") or [])
-    if not rounds:
-        return []
-    injection_rounds: list[dict[str, Any]] = []
-    for fact in facts[:3]:
-        injection_rounds.append({
-            "id": f"inject-{fact.get('id', uuid.uuid4().hex[:4])}",
-            "query": f"我想告诉你一件事：{fact.get('text', '')}",
-            "ground_facts": [fact.get("id", "")],
-            "new_session": False,
-            "complexity": "simple",
-            "is_injection": True,
-        })
-    for r in rounds:
-        r.setdefault("is_injection", False)
-    return injection_rounds + rounds
 
 
 # ---------------------------------------------------------------------------
@@ -906,29 +820,28 @@ def run_test(args: argparse.Namespace) -> None:
     context_path = "/"
 
     for batch_idx in range(args.num_batches):
-        log(f"[batch {batch_idx + 1}/{args.num_batches}] Generating scenario...")
-        try:
-            scenario = generate_scenario(
-                model=args.scenario_model,
-                base_url=args.scenario_base_url,
-                api_key=args.scenario_api_key,
-            )
-        except Exception as exc:
-            log(f"Scenario generation failed: {exc}. Using fallback.")
-            scenario = {
-                "theme": f"fallback-theme-{batch_idx}",
-                "facts": [{"id": "f1", "text": f"测试事实 {batch_idx}", "length_hint": "short"}],
-                "rounds": [
-                    {"id": "r1", "query": f"请记住：测试事实 {batch_idx}", "ground_facts": ["f1"], "new_session": False, "complexity": "simple"},
-                    {"id": "r2", "query": "我刚才告诉你的测试事实是什么？", "ground_facts": ["f1"], "new_session": True, "complexity": "simple"},
-                ],
-            }
+        log(f"[batch {batch_idx + 1}/{args.num_batches}] Creating evaluator...")
 
-        rounds = build_fact_injection_queries(scenario)
-        log(f"[batch {batch_idx + 1}] theme={scenario.get('theme', '?')} rounds={len(rounds)}")
+        # Use MemoryDynamicEvaluator for generating memories and queries
+        evaluator_config = {
+            "mode": "dynamic",
+            "num_memories": args.queries_per_batch // 2,
+            "custom_scenario": args.custom_scenario,
+            "llm_config": {
+                "model": args.scenario_model,
+                "base_url": args.scenario_base_url,
+                "api_key": args.scenario_api_key,
+            },
+        }
+        evaluator = dynamic_evaluator.MemoryDynamicEvaluator(evaluator_config)
+
+        # Generate background memories
+        memories_result = evaluator.generate_background_memories()
+        memories = memories_result.get("memories", [])
+        log(f"[batch {batch_idx + 1}] theme={evaluator.theme} memories={len(memories)}")
 
         # Save fact texts for quality evaluation
-        for fact in scenario.get("facts") or []:
+        for fact in memories:
             fid = fact.get("id", "")
             ftext = fact.get("text", "")
             if fid and ftext:
@@ -936,23 +849,41 @@ def run_test(args: argparse.Namespace) -> None:
 
         session_id = ""
         session_count = 0
-        for round_idx, round_data in enumerate(rounds):
-            if round_idx >= args.queries_per_batch + 3:
-                break
+        previous_queries: list[str] = []
+        previous_replies: list[str] = []
+
+        for round_idx in range(args.queries_per_batch):
+            # Generate next query using the evaluator
+            query_result = evaluator.generate_next_query({
+                "round_index": round_idx,
+                "previous_queries": previous_queries,
+                "previous_replies": previous_replies,
+                "is_new_session": session_id == "",
+            })
+
+            query = query_result.get("query", "")
+            if not query:
+                continue
+
+            # Build round_data from query_result
+            round_data = {
+                "id": f"r{round_idx}",
+                "query": query,
+                "ground_facts": query_result.get("ground_facts", []),
+                "new_session": query_result.get("new_session_hint", False),
+                "complexity": query_result.get("complexity", "simple"),
+                "is_injection": False,
+            }
 
             # Decide whether to open a new session for cross-session recall testing.
-            # - First round always needs a session.
-            # - Injection rounds stay in the current session (to feed facts first).
-            # - For query rounds: with probability new_session_ratio, open a fresh
-            #   session and keep chatting there — this tests cross-session memory recall.
             need_new = not session_id
-            if not need_new and not round_data.get("is_injection"):
+            if not need_new and round_data.get("new_session"):
                 if random.random() < args.new_session_ratio:
                     need_new = True
             if need_new:
                 session_count += 1
                 session_id = client.create_session(
-                    title=f"test-{scenario.get('theme', 'batch')}-{batch_idx}-s{session_count}",
+                    title=f"test-{evaluator.theme}-{batch_idx}-s{session_count}",
                     memory_engine_endpoint=args.memory_engine_endpoint,
                 )
                 session_index_map[session_id] = next_session_index
@@ -965,7 +896,7 @@ def run_test(args: argparse.Namespace) -> None:
             if not query:
                 continue
 
-            log(f"  [{round_idx + 1}/{len(rounds)}] query={query[:60]}...")
+            log(f"  [{round_idx + 1}/{args.queries_per_batch}] query={query[:60]}...")
 
             client_turn_id = ""
             prefetch_committed = False
@@ -1047,6 +978,9 @@ def run_test(args: argparse.Namespace) -> None:
                 session_conversations[session_id].append({"speaker": "用户", "dia_id": dia_id, "text": query})
                 session_conversations[session_id].append({"speaker": "助手", "dia_id": f"D{session_idx}:{turn_idx + 1}", "text": metrics.get("reply", "")})
                 session_turn_counters[session_id] = turn_idx + 1
+            # Update history for next query generation
+            previous_queries.append(query)
+            previous_replies.append(metrics.get("reply", ""))
             log(f"    ttft={metrics['ttft_ms']}ms cached={metrics['cached_tokens']} prompt={metrics['prompt_tokens']} reply_len={metrics['reply_length']}")
 
     summary = compute_summary(all_rounds, config)
@@ -1238,6 +1172,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--dataset-sample", default="all", help="Dataset sample filter: all / sample_id / index number")
     parser.add_argument("--dataset-limit", type=int, default=0, help="Max QA questions to replay, 0=all")
     parser.add_argument("--save-dataset", default="", help="Save generated conversations as locomo-format dataset to this path (e.g. dataset/echoagent_gen_001.json)")
+    parser.add_argument("--custom-scenario", default="", help="Custom scenario text. If provided, skip LLM generation and use this scenario directly")
     
     # New options for runtime/accuracy metrics separation
     parser.add_argument("--collect-runtime-metrics", action="store_true", default=True, help="Collect runtime metrics from Prometheus endpoints")

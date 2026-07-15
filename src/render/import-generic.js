@@ -9,6 +9,12 @@ export function compactImportRow(label, controlHtml, escapeHtml) {
   `;
 }
 
+export function compactImportHeader(label, escapeHtml) {
+  return `
+    <div class="wb-compact-header">${escapeHtml(label)}</div>
+  `;
+}
+
 export function renderCompactImportConfig({
   escapeHtml,
   rows = [],
@@ -16,15 +22,21 @@ export function renderCompactImportConfig({
   primaryLabel = "开始注入",
   stopLabel = "停止任务",
 }) {
+  const renderedRows = rows.map((row) => {
+    if (row.isHeader) {
+      return compactImportHeader(row.label, escapeHtml);
+    }
+    return row;
+  });
   const controls = showActions
     ? actionButtons([
-      { label: primaryLabel, tone: "primary", action: "run-primary" },
-      { label: stopLabel, tone: "danger-outline", action: "stop-tasks" },
-    ], escapeHtml)
+        { label: primaryLabel, tone: "primary", action: "run-primary" },
+        { label: stopLabel, tone: "danger-outline", action: "stop-tasks" },
+      ], escapeHtml)
     : "";
   return `
     <div class="wb-compact-form">
-      ${rows.join("")}
+      ${renderedRows.join("")}
       ${controls ? `<div class="wb-compact-actions">${controls}</div>` : ""}
     </div>
   `;

@@ -1,6 +1,7 @@
 import { createHotpotQaActions } from "./hotpotqa.js";
 import { createLongMemEvalActions } from "./longmemeval.js";
 import { createLocomoActions } from "./locomo.js";
+import { createEchoAgentLiveActions } from "./echoagent.js";
 import { createReportActions } from "./report.js";
 import { createSystemActions } from "./system.js";
 import { summarizeBenchmarkRun } from "../run-metrics.js";
@@ -27,6 +28,7 @@ export function createWorkflowActions(deps) {
   const locomo = createLocomoActions(deps);
   const hotpotqa = createHotpotQaActions(deps);
   const longmemeval = createLongMemEvalActions(deps);
+  const echoagent_live = createEchoAgentLiveActions(deps);
   const report = createReportActions(deps);
   const system = createSystemActions(deps);
   const benchmarkWorkflows = {
@@ -70,6 +72,13 @@ export function createWorkflowActions(deps) {
         if (!preflight?.ok) throw new Error("当前没有可查看的 LongMemEval 结果");
         return {stage: "report"};
       },
+    },
+    echoagent_live: {
+      startImport: echoagent_live.startImport,
+      startQa: echoagent_live.startQa,
+      preflightQa: echoagent_live.preflightQa,
+      preflightJudge: echoagent_live.preflightJudge,
+      runJudge: echoagent_live.runJudge,
     },
   };
 

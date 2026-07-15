@@ -239,6 +239,21 @@ export function createFormReaders({ $, queryAll, currentBenchmark, currentWorksp
     };
   }
 
+  function readEchoAgentLiveImportForm() {
+    return {
+      echoagent_url: readText("wbEchoAgentUrl", "http://127.0.0.1:31020"),
+      echomem_url: readText("wbEchoMemUrl", "http://127.0.0.1:8010"),
+      username: readText("wbEchoAgentUsername", "test_user"),
+      password: readText("wbEchoAgentPassword", "test_password"),
+      num_batches: Math.max(1, readNumber("wbNumBatches", 3)),
+      queries_per_batch: Math.max(1, readNumber("wbQueriesPerBatch", 5)),
+      custom_scenario: readText("wbCustomScenario", ""),
+      scenario_model: readText("wbScenarioModel", "deepseek-v4-flash"),
+      scenario_base_url: readText("wbScenarioBaseUrl", ""),
+      scenario_api_key: readText("wbScenarioApiKey", ""),
+    };
+  }
+
   function readQuestionPreviewScope(fallback = {}) {
     const benchmarkId = String(currentBenchmark()?.id || "").trim().toLowerCase();
     const nextSample = benchmarkId === "locomo"
@@ -252,6 +267,7 @@ export function createFormReaders({ $, queryAll, currentBenchmark, currentWorksp
 
   return {
     readDataPathValue,
+    readEchoAgentLiveImportForm,
     readHotpotQaImportForm,
     readHotpotQaQaForm,
     readJudgeForm,

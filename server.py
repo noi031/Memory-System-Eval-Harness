@@ -119,8 +119,10 @@ from memory.vikingboat_alignment import (  # noqa: E402
     VIKINGBOT_USER_MEMORY_BUDGET_CHARS,
 )
 from web.api import handle_agent_backend_post  # noqa: E402
+from web.api import handle_dynamic_eval_post, handle_dynamic_eval_get, handle_dynamic_eval_delete  # noqa: E402
 from web.api import handle_memory_backend_get  # noqa: E402
 from web.api import handle_task_post  # noqa: E402
+from memory import dynamic_evaluator  # noqa: E402
 
 def load_ui_contract() -> dict[str, Any]:
     return WEB_PACKAGE.load_ui_contract()
@@ -1742,6 +1744,7 @@ def preflight_fixes(
     model_status: dict[str, Any],
     runtime_status: dict[str, Any],
     security_status: dict[str, Any],
+    config: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     fixes: list[dict[str, Any]] = []
 
@@ -1999,7 +2002,7 @@ def system_preflight(payload: dict[str, Any] | None = None) -> dict[str, Any]:
             "真实 API Key",
         ],
     }
-    fixes = preflight_fixes(backend, plugin_status, workspace_status, dataset_status, model_status, runtime_status, security_status)
+    fixes = preflight_fixes(backend, plugin_status, workspace_status, dataset_status, model_status, runtime_status, security_status, config)
     sections = [plugin_status, workspace_status, dataset_status, model_status, runtime_status, security_status]
     if any(item.get("status") == "fail" for item in sections):
         overall = "fail"
@@ -7714,6 +7717,16 @@ class Handler(BaseHTTPRequestHandler):
             default_data=DEFAULT_DATA,
         ):
             return
+        # Dynamic evaluation endpoints (GET)
+        if parsed.path.startswith("/api/dynamic/"):
+            if handle_dynamic_eval_get(
+                parsed.path,
+                send_json=self.send_json,
+                get_evaluator=dynamic_evaluator.get_evaluator,
+                list_evaluators=dynamic_evaluator.list_evaluators,
+                remove_evaluator=dynamic_evaluator.remove_evaluator,
+            ):
+                return
         if parsed.path == "/api/dataset":
             qs = parse_qs(parsed.query)
             path = safe_path(qs.get("path", [str(DEFAULT_DATA)])[0])
@@ -8184,6 +8197,19 @@ class Handler(BaseHTTPRequestHandler):
                 conflict_error_cls=ActiveLocomoQaConflictError,
             ):
                 return
+        # Dynamic evaluation endpoints
+        if parsed.path.startswith("/api/dynamic/"):
+            payload = self.read_body()
+            if handle_dynamic_eval_post(
+                parsed.path,
+                payload,
+                send_json=self.send_json,
+                create_evaluator=dynamic_evaluator.create_evaluator,
+                get_evaluator=dynamic_evaluator.get_evaluator,
+                generate_background_memories=lambda ev: ev.generate_background_memories(),
+                generate_next_query=lambda ev, ctx: ev.generate_next_query(ctx),
+            ):
+                return
         if parsed.path == "/api/analyze":
             try:
                 payload = self.read_body()
@@ -8221,6 +8247,19 @@ class Handler(BaseHTTPRequestHandler):
             except Exception as exc:
                 self.send_json({"error": str(exc)}, 400)
             return
+        self.send_json({"error": "not found"}, 404)
+
+    def do_DELETE(self) -> None:
+        parsed = urlparse(self.path)
+        # Dynamic evaluation endpoints (DELETE)
+        if parsed.path.startswith("/api/dynamic/evaluators/"):
+            if handle_dynamic_eval_delete(
+                parsed.path,
+                send_json=self.send_json,
+                get_evaluator=dynamic_evaluator.get_evaluator,
+                remove_evaluator=dynamic_evaluator.remove_evaluator,
+            ):
+                return
         self.send_json({"error": "not found"}, 404)
 
 

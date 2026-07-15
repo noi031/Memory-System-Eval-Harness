@@ -506,3 +506,55 @@ def build_local_pipeline_task(
     if runner != "local_agent":
         raise ValueError("外部 runner 已移除；流水线只支持 MemoryBench 本地基线或 OpenViking QA")
     return build_local_agent_task(payload, run_dir, root, default_data, safe_path, infer_dataset_format)
+
+
+def build_echoagent_live_task(
+    payload: dict[str, Any],
+    run_dir: Path,
+    root: Path,
+    safe_path: SafePath,
+) -> TaskSpec:
+    """Build task spec for EchoAgent live interaction test."""
+    out_dir = safe_path(str(payload.get("out_dir") or str(run_dir / "echoagent_live")))
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    command = [
+        "/usr/bin/env",
+        "python3",
+        str(root / "scripts/echoagent_live_test.py"),
+        "--echoagent-url",
+        str(payload.get("echoagent_url") or "http://127.0.0.1:31020"),
+        "--echomem-url",
+        str(payload.get("echomem_url") or "http://127.0.0.1:8010"),
+        "--username",
+        str(payload.get("username") or "test_user"),
+        "--password",
+        str(payload.get("password") or "test_password"),
+        "--num-batches",
+        str(payload.get("num_batches") or 3),
+        "--queries-per-batch",
+        str(payload.get("queries_per_batch") or 5),
+        "--new-session-ratio",
+        str(payload.get("new_session_ratio") or 0.3),
+        "--typing-speed-ms",
+        str(payload.get("typing_speed_ms") or 200),
+        "--typing-jitter-ms",
+        str(payload.get("typing_jitter_ms") or 20),
+        "--scenario-model",
+        str(payload.get("scenario_model") or "deepseek-v4-flash"),
+        "--out-dir",
+        str(out_dir),
+    ]
+
+    # Optional parameters
+    if payload.get("custom_scenario"):
+        command.extend(["--custom-scenario", str(payload.get("custom_scenario"))])
+    if payload.get("scenario_base_url"):
+        command.extend(["--scenario-base-url", str(payload.get("scenario_base_url"))])
+    if payload.get("scenario_api_key"):
+        command.extend(["--scenario-api-key", str(payload.get("scenario_api_key"))])
+    if payload.get("memory_engine_endpoint"):
+        command.extend(["--memory-engine-endpoint", str(payload.get("memory_engine_endpoint"))])
+
+    output_file = str(out_dir / "echoagent_live_test_results.json")
+    return TaskSpec(command, output_file, payload.get("name") or "EchoAgent 交互评测")
