@@ -12,6 +12,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 
+from memory.strict_blackbox import merge_strict_blackbox_snapshot
+
 
 ROOT = Path(__file__).resolve().parent
 
@@ -95,6 +97,10 @@ def merge_longmemeval_summary(summary: dict[str, Any], csv_path: Path) -> dict[s
     return merged
 
 
+def merge_strict_blackbox_summary(summary: dict[str, Any], csv_path: Path) -> dict[str, Any]:
+    return merge_strict_blackbox_snapshot(summary, csv_path)
+
+
 def maybe_patch_results_payload(raw_payload: bytes, parsed_url: urllib.parse.ParseResult) -> bytes:
     if parsed_url.path != "/api/results":
         return raw_payload
@@ -114,6 +120,7 @@ def maybe_patch_results_payload(raw_payload: bytes, parsed_url: urllib.parse.Par
         return raw_payload
     patched = merge_hotpotqa_summary(summary, csv_path)
     patched = merge_longmemeval_summary(patched, csv_path)
+    patched = merge_strict_blackbox_summary(patched, csv_path)
     if patched == summary:
         return raw_payload
     merged = dict(data)

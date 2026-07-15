@@ -153,10 +153,6 @@ export function renderLocomoImportConfig({
     ...sampleCandidates,
     ...(preferredSample && preferredSample !== "all" ? [preferredSample] : []),
   ])).sort((a, b) => a.localeCompare(b));
-  const sharedEchomemRoot = String(
-    state?.locomoQaDraft?.wbQaEchomemRoot
-    || firstValue(cfg.echomemRoot, state.config?.echomemRoot, state.readiness?.preflight?.runtime?.root, "")
-  ).trim();
   const sharedEchomemBaseUrl = String(
     state?.locomoQaDraft?.wbQaEchomemBaseUrl
     || firstValue(cfg.echomemBaseUrl, state.config?.echomemBaseUrl, state.readiness?.preflight?.runtime?.url, "")
@@ -191,13 +187,6 @@ export function renderLocomoImportConfig({
     }),
   ];
   if (activeBackend === "echomemory") {
-    fields.push(setupField({
-      label: "EchoMemory 根目录",
-      iconName: "database",
-      hint: "只有在切换本地 EchoMemory 代码目录时才需要修改。",
-      controlHtml: `<input id="wbImportEchomemRoot" type="text" value="${escapeHtml(sharedEchomemRoot)}" placeholder="/path/to/EchoMem">`,
-      escapeHtml,
-    }));
     fields.push(setupField({
       label: "EchoMemory URL",
       iconName: "activity",

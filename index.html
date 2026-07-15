@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>LoCoMo 评测台 | MemoryBench</title>
-  <link rel="stylesheet" href="./styles.css?v=20260707locomo6">
+  <link rel="stylesheet" href="./styles.css?v=20260714metrics2">
 </head>
 <body>
   <div class="wb-shell" id="wbShell" data-benchmark="locomo" data-stage="import">
@@ -76,6 +76,12 @@
             <span class="wb-inline-icon" id="wbBackendIcon" aria-hidden="true"></span>
             <span class="wb-account-pill-label" id="wbBackendLabel">记忆后端</span>
             <strong id="wbBackendName">-</strong>
+            <div class="wb-account-select-wrap">
+              <select id="wbBackendSelect" aria-label="选择记忆后端">
+                <option value="echomemory">EchoMemory</option>
+                <option value="openviking">OpenViking</option>
+              </select>
+            </div>
             <small id="wbBackendHint">读取中</small>
           </article>
         </div>
@@ -318,6 +324,8 @@
     </main>
   </div>
 
-  <script type="module" src="./app.js?v=20260707locomo6"></script>
+  <div id="wbGlobalAlert" class="wb-global-alert" role="alert" aria-live="assertive" hidden></div>
+
+  <script type="module" src="./app.js?v=20260714metrics2"></script>
 </body>
 </html>

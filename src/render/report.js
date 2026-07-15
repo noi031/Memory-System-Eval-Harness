@@ -5,6 +5,7 @@ import { getRunPhase, getRunStatusLabel } from "../run-status.js";
 import { renderBenchmarkRunCards } from "./run-list.js";
 import { renderOfficialStageActions, renderOfficialStageCurrent } from "./official-stage.js";
 import { BENCHMARKS } from "../config.js";
+import { renderStrictBlackboxMetrics } from "./strict-blackbox.js";
 
 export function createReportRenderers({
   $,
@@ -42,6 +43,11 @@ export function createReportRenderers({
       formatInt,
       formatPct,
     });
+    if (metrics.strictBlackbox) {
+      $("wbReportCurrent").insertAdjacentHTML("beforeend", renderStrictBlackboxMetrics(metrics.strictBlackbox, {
+        escapeHtml,
+      }));
+    }
   }
 
   function renderReportActions() {
@@ -77,8 +83,24 @@ export function createReportRenderers({
           ...button,
           action: "open-path",
         })),
+        metrics.strictBlackbox?.artifact_path
+          ? {
+            label: "打开指标 JSON",
+            tone: "ghost",
+            action: "open-path",
+            path: metrics.strictBlackbox.artifact_path,
+          }
+          : null,
+        metrics.strictBlackbox?.report_path
+          ? {
+            label: "打开黑盒指标报告",
+            tone: "ghost",
+            action: "open-path",
+            path: metrics.strictBlackbox.report_path,
+          }
+          : null,
         {id: "wbExportReport", label: actionModel.exportLabel, tone: "primary"},
-      ],
+      ].filter(Boolean),
       escapeHtml,
     });
   }

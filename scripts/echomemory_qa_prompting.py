@@ -25,34 +25,32 @@ def build_vikingboat_lite_messages(
     execution_mode_note = (
         "- This run does not allow interactive tool execution. Use only the retrieved evidence already included below.\n"
         "- Never emit tool calls, XML tags, search plans, or 'let me search' style text.\n"
-        "- Return the smallest exact final answer only; if the evidence is insufficient, reply with 'unknown'."
+        "- Answer directly and concisely; if the evidence is insufficient, reply with 'unknown'."
         if not tool_loop_enabled
-        else "- If tools are available in this run, use them only when necessary and still return answer text only."
+        else (
+            "- The only authoritative evidence is returned by the exposed EchoMemory HTTP-backed memory tools.\n"
+            "- For questions about remembered facts or personal context, use memory_search before concluding that no relevant record exists.\n"
+            "- Search results may contain partial summaries. Use memory_read_many on relevant summary or session URIs when more detail is needed.\n"
+            "- A previous empty search does not prove that a different requested fact has no memory. Search again when the information need changes, but avoid duplicate calls with the same intent.\n"
+            "- Use semantic search for concepts and memory_grep for exact text or identifiers. Scope reads and grep to relevant sessions when possible.\n"
+            "- Base the answer only on returned evidence, preserve exact names, dates, and values when present, and do not invent unsupported details.\n"
+            "- Stop when the evidence is sufficient and answer directly and concisely. Reply 'unknown' only when the available evidence does not support an answer."
+        )
     )
     system = f"""# MemoryBench Agent
 
 You are an AI assistant using EchoMemory as the memory backend.
 When acquiring information, data, and knowledge, you **prioritize using EchoMemory evidence above all other sources**.
-You have access to tools that can allow you to:
-- Read, search, and grep EchoMemory items
-- Read, write, and edit local files
-- Execute shell commands
-- Search the web and fetch web pages
-- Send messages to users on chat channels
-- Spawn subagents for complex background tasks
+You have access only to the EchoMemory tools exposed in this request.
 
 ## Runtime
 {runtime}
 
 ## Workspace
-You have two workspaces:
-1. Local workspace: {workspace_display}
-2. EchoMemory workspace: managed via EchoMemory local SDK and memory tools
-- Custom skills: {workspace_display}/skills/{{skill-name}}/SKILL.md
+EchoMemory is accessed through its public HTTP-backed memory tools. Do not assume access to local files, databases, shell commands, or hidden workspace artifacts.
 
 IMPORTANT:
 - When responding to direct questions or conversations, reply directly with your text response.
-- Only use the 'message' tool when you need to send a message to a specific chat channel (like WhatsApp).For normal conversation, just respond with text - do not call the message tool.
 - Always be helpful, accurate, and concise. When using tools, think step by step: what you know, what you need, and why you chose this tool.
 {execution_mode_note}
 
@@ -61,7 +59,8 @@ IMPORTANT:
 
 ## Evaluation alignment
 This run keeps the VikingBoat-style message layout and retrieval budgets for comparability, but the memory backend and exposed tools are EchoMemory."""
-    now = datetime.now().strftime("%Y-%m-%d %H:%M (%A)")
+    question_time = str(getattr(job, "query_time", "") or "").strip()
+    now = question_time if question_time and question_time != "-" else datetime.now().strftime("%Y-%m-%d %H:%M (%A)")
     tz = time.strftime("%Z") or "UTC"
     session_context = (
         "## Current Session\n"

@@ -555,11 +555,14 @@ def build_echomemory_qa_command(
         raise ValueError("LoCoMo EchoMemory QA requires echomem_base_url; local SDK evaluation is not a black-box run")
     if requested_transport not in {"", "http"}:
         raise ValueError("LoCoMo EchoMemory QA only supports EchoMemory HTTP black-box transport")
-    prompt_mode = str(payload.get("prompt_mode") or "one_shot")
+    prompt_mode = str(payload.get("prompt_mode") or "vikingboat_lite")
     if prompt_mode not in {"vikingboat_lite", "vikingboat_compat", "one_shot"}:
-        prompt_mode = "one_shot"
+        prompt_mode = "vikingboat_lite"
     vikingboat_compat = bool_value(payload.get("vikingboat_compat"), prompt_mode == "vikingboat_compat")
-    vikingboat_tool_loop = bool_value(payload.get("vikingboat_tool_loop"), False)
+    vikingboat_tool_loop = bool_value(
+        payload.get("vikingboat_tool_loop"),
+        prompt_mode != "one_shot",
+    )
     initial_tool_prefetch = False
     max_iterations = int(payload_value(payload, "max_iterations", VIKINGBOT_MAX_ITERATIONS))
     score_threshold = float(payload_value(payload, "score_threshold", VIKINGBOT_INITIAL_MIN_SCORE))
@@ -606,8 +609,6 @@ def build_echomemory_qa_command(
         prompt_mode,
         "--top-k",
         str(top_k),
-        "--score-threshold",
-        str(score_threshold),
         "--memory-budget-chars",
         str(memory_budget_chars),
         "--user-memory-budget-chars",
@@ -648,8 +649,6 @@ def build_echomemory_qa_command(
         tool_set,
         "--tool-search-limit",
         str(tool_search_limit),
-        "--tool-min-score",
-        str(tool_min_score),
         "--tool-log-chars",
         str(payload.get("tool_log_chars") or 1200),
         "--prefetch-read-count",
@@ -721,6 +720,7 @@ def build_echomemory_qa_command(
         metadata={
             **alignment_metadata("echomemory", "custom_agent_echomemory_sdk_memory_tools"),
             "task_kind": "echomemory_qa",
+            "dataset_format": "locomo",
             "backend": "echomemory",
             "workspace": workspace,
             "sample": str(payload.get("sample") or "conv-30"),
@@ -735,6 +735,9 @@ def build_echomemory_qa_command(
             "echomem_base_url": echomem_base_url,
             "retrieval_mode": retrieval_mode,
             "retrieval_source_mode": retrieval_source_mode,
+            "retrieval_score_source": "echomemory_http_native",
+            "platform_score_recomputed": False,
+            "native_result_order_preserved": True,
             "neo4j_graph_evidence_enabled": False,
             "search_overview_enrichment_enabled": search_overview_enrichment,
             "overview_transport": "echomemory_http_fs_read" if search_overview_enrichment else "disabled",
@@ -743,9 +746,11 @@ def build_echomemory_qa_command(
             "retrieval_mode_requested": requested_retrieval_mode or retrieval_mode,
             "identity_mode": "sample_question",
             "tool_search_limit": tool_search_limit,
-            "tool_min_score": tool_min_score,
+            "tool_min_score": None,
+            "tool_min_score_observed": False,
             "initial_search_limit": top_k,
-            "initial_score_threshold": score_threshold,
+            "initial_score_threshold": None,
+            "initial_score_threshold_observed": False,
             "initial_tool_prefetch_enabled": initial_tool_prefetch,
             "prefetch_read_count": int(payload.get("prefetch_read_count") or 4),
             "prefetch_context_chars": int(payload.get("prefetch_context_chars") or 5000),
@@ -755,7 +760,7 @@ def build_echomemory_qa_command(
             "judge_parallel": judge_parallel,
             "qa_memory_injection_enabled": qa_memory_injection,
             "top_k": top_k,
-            "score_threshold": score_threshold,
+            "score_threshold": None,
             "memory_budget_chars": memory_budget_chars,
             "user_memory_budget_chars": user_budget_chars,
             "agent_memory_budget_chars": agent_budget_chars,

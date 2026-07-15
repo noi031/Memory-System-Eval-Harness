@@ -18,10 +18,6 @@ export function createSelectors({ state, BENCHMARKS, $, queryAll, firstValue }) 
     ].includes(String(kind || "").trim().toLowerCase());
   }
 
-  function isLocomoImportKind(kind) {
-    return /import/i.test(String(kind || ""));
-  }
-
   function selectedAccount() {
     return String(state.selectedAccount || "").trim();
   }
@@ -96,15 +92,14 @@ export function createSelectors({ state, BENCHMARKS, $, queryAll, firstValue }) 
       if (String(benchmarkId || "").trim().toLowerCase() === "locomo") {
         return scopedCandidates.find((run) => isLocomoQaKind(run?.kind) && isSuccessfulStatus(run?.status))
           || scopedCandidates.find((run) => isLocomoQaKind(run?.kind) && isActiveStatus(run?.status))
-          || scopedCandidates.find((run) => !isLocomoImportKind(run?.kind) && isSuccessfulStatus(run?.status))
-          || scopedCandidates.find((run) => !isLocomoImportKind(run?.kind))
-          || scopedCandidates.find((run) => isSuccessfulStatus(run?.status))
-          || scopedCandidates[0]
+          || scopedCandidates.find((run) => isLocomoQaKind(run?.kind))
           || null;
       }
       return scopedCandidates[0] || null;
     }
-    const officialCandidates = accountBound ? exactRuns : (exactRuns.length ? exactRuns : runs);
+    const officialCandidates = accountBound && exactRuns.length
+      ? exactRuns
+      : (exactRuns.length ? exactRuns : runs);
     return officialCandidates.find((run) => hasOfficialEvalReadyMetrics(benchmarkId, run))
       || scopedCandidates.find((run) => isActiveStatus(run.status))
       || scopedCandidates.find((run) => isOfficialEvalUsableRun(benchmarkId, run))
@@ -123,9 +118,15 @@ export function createSelectors({ state, BENCHMARKS, $, queryAll, firstValue }) 
     const benchmark = getBenchmark(BENCHMARKS, benchmarkId);
     const allRuns = runsForBenchmark(benchmarkId);
     const accountBound = Boolean(selectedAccount());
-    const runs = accountBound ? accountScopedRuns(allRuns) : allRuns;
+    const exactRuns = exactAccountRuns(allRuns);
+    const runs = accountBound
+      ? (benchmarkHasOfficialEval(benchmark) && !exactRuns.length ? allRuns : accountScopedRuns(allRuns))
+      : allRuns;
     if (!benchmarkHasOfficialEval(benchmark)) {
-      return limit ? runs.slice(0, Math.max(1, limit)) : runs;
+      const nonOfficialRuns = String(benchmarkId || "").trim().toLowerCase() === "locomo"
+        ? runs.filter((run) => isLocomoQaKind(run?.kind))
+        : runs;
+      return limit ? nonOfficialRuns.slice(0, Math.max(1, limit)) : nonOfficialRuns;
     }
     const selectedRunDir = state.currentRunDirs[benchmarkId] || "";
     const selectedRun = runs.find((run) => run.run_dir === selectedRunDir) || null;
@@ -230,8 +231,17 @@ export function createSelectors({ state, BENCHMARKS, $, queryAll, firstValue }) 
     const storedMatchesAccount = !stored || runMatchesSelectedAccount(stored);
     const preferred = preferredRunForBenchmark(benchmarkId, runs);
     if (!benchmarkHasOfficialEval(benchmark)) {
-      if (stored && state.userSelectedRunDirs[benchmarkId] && (!accountBound || storedMatchesAccount)) {
+      const locomo = String(benchmarkId || "").trim().toLowerCase() === "locomo";
+      if (
+        stored
+        && state.userSelectedRunDirs[benchmarkId]
+        && (!accountBound || storedMatchesAccount)
+        && (!locomo || isLocomoQaKind(stored?.kind))
+      ) {
         return stored;
+      }
+      if (locomo) {
+        return preferred || (stored && isLocomoQaKind(stored?.kind) ? stored : null);
       }
       return preferred || stored;
     }

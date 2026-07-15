@@ -56,10 +56,8 @@ from echomemory_memory_qa import (
 from memory.vikingboat_alignment import (
     VIKINGBOT_AGENT_MEMORY_BUDGET_CHARS,
     VIKINGBOT_ALIGNMENT_PROFILE,
-    VIKINGBOT_INITIAL_MIN_SCORE,
     VIKINGBOT_INITIAL_SEARCH_LIMIT,
     VIKINGBOT_MAX_ITERATIONS,
-    VIKINGBOT_TOOL_MIN_SCORE,
     VIKINGBOT_TOOL_SEARCH_LIMIT,
     VIKINGBOT_TOOL_SET,
     VIKINGBOT_USER_MEMORY_BUDGET_CHARS,
@@ -1376,9 +1374,8 @@ async def run_hotpotqa_global_sentence_corpus(
             "official_eval_after": False,
             "official_eval": {"enabled": False, "reason": "import_only"},
             "top_k": args.top_k,
-            "score_threshold": args.score_threshold,
             "tool_search_limit": args.tool_search_limit,
-            "tool_min_score": args.tool_min_score,
+            "platform_score_filtering": False,
             "tool_set": args.tool_set,
             "max_iterations": args.max_iterations,
             "prompt_mode": args.prompt_mode,
@@ -1592,9 +1589,8 @@ async def run_hotpotqa_global_sentence_corpus(
         "official_eval_after": bool(args.official_eval_after),
         "official_eval": official_eval_result,
         "top_k": args.top_k,
-        "score_threshold": args.score_threshold,
         "tool_search_limit": args.tool_search_limit,
-        "tool_min_score": args.tool_min_score,
+        "platform_score_filtering": False,
         "tool_set": args.tool_set,
         "max_iterations": args.max_iterations,
         "prompt_mode": args.prompt_mode,
@@ -2380,7 +2376,7 @@ async def run(args: argparse.Namespace) -> None:
         "memory_tool_loop_enabled": bool(args.prompt_mode in VIKINGBOT_ALIGNED_PROMPT_MODES and args.vikingboat_tool_loop),
         "memory_tool_set": args.tool_set,
         "top_k": args.top_k,
-        "score_threshold": args.score_threshold,
+        "platform_score_filtering": False,
         "retrieval_mode": args.retrieval_mode,
         "retrieval_query_strategy": args.retrieval_query_strategy,
         "total_memory_injection_time_s": round(sum(float(row.get("memory_injection_time_s") or 0.0) for row in rows), 4),
@@ -2472,7 +2468,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--vikingboat-compat", dest="vikingboat_compat", action="store_true")
     parser.add_argument("--no-vikingboat-compat", dest="vikingboat_compat", action="store_false")
     parser.add_argument("--top-k", type=int, default=VIKINGBOT_INITIAL_SEARCH_LIMIT)
-    parser.add_argument("--score-threshold", type=float, default=VIKINGBOT_INITIAL_MIN_SCORE)
     parser.add_argument("--memory-budget-chars", type=int, default=VIKINGBOT_USER_MEMORY_BUDGET_CHARS + VIKINGBOT_AGENT_MEMORY_BUDGET_CHARS)
     parser.add_argument("--user-memory-budget-chars", type=int, default=VIKINGBOT_USER_MEMORY_BUDGET_CHARS)
     parser.add_argument("--agent-memory-budget-chars", type=int, default=VIKINGBOT_AGENT_MEMORY_BUDGET_CHARS)
@@ -2502,7 +2497,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-tool-calls", type=int, default=5)
     parser.add_argument("--tool-set", choices=["vikingboat_default", "search_read", "search_only", VIKINGBOT_TOOL_SET], default="search_read")
     parser.add_argument("--tool-search-limit", type=int, default=VIKINGBOT_TOOL_SEARCH_LIMIT)
-    parser.add_argument("--tool-min-score", type=float, default=VIKINGBOT_TOOL_MIN_SCORE)
     parser.add_argument("--tool-log-chars", type=int, default=1200)
     parser.add_argument("--prefetch-read-count", type=int, default=4)
     parser.add_argument("--prefetch-context-chars", type=int, default=5000)

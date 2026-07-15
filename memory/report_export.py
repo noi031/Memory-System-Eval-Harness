@@ -14,6 +14,7 @@ from . import runs as run_service
 from .backend_profiles import backend_profile, normalize_backend_id
 from .plugins.service import plugin_service
 from .tasking import redacted_command
+from scripts.generate_html_report import observed_blackbox_metrics, strict_metric_definitions
 
 ROOT = Path(__file__).resolve().parent.parent
 GENERATED_REPORTS_DIR = ROOT / "generated-reports"
@@ -44,6 +45,278 @@ def format_metric_seconds(value: Any, fallback: str = "-") -> str:
         return f"{float(value):.2f}s"
     except (TypeError, ValueError):
         return fallback
+
+
+def format_observed_percent(value: Any) -> str:
+    if value in (None, "", "-"):
+        return "N/A"
+    try:
+        return f"{float(value) * 100:.2f}%"
+    except (TypeError, ValueError):
+        return "N/A"
+
+
+def format_observed_number(value: Any, digits: int = 1) -> str:
+    if value in (None, "", "-"):
+        return "N/A"
+    try:
+        return f"{float(value):,.{digits}f}"
+    except (TypeError, ValueError):
+        return "N/A"
+
+
+def format_observed_fraction(numerator: Any, denominator: Any, suffix: str = "条观测") -> str:
+    try:
+        left = int(float(numerator))
+        right = int(float(denominator))
+    except (TypeError, ValueError):
+        return "无完整观测"
+    if right <= 0:
+        return "无完整观测"
+    return f"{left:,} / {right:,} {suffix}"
+
+
+def strict_import_summary(
+    summary: dict[str, Any],
+    summary_json: dict[str, Any],
+    import_integrity: dict[str, Any],
+) -> dict[str, Any]:
+    """Resolve only authoritative import fields used by the strict black-box report."""
+    resolved: dict[str, Any] = {}
+    summary_path_value = import_integrity.get("summary_path") or import_integrity.get("output_file")
+    if summary_path_value:
+        summary_path = Path(str(summary_path_value)).expanduser()
+        if not summary_path.is_absolute():
+            summary_path = ROOT / summary_path
+        if summary_path.exists():
+            try:
+                raw_summary = read_json(summary_path)
+            except Exception:
+                raw_summary = None
+            if isinstance(raw_summary, dict):
+                resolved.update(raw_summary)
+
+    for candidate in (summary_json.get("import_summary"), summary.get("import_summary")):
+        if not isinstance(candidate, dict):
+            continue
+        for key, value in candidate.items():
+            if resolved.get(key) in (None, "") and value not in (None, ""):
+                resolved[key] = value
+
+    for key in ("status", "expected_messages", "submitted_messages"):
+        if resolved.get(key) in (None, "") and import_integrity.get(key) not in (None, ""):
+            resolved[key] = import_integrity.get(key)
+    return resolved
+
+
+def render_strict_blackbox_metrics_html(
+    rows: list[dict[str, Any]],
+    import_summary: dict[str, Any] | None = None,
+) -> str:
+    if not rows:
+        return ""
+    metrics = observed_blackbox_metrics(rows, import_summary)
+    definitions = strict_metric_definitions()
+
+    headline_items = [
+        (
+            "准确率",
+            format_observed_percent(metrics.get("accuracy")),
+            format_observed_fraction(metrics.get("correct_count"), metrics.get("graded_count"), "已判题"),
+            "success",
+        ),
+        (
+            "QA 请求成功率",
+            format_observed_percent(metrics.get("request_success_rate")),
+            format_observed_fraction(metrics.get("request_success_count"), metrics.get("request_status_count")),
+            "success",
+        ),
+        (
+            "空召回率",
+            format_observed_percent(metrics.get("empty_retrieval_rate")),
+            format_observed_fraction(metrics.get("empty_retrieval_count"), metrics.get("retrieval_observed_count")),
+            "warn" if int_value(metrics.get("empty_retrieval_count")) > 0 else "",
+        ),
+        (
+            "最终失败率",
+            format_observed_percent(metrics.get("failure_rate")),
+            format_observed_fraction(metrics.get("failure_count"), metrics.get("request_status_count")),
+            "danger" if int_value(metrics.get("failure_count")) > 0 else "",
+        ),
+        (
+            "外部可见模型重试率",
+            format_observed_percent(metrics.get("retry_rate")),
+            format_observed_fraction(metrics.get("retried_count"), metrics.get("retry_observed_count")),
+            "",
+        ),
+        (
+            "每个正确答案 Token",
+            format_observed_number(metrics.get("tokens_per_correct"), 1),
+            "回答模型总 Token / 正确题数",
+            "",
+        ),
+        (
+            "Judge 模型 Token",
+            format_observed_number((metrics.get("judge_total_tokens") or {}).get("sum"), 0),
+            format_observed_fraction(
+                metrics.get("judge_usage_observed_count"),
+                metrics.get("judge_usage_expected_count"),
+                "条 Judge usage",
+            ),
+            "",
+        ),
+        (
+            "外部可见模型总 Token",
+            format_observed_number(metrics.get("visible_model_total_tokens"), 0),
+            "QA 回答 + Judge；任一不完整则 N/A",
+            "",
+        ),
+        (
+            "消息提交率",
+            format_observed_percent(metrics.get("submission_rate")),
+            format_observed_fraction(
+                metrics.get("submitted_messages"),
+                metrics.get("expected_messages"),
+                "条消息",
+            ),
+            "",
+        ),
+        (
+            "记忆导入状态",
+            str(metrics.get("import_status") or "N/A"),
+            "直接读取导入摘要，不推断后台完成",
+            "status",
+        ),
+        (
+            "内部记忆注入 Token",
+            "N/A",
+            "黑盒 API 未返回权威 usage",
+            "",
+        ),
+        (
+            "初始记忆导入时间",
+            "N/A",
+            "缺少可靠的后台完成事件",
+            "",
+        ),
+    ]
+    headline_html = "".join(
+        f"<article class='strict-metric-card {html.escape(tone)}'>"
+        f"<span>{html.escape(label)}</span>"
+        f"<strong>{html.escape(value)}</strong>"
+        f"<small>{html.escape(note)}</small>"
+        "</article>"
+        for label, value, note, tone in headline_items
+    )
+
+    category_rows = []
+    for name, item in sorted((metrics.get("categories") or {}).items(), key=lambda pair: str(pair[0])):
+        correct = int_value((item or {}).get("correct"))
+        wrong = int_value((item or {}).get("wrong"))
+        graded = correct + wrong
+        accuracy = format_observed_percent(correct / graded) if graded else "N/A"
+        category_rows.append(
+            "<tr>"
+            f"<th>{html.escape(str(name))}</th>"
+            f"<td>{graded:,}</td><td>{correct:,}</td><td>{wrong:,}</td>"
+            f"<td>{html.escape(accuracy)}</td>"
+            "</tr>"
+        )
+    category_html = "".join(category_rows) or "<tr><td colspan='5'>N/A</td></tr>"
+
+    def stats_rows(items: list[tuple[str, str]], *, token: bool = False) -> str:
+        cells = []
+        for label, key in items:
+            stats = metrics.get(key) if isinstance(metrics.get(key), dict) else {}
+            values = (
+                [stats.get("avg"), stats.get("p50"), stats.get("p95"), stats.get("p99"), stats.get("sum")]
+                if token
+                else [stats.get("avg"), stats.get("p50"), stats.get("p95"), stats.get("p99"), stats.get("max")]
+            )
+            formatted = []
+            for value in values:
+                text = format_observed_number(value, 0 if token else 3)
+                if not token and text != "N/A":
+                    text += " 秒"
+                formatted.append(f"<td>{html.escape(text)}</td>")
+            cells.append(f"<tr><th>{html.escape(label)}</th>{''.join(formatted)}</tr>")
+        return "".join(cells)
+
+    latency_html = stats_rows([
+        ("端到端 QA", "end_to_end_s"),
+        ("记忆检索", "retrieval_latency_s"),
+        ("QA 侧编排注入", "injection_total_s"),
+        ("回答模型", "llm_total_s"),
+    ])
+    token_html = stats_rows([
+        ("Prompt Token", "answer_prompt_tokens"),
+        ("Completion Token", "answer_completion_tokens"),
+        ("回答总 Token", "answer_total_tokens"),
+        ("Judge Prompt Token", "judge_prompt_tokens"),
+        ("Judge Completion Token", "judge_completion_tokens"),
+        ("Judge 总 Token", "judge_total_tokens"),
+    ], token=True)
+    definition_html = "".join(
+        "<details class='strict-definition'>"
+        "<summary>"
+        f"<strong>{html.escape(str(item.get('name') or '-'))}</strong>"
+        f"<span>{html.escape(str(item.get('kind') or '-'))}</span>"
+        "</summary>"
+        "<div>"
+        f"<p><b>计算</b><code>{html.escape(str(item.get('formula') or 'N/A'))}</code></p>"
+        f"<p><b>来源</b>{html.escape(str(item.get('source') or 'N/A'))}</p>"
+        f"<p><b>含义</b>{html.escape(str(item.get('meaning') or 'N/A'))}</p>"
+        f"<p><b>边界</b>{html.escape(str(item.get('boundary') or 'N/A'))}</p>"
+        "</div>"
+        "</details>"
+        for item in definitions
+    )
+
+    return f"""
+    <section class="panel strict-panel" style="margin-bottom:16px">
+      <header class="strict-head">
+        <div>
+          <span>API 边界实际观测</span>
+          <h2>严格黑盒指标</h2>
+          <p>只使用结果 CSV 和导入摘要中的实际观测字段；缺失值显示 N/A，不做 Token 或耗时推算。</p>
+        </div>
+        <strong>{len(rows):,} 题</strong>
+      </header>
+      <div class="strict-metric-grid">{headline_html}</div>
+      <details class="strict-fold">
+        <summary><strong>分类准确率</strong><span>{len(metrics.get("categories") or {}):,} 个类别</span></summary>
+        <div class="strict-table-wrap">
+          <table class="strict-table">
+            <thead><tr><th>类别</th><th>已判分</th><th>正确</th><th>错误</th><th>准确率</th></tr></thead>
+            <tbody>{category_html}</tbody>
+          </table>
+        </div>
+      </details>
+      <details class="strict-fold">
+        <summary><strong>时延分布</strong><span>4 项严格观测</span></summary>
+        <div class="strict-table-wrap">
+          <table class="strict-table">
+            <thead><tr><th>指标</th><th>平均</th><th>P50</th><th>P95</th><th>P99</th><th>最大</th></tr></thead>
+            <tbody>{latency_html}</tbody>
+          </table>
+        </div>
+      </details>
+      <details class="strict-fold">
+        <summary><strong>外部可见模型 Token（API usage）</strong><span>6 项严格观测</span></summary>
+        <div class="strict-table-wrap">
+          <table class="strict-table">
+            <thead><tr><th>指标</th><th>平均</th><th>P50</th><th>P95</th><th>P99</th><th>合计</th></tr></thead>
+            <tbody>{token_html}</tbody>
+          </table>
+        </div>
+      </details>
+      <details class="strict-fold strict-definitions" open>
+        <summary><strong>指标定义与黑盒边界</strong><span>{len(definitions)} 项</span></summary>
+        <p class="strict-note">百分位在排序后的逐题观测值上按 (n - 1) × q 定位并线性插值。下面逐项说明计算、来源、含义和不可越过的黑盒边界。</p>
+        <div class="strict-definition-list">{definition_html}</div>
+      </details>
+    </section>
+    """
 
 
 def csv_rows_limited(path: Path, limit: int = 10000) -> list[dict[str, str]]:
@@ -1005,6 +1278,19 @@ def export_report(run_dir: Path, active_run_ids: set[str] | None = None) -> dict
         )
 
     summary_json = summary.get("summary_json") or {}
+    evidence_policy_text = summary_value(
+        summary,
+        summary_json,
+        "evidence_policy",
+        fallback=config_value(config, "evidence_policy"),
+    )
+    strict_blackbox_mode = evidence_policy_text.strip().lower() == "blackbox"
+    resolved_strict_import_summary = strict_import_summary(summary, summary_json, import_integrity)
+    strict_observed_metrics = (
+        observed_blackbox_metrics(all_rows, resolved_strict_import_summary)
+        if all_rows
+        else {}
+    )
     exact_match = summary.get("exact_match_reference")
     if exact_match is None:
         exact_match = summary_json.get("exact_match_rate")
@@ -1019,12 +1305,31 @@ def export_report(run_dir: Path, active_run_ids: set[str] | None = None) -> dict
     official_answer_f1_text = format_metric_percent(official_answer_f1_raw)
     avg_memory_injection_time_text = format_metric_seconds(summary.get("avg_memory_injection_time_s", summary_json.get("avg_memory_injection_time_s")))
     total_memory_injection_time_text = format_metric_seconds(summary.get("total_memory_injection_time_s", summary_json.get("total_memory_injection_time_s")))
+    if strict_blackbox_mode:
+        avg_memory_injection_time_text = "N/A"
+        total_memory_injection_time_text = "N/A"
     avg_qa_time_text = format_metric_seconds(summary.get("avg_qa_time_s", summary_json.get("avg_qa_time_s", summary.get("avg_time"))))
     total_qa_time_text = format_metric_seconds(summary.get("total_qa_time_s", summary_json.get("total_qa_time_s")))
     avg_end_to_end_time_text = format_metric_seconds(summary.get("avg_end_to_end_time_s", summary_json.get("avg_end_to_end_time_s")))
     total_end_to_end_time_text = format_metric_seconds(summary.get("total_end_to_end_time_s", summary_json.get("total_end_to_end_time_s")))
+    if strict_blackbox_mode:
+        end_to_end_stats = strict_observed_metrics.get("end_to_end_s") or {}
+        avg_end_to_end_time_text = format_metric_seconds(
+            end_to_end_stats.get("avg"),
+            fallback="N/A",
+        )
+        total_end_to_end_time_text = format_metric_seconds(
+            end_to_end_stats.get("sum"),
+            fallback="N/A",
+        )
 
     context_items = context_composition(summary, summary_json, config, current_backend)
+    if strict_blackbox_mode:
+        context_items = [
+            (label, value)
+            for label, value in context_items
+            if "tokens est" not in label.lower()
+        ]
     context_lines = [f"- {label}: `{value}`" for label, value in context_items]
     source_mix_items = [
         ("Long-term memory hits", summary_value(summary, summary_json, "memory_hit_total")),
@@ -1034,20 +1339,31 @@ def export_report(run_dir: Path, active_run_ids: set[str] | None = None) -> dict
         ("Rows with retrieval errors", summary_value(summary, summary_json, "retrieval_error_rows")),
         ("Health counts", counts_text(summary.get("health_counts") or summary_json.get("health_counts"))),
     ]
-    token_items = [
-        ("Answer prompt tokens", summary_value(summary, summary_json, "answer_prompt_tokens")),
-        ("Answer completion tokens", summary_value(summary, summary_json, "answer_completion_tokens")),
-        ("Answer total tokens", summary_value(summary, summary_json, "answer_total_tokens")),
-        ("Retrieval tokens est", summary_value(summary, summary_json, "retrieval_tokens_est_total", "retrieval_tokens_est")),
-        ("Total injection tokens est", summary_value(summary, summary_json, "total_injection_tokens_est", "retrieval_tokens_est_total", "retrieval_tokens_est")),
-        ("Avg injection tokens est", summary_value(summary, summary_json, "avg_injection_tokens_est", "avg_retrieval_tokens_est")),
-        ("Total memory injection time", summary_value(summary, summary_json, "total_memory_injection_time_s")),
-        ("Avg memory injection time", summary_value(summary, summary_json, "avg_memory_injection_time_s")),
-        ("Total QA time", summary_value(summary, summary_json, "total_qa_time_s")),
-        ("Avg QA time", summary_value(summary, summary_json, "avg_qa_time_s", "avg_time")),
-        ("Total end-to-end time", summary_value(summary, summary_json, "total_end_to_end_time_s")),
-        ("Avg end-to-end time", summary_value(summary, summary_json, "avg_end_to_end_time_s")),
-    ]
+    if strict_blackbox_mode:
+        token_items = [
+            ("Answer prompt tokens", summary_value(summary, summary_json, "answer_prompt_tokens")),
+            ("Answer completion tokens", summary_value(summary, summary_json, "answer_completion_tokens")),
+            ("Answer total tokens", summary_value(summary, summary_json, "answer_total_tokens")),
+            ("Internal memory injection tokens", "N/A"),
+            ("Initial memory import time", "N/A"),
+        ]
+        token_summary_note = "只展示回答模型 API 返回的 usage；记忆系统内部 Token 和没有完成事件的导入耗时均显示 N/A。"
+    else:
+        token_items = [
+            ("Answer prompt tokens", summary_value(summary, summary_json, "answer_prompt_tokens")),
+            ("Answer completion tokens", summary_value(summary, summary_json, "answer_completion_tokens")),
+            ("Answer total tokens", summary_value(summary, summary_json, "answer_total_tokens")),
+            ("Retrieval tokens est", summary_value(summary, summary_json, "retrieval_tokens_est_total", "retrieval_tokens_est")),
+            ("Total injection tokens est", summary_value(summary, summary_json, "total_injection_tokens_est", "retrieval_tokens_est_total", "retrieval_tokens_est")),
+            ("Avg injection tokens est", summary_value(summary, summary_json, "avg_injection_tokens_est", "avg_retrieval_tokens_est")),
+            ("Total memory injection time", summary_value(summary, summary_json, "total_memory_injection_time_s")),
+            ("Avg memory injection time", summary_value(summary, summary_json, "avg_memory_injection_time_s")),
+            ("Total QA time", summary_value(summary, summary_json, "total_qa_time_s")),
+            ("Avg QA time", summary_value(summary, summary_json, "avg_qa_time_s", "avg_time")),
+            ("Total end-to-end time", summary_value(summary, summary_json, "total_end_to_end_time_s")),
+            ("Avg end-to-end time", summary_value(summary, summary_json, "avg_end_to_end_time_s")),
+        ]
+        token_summary_note = "用于估算成本，也能判断上下文是否异常膨胀。"
     model_health_items = [
         ("Model OK rows", summary_value(summary, summary_json, "model_ok_count")),
         ("Model failed rows", summary_value(summary, summary_json, "model_failed_count")),
@@ -1486,6 +1802,10 @@ def export_report(run_dir: Path, active_run_ids: set[str] | None = None) -> dict
         f"- Question kinds: `{counts_text(attribution.get('question_kind_counts'))}`",
         f"- Modes: `{counts_text(attribution.get('mode_counts'))}`",
     ]
+    estimated_reliability_lines = [] if strict_blackbox_mode else [
+        "- Total injection tokens est: `n/a`",
+        "- Avg injection tokens est: `n/a`",
+    ]
     command_text = safe_command_text(manifest.get("command") or config_snapshot.get("command") or "")
 
     lines = [
@@ -1599,8 +1919,7 @@ def export_report(run_dir: Path, active_run_ids: set[str] | None = None) -> dict
         f"- Answer empty/unknown rows: `{summary.get('answer_empty_or_unknown_count', summary_json.get('answer_empty_or_unknown_count', '-'))}`",
         f"- Unknown response rows: `{summary.get('unknown_response_count', summary_json.get('unknown_response_count', '-'))}`",
         f"- Empty response rows: `{summary.get('empty_response_count', summary_json.get('empty_response_count', '-'))}`",
-        "- Total injection tokens est: `n/a`",
-        "- Avg injection tokens est: `n/a`",
+        *estimated_reliability_lines,
         "",
         "## Failure Attribution",
         "",
@@ -1970,6 +2289,7 @@ def export_report(run_dir: Path, active_run_ids: set[str] | None = None) -> dict
         f"<article><span>{html.escape(label)}</span><code>{html.escape(status)} · {html.escape(detail)}</code></article>"
         for label, status, detail in gate_items
     )
+    strict_blackbox_html = render_strict_blackbox_metrics_html(all_rows, resolved_strict_import_summary)
 
     html_report = f"""<!DOCTYPE html>
 <html lang="zh-CN">
@@ -1997,6 +2317,42 @@ def export_report(run_dir: Path, active_run_ids: set[str] | None = None) -> dict
     .panel h2 {{ font-size:16px; }}
     .overview-panel {{ border-left:4px solid #2563eb; }}
     .overview-note {{ color:#334155; background:#eff6ff; border:1px solid #bfdbfe; border-radius:8px; padding:10px 12px; }}
+    .strict-panel {{ border-left:4px solid #15803d; gap:14px; }}
+    .strict-head {{ display:flex; align-items:flex-start; justify-content:space-between; gap:18px; }}
+    .strict-head > div {{ min-width:0; display:grid; gap:4px; }}
+    .strict-head > div > span {{ color:#15803d; font-size:11px; font-weight:800; text-transform:uppercase; }}
+    .strict-head h2 {{ font-size:18px; }}
+    .strict-head p, .strict-note {{ color:#52637b; }}
+    .strict-head > strong {{ flex:0 0 auto; color:#166534; font-size:16px; }}
+    .strict-metric-grid {{ display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:10px; }}
+    .strict-metric-card {{ min-width:0; padding:12px; border:1px solid #dbe3ef; border-top:3px solid #64748b; border-radius:7px; background:#fbfdff; }}
+    .strict-metric-card.success {{ border-top-color:#16a34a; }}
+    .strict-metric-card.warn {{ border-top-color:#d97706; }}
+    .strict-metric-card.danger {{ border-top-color:#dc2626; }}
+    .strict-metric-card.status {{ border-top-color:#2563eb; }}
+    .strict-metric-card span {{ display:block; color:#667790; font-size:11px; font-weight:800; }}
+    .strict-metric-card strong {{ display:block; margin-top:5px; font-size:18px; overflow-wrap:anywhere; }}
+    .strict-metric-card.status strong {{ font-size:14px; line-height:1.35; }}
+    .strict-metric-card small {{ display:block; margin-top:4px; color:#667790; }}
+    .strict-fold {{ border-top:1px solid #e0e7f1; padding-top:10px; }}
+    .strict-fold > summary, .strict-definition > summary {{ cursor:pointer; list-style:none; display:flex; align-items:center; justify-content:space-between; gap:12px; }}
+    .strict-fold > summary::-webkit-details-marker, .strict-definition > summary::-webkit-details-marker {{ display:none; }}
+    .strict-fold > summary span, .strict-definition > summary span {{ color:#667790; font-size:12px; }}
+    .strict-table-wrap {{ max-width:100%; overflow-x:auto; margin-top:10px; border:1px solid #e0e7f1; border-radius:7px; }}
+    .strict-table {{ width:100%; min-width:680px; border-collapse:collapse; }}
+    .strict-table th, .strict-table td {{ padding:9px 10px; border-bottom:1px solid #e8edf4; text-align:right; white-space:nowrap; }}
+    .strict-table th:first-child, .strict-table td:first-child {{ text-align:left; }}
+    .strict-table thead th {{ color:#52637b; background:#f7f9fc; font-size:11px; }}
+    .strict-table tbody tr:last-child th, .strict-table tbody tr:last-child td {{ border-bottom:0; }}
+    .strict-definitions > .strict-note {{ margin-top:10px; }}
+    .strict-definition-list {{ display:grid; gap:8px; margin-top:10px; }}
+    .strict-definition {{ border:1px solid #e0e7f1; border-radius:7px; background:#fbfdff; }}
+    .strict-definition > summary {{ padding:10px 12px; }}
+    .strict-definition > summary strong {{ min-width:0; overflow-wrap:anywhere; }}
+    .strict-definition > div {{ display:grid; gap:7px; padding:0 12px 12px; }}
+    .strict-definition p {{ display:grid; grid-template-columns:52px minmax(0,1fr); gap:8px; color:#334155; }}
+    .strict-definition b {{ color:#10233f; }}
+    .strict-definition code {{ white-space:normal; overflow-wrap:anywhere; }}
     .diagnostic-panel {{ border:1px solid #c7d7ee; background:linear-gradient(180deg,#fff,#f7fbff); }}
     .diagnostic-pass {{ border-left:4px solid #16a34a; }}
     .diagnostic-warn {{ border-left:4px solid #f59e0b; }}
@@ -2037,7 +2393,17 @@ def export_report(run_dir: Path, active_run_ids: set[str] | None = None) -> dict
     .gate-fail {{ border-left:4px solid #b91c1c; background:#fff7f7; }}
     code, pre {{ font:12px/1.5 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; }}
     pre {{ white-space:pre-wrap; overflow-wrap:anywhere; padding:14px; background:#f7f9fc; border-radius:8px; border:1px solid #e0e7f1; }}
-    @media (max-width: 960px) {{ .kpis, .grid, .info-grid, .diagnostic-summary, .diagnostic-actions {{ grid-template-columns: 1fr; }} }}
+    @media (max-width: 960px) {{
+      .kpis, .grid, .info-grid, .diagnostic-summary, .diagnostic-actions {{ grid-template-columns: 1fr; }}
+      .strict-metric-grid {{ grid-template-columns:repeat(2,minmax(0,1fr)); }}
+    }}
+    @media (max-width: 560px) {{
+      .page {{ padding:20px 14px 40px; }}
+      .strict-head {{ display:grid; gap:8px; }}
+      .strict-head > strong {{ justify-self:start; }}
+      .strict-metric-grid {{ grid-template-columns:1fr; }}
+      .strict-definition p {{ grid-template-columns:1fr; gap:2px; }}
+    }}
   </style>
 </head>
 <body>
@@ -2059,6 +2425,7 @@ def export_report(run_dir: Path, active_run_ids: set[str] | None = None) -> dict
       <p class="overview-note">{html.escape(backend_note)}</p>
       <div class="info-grid">{overview_cards_html}</div>
     </section>
+    {strict_blackbox_html}
     <section class="panel diagnostic-panel {diagnostic_overall_class}" style="margin-bottom:16px">
       <h2>先修什么</h2>
       <div class="diagnostic-summary">
@@ -2104,7 +2471,7 @@ def export_report(run_dir: Path, active_run_ids: set[str] | None = None) -> dict
       </article>
       <article class="panel">
         <h2>Token Summary</h2>
-        <p class="muted">用于估算成本，也能判断上下文是否异常膨胀。</p>
+        <p class="muted">{html.escape(token_summary_note)}</p>
         <div class="info-grid">{token_cards_html}</div>
       </article>
     </section>

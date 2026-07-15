@@ -13,6 +13,7 @@ from typing import Any
 
 
 FAILURE_HEALTH = {"api_error", "timeout", "rate_limited", "retrieval_empty", "retrieval_error", "question_timeout"}
+FAILURE_ANSWER_STATUS = {"failed", "empty_or_unknown"}
 
 
 def retrieval_failed(row: dict[str, str]) -> bool:
@@ -44,7 +45,7 @@ def resolve_python_bin(echomem_root: str) -> str:
 def is_failed(row: dict[str, str]) -> bool:
     return (
         str(row.get("model_status") or "").lower() == "failed"
-        or str(row.get("answer_status") or "").lower() == "failed"
+        or str(row.get("answer_status") or "").lower() in FAILURE_ANSWER_STATUS
         or retrieval_failed(row)
         or str(row.get("health_status") or "").lower() in FAILURE_HEALTH
     )
@@ -53,7 +54,7 @@ def is_failed(row: dict[str, str]) -> bool:
 def is_recovered(row: dict[str, str]) -> bool:
     return (
         str(row.get("model_status") or "").lower() != "failed"
-        and str(row.get("answer_status") or "").lower() != "failed"
+        and str(row.get("answer_status") or "").lower() not in FAILURE_ANSWER_STATUS
         and not retrieval_failed(row)
         and str(row.get("health_status") or "").lower() not in FAILURE_HEALTH
     )
@@ -122,8 +123,6 @@ def build_retry_command(args: argparse.Namespace, question_ids: list[str], round
         args.prompt_mode if args.prompt_mode != "one_shot" else "vikingboat_lite",
         "--top-k",
         str(args.top_k),
-        "--score-threshold",
-        str(args.score_threshold),
         "--memory-budget-chars",
         str(args.memory_budget_chars),
         "--user-memory-budget-chars",
@@ -152,8 +151,6 @@ def build_retry_command(args: argparse.Namespace, question_ids: list[str], round
         args.tool_set,
         "--tool-search-limit",
         str(args.tool_search_limit),
-        "--tool-min-score",
-        str(args.tool_min_score),
         "--tool-log-chars",
         str(args.tool_log_chars),
         "--prefetch-read-count",
@@ -209,7 +206,6 @@ def main() -> None:
     parser.add_argument("--agent-id", default="default")
     parser.add_argument("--prompt-mode", choices=["one_shot", "vikingboat_lite", "vikingboat_compat"], default="vikingboat_lite")
     parser.add_argument("--top-k", type=int, default=30)
-    parser.add_argument("--score-threshold", type=float, default=0.1)
     parser.add_argument("--memory-budget-chars", type=int, default=6000)
     parser.add_argument("--user-memory-budget-chars", type=int, default=4000)
     parser.add_argument("--agent-memory-budget-chars", type=int, default=2000)
@@ -225,12 +221,11 @@ def main() -> None:
     parser.add_argument("--no-qa-memory-injection", dest="qa_memory_injection", action="store_false")
     parser.add_argument("--tool-set", default="search_read")
     parser.add_argument("--tool-search-limit", type=int, default=20)
-    parser.add_argument("--tool-min-score", type=float, default=0.35)
     parser.add_argument("--tool-log-chars", type=int, default=1200)
     parser.add_argument("--prefetch-read-count", type=int, default=4)
     parser.add_argument("--prefetch-context-chars", type=int, default=5000)
-    parser.add_argument("--max-iterations", type=int, default=8)
-    parser.add_argument("--vikingboat-tool-loop", dest="vikingboat_tool_loop", action="store_true", default=False)
+    parser.add_argument("--max-iterations", type=int, default=50)
+    parser.add_argument("--vikingboat-tool-loop", dest="vikingboat_tool_loop", action="store_true", default=True)
     parser.add_argument("--no-vikingboat-tool-loop", dest="vikingboat_tool_loop", action="store_false")
     parser.add_argument("--vikingboat-compat", dest="vikingboat_compat", action="store_true", default=False)
     parser.add_argument("--no-vikingboat-compat", dest="vikingboat_compat", action="store_false")

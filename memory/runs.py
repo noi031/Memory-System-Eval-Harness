@@ -402,15 +402,27 @@ def _merge_output_sidecar_summary(summary: dict[str, Any], output_path: Path | N
     if not isinstance(summary, dict) or not output_path or output_path.suffix.lower() != ".csv":
         return summary
     summary_path = output_path.parent / "summary.json"
+    merged = dict(summary)
+    strict_path = output_path.parent / "strict_blackbox_metrics.json"
+    strict_report_path = output_path.parent / "strict_blackbox_report.html"
+    if strict_path.exists():
+        try:
+            strict_snapshot = read_json(strict_path)
+        except Exception:
+            strict_snapshot = None
+        if isinstance(strict_snapshot, dict):
+            merged["strict_blackbox"] = strict_snapshot
+            merged["strict_blackbox_metrics_path"] = str(strict_path)
+            if strict_report_path.exists():
+                merged["strict_blackbox_report_path"] = str(strict_report_path)
     if not summary_path.exists():
-        return summary
+        return merged
     try:
         sidecar = read_json(summary_path)
     except Exception:
-        return summary
+        return merged
     if not isinstance(sidecar, dict):
-        return summary
-    merged = dict(summary)
+        return merged
     summary_json = merged.get("summary_json") if isinstance(merged.get("summary_json"), dict) else {}
     next_summary_json = dict(summary_json)
     import_summary = sidecar.get("import_summary") if isinstance(sidecar.get("import_summary"), dict) else {}
@@ -983,13 +995,6 @@ def list_runs(
     query_l = query.strip().lower()
     dataset_format_l = dataset_format.strip().lower()
     for path in dirs:
-        if dataset_format_l:
-            name = path.name.lower()
-            if dataset_format_l == "locomo":
-                if "locomo" not in name and "conv30" not in name:
-                    continue
-            elif dataset_format_l not in name:
-                continue
         if query_l and query_l not in path.name.lower():
             manifest_path = path / "manifest.json"
             manifest_text = ""

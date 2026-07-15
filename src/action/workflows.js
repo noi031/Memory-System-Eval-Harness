@@ -214,7 +214,7 @@ export function createWorkflowActions(deps) {
     return {
       refresh: true,
       createdTask: task,
-      stage: "report",
+      stage: "judge",
       followupRefreshMs: 2000,
     };
   }
@@ -252,7 +252,7 @@ export function createWorkflowActions(deps) {
     return {
       refresh: true,
       createdTask: task,
-      stage: "report",
+      stage: "judge",
       followupRefreshMs: 2000,
     };
   }

@@ -15,9 +15,6 @@ from echomemory_qa_common import (
     MEMORY_SEARCH_TOOL_NAME,
     compact,
 )
-from memory.vikingboat_alignment import VIKINGBOT_TOOL_MIN_SCORE
-
-
 def memory_uri(item: dict[str, Any]) -> str:
     return str(item.get("uri") or item.get("path") or item.get("id") or "")
 
@@ -183,20 +180,19 @@ def search_result_kind(item: dict[str, Any]) -> str:
 
 def echomemory_search_payload(
     items: list[dict[str, Any]],
-    min_score: float,
     limit: int,
     *,
     hit_score_fn: Callable[[dict[str, Any]], float],
 ) -> dict[str, Any]:
     grouped: dict[str, list[dict[str, Any]]] = {"memories": [], "resources": [], "skills": []}
     emitted = 0
+    seen_uris: set[str] = set()
     for item in items:
         score = hit_score_fn(item)
-        if score < min_score:
-            continue
         uri = memory_uri(item)
-        if not uri:
+        if not uri or uri in seen_uris:
             continue
+        seen_uris.add(uri)
         emitted += 1
         grouped[search_result_kind(item)].append(
             {
@@ -224,16 +220,17 @@ async def execute_echomemory_search_tool(
     query = str(tool_args.get("query") or "").strip()
     if not query:
         return "No results found for empty query", "", 0
-    try:
-        min_score = float(tool_args.get("min_score") if tool_args.get("min_score") is not None else args.tool_min_score)
-    except (TypeError, ValueError):
-        min_score = args.tool_min_score
-
     tool_query_args = argparse.Namespace(**vars(args))
-    tool_query_args.top_k = max(int(args.top_k), int(args.tool_search_limit))
+    # Keep the native Top-K boundary by default. A larger pool is an explicit
+    # adapter experiment, not part of the strict black-box benchmark profile.
+    tool_query_args.top_k = max(
+        int(args.top_k),
+        int(args.tool_search_limit)
+        * max(1, int(getattr(args, "tool_search_pool_multiplier", 4) or 4)),
+    )
     hits, retrieval_error, _timing = await retrieve_fn(tool_query_args, sdk, query)
     cache_memory_items(cache, hits)
-    payload = echomemory_search_payload(hits, min_score, int(args.tool_search_limit), hit_score_fn=hit_score_fn)
+    payload = echomemory_search_payload(hits, int(args.tool_search_limit), hit_score_fn=hit_score_fn)
     if payload["count"] == 0:
         return f"No results found for query: {query}", retrieval_error, 0
     return json.dumps(payload, ensure_ascii=False, indent=2), retrieval_error, int(payload["count"])
@@ -262,6 +259,64 @@ def execute_echomemory_multi_read_tool(
     if len(uris) > 20:
         lines.append(f"\nSkipped {len(uris) - 20} URIs to keep the tool result bounded.")
     return "\n".join(lines)
+
+
+async def execute_echomemory_http_multi_read_tool(
+    sdk: Any,
+    tool_args: dict[str, Any],
+    cache: dict[str, dict[str, Any]],
+) -> tuple[str, str, int]:
+    raw_uris = tool_args.get("uris")
+    if isinstance(raw_uris, str):
+        uris = [raw_uris]
+    elif isinstance(raw_uris, list):
+        uris = [str(uri) for uri in raw_uris if str(uri or "").strip()]
+    else:
+        uris = []
+    if not uris:
+        return "Error: No URIs provided.", "", 0
+
+    lines = [f"Multi-read results for {len(uris)} resources (level: read):"]
+    errors: list[str] = []
+    read_count = 0
+    for uri in uris[:20]:
+        lines.append(f"\n--- START OF {uri} ---")
+        content = ""
+        read_uri = uri
+        read_candidates = [uri]
+        if uri.startswith("echo://") and "/sessions/" in uri:
+            session_tail = uri.split("/sessions/", 1)[1].strip("/")
+            session_id = session_tail.split("/", 1)[0]
+            source = str((cache.get(uri) or {}).get("source") or "echo0_plugin").strip()
+            if not re.fullmatch(r"[A-Za-z0-9_.-]+", source):
+                source = "echo0_plugin"
+            read_candidates = [
+                f"echo://engine/{source}/sessions/{session_id}/overview.md",
+                f"echo://engine/{source}/sessions/{session_id}/abstract.md",
+            ]
+        candidate_errors: list[str] = []
+        for candidate_uri in read_candidates:
+            try:
+                payload = await sdk.fs_read(candidate_uri)
+                candidate_content = str((payload or {}).get("content") or "").strip()
+                if candidate_content:
+                    content = candidate_content
+                    read_uri = candidate_uri
+                    read_count += 1
+                    break
+            except Exception as exc:
+                candidate_errors.append(f"{candidate_uri}: {exc}")
+        if not content and candidate_errors:
+            errors.extend(candidate_errors)
+        if not content:
+            content = memory_content(cache.get(uri) or {})
+        if read_uri != uri:
+            lines.append(f"[http_read_uri={read_uri}]")
+        lines.append(content if content else f"ERROR: EchoMemory returned empty content for {uri}")
+        lines.append(f"--- END OF {uri} ---")
+    if len(uris) > 20:
+        lines.append(f"\nSkipped {len(uris) - 20} URIs to keep the tool result bounded.")
+    return "\n".join(lines), "; ".join(errors[:5]), read_count
 
 
 def execute_echomemory_list_tool(cache: dict[str, dict[str, Any]], uri: str = "", recursive: bool = False) -> str:
@@ -340,30 +395,164 @@ def execute_echomemory_glob_tool(tool_args: dict[str, Any], cache: dict[str, dic
     return "Found " + str(len(matches)) + " files:\n" + "\n".join(f"📄 {uri}" for uri in matches)
 
 
+def http_engine_uri(value: str, *, leaf_pattern: str = "") -> str:
+    raw = str(value or "").strip()
+    engine_sessions = "echo://engine/echo0_plugin/sessions"
+    if raw.startswith("echo://engine/"):
+        if not leaf_pattern or raw.endswith((".md", "*")):
+            return raw
+        if raw.rstrip("/").endswith("/sessions"):
+            return raw.rstrip("/") + "/" + leaf_pattern.lstrip("/")
+        return raw.rstrip("/") + "/" + leaf_pattern.removeprefix("*/").lstrip("/")
+    if "/sessions" in raw:
+        session_tail = raw.split("/sessions", 1)[1].strip("/")
+        if not session_tail:
+            suffix = f"/{leaf_pattern.lstrip('/')}" if leaf_pattern else ""
+            return engine_sessions + suffix
+        mapped = engine_sessions + "/" + session_tail
+        if not leaf_pattern or mapped.endswith((".md", "*")) or "*" in session_tail:
+            return mapped
+        return mapped.rstrip("/") + "/" + leaf_pattern.removeprefix("*/").lstrip("/")
+    if not raw:
+        suffix = f"/{leaf_pattern.lstrip('/')}" if leaf_pattern else ""
+        return engine_sessions + suffix
+    return raw
+
+
+async def execute_echomemory_http_list_tool(
+    sdk: Any,
+    uri: str = "",
+    recursive: bool = False,
+) -> tuple[str, str, int]:
+    target = http_engine_uri(uri)
+    try:
+        if recursive:
+            pattern = target.rstrip("/") + "/**"
+            entries = await sdk.fs_glob(pattern)
+        else:
+            entries = await sdk.fs_list(target)
+    except Exception as exc:
+        return f"Error listing EchoMemory resources: {exc}", str(exc), 0
+    rows = []
+    for entry in entries[:80]:
+        rows.append(
+            str(
+                {
+                    "name": str(entry.get("name") or ""),
+                    "size": int(entry.get("size") or 0),
+                    "uri": str(entry.get("uri") or ""),
+                    "isDir": str(entry.get("kind") or "") == "directory",
+                }
+            )
+        )
+    return "\n".join(rows) if rows else f"No resources found at {target}", "", len(rows)
+
+
+async def execute_echomemory_http_glob_tool(
+    sdk: Any,
+    tool_args: dict[str, Any],
+) -> tuple[str, str, int]:
+    pattern = str(tool_args.get("pattern") or "*").strip() or "*"
+    uri_prefix = str(tool_args.get("uri") or "").strip()
+    if uri_prefix:
+        pattern = uri_prefix.rstrip("/") + "/" + pattern.lstrip("/")
+    target = http_engine_uri(pattern, leaf_pattern="*/overview.md")
+    try:
+        entries = await sdk.fs_glob(target)
+    except Exception as exc:
+        return f"Error globbing EchoMemory resources: {exc}", str(exc), 0
+    uris = [str(entry.get("uri") or "") for entry in entries if str(entry.get("uri") or "").strip()]
+    if not uris:
+        return f"No files found for pattern: {target}", "", 0
+    return "Found " + str(len(uris)) + " files:\n" + "\n".join(f"📄 {uri}" for uri in uris[:80]), "", len(uris)
+
+
+async def execute_echomemory_http_grep_tool(
+    sdk: Any,
+    tool_args: dict[str, Any],
+) -> tuple[str, str, int]:
+    raw_patterns = tool_args.get("pattern")
+    patterns = raw_patterns if isinstance(raw_patterns, list) else [raw_patterns]
+    patterns = [str(pattern or "").strip() for pattern in patterns if str(pattern or "").strip()]
+    if not patterns:
+        return "No matches found for patterns: ''", "", 0
+    flags = re.I if tool_args.get("case_insensitive") else 0
+    uri_prefix = str(tool_args.get("uri") or "").strip()
+    overview_pattern = http_engine_uri(uri_prefix, leaf_pattern="*/overview.md")
+    if overview_pattern.endswith("/overview.md") and "*" not in overview_pattern:
+        entries = [
+            {"uri": overview_pattern},
+            {"uri": overview_pattern.removesuffix("/overview.md") + "/messages.jsonl"},
+        ]
+    else:
+        if not overview_pattern.endswith((".md", "*")):
+            overview_pattern = overview_pattern.rstrip("/") + "/*/overview.md"
+        message_pattern = overview_pattern.removesuffix("/overview.md") + "/messages.jsonl"
+        entries = []
+        glob_errors: list[str] = []
+        for pattern in (overview_pattern, message_pattern):
+            try:
+                entries.extend(await sdk.fs_glob(pattern))
+            except Exception as exc:
+                glob_errors.append(f"{pattern}: {exc}")
+        if not entries and glob_errors:
+            return f"Error globbing EchoMemory resources: {'; '.join(glob_errors)}", "; ".join(glob_errors), 0
+    results: list[str] = []
+    errors: list[str] = []
+    total = 0
+    seen_uris: set[str] = set()
+    for entry in entries[:160]:
+        item_uri = str(entry.get("uri") or "").strip()
+        if not item_uri or item_uri in seen_uris:
+            continue
+        seen_uris.add(item_uri)
+        try:
+            payload = await sdk.fs_read(item_uri)
+            content = str((payload or {}).get("content") or "")
+        except Exception as exc:
+            errors.append(f"{item_uri}: {exc}")
+            continue
+        for pattern in patterns:
+            try:
+                regex = re.compile(pattern, flags)
+            except re.error:
+                regex = re.compile(re.escape(pattern), flags)
+            for line_no, line in enumerate(content.splitlines(), 1):
+                if not regex.search(line):
+                    continue
+                if not results or results[-1] != f"\n📄 {item_uri}":
+                    results.append(f"\n📄 {item_uri}")
+                results.append(f"   Line {line_no} (pattern: '{pattern}'):")
+                results.append(f"   {line[:600]}")
+                total += 1
+                if total >= 60:
+                    return f"Found {total} matches across {len(patterns)} patterns:\n" + "\n".join(results), "; ".join(errors[:5]), total
+    if not results:
+        return "No matches found for patterns: " + ", ".join(f"'{pattern}'" for pattern in patterns), "; ".join(errors[:5]), 0
+    return f"Found {total} matches across {len(patterns)} patterns:\n" + "\n".join(results), "; ".join(errors[:5]), total
+
+
 def echomemory_search_tool_definition() -> dict[str, Any]:
+    properties: dict[str, Any] = {
+        "query": {"type": "string", "description": "The search query"},
+        "target_uri": {
+            "type": "string",
+            "description": "Optional EchoMemory URI prefix to limit search scope. If omitted, search all available memory.",
+        },
+    }
     return {
         "type": "function",
         "function": {
             "name": MEMORY_SEARCH_TOOL_NAME,
             "description": (
                 "Using query to search EchoMemory long-term memories and supporting context. "
-                "This operation performs semantic retrieval, not full character matching. Please avoid repeated calls with similar queries as much as possible."
-                "bad-case: after searching with 'Nate Joanna dog playdate 3:00 pm', another search was performed using 'Nate Joanna dog playdate'."
+                "This operation performs semantic retrieval, not full character matching. "
+                "Avoid duplicate calls with the same intent in the same turn, but search again "
+                "when a follow-up asks for a different remembered fact."
             ),
             "parameters": {
                 "type": "object",
-                "properties": {
-                    "query": {"type": "string", "description": "The search query"},
-                    "min_score": {
-                        "type": "number",
-                        "description": "Minimum relevance score threshold",
-                        "default": VIKINGBOT_TOOL_MIN_SCORE,
-                    },
-                    "target_uri": {
-                        "type": "string",
-                        "description": "Optional EchoMemory URI prefix to limit search scope. If omitted, search all available memory.",
-                    },
-                },
+                "properties": properties,
                 "required": ["query"],
             },
         },
@@ -375,7 +564,11 @@ def echomemory_multi_read_tool_definition() -> dict[str, Any]:
         "type": "function",
         "function": {
             "name": MEMORY_MULTI_READ_TOOL_NAME,
-            "description": "Read full content from multiple EchoMemory items. Returns complete content for all URIs with no truncation.",
+            "description": (
+                "Read full content for up to 20 EchoMemory URIs through HTTP /fs/read. "
+                "For session URIs this resolves the corresponding overview.md when available. "
+                "Use this for relevant summary or session results that need more detail."
+            ),
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -396,7 +589,7 @@ def echomemory_list_tool_definition() -> dict[str, Any]:
         "type": "function",
         "function": {
             "name": MEMORY_LIST_TOOL_NAME,
-            "description": "List cached EchoMemory items by URI prefix.",
+            "description": "List EchoMemory items by URI prefix. In HTTP mode this uses the public read-only /fs/ls API.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -414,7 +607,10 @@ def echomemory_grep_tool_definition() -> dict[str, Any]:
         "type": "function",
         "function": {
             "name": MEMORY_GREP_TOOL_NAME,
-            "description": "Search cached EchoMemory item content using regex patterns. Supports multiple patterns to search concurrently. Please avoid repeated calls with similar queries as much as possible.",
+            "description": (
+                "Search EchoMemory session overview and committed messages using regex patterns. "
+                "In HTTP mode this uses only public read-only /fs/glob and /fs/read APIs."
+            ),
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -433,7 +629,7 @@ def echomemory_glob_tool_definition() -> dict[str, Any]:
         "type": "function",
         "function": {
             "name": MEMORY_GLOB_TOOL_NAME,
-            "description": "Find cached EchoMemory item URIs using glob patterns.",
+            "description": "Find EchoMemory item URIs using glob patterns. In HTTP mode this uses the public read-only /fs/glob API.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -455,17 +651,18 @@ def echomemory_tool_definitions(
         getattr(args, "tool_set", ""),
         vikingboat_compat=bool(getattr(args, "vikingboat_compat", False)),
     )
+    search_tool = echomemory_search_tool_definition()
     if tool_set == "search_only":
-        return [echomemory_search_tool_definition()]
+        return [search_tool]
     if tool_set == ECHOMEMORY_VIKINGBOAT_TOOL_SET:
         return [
-            echomemory_search_tool_definition(),
+            search_tool,
             echomemory_multi_read_tool_definition(),
             echomemory_list_tool_definition(),
             echomemory_grep_tool_definition(),
             echomemory_glob_tool_definition(),
         ]
-    return [echomemory_search_tool_definition(), echomemory_multi_read_tool_definition()]
+    return [search_tool, echomemory_multi_read_tool_definition()]
 
 
 async def execute_echomemory_tool(
@@ -488,12 +685,24 @@ async def execute_echomemory_tool(
             hit_score_fn=hit_score_fn,
         )
     if name == MEMORY_MULTI_READ_TOOL_NAME:
+        if getattr(sdk, "_compat_layout", "") == "http":
+            return await execute_echomemory_http_multi_read_tool(sdk, parsed_args, cache)
         return execute_echomemory_multi_read_tool(parsed_args, cache), "", 0
     if name == MEMORY_LIST_TOOL_NAME:
+        if getattr(sdk, "_compat_layout", "") == "http":
+            return await execute_echomemory_http_list_tool(
+                sdk,
+                str(parsed_args.get("uri") or ""),
+                bool(parsed_args.get("recursive")),
+            )
         return execute_echomemory_list_tool(cache, str(parsed_args.get("uri") or ""), bool(parsed_args.get("recursive"))), "", 0
     if name == MEMORY_GREP_TOOL_NAME:
+        if getattr(sdk, "_compat_layout", "") == "http":
+            return await execute_echomemory_http_grep_tool(sdk, parsed_args)
         return execute_echomemory_grep_tool(parsed_args, cache), "", 0
     if name == MEMORY_GLOB_TOOL_NAME:
+        if getattr(sdk, "_compat_layout", "") == "http":
+            return await execute_echomemory_http_glob_tool(sdk, parsed_args)
         return execute_echomemory_glob_tool(parsed_args, cache), "", 0
     return f"Error executing {name}: unsupported tool", "", 0
 

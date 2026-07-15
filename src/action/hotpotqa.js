@@ -75,7 +75,6 @@ export function createHotpotQaActions(deps) {
         retrieval_query_strategy: "expanded",
         tool_set: form.tool_set || firstValue(cfg.hotpotQaToolSet, "vikingbot_native_safe"),
         tool_search_limit: form.tool_search_limit,
-        tool_min_score: Number.isFinite(form.tool_min_score) ? form.tool_min_score : Number(firstValue(cfg.hotpotQaToolMinScore, "0.35")),
         max_iterations: form.max_iterations,
         question_timeout_s: Number.isFinite(form.question_timeout_s) ? form.question_timeout_s : Number(firstValue(cfg.hotpotQaQuestionTimeout, "180")),
         answer_refinement: true,
@@ -143,7 +142,6 @@ export function createHotpotQaActions(deps) {
     if (config?.max_iterations !== undefined) next.max_iterations = config.max_iterations;
     if (config?.retrieval_mode) next.retrieval_mode = config.retrieval_mode;
     if (config?.tool_set) next.tool_set = config.tool_set;
-    if (config?.tool_min_score !== undefined) next.tool_min_score = config.tool_min_score;
     if (config?.question_timeout_s !== undefined) next.question_timeout_s = config.question_timeout_s;
     if (config?.official_eval_after !== undefined) next.official_eval_after = config.official_eval_after;
     if (config?.hotpotqa_corpus_mode) next.hotpotqa_corpus_mode = config.hotpotqa_corpus_mode;

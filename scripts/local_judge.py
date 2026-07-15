@@ -90,6 +90,46 @@ def extract_chat_content(raw: str) -> str:
     raise RuntimeError(f"non-json judge API response: {raw[:800]}")
 
 
+def extract_usage(raw: str) -> dict[str, int] | None:
+    payloads: list[dict[str, Any]] = []
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError:
+        parsed = None
+    if isinstance(parsed, dict):
+        payloads.append(parsed)
+    else:
+        for line in raw.splitlines():
+            line = line.strip()
+            if not line.startswith("data:"):
+                continue
+            text = line[5:].strip()
+            if not text or text == "[DONE]":
+                continue
+            try:
+                item = json.loads(text)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(item, dict):
+                payloads.append(item)
+
+    usage: dict[str, Any] = {}
+    for payload in payloads:
+        candidate = payload.get("usage")
+        if isinstance(candidate, dict):
+            usage = candidate
+    if not usage:
+        return None
+    prompt = int(usage.get("prompt_tokens") or usage.get("input_tokens") or 0)
+    completion = int(usage.get("completion_tokens") or usage.get("output_tokens") or 0)
+    total = int(usage.get("total_tokens") or (prompt + completion))
+    return {
+        "prompt_tokens": prompt,
+        "completion_tokens": completion,
+        "total_tokens": total,
+    }
+
+
 def parse_judge_json(text: str) -> tuple[str, str] | None:
     start_idx = text.find("{")
     end_idx = text.rfind("}")
@@ -107,7 +147,13 @@ def parse_judge_json(text: str) -> tuple[str, str] | None:
     return None
 
 
-def call_openai_compatible(base_url: str, model: str, token: str, row: dict[str, str], timeout: int) -> tuple[str, str]:
+def call_openai_compatible(
+    base_url: str,
+    model: str,
+    token: str,
+    row: dict[str, str],
+    timeout: int,
+) -> tuple[str, str, dict[str, int] | None]:
     url = base_url.rstrip("/") + "/chat/completions"
     system_prompt = """
         You are an expert grader that determines if answers to questions match a gold standard answer
@@ -163,10 +209,11 @@ def call_openai_compatible(base_url: str, model: str, token: str, row: dict[str,
     if not raw.strip():
         raise RuntimeError("empty judge API response")
     content = extract_chat_content(raw)
+    usage = extract_usage(raw)
     parsed = parse_judge_json(content)
     if parsed:
-        return parsed
-    return "WRONG", f"[PARSE ERROR] Invalid response: {content}"
+        return parsed[0], parsed[1], usage
+    return "WRONG", f"[PARSE ERROR] Invalid response: {content}", usage
 
 
 def judge_row(row: dict[str, str], args: argparse.Namespace, token: str) -> dict[str, str]:
@@ -181,9 +228,25 @@ def judge_row(row: dict[str, str], args: argparse.Namespace, token: str) -> dict
     last_exc: Exception | None = None
     for attempt in range(max(1, args.retries + 1)):
         try:
-            result, reasoning = call_openai_compatible(args.base_url, args.model, token, row, args.timeout_s)
+            result, reasoning, usage = call_openai_compatible(
+                args.base_url,
+                args.model,
+                token,
+                row,
+                args.timeout_s,
+            )
             row["result"] = result
             row["reasoning"] = reasoning
+            if usage is not None:
+                row["judge_prompt_tokens"] = str(usage["prompt_tokens"])
+                row["judge_completion_tokens"] = str(usage["completion_tokens"])
+                row["judge_total_tokens"] = str(usage["total_tokens"])
+                row["judge_usage_status"] = "ok"
+            else:
+                row["judge_prompt_tokens"] = ""
+                row["judge_completion_tokens"] = ""
+                row["judge_total_tokens"] = ""
+                row["judge_usage_status"] = "unavailable"
             last_exc = None
             break
         except Exception as exc:
@@ -193,6 +256,10 @@ def judge_row(row: dict[str, str], args: argparse.Namespace, token: str) -> dict
     if last_exc is not None:
         row["result"] = "WRONG"
         row["reasoning"] = f"[JUDGE ERROR] {last_exc}"
+        row["judge_prompt_tokens"] = ""
+        row["judge_completion_tokens"] = ""
+        row["judge_total_tokens"] = ""
+        row["judge_usage_status"] = "unavailable"
     try:
         prior = float(row.get("time_cost") or 0)
         row["time_cost"] = f"{prior + (time.time() - started):.4f}"
@@ -274,7 +341,14 @@ def main() -> None:
     if not rows:
         raise SystemExit(f"no rows in {path}")
     fieldnames = list(rows[0].keys())
-    for name in ["result", "reasoning"]:
+    for name in [
+        "result",
+        "reasoning",
+        "judge_prompt_tokens",
+        "judge_completion_tokens",
+        "judge_total_tokens",
+        "judge_usage_status",
+    ]:
         if name not in fieldnames:
             fieldnames.append(name)
             for row in rows:
@@ -309,6 +383,7 @@ def main() -> None:
     correct = sum(1 for row in rows if (row.get("result") or "").upper() == "CORRECT")
     wrong = sum(1 for row in rows if (row.get("result") or "").upper() == "WRONG")
     graded = correct + wrong
+    judge_usage_rows = [row for row in rows if str(row.get("judge_total_tokens") or "").strip()]
     summary = {
         "count": len(rows),
         "graded": graded,
@@ -323,6 +398,12 @@ def main() -> None:
         "uses_retrieved_memory": False,
         "uses_message_jsonl": False,
         "judge_model": args.model,
+        "judge_prompt_tokens": sum(int(row.get("judge_prompt_tokens") or 0) for row in judge_usage_rows),
+        "judge_completion_tokens": sum(int(row.get("judge_completion_tokens") or 0) for row in judge_usage_rows),
+        "judge_total_tokens": sum(int(row.get("judge_total_tokens") or 0) for row in judge_usage_rows),
+        "judge_usage_observed_count": len(judge_usage_rows),
+        "judge_usage_expected_count": graded,
+        "judge_usage_complete": bool(graded) and len(judge_usage_rows) == graded,
     }
     (path.parent / "judge_summary.json").write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
     print(f"Grading completed: {correct}/{graded} correct, accuracy: {summary['accuracy'] * 100:.2f}%" if graded else "Grading completed: 0 graded", flush=True)

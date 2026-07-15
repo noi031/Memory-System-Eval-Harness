@@ -339,7 +339,6 @@ def main() -> None:
     parser.add_argument("--judge-token", default="")
     parser.add_argument("--prompt-mode", choices=["vikingboat_lite", "vikingboat_compat", "one_shot"], default="vikingboat_lite")
     parser.add_argument("--top-k", type=int, default=30)
-    parser.add_argument("--score-threshold", type=float, default=0.1)
     parser.add_argument("--memory-budget-chars", type=int, default=6000)
     parser.add_argument("--user-memory-budget-chars", type=int, default=4000)
     parser.add_argument("--agent-memory-budget-chars", type=int, default=2000)
@@ -349,7 +348,6 @@ def main() -> None:
     parser.add_argument("--no-retrieval-uri-dedup", dest="retrieval_uri_dedup", action="store_false")
     parser.add_argument("--tool-set", choices=["vikingboat_default", "search_read", "search_only", "vikingbot_native_safe"], default="search_read")
     parser.add_argument("--tool-search-limit", type=int, default=20)
-    parser.add_argument("--tool-min-score", type=float, default=0.35)
     parser.add_argument("--tool-log-chars", type=int, default=1200)
     parser.add_argument("--prefetch-read-count", type=int, default=4)
     parser.add_argument("--prefetch-context-chars", type=int, default=5000)
@@ -548,8 +546,6 @@ def main() -> None:
         args.prompt_mode,
         "--top-k",
         str(args.top_k),
-        "--score-threshold",
-        str(args.score_threshold),
         "--memory-budget-chars",
         str(args.memory_budget_chars),
         "--user-memory-budget-chars",
@@ -574,8 +570,6 @@ def main() -> None:
         args.tool_set,
         "--tool-search-limit",
         str(args.tool_search_limit),
-        "--tool-min-score",
-        str(args.tool_min_score),
         "--tool-log-chars",
         str(args.tool_log_chars),
         "--prefetch-read-count",

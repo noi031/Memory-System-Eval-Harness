@@ -71,7 +71,6 @@ export function createLongMemEvalActions(deps) {
         retrieval_query_strategy: "direct",
         tool_set: form.tool_set || firstValue(cfg.longMemEvalToolSet, cfg.hotpotQaToolSet, "vikingbot_native_safe"),
         tool_search_limit: form.tool_search_limit,
-        tool_min_score: Number.isFinite(form.tool_min_score) ? form.tool_min_score : Number(firstValue(cfg.longMemEvalToolMinScore, cfg.hotpotQaToolMinScore, "0.35")),
         max_iterations: form.max_iterations,
         question_timeout_s: Number.isFinite(form.question_timeout_s) ? form.question_timeout_s : Number(firstValue(cfg.longMemEvalQuestionTimeout, cfg.hotpotQaQuestionTimeout, "180")),
         qa_parallelism: Number.isFinite(form.qa_parallelism) ? form.qa_parallelism : Number(firstValue(cfg.longMemEvalQaParallelism, cfg.echomemQaParallelism, "10")),
@@ -139,7 +138,6 @@ export function createLongMemEvalActions(deps) {
     if (config?.max_iterations !== undefined) next.max_iterations = config.max_iterations;
     if (config?.retrieval_mode) next.retrieval_mode = config.retrieval_mode;
     if (config?.tool_set) next.tool_set = config.tool_set;
-    if (config?.tool_min_score !== undefined) next.tool_min_score = config.tool_min_score;
     if (config?.question_timeout_s !== undefined) next.question_timeout_s = config.question_timeout_s;
     if (config?.official_eval_after !== undefined) next.official_eval_after = config.official_eval_after;
     if (config?.qa_parallelism !== undefined) next.qa_parallelism = config.qa_parallelism;

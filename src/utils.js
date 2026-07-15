@@ -35,7 +35,7 @@ export function formatPct(value) {
 
 export function formatInt(value) {
   const n = Number(value);
-  return Number.isFinite(n) ? String(n) : "-";
+  return Number.isFinite(n) ? n.toLocaleString("zh-CN") : "-";
 }
 
 export function formatDurationSeconds(value) {

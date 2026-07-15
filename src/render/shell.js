@@ -176,11 +176,23 @@ export function createShellRenderers({
       accountSelect.value = state.selectedAccount || "default";
     }
     $("wbBackendName").textContent = model.backendName;
+    const backendSelect = $("wbBackendSelect");
+    if (backendSelect) {
+      const selectedBackend = String(
+        state.accountDetails?.config?.memoryBackend
+        || state.config?.active_account_config?.memoryBackend
+        || state.config?.memoryBackend
+        || "echomemory"
+      ).trim().toLowerCase();
+      backendSelect.value = selectedBackend === "openviking" ? "openviking" : "echomemory";
+    }
     $("wbSidebarStatus").textContent = model.sidebarStatus;
     $("wbBackendHint").textContent = model.backendHint;
     $("wbTopbarStatus").textContent = model.topbarStatusLabel || model.topbarStatus;
     $("wbTopbarStatusHint").textContent = model.topbarStatusHint;
     $("wbAccountName").hidden = benchmarkId === "locomo";
+    $("wbBackendName").hidden = benchmarkId === "locomo";
+    if (backendSelect) backendSelect.hidden = benchmarkId !== "locomo";
     $("wbAccountHint").hidden = benchmarkId === "locomo" || !String(model.accountHint || "").trim();
     $("wbBackendHint").hidden = benchmarkId === "locomo";
     $("wbTopbarStatusHint").hidden = benchmarkId === "locomo";

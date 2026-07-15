@@ -122,6 +122,8 @@ import { createFormReaders } from "./src/form-readers.js";
   async function loadBootstrapRunner(options = {}) {
     clearTimer(state.refreshTimer);
     await actions.loadBootstrap(options);
+    controller.reconcileAfterBootstrap();
+    await actions.ensureQuestions().catch(() => {});
     renderAll();
     if (selectors.hasRunningTasks()) {
       state.refreshTimer = delay(() => refreshAllRunner().catch(() => {}), 3000);

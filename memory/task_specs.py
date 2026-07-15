@@ -340,7 +340,7 @@ def build_echomemory_qa_retry_missing_task(
         "--agent-id",
         str(payload.get("em_agent_id") or payload.get("agent_id") or "default"),
         "--prompt-mode",
-        str(payload.get("prompt_mode") or "one_shot"),
+        str(payload.get("prompt_mode") or "vikingboat_lite"),
         "--top-k",
         str(payload.get("top_k") or default_top_k),
         "--score-threshold",
@@ -378,14 +378,14 @@ def build_echomemory_qa_retry_missing_task(
         "--prefetch-context-chars",
         str(payload.get("prefetch_context_chars") or 5000),
         "--max-iterations",
-        str(payload.get("max_iterations") or 8),
+        str(payload.get("max_iterations") or 50),
     ]
     command.append("--qa-memory-injection" if str(payload.get("qa_memory_injection", True)).strip().lower() not in {"0", "false", "no", "off"} else "--no-qa-memory-injection")
     if echomem_auth_key:
         command += ["--echomem-auth-key", echomem_auth_key]
     if token:
         command += ["--answer-token", str(token)]
-    command.append("--vikingboat-tool-loop" if str(payload.get("vikingboat_tool_loop", False)).strip().lower() not in {"0", "false", "no", "off"} else "--no-vikingboat-tool-loop")
+    command.append("--vikingboat-tool-loop" if str(payload.get("vikingboat_tool_loop", True)).strip().lower() not in {"0", "false", "no", "off"} else "--no-vikingboat-tool-loop")
     command.append("--vikingboat-compat" if str(payload.get("vikingboat_compat", False)).strip().lower() not in {"0", "false", "no", "off"} else "--no-vikingboat-compat")
     command.append("--initial-tool-prefetch" if str(payload.get("initial_tool_prefetch", False)).strip().lower() not in {"0", "false", "no", "off"} else "--no-initial-tool-prefetch")
     command.append("--fallback-to-one-shot" if str(payload.get("fallback_to_one_shot", True)).strip().lower() not in {"0", "false", "no", "off"} else "--no-fallback-to-one-shot")
@@ -442,7 +442,7 @@ def build_echomemory_qa_retry_failed_task(
         "--agent-id",
         str(payload.get("em_agent_id") or payload.get("agent_id") or "default"),
         "--prompt-mode",
-        str(payload.get("prompt_mode") or "one_shot"),
+        str(payload.get("prompt_mode") or "vikingboat_lite"),
         "--top-k",
         str(payload.get("top_k") or default_top_k),
         "--score-threshold",
@@ -480,14 +480,14 @@ def build_echomemory_qa_retry_failed_task(
         "--prefetch-context-chars",
         str(payload.get("prefetch_context_chars") or 5000),
         "--max-iterations",
-        str(payload.get("max_iterations") or 8),
+        str(payload.get("max_iterations") or 50),
     ]
     command.append("--qa-memory-injection" if str(payload.get("qa_memory_injection", True)).strip().lower() not in {"0", "false", "no", "off"} else "--no-qa-memory-injection")
     if echomem_auth_key:
         command += ["--echomem-auth-key", echomem_auth_key]
     if token:
         command += ["--answer-token", str(token)]
-    command.append("--vikingboat-tool-loop" if str(payload.get("vikingboat_tool_loop", False)).strip().lower() not in {"0", "false", "no", "off"} else "--no-vikingboat-tool-loop")
+    command.append("--vikingboat-tool-loop" if str(payload.get("vikingboat_tool_loop", True)).strip().lower() not in {"0", "false", "no", "off"} else "--no-vikingboat-tool-loop")
     command.append("--vikingboat-compat" if str(payload.get("vikingboat_compat", False)).strip().lower() not in {"0", "false", "no", "off"} else "--no-vikingboat-compat")
     command.append("--initial-tool-prefetch" if str(payload.get("initial_tool_prefetch", False)).strip().lower() not in {"0", "false", "no", "off"} else "--no-initial-tool-prefetch")
     command.append("--fallback-to-one-shot" if str(payload.get("fallback_to_one_shot", True)).strip().lower() not in {"0", "false", "no", "off"} else "--no-fallback-to-one-shot")
