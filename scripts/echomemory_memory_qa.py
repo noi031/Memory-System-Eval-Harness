@@ -63,6 +63,7 @@ from echomemory_qa_common import (
 from echomemory_evaluation_profiles import (
     EVALUATION_PROFILE_CHOICES,
     EVALUATION_PROFILE_CUSTOM,
+    EVALUATION_PROFILE_LEGACY_77,
     apply_evaluation_profile,
     evaluation_profile_metadata,
 )
@@ -6795,10 +6796,10 @@ def main() -> None:
     parser.add_argument(
         "--evaluation-profile",
         choices=EVALUATION_PROFILE_CHOICES,
-        default=EVALUATION_PROFILE_CUSTOM,
+        default=EVALUATION_PROFILE_LEGACY_77,
         help=(
-            "Apply one reproducible configuration bundle. legacy-77 restores the "
-            "historical 77.78%% setup; test-best selects the current VikingBot-aligned "
+            "Apply one reproducible configuration bundle. The default legacy-77 restores "
+            "the historical 77.78%% setup; test-best selects the current VikingBot-aligned "
             "85.19%% setup; custom preserves individually supplied flags."
         ),
     )

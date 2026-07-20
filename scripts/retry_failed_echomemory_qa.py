@@ -11,7 +11,10 @@ import subprocess
 import sys
 from typing import Any
 
-from echomemory_evaluation_profiles import EVALUATION_PROFILE_CHOICES
+from echomemory_evaluation_profiles import (
+    EVALUATION_PROFILE_CHOICES,
+    EVALUATION_PROFILE_LEGACY_77,
+)
 
 
 FAILURE_HEALTH = {"api_error", "timeout", "rate_limited", "retrieval_empty", "retrieval_error", "question_timeout"}
@@ -182,7 +185,7 @@ def main() -> None:
     parser.add_argument(
         "--evaluation-profile",
         choices=EVALUATION_PROFILE_CHOICES,
-        default="custom",
+        default=EVALUATION_PROFILE_LEGACY_77,
         help="Reuse the same bundled evaluation configuration when retrying failed rows.",
     )
     parser.add_argument("--dataset", required=True)
