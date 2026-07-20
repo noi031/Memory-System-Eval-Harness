@@ -675,6 +675,11 @@ def _write_develop_echomem_config(
         chat_provider = "deepseek"
     chat_model = (os.environ.get("ECHOMEM_CHAT_MODEL") or "deepseek-v4-flash").strip()
     chat_token = str(os.environ.get("ECHOMEM_CHAT_API_KEY") or embedding_token).strip()
+    neo4j_uri = str(os.environ.get("ECHOMEM_NEO4J_URI") or "bolt://127.0.0.1:7687").strip()
+    neo4j_username = str(os.environ.get("ECHOMEM_NEO4J_USERNAME") or "neo4j").strip()
+    neo4j_password = str(os.environ.get("ECHOMEM_NEO4J_PASSWORD") or "").strip()
+    neo4j_database = str(os.environ.get("ECHOMEM_NEO4J_DATABASE") or "neo4j").strip()
+    graph_enabled = _env_bool("ECHOMEM_GRAPH_ENABLED", bool(neo4j_password))
     llm_provider = "fake" if fallback_to_mock else "openai_compatible"
     embedding_provider = "fake" if (fallback_to_mock or fallback_to_mock_embedding_only) else "openai_compatible"
     recall_routers = _normalize_recall_routers(
@@ -748,6 +753,31 @@ def _write_develop_echomem_config(
                         "enabled": True,
                         "backend": "hnswlib",
                         "dim": int(os.environ.get("ECHOMEM_EMBEDDING_DIM") or 1024),
+                    },
+                    "graph": {
+                        "enabled": graph_enabled,
+                        "backend": "neo4j",
+                        "neo4j": {
+                            "uri": neo4j_uri,
+                            "username": neo4j_username,
+                            "password": neo4j_password,
+                            "database": neo4j_database,
+                            "auto_create_schema": True,
+                            "pool": {
+                                "max_size": int(
+                                    os.environ.get("ECHOMEM_NEO4J_POOL_MAX_SIZE") or 100
+                                ),
+                                "max_connection_lifetime": int(
+                                    os.environ.get("ECHOMEM_NEO4J_MAX_CONNECTION_LIFETIME")
+                                    or 3600
+                                ),
+                            },
+                            "retry": {
+                                "max_attempts": int(
+                                    os.environ.get("ECHOMEM_NEO4J_RETRY_MAX_ATTEMPTS") or 3
+                                ),
+                            },
+                        },
                     },
                     "search": {
                         "text_scan": {
@@ -1151,6 +1181,7 @@ class EchoMemHTTPCompatSDK:
         agent_id: str,
         workspace: str | Path,
         timeout_s: float = 60.0,
+        auto_auth: bool = True,
     ) -> None:
         self._base_url = str(base_url).strip().rstrip("/")
         self._account = account or "default"
@@ -1159,14 +1190,23 @@ class EchoMemHTTPCompatSDK:
         self._workspace = Path(workspace).expanduser().resolve()
         self._timeout_s = max(1.0, float(timeout_s or 60.0))
         self._request_counts: dict[str, int] = {}
-        self._auth_key, self._auth_info = ensure_echomem_http_auth_key(
-            base_url=self._base_url,
-            auth_key=auth_key,
-            account=self._account,
-            user_id=self._user_id,
-            workspace=self._workspace,
-            timeout_s=self._timeout_s,
-        )
+        explicit_auth_key = str(auth_key or "").strip()
+        if explicit_auth_key or auto_auth:
+            self._auth_key, self._auth_info = ensure_echomem_http_auth_key(
+                base_url=self._base_url,
+                auth_key=explicit_auth_key,
+                account=self._account,
+                user_id=self._user_id,
+                workspace=self._workspace,
+                timeout_s=self._timeout_s,
+            )
+        else:
+            self._auth_key = ""
+            self._auth_info = {
+                "source": "anonymous",
+                "auth_key_present": False,
+                "user_id": self._user_id,
+            }
         self._compat_layout = "http"
 
     def _ctx(self, **kwargs: Any) -> dict[str, Any]:
@@ -1637,11 +1677,53 @@ class EchoMemDevelopCompatSDK:
 
     async def fs_read(self, uri: str, *, ctx: dict[str, Any] | None = None) -> dict[str, Any]:
         raw = str(uri or "").strip()
+        if not raw:
+            return {"content": ""}
+        account = self._ctx_value(ctx, "account_id", self._account)
         if raw.startswith("/"):
-            raw = f"echo://{self._ctx_value(ctx, 'account_id', self._account)}/{raw.lstrip('/')}"
+            raw = f"echo://{raw.lstrip('/')}"
         elif not raw.startswith("echo://"):
-            raw = f"echo://{self._ctx_value(ctx, 'account_id', self._account)}/{raw.lstrip('/')}"
-        return {"content": await self._client.fs_read(raw)}
+            raw = f"echo://{raw.lstrip('/')}"
+
+        account_prefix = f"echo://{account}/"
+        if raw.startswith(account_prefix):
+            raw = f"echo://{raw[len(account_prefix):]}"
+
+        tail = raw[len("echo://") :] if raw.startswith("echo://") else raw
+        parts = tail.split("/")
+        if parts and parts[0] == "sessions" and len(parts) >= 3:
+            resolved_uri = (
+                f"echo://engine/{echomem_engine_id()}/"
+                + "/".join(parts)
+            )
+            return {
+                "content": await self._client.fs_read(resolved_uri),
+                "resolved_uri": resolved_uri,
+            }
+
+        if parts and parts[0] == "memory" and len(parts) >= 3:
+            filename = parts[-1]
+            parent = "/".join(parts[:-1])
+            pattern = (
+                f"echo://engine/{echomem_engine_id()}/{parent}/**/{filename}"
+            )
+            matches = await self._client.fs_glob(pattern)
+            if not matches:
+                return {"content": ""}
+            resolved_uri = str(getattr(matches[0], "uri", "") or "")
+            return {
+                "content": await self._client.fs_read(resolved_uri),
+                "resolved_uri": resolved_uri,
+            }
+
+        # Search results use a session URI as provenance for inline atomic
+        # content. The URI names a directory rather than a readable memory
+        # file, so preserve the inline atom instead of replacing it with the
+        # entire source transcript.
+        if parts and parts[0] == "sessions" and len(parts) == 2:
+            return {"content": ""}
+
+        return {"content": await self._client.fs_read(raw), "resolved_uri": raw}
 
     async def close(self) -> None:
         await self._client.close()
@@ -1659,6 +1741,7 @@ async def open_echomem_sdk(
     auth_key: str = "",
     transport_mode: str = "",
     http_timeout_s: float = 60.0,
+    http_auto_auth: bool = True,
 ) -> tuple[Any, Any | None, str]:
     normalized_transport = echomem_transport_mode(base_url, transport_mode)
     if normalized_transport == "http":
@@ -1673,10 +1756,12 @@ async def open_echomem_sdk(
             agent_id=agent_id,
             workspace=workspace,
             timeout_s=http_timeout_s,
+            auto_auth=http_auto_auth,
         )
         print(
             f"[sdk-open] transport=http base_url={normalized_base_url} workspace={workspace} "
-            f"account={account} user_id={user_id} agent_id={agent_id}",
+            f"account={account} user_id={user_id} agent_id={agent_id} "
+            f"auth_source={sdk._auth_info.get('source', 'unknown')}",
             flush=True,
         )
         return sdk, None, "http"
@@ -1690,11 +1775,10 @@ async def open_echomem_sdk(
     if layout == "develop-src":
         from echomem.entrypoints.client.local.async_client import AsyncEchoMemLocalClient
 
-        # The develop local runtime auto-commits after a char threshold by
-        # default. For benchmark import/QA we typically want one explicit
-        # archive per commit so the harness can wait on the exact archive it
-        # triggered. Keep this override configurable so PR probes can opt out.
-        os.environ.setdefault("ECHOMEM_AUTO_COMMIT_THRESHOLD", "0")
+        # SessionService commits when accumulated chars are greater than or
+        # equal to this threshold, so zero means "commit every message", not
+        # "disabled". Benchmarks explicitly commit each source session once.
+        os.environ.setdefault("ECHOMEM_AUTO_COMMIT_THRESHOLD", str(2**63 - 1))
         override = load_echomem_config_file(config_path)
         print("[sdk-open] using develop AsyncEchoMemLocalClient compat path", flush=True)
         client = AsyncEchoMemLocalClient(workspace=workspace, config=override or None)

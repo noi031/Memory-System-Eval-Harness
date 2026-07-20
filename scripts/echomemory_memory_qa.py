@@ -32,6 +32,7 @@ from echomemory_qa_common import (
     MEMORY_MULTI_READ_TOOL_NAME,
     MEMORY_SEARCH_TOOL_NAME,
     OFFICIAL_LONGMEMEVAL_PROMPT_BUILDER,
+    OFFICIAL_LONGMEMEVAL_PROMPT_SOURCE,
     call_openai_without_signal,
     checkpoint_csv_path,
     checkpoint_summary_path,
@@ -59,6 +60,13 @@ from echomemory_qa_common import (
     write_rows_csv,
     write_snapshot_index,
 )
+from echomemory_evaluation_profiles import (
+    EVALUATION_PROFILE_CHOICES,
+    EVALUATION_PROFILE_CUSTOM,
+    EVALUATION_PROFILE_LEGACY_77,
+    apply_evaluation_profile,
+    evaluation_profile_metadata,
+)
 
 ECHOMEMORY_HTTP_BLACKBOX_ROUTE = "echomemory_http_api_blackbox"
 from echomemory_qa_answers import (
@@ -80,7 +88,7 @@ from echomemory_qa_answers import (
 from echomemory_qa_prompting import (
     build_longmemeval_messages,
     build_messages,
-    build_vikingboat_lite_messages,
+    build_vikingbot_agent_aligned_messages,
     format_memory_section,
     format_memory_section_detailed,
     select_memory_items_detailed,
@@ -163,6 +171,7 @@ from openviking_memory_qa import (
     classify_model_error,
     csv_fieldnames,
     default_openai_max_tokens,
+    model_http_headers,
     openai_payload_variants,
     openai_response_message,
     parse_openai_compatible_response,
@@ -171,6 +180,40 @@ from openviking_memory_qa import (
 
 ENGINE_ID = echomem_engine_id()
 ENGINE_ID_CANDIDATES = echomem_engine_candidates(ENGINE_ID)
+
+STRICT_BLACKBOX_AUGMENTATION_TRIGGER_FIELDS = (
+    "current_session_raw_fallback_triggered",
+    "longmemeval_current_session_summary_fallback_triggered",
+    "hotpot_empty_overview_fallback_triggered",
+    "segment_readback_triggered",
+    "precision_session_readback_triggered",
+    "precision_grounded_projection_triggered",
+    "local_timeline_hints_triggered",
+    "local_segments_triggered",
+    "local_messages_triggered",
+    "local_session_summaries_triggered",
+    "local_atoms_triggered",
+    "local_memory_artifacts_triggered",
+    "local_graph_nodes_triggered",
+)
+
+
+def strict_blackbox_augmentation_flags(values: dict[str, Any]) -> dict[str, bool]:
+    """Return audit-only platform evidence flags without enabling any fallback."""
+    return {
+        field: str(values.get(field) or "").strip().lower() == "true"
+        if isinstance(values.get(field), str)
+        else bool(values.get(field, False))
+        for field in STRICT_BLACKBOX_AUGMENTATION_TRIGGER_FIELDS
+    }
+
+
+def strict_blackbox_augmentation_paths(values: dict[str, Any]) -> list[str]:
+    return [
+        field.removesuffix("_triggered")
+        for field, triggered in strict_blackbox_augmentation_flags(values).items()
+        if triggered
+    ]
 
 
 
@@ -1041,91 +1084,6 @@ def session_summary_content(session_dir: Path) -> tuple[str, dict[str, str]]:
     return "\n\n".join(part for part in (header, body) if part), meta
 
 
-def collect_session_summary_pairs(workspace: str, account: str) -> list[tuple[Path, Path]]:
-    pairs: list[tuple[Path, Path]] = []
-    seen: set[str] = set()
-    for root in echomem_account_roots(workspace, account):
-        base_sessions = root / "sessions"
-        session_ids: set[str] = set()
-        if base_sessions.exists():
-            session_ids.update(path.name for path in base_sessions.iterdir() if path.is_dir())
-        engine_sessions_roots = [root / "engines" / engine_id / "sessions" for engine_id in ENGINE_ID_CANDIDATES]
-        for engine_sessions in engine_sessions_roots:
-            if engine_sessions.exists():
-                session_ids.update(path.name for path in engine_sessions.iterdir() if path.is_dir())
-        for session_id in sorted(session_ids):
-            meta_dir = base_sessions / session_id if (base_sessions / session_id).exists() else next(
-                (
-                    engine_sessions / session_id
-                    for engine_sessions in engine_sessions_roots
-                    if (engine_sessions / session_id).exists()
-                ),
-                engine_sessions_roots[0] / session_id,
-            )
-            summary_dir = base_sessions / session_id if (base_sessions / session_id).exists() else next(
-                (
-                    engine_sessions / session_id
-                    for engine_sessions in engine_sessions_roots
-                    if (engine_sessions / session_id).exists()
-                ),
-                engine_sessions_roots[0] / session_id,
-            )
-            key = f"{session_id}::{meta_dir}::{summary_dir}"
-            if key in seen:
-                continue
-            seen.add(key)
-            pairs.append((meta_dir, summary_dir))
-    return pairs
-
-
-def local_session_scope_prefixes(args: argparse.Namespace) -> list[str]:
-    dataset_format = str(getattr(args, "dataset_format", "") or "").strip().lower()
-    sample = str(getattr(args, "sample", "") or "").strip()
-    if dataset_format == "locomo":
-        if sample and sample.lower() != "all":
-            return [f"echomem-locomo-{sample}-"]
-        return ["echomem-locomo-"]
-    if dataset_format == "hotpotqa":
-        return ["hotpotqa-"]
-    return []
-
-
-def session_matches_local_scope(args: argparse.Namespace, session_id: str) -> bool:
-    session_text = str(session_id or "").strip()
-    if not session_text:
-        return False
-    prefixes = local_session_scope_prefixes(args)
-    if prefixes:
-        lowered = session_text.lower()
-        return any(lowered.startswith(prefix.lower()) for prefix in prefixes)
-    return True
-
-
-def summary_relevant_snippet(query: str, content: str, max_lines: int = 6, threshold: float = 0.18) -> tuple[str, float]:
-    lines = [line.strip() for line in str(content or "").splitlines() if line.strip()]
-    if not lines:
-        return "", 0.0
-    header_lines = [line for line in lines if line.lower().startswith("## session metadata")]
-    scored: list[tuple[float, int, str]] = []
-    for idx, line in enumerate(lines):
-        if line.startswith("##"):
-            continue
-        score = local_memory_score(query, line)
-        if score >= threshold:
-            scored.append((score, idx, line))
-    if not scored:
-        fallback_score = local_memory_score(query, content)
-        return compact(content, 2200), fallback_score
-    chosen = sorted(scored, key=lambda item: item[0], reverse=True)[:max_lines]
-    chosen = sorted(chosen, key=lambda item: item[1])
-    snippet_lines: list[str] = []
-    if header_lines:
-        snippet_lines.extend(header_lines[:1])
-    snippet_lines.extend(line for _score, _idx, line in chosen)
-    best_score = max(score for score, _idx, _line in chosen)
-    return "\n".join(snippet_lines), best_score
-
-
 def precision_fragment_candidates(text: str) -> list[str]:
     normalized = str(text or "").replace("\r", "\n")
     normalized = re.sub(r"\n+", "\n", normalized)
@@ -1182,99 +1140,6 @@ def collapse_repeated_phrase(text: str) -> str:
     if len(words) >= 4 and len(words) % 2 == 0 and words[:half] == words[half:]:
         return " ".join(words[:half]).strip()
     return value
-
-
-def precision_grounded_projection_needed(query: str, items: list[dict[str, Any]]) -> bool:
-    if not is_precision_followup_query(query):
-        return False
-    grounded_hits = [
-        item
-        for item in items
-        if memory_type_of(item) in {"raw_turn", "segment_memory"} and hit_score(item) >= 0.45
-    ]
-    if not grounded_hits:
-        return False
-    if any(memory_type_of(item) == "atom" and hit_score(item) >= 0.35 for item in items):
-        return False
-    return any(len(memory_content(item)) >= 220 for item in grounded_hits)
-
-
-def current_session_raw_fallback_needed(query: str, items: list[dict[str, Any]]) -> bool:
-    grounded_hits = [
-        item
-        for item in items
-        if memory_type_of(item) in {"raw_turn", "segment_memory", "atom"} and hit_score(item) >= 0.45
-    ]
-    if grounded_hits:
-        return False
-    q_clean = clean_query_text(query)
-    exact_or_followup = bool(
-        is_precision_followup_query(query)
-        or re.search(
-            r"\b(currently|current|now|latest|recent|where|when|who|which|how many|how much|number of|count|subjects?)\b",
-            q_clean,
-            re.I,
-        )
-    )
-    return bool(exact_or_followup or not items)
-
-
-def record_retrieval_pass(timing: dict[str, Any], key: str, hits: list[dict[str, Any]]) -> None:
-    count = len(hits)
-    count_key = f"{key}_hits_added"
-    triggered_key = f"{key}_triggered"
-    timing[count_key] = int(timing.get(count_key, 0) or 0) + count
-    timing[triggered_key] = bool(timing.get(triggered_key, False) or count > 0)
-
-
-def strict_blackbox_augmentation_flags(retrieval_timing: dict[str, Any]) -> dict[str, bool]:
-    return {
-        "current_session_raw_fallback_triggered": bool(retrieval_timing.get("current_session_raw_fallback_triggered", False)),
-        "longmemeval_current_session_summary_fallback_triggered": bool(
-            retrieval_timing.get("longmemeval_current_session_summary_fallback_triggered", False)
-        ),
-        "hotpot_empty_overview_fallback_triggered": bool(
-            retrieval_timing.get("hotpot_empty_overview_fallback_triggered", False)
-        ),
-        "segment_readback_triggered": bool(retrieval_timing.get("segment_readback_triggered", False)),
-        "precision_session_readback_triggered": bool(retrieval_timing.get("precision_session_readback_triggered", False)),
-        "precision_grounded_projection_triggered": bool(
-            retrieval_timing.get("precision_grounded_projection_triggered", False)
-        ),
-        "local_timeline_hints_triggered": bool(retrieval_timing.get("local_timeline_hints_triggered", False)),
-        "local_segments_triggered": bool(retrieval_timing.get("local_segments_triggered", False)),
-        "local_messages_triggered": bool(retrieval_timing.get("local_messages_triggered", False)),
-        "local_session_summaries_triggered": bool(
-            retrieval_timing.get("local_session_summaries_triggered", False)
-        ),
-        "local_atoms_triggered": bool(retrieval_timing.get("local_atoms_triggered", False)),
-        "local_memory_artifacts_triggered": bool(
-            retrieval_timing.get("local_memory_artifacts_triggered", False)
-        ),
-        "local_graph_nodes_triggered": bool(retrieval_timing.get("local_graph_nodes_triggered", False)),
-    }
-
-
-def allowed_http_enrichment_flags(retrieval_timing: dict[str, Any]) -> dict[str, bool]:
-    return {
-        "overview_enrichment_triggered": bool(retrieval_timing.get("overview_enrichment_triggered", False)),
-    }
-
-
-def strict_blackbox_augmentation_paths(retrieval_timing: dict[str, Any]) -> list[str]:
-    return [
-        key.removesuffix("_triggered")
-        for key, value in strict_blackbox_augmentation_flags(retrieval_timing).items()
-        if value
-    ]
-
-
-def allowed_http_enrichment_paths(retrieval_timing: dict[str, Any]) -> list[str]:
-    return [
-        key.removesuffix("_triggered")
-        for key, value in allowed_http_enrichment_flags(retrieval_timing).items()
-        if value
-    ]
 
 
 def is_duration_query(query: str) -> bool:
@@ -1514,446 +1379,6 @@ def inventory_like_session_summary(item: dict[str, Any]) -> bool:
     return False
 
 
-def local_timeline_hint_hits(args: argparse.Namespace, query: str) -> list[dict[str, Any]]:
-    return []
-
-
-def parse_session_anchor_date(meta: dict[str, str]) -> datetime | None:
-    for raw in [meta.get("session_date"), meta.get("created_at")]:
-        text = str(raw or "").strip()
-        if not text:
-            continue
-        match = re.search(r"(\d{1,2}) ([A-Za-z]+), (\d{4})", text)
-        if match:
-            try:
-                return datetime.strptime(" ".join(match.groups()), "%d %B %Y")
-            except ValueError:
-                pass
-        try:
-            iso_text = text.replace("Z", "+00:00")
-            return datetime.fromisoformat(iso_text)
-        except ValueError:
-            continue
-    return None
-
-
-def local_temporal_resolution_hits(args: argparse.Namespace, query: str) -> list[dict[str, Any]]:
-    return []
-
-
-def maybe_attach_trace_time(item: dict[str, Any]) -> dict[str, Any]:
-    content = str(item.get("content") or "")
-    trace = item.get("trace") or {}
-    event_time = str(trace.get("event_time") or "").strip()
-    if event_time and event_time not in content:
-        item = dict(item)
-        item["content"] = f"{content} [event_time={event_time}]".strip()
-    return item
-
-
-def echo_relative_fs_path(uri: str, account: str) -> str:
-    text = str(uri or "").strip()
-    prefix = f"echo://{account}/"
-    if not text.startswith(prefix):
-        return ""
-    relative = text[len(prefix) :].strip("/")
-    return f"/{relative}" if relative else "/"
-
-
-async def sdk_read_echo_text(sdk: Any, args: argparse.Namespace, uri: str) -> str:
-    read_uri = str(uri or "").strip()
-    if getattr(sdk, "_compat_layout", "") != "http" and not read_uri.startswith("echo://engine/"):
-        read_uri = echo_relative_fs_path(read_uri, args.account)
-    if not read_uri:
-        return ""
-    reader = getattr(sdk, "fs_read", None)
-    if not callable(reader):
-        return ""
-    try:
-        payload = await reader(
-            read_uri,
-            ctx=sdk_ctx_kwargs(sdk, args.account, args.user_id, args.agent_id),
-        )
-    except Exception:
-        return ""
-    if isinstance(payload, dict):
-        return str(payload.get("content") or "")
-    return ""
-
-
-def session_root_from_any_uri(uri: str, account: str) -> str:
-    text = str(uri or "").strip()
-    prefix = f"echo://{account}/sessions/"
-    if not text.startswith(prefix):
-        return ""
-    session_id = text[len(prefix) :].split("/", 1)[0].strip()
-    if not session_id:
-        return ""
-    return f"echo://{account}/sessions/{session_id}"
-
-
-def render_message_span(
-    meta: dict[str, str],
-    messages: list[dict[str, Any]],
-    start: int,
-    end: int,
-    *,
-    max_message_chars: int = 900,
-) -> str:
-    start = max(0, int(start))
-    end = min(len(messages) - 1, int(end)) if messages else -1
-    if end < start or not messages:
-        return ""
-    lines: list[str] = []
-    header_parts = []
-    if meta.get("title"):
-        header_parts.append(f"title={meta['title']}")
-    if meta.get("session_date"):
-        header_parts.append(f"session_date={meta['session_date']}")
-    if header_parts:
-        lines.append(" | ".join(header_parts))
-    for offset in range(start, end + 1):
-        item = messages[offset]
-        created_at = message_story_timestamp(item)
-        role_id = str(item.get("role_id") or item.get("role") or "")
-        text = compact(item.get("content") or "", max_message_chars)
-        lines.append(f"[turn={offset} created_at={created_at} speaker={role_id}] {text}")
-    return "\n".join(lines)
-
-
-def message_content_text(message: dict[str, Any]) -> str:
-    return compact(message.get("content") or "", 1800)
-
-
-def segment_artifact_text(
-    meta: dict[str, str],
-    messages: list[dict[str, Any]],
-    start: int,
-    end: int,
-    *,
-    max_points: int = 4,
-    max_chars: int = 700,
-) -> str:
-    start = max(0, int(start))
-    end = min(len(messages) - 1, int(end)) if messages else -1
-    if end < start or not messages:
-        return ""
-    header_parts: list[str] = []
-    if meta.get("title"):
-        header_parts.append(f"title={meta['title']}")
-    if meta.get("session_date"):
-        header_parts.append(f"session_date={meta['session_date']}")
-    header_parts.append(f"turns={start}..{end}")
-
-    bullet_lines: list[str] = []
-    seen: set[str] = set()
-    for offset in range(start, end + 1):
-        item = messages[offset]
-        role_id = str(item.get("role_id") or item.get("role") or "").strip() or "unknown"
-        text = message_content_text(item)
-        if not text:
-            continue
-        normalized = text.lower()
-        if normalized in seen:
-            continue
-        seen.add(normalized)
-        bullet_lines.append(f"- [{role_id}] {text}")
-        if len(bullet_lines) >= max(1, int(max_points)):
-            break
-
-    if not bullet_lines:
-        return ""
-
-    body = "\n".join(bullet_lines)
-    return compact("\n".join([" | ".join(header_parts), body]), max_chars)
-
-
-def segment_readback_hits(args: argparse.Namespace, query: str, items: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    if not bool(getattr(args, "segment_readback", False)):
-        return []
-    roots = echomem_account_roots(args.workspace, args.account)
-    if not roots:
-        return []
-    route = str(getattr(args, "_granularity_route", "hybrid") or "hybrid")
-    readback_mode = str(getattr(args, "segment_readback_mode", "all") or "all").strip().lower()
-    if readback_mode == "fine_only" and route != "fine-first":
-        return []
-    session_candidates: list[str] = []
-    for item in sorted(items, key=hit_score, reverse=True)[: max(1, int(getattr(args, "segment_session_limit", 6) or 6))]:
-        direct_root = session_root_from_any_uri(memory_uri(item), args.account)
-        if direct_root and direct_root not in session_candidates:
-            session_candidates.append(direct_root)
-        for uri in related_session_summary_uris(args, item):
-            root_uri = session_root_from_summary_uri(uri)
-            if root_uri and root_uri not in session_candidates:
-                session_candidates.append(root_uri)
-    if not session_candidates:
-        return []
-
-    span_window = max(0, int(getattr(args, "segment_window", 2) or 2))
-    max_per_session = max(1, int(getattr(args, "segment_hits_per_session", 1) or 1))
-    hits: list[dict[str, Any]] = []
-    seen: set[str] = set()
-    for session_root in session_candidates[: max(1, int(getattr(args, "segment_session_limit", 6) or 6))]:
-        session_id = session_root.rsplit("/", 1)[-1].strip()
-        if not session_id:
-            continue
-        session_dir = None
-        for root in roots:
-            candidate = root / "sessions" / session_id
-            if candidate.exists():
-                session_dir = candidate
-                break
-        if session_dir is None:
-            continue
-        meta = read_session_meta(session_dir)
-        message_path, messages = read_session_messages(session_dir)
-        if not messages:
-            continue
-        scored: list[tuple[float, int]] = []
-        for index, message in enumerate(messages):
-            content = str(message.get("content") or "")
-            if not content:
-                continue
-            score = local_memory_score(query, content)
-            if score < max(args.local_score_threshold, 0.06):
-                continue
-            scored.append((score, index))
-        scored.sort(key=lambda item: item[0], reverse=True)
-        for score, index in scored[:max_per_session]:
-            start = max(0, index - span_window)
-            end = min(len(messages) - 1, index + span_window)
-            span_uri = f"echo://{args.account}/sessions/{session_id}/messages.jsonl#turn={start}..{end}"
-            if span_uri in seen:
-                continue
-            seen.add(span_uri)
-            span_text = render_message_span(meta, messages, start, end)
-            if not span_text:
-                continue
-            hits.append(
-                {
-                    "uri": span_uri,
-                    "score": round(min(1.35, score + 0.12), 4),
-                    "content": span_text,
-                    "memory_type": "segment_memory",
-                    "backend": "echomemory_segment_readback",
-                    "path": str(message_path or session_dir / "messages.jsonl"),
-                    "session_id": session_id,
-                    "evidence_uri": span_uri,
-                }
-            )
-    hits.sort(key=hit_score, reverse=True)
-    return hits[: max(4, int(getattr(args, "segment_max_hits", 8) or 8))]
-
-
-def precision_session_readback_needed(query: str, items: list[dict[str, Any]]) -> bool:
-    title_lookup = any(len(significant_title_tokens(phrase)) >= 2 for phrase in extract_named_phrases(query, max_phrases=8))
-    query_supported = bool(
-        is_precision_followup_query(query)
-        or is_temporal_query(query)
-        or is_causal_query(query)
-        or is_list_query(query)
-        or title_lookup
-    )
-    if not query_supported:
-        return False
-    if not bool(items):
-        return True
-    summary_hits = [item for item in items if memory_type_of(item) == "session_summary"]
-    if not summary_hits:
-        return False
-    raw_or_segment_hits = [
-        item
-        for item in items
-        if memory_type_of(item) in {"raw_turn", "segment_memory"} and hit_score(item) >= 0.45
-    ]
-    return len(raw_or_segment_hits) < 1
-
-
-def precision_temporal_bias(query: str, index: int, total: int) -> float:
-    if total <= 1:
-        return 0.0
-    q_clean = clean_query_text(query).lower()
-    progress = max(0.0, min(1.0, float(index) / max(1, total - 1)))
-    if re.search(r"\b(currently|current|now|latest|recent)\b", q_clean):
-        return round(0.12 * progress, 4)
-    if re.search(r"\b(initially|originally|first|earlier|before)\b", q_clean):
-        return round(0.12 * (1.0 - progress), 4)
-    return 0.0
-
-
-def precision_role_bias(query: str, message: dict[str, Any]) -> float:
-    q_clean = clean_query_text(query).lower()
-    role = str(message.get("role_id") or message.get("role") or "").strip().lower()
-    if role in {"assistant", "agent"} and re.search(
-        r"\b(you|your|said|told|provided|recommended|recommendation|list|study|example|examples|subjects|jobs?)\b",
-        q_clean,
-    ):
-        return 0.12
-    if role in {"user", "benchmark_memory"} and re.search(r"\b(currently|current|now|where)\b", q_clean):
-        if query_answer_kind(query) in {"count", "date", "location"}:
-            return 0.12
-        return 0.04
-    return 0.0
-
-
-def precision_session_readback_hits(args: argparse.Namespace, query: str, items: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    if not bool(getattr(args, "precision_session_readback", False)):
-        return []
-    if not precision_session_readback_needed(query, items):
-        return []
-    roots = echomem_account_roots(args.workspace, args.account)
-    if not roots:
-        return []
-
-    candidate_items = [*items, *precision_session_probe_hits(args, query)]
-    session_candidates: list[str] = []
-    for item in sorted(candidate_items, key=hit_score, reverse=True)[: max(1, int(getattr(args, "precision_session_limit", 4) or 4))]:
-        direct_root = session_root_from_any_uri(memory_uri(item), args.account)
-        if direct_root and direct_root not in session_candidates:
-            session_candidates.append(direct_root)
-        for uri in related_session_summary_uris(args, item):
-            root_uri = session_root_from_summary_uri(uri)
-            if root_uri and root_uri not in session_candidates:
-                session_candidates.append(root_uri)
-    if not session_candidates:
-        return []
-
-    span_window = max(0, int(getattr(args, "precision_session_window", 0) or 0))
-    max_hits = max(1, int(getattr(args, "precision_session_max_hits", 2) or 2))
-    scored_hits: list[dict[str, Any]] = []
-    seen: set[str] = set()
-    for session_root in session_candidates:
-        session_id = session_root.rsplit("/", 1)[-1].strip()
-        if not session_id:
-            continue
-        session_dir = None
-        for root in roots:
-            candidate = root / "sessions" / session_id
-            if candidate.exists():
-                session_dir = candidate
-                break
-        if session_dir is None:
-            continue
-        meta = read_session_meta(session_dir)
-        message_path, messages = read_session_messages(session_dir)
-        if not messages:
-            continue
-        total = len(messages)
-        for index, message in enumerate(messages):
-            content = str(message.get("content") or "")
-            if not content:
-                continue
-            clean_content = fragment_text_for_extraction(content) or content
-            score = fragment_answer_match_score(query, clean_content)
-            if score < max(float(getattr(args, "local_score_threshold", 0.08) or 0.08), 0.12):
-                continue
-            score += precision_temporal_bias(query, index, total)
-            score += precision_role_bias(query, message)
-            score += temporal_event_anchor_bonus(query, clean_content)
-            start = max(0, index - span_window)
-            end = min(total - 1, index + span_window)
-            span_uri = f"echo://{args.account}/sessions/{session_id}/messages.jsonl#turn={start}..{end}"
-            if span_uri in seen:
-                continue
-            seen.add(span_uri)
-            span_text = render_message_span(meta, messages, start, end)
-            if not span_text:
-                continue
-            scored_hits.append(
-                {
-                    "uri": span_uri,
-                    "score": round(min(1.45, score + 0.14), 4),
-                    "content": span_text,
-                    "memory_type": "raw_turn",
-                    "backend": "echomemory_precision_session_readback",
-                    "path": str(message_path or session_dir / "messages.jsonl"),
-                    "session_id": session_id,
-                    "evidence_uri": span_uri,
-                }
-            )
-    scored_hits.sort(key=hit_score, reverse=True)
-    return scored_hits[:max_hits]
-
-
-def current_session_raw_fallback_hits(args: argparse.Namespace, query: str, items: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    if not bool(getattr(args, "current_session_raw_fallback", False)):
-        return []
-    import_session_id = str(getattr(args, "import_session_id", "") or "").strip()
-    if not import_session_id:
-        return []
-    if not current_session_raw_fallback_needed(query, items):
-        return []
-    session_dirs = engine_session_dirs(args.workspace, args.account, import_session_id)
-    if not session_dirs:
-        return []
-    session_dir = session_dirs[0]
-    meta = read_session_meta(session_dir)
-    message_path, messages = read_session_messages(session_dir)
-    if not messages:
-        return []
-    max_hits = max(1, int(getattr(args, "current_session_raw_fallback_max_hits", 3) or 3))
-    span_window = max(0, int(getattr(args, "current_session_raw_fallback_window", 0) or 0))
-    total = len(messages)
-    scored: list[tuple[float, int]] = []
-    seen_message_ids: set[str] = set()
-    for index, message in enumerate(messages):
-        content = str(message.get("content") or "")
-        if not content:
-            continue
-        message_id = str(message.get("id") or f"idx:{index}")
-        if message_id in seen_message_ids:
-            continue
-        seen_message_ids.add(message_id)
-        clean_content = fragment_text_for_extraction(content) or content
-        score = fragment_answer_match_score(query, clean_content)
-        if score < max(float(getattr(args, "local_score_threshold", 0.08) or 0.08), 0.12):
-            continue
-        strong_overlap_count, strong_overlap_ratio = significant_query_overlap_stats(query, clean_content)
-        if strong_overlap_count:
-            score += min(0.22, 0.08 * strong_overlap_count)
-            score += min(0.12, strong_overlap_ratio * 0.24)
-        elif len(significant_query_tokens(query, limit=8)) >= 2:
-            # Current-session fallback is a last resort. If a candidate only
-            # matches weak prompt glue such as "do you think" and shares none of
-            # the query's meaningful tokens, skip it instead of surfacing
-            # misleading same-session chatter.
-            continue
-        score += precision_temporal_bias(query, index, total)
-        score += precision_role_bias(query, message)
-        score += temporal_event_anchor_bonus(query, clean_content)
-        scored.append((score, index))
-    if not scored:
-        return []
-    scored.sort(key=lambda item: item[0], reverse=True)
-    hits: list[dict[str, Any]] = []
-    seen_spans: set[str] = set()
-    for score, index in scored[:max_hits]:
-        start = max(0, index - span_window)
-        end = min(total - 1, index + span_window)
-        span_uri = f"echo://{args.account}/sessions/{import_session_id}/messages.jsonl#turn={start}..{end}"
-        if span_uri in seen_spans:
-            continue
-        seen_spans.add(span_uri)
-        span_text = render_message_span(meta, messages, start, end)
-        if not span_text:
-            continue
-        hits.append(
-            {
-                "uri": span_uri,
-                "score": round(min(1.42, score + 0.14), 4),
-                "content": span_text,
-                "memory_type": "raw_turn",
-                "backend": "echomemory_current_session_fallback",
-                "path": str(message_path or session_dir / "messages.jsonl"),
-                "session_id": import_session_id,
-                "evidence_uri": span_uri,
-            }
-        )
-    hits.sort(key=hit_score, reverse=True)
-    return hits[:max_hits]
-
-
 def span_bounds_from_uri(uri: str) -> tuple[int, int] | None:
     match = re.search(r"#turn=(\d+)\.\.(\d+)", str(uri or ""))
     if not match:
@@ -1963,107 +1388,6 @@ def span_bounds_from_uri(uri: str) -> tuple[int, int] | None:
     if end < start:
         return None
     return start, end
-
-
-def full_source_text_for_projection(args: argparse.Namespace, item: dict[str, Any]) -> str:
-    source_text = memory_content(item)
-    workspace = str(getattr(args, "workspace", "") or "").strip()
-    account = str(getattr(args, "account", "") or "").strip()
-    session_id = str(item.get("session_id") or "").strip()
-    uri = str(item.get("evidence_uri") or memory_uri(item) or "").strip()
-    bounds = span_bounds_from_uri(uri)
-    if not workspace or not account or not session_id or bounds is None:
-        return source_text
-    session_dirs = engine_session_dirs(workspace, account, session_id)
-    if not session_dirs:
-        return source_text
-    message_path, messages = read_session_messages(session_dirs[0])
-    if not message_path or not messages:
-        return source_text
-    meta = read_session_meta(session_dirs[0])
-    full_text = render_message_span(meta, messages, bounds[0], bounds[1], max_message_chars=3200)
-    return full_text or source_text
-
-
-def precision_grounded_projection_hits(args: argparse.Namespace, query: str, items: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    if not bool(getattr(args, "precision_grounded_projection", False)):
-        return []
-    if not precision_grounded_projection_needed(query, items):
-        return []
-    q_clean = clean_query_text(query)
-    numeric_query = bool(re.search(r"\bhow many\b|\bhow much\b|\bnumber of\b|\bcount\b|\bsubjects?\b", clean_query_text(query), re.I))
-    exact_query = bool(
-        re.search(
-            r"\b(currently|current|now|latest|recent|where|when|who|which|what did|what was|remind|remember|follow up)\b",
-            q_clean,
-            re.I,
-        )
-    )
-    named_phrases = [phrase.lower() for phrase in extract_named_phrases(q_clean, max_phrases=8)]
-    query_years = re.findall(r"\b\d{4}\b", q_clean)
-    source_items = [
-        item
-        for item in items
-        if memory_type_of(item) in {"raw_turn", "segment_memory"} and hit_score(item) >= 0.45
-    ]
-    projected: list[dict[str, Any]] = []
-    seen: set[str] = set()
-    max_source_items = max(1, int(getattr(args, "precision_grounded_projection_source_limit", 4) or 4))
-    max_hits = max(1, int(getattr(args, "precision_grounded_projection_max_hits", 3) or 3))
-    for source in sorted(source_items, key=hit_score, reverse=True)[:max_source_items]:
-        source_text = full_source_text_for_projection(args, source)
-        if not source_text:
-            continue
-        candidates = precision_fragment_candidates(source_text)
-        if not candidates:
-            continue
-        scored: list[tuple[float, int, str]] = []
-        for index, fragment in enumerate(candidates):
-            score = local_memory_score(query, fragment)
-            if score < max(float(getattr(args, "local_score_threshold", 0.08) or 0.08), 0.12):
-                continue
-            fragment_low = fragment.lower()
-            matched_named = sum(1 for phrase in named_phrases if phrase and phrase in fragment_low)
-            if matched_named:
-                score += min(0.24, 0.12 * matched_named)
-            if numeric_query and re.search(r"\b\d+\b", fragment):
-                score += 0.12
-            if numeric_query and re.search(r"\b(subject|subjects|participants|people|users|items)\b", fragment_low):
-                score += 0.1
-            if query_years and any(year in fragment for year in query_years):
-                score += 0.06
-            if exact_query and re.search(r"\b(currently|current|now|latest|recent)\b", fragment, re.I):
-                score += 0.04
-            scored.append((score, index, fragment))
-        if not scored:
-            continue
-        chosen = sorted(scored, key=lambda item: item[0], reverse=True)[:2]
-        chosen = sorted(chosen, key=lambda item: item[1])
-        fragment_lines = [fragment for _score, _index, fragment in chosen]
-        snippet = compact("\n".join(f"- {fragment}" for fragment in fragment_lines), 1400)
-        if not snippet:
-            continue
-        best_score = max(score for score, _index, _fragment in chosen)
-        uri = f"{memory_uri(source)}#focused"
-        if uri in seen:
-            continue
-        seen.add(uri)
-        projected.append(
-            {
-                "uri": uri,
-                "score": round(min(1.38, best_score + 0.16), 4),
-                "content": snippet,
-                "memory_type": "segment_memory",
-                "backend": "echomemory_precision_grounded_projection",
-                "path": str(source.get("path") or ""),
-                "session_id": str(source.get("session_id") or ""),
-                "evidence_uri": str(source.get("evidence_uri") or memory_uri(source)),
-            }
-        )
-        if len(projected) >= max_hits:
-            break
-    projected.sort(key=hit_score, reverse=True)
-    return projected[:max_hits]
 
 
 def prefer_grounded_precision_prompt(query: str, items: list[dict[str, Any]], *, score_threshold: float = 0.0) -> bool:
@@ -2252,148 +1576,6 @@ def select_diverse_hits(args: argparse.Namespace, ranked_items: list[dict[str, A
             source_counts[chosen_source] = source_counts.get(chosen_source, 0) + 1
         selected.append(chosen)
     return selected[:top_k]
-
-
-def item_session_ids(item: dict[str, Any]) -> set[str]:
-    values: set[str] = set()
-    direct_session_id = str(item.get("session_id") or "").strip()
-    if direct_session_id:
-        values.add(direct_session_id)
-    for candidate in [memory_uri(item), str(item.get("evidence_uri") or "")]:
-        text = str(candidate or "").strip()
-        if "/sessions/" not in text:
-            continue
-        tail = text.split("/sessions/", 1)[1].strip()
-        if not tail:
-            continue
-        session_id = tail.split("/", 1)[0].split("#", 1)[0].strip()
-        if session_id:
-            values.add(session_id)
-    return values
-
-
-def filter_items_to_import_session(items: list[dict[str, Any]], import_session_id: str) -> list[dict[str, Any]]:
-    target = str(import_session_id or "").strip()
-    if not target:
-        return list(items)
-    filtered: list[dict[str, Any]] = []
-    for item in items:
-        session_ids = item_session_ids(item)
-        if not session_ids:
-            continue
-        if target in session_ids:
-            filtered.append(item)
-    return filtered
-
-
-async def search_overview_enrichment_hits(
-    args: argparse.Namespace,
-    sdk: Any,
-    items: list[dict[str, Any]],
-) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-    audit = {
-        "enabled": bool(getattr(args, "search_overview_enrichment", False)),
-        "candidate_count": 0,
-        "http_read_count": 0,
-        "hit_count": 0,
-        "candidate_uris": [],
-        "read_error_uris": [],
-        "hit_uris": [],
-    }
-    if not session_summary_allowed(args):
-        return [], audit
-    if not bool(getattr(args, "search_overview_enrichment", False)):
-        return [], audit
-    if getattr(sdk, "_compat_layout", "") != "http":
-        raise RuntimeError("overview enrichment requires EchoMemory HTTP transport")
-    if not callable(getattr(sdk, "fs_read", None)):
-        return [], audit
-
-    candidates: list[tuple[str, dict[str, Any]]] = []
-    seen: set[str] = set()
-    for item in items:
-        source = str(item.get("source") or "").strip()
-        if not re.fullmatch(r"[A-Za-z0-9_.-]+", source):
-            source = ENGINE_ID
-        session_ids = item_session_ids(item)
-        for session_id in sorted(session_ids):
-            uri = f"echo://engine/{source}/sessions/{session_id}/overview.md"
-            if uri in seen:
-                continue
-            seen.add(uri)
-            candidates.append((uri, item))
-
-    audit["candidate_count"] = len(candidates)
-    audit["candidate_uris"] = [uri for uri, _item in candidates]
-    hits: list[dict[str, Any]] = []
-    for native_rank, (uri, source_item) in enumerate(candidates, 1):
-        audit["http_read_count"] += 1
-        text = await sdk_read_echo_text(sdk, args, uri)
-        if not text:
-            audit["read_error_uris"].append(uri)
-            continue
-        hits.append(
-            {
-                "uri": uri,
-                "score": hit_score(source_item),
-                "content": text,
-                "memory_type": "session_summary",
-                "backend": "echomemory_http_fs_read",
-                "source": str(source_item.get("source") or ""),
-                "evidence_uri": uri,
-                "overview_source_rank": native_rank,
-                "overview_source_uri": memory_uri(source_item),
-            }
-        )
-        audit["hit_uris"].append(uri)
-    audit["hit_count"] = len(hits)
-    return hits, audit
-
-
-async def longmemeval_current_session_summary_fallback(
-    args: argparse.Namespace,
-    sdk: Any,
-    query: str,
-    items: list[dict[str, Any]],
-) -> list[dict[str, Any]]:
-    dataset_format = str(getattr(args, "dataset_format", "") or "").strip().lower()
-    import_session_id = str(getattr(args, "import_session_id", "") or "").strip()
-    if dataset_format != "longmemeval" or not import_session_id:
-        return []
-    if not bool(getattr(args, "longmemeval_current_session_summary_fallback", False)):
-        return []
-    if not session_summary_allowed(args):
-        return []
-    if not callable(getattr(sdk, "fs_read", None)):
-        return []
-    summary_like_hits = [item for item in items if memory_type_of(item) == "session_summary"]
-    if summary_like_hits:
-        return []
-    results: list[dict[str, Any]] = []
-    for filename in ("overview.md", "abstract.md"):
-        uri = f"echo://{args.account}/sessions/{import_session_id}/{filename}"
-        text = await sdk_read_echo_text(sdk, args, uri)
-        if not text:
-            continue
-        snippet, score = summary_relevant_snippet(query, text, max_lines=10, threshold=0.04)
-        if not snippet:
-            snippet = compact(text, 2400)
-            score = local_memory_score(query, text)
-        if score < 0.04:
-            continue
-        results.append(
-            {
-                "uri": uri,
-                "score": round(min(1.12, score + (0.12 if filename == "overview.md" else 0.08)), 4),
-                "content": snippet,
-                "memory_type": "session_summary",
-                "backend": "echomemory_fs_read",
-                "path": uri,
-                "evidence_uri": uri,
-            }
-        )
-    results.sort(key=hit_score, reverse=True)
-    return results[:2]
 
 
 def rank_hits_for_prompt(args: argparse.Namespace, query: str, items: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -3192,6 +2374,11 @@ async def echomemory_retrieve(args: argparse.Namespace, sdk: Any, query: str) ->
     dataset_format = str(getattr(args, "dataset_format", "") or "").strip().lower()
     hotpot_mode = dataset_format == "hotpotqa"
     longmemeval_mode = dataset_format == "longmemeval"
+    longmemeval_v047 = (
+        longmemeval_mode
+        and str(getattr(args, "longmemeval_alignment_profile", "") or "").strip()
+        == "openviking-v0.4.7"
+    )
     local_mode = str(getattr(args, "retrieval_mode", "") or "").strip().lower() == "local"
     retrieval_query_strategy = str(getattr(args, "retrieval_query_strategy", "direct") or "direct").strip().lower()
     if longmemeval_mode:
@@ -3218,6 +2405,15 @@ async def echomemory_retrieve(args: argparse.Namespace, sdk: Any, query: str) ->
         items.extend(primary_items)
         errors.extend(primary_errors)
         timing["primary_search_ms"] = ms_since(primary_started)
+    if longmemeval_v047:
+        native_items = list(items[: max(0, int(args.top_k))])
+        timing["native_http_candidate_count"] = len(items)
+        timing["native_http_selected_count"] = len(native_items)
+        timing["platform_retrieval_postprocess_enabled"] = False
+        timing["postprocess_ms"] = 0.0
+        timing["total_ms"] = ms_since(retrieve_started)
+        setattr(args, "_last_retrieval_pool", list(native_items))
+        return native_items, "; ".join(errors), timing
     adaptive_followup_queries: list[str] = []
     if membase_enabled and not local_mode and retrieval_query_strategy == "direct" and not longmemeval_mode:
         adaptive_followup_queries = adaptive_direct_followup_queries(query, items, max_queries=2)
@@ -3503,7 +2699,7 @@ async def build_initial_tool_prefetch(
     ]
     if normalize_echomemory_tool_set(
         getattr(args, "tool_set", "search_read"),
-        vikingboat_compat=bool(getattr(args, "vikingboat_compat", False)),
+        vikingboat_compat=False,
     ) != "search_only":
         uris = search_payload_uris(search_text, max(0, int(args.prefetch_read_count)))
         if uris:
@@ -3542,10 +2738,13 @@ async def call_echomemory_vikingboat_lite_loop(
     retry_count_total = 0
     llm_call_ms_total = 0.0
     llm_http_attempts = 0
-    seen_search_queries: set[str] = set()
+    question_search_queries: set[str] = set()
     attempts = max(1, args.model_retries + 1)
     for iteration in range(1, max(1, args.max_iterations) + 1):
         payload_variants = openai_payload_variants(args.answer_model, messages, default_openai_max_tokens(), tools)
+        if not bool(getattr(args, "omit_answer_temperature", False)):
+            for payload in payload_variants:
+                payload["temperature"] = float(args.answer_temperature)
         data: dict[str, Any] | None = None
         last_error = ""
         last_kind = "api_error"
@@ -3556,7 +2755,7 @@ async def call_echomemory_vikingboat_lite_loop(
                 req = request.Request(
                     args.answer_base_url.rstrip("/") + "/chat/completions",
                     data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
-                    headers={"Content-Type": "application/json", "Authorization": f"Bearer {args.answer_token}"},
+                    headers=model_http_headers(args.answer_token),
                     method="POST",
                 )
                 def _read_response() -> str:
@@ -3623,6 +2822,13 @@ async def call_echomemory_vikingboat_lite_loop(
                     continue
                 tool_calls = tool_calls[:remaining]
             messages.append({"role": "assistant", "content": message.get("content") or " ", "tool_calls": tool_calls})
+            prepared_tool_calls: list[dict[str, Any]] = []
+            query_dedup_scope = str(
+                getattr(args, "tool_query_dedup_scope", "turn") or "turn"
+            ).strip()
+            turn_search_queries = (
+                question_search_queries if query_dedup_scope == "question" else set()
+            )
             for tool_call in tool_calls:
                 fn = tool_call.get("function") or {}
                 name = str(fn.get("name") or "")
@@ -3638,25 +2844,56 @@ async def call_echomemory_vikingboat_lite_loop(
                         " ",
                         str(parsed_args.get("query") or "").strip().lower(),
                     )
-                if normalized_query and normalized_query in seen_search_queries:
+                if normalized_query and normalized_query in turn_search_queries:
                     result_text = (
                         "Duplicate search skipped. Reformulate the query around a different "
                         "entity, event phrase, date clue, quote, object, or relation."
                     )
-                    retrieval_error = ""
-                    result_count = 0
+                    prepared_tool_calls.append(
+                        {
+                            "tool_call": tool_call,
+                            "name": name,
+                            "args": parsed_args,
+                            "duplicate_result": result_text,
+                        }
+                    )
                 else:
                     if normalized_query:
-                        seen_search_queries.add(normalized_query)
-                    result_text, retrieval_error, result_count = await execute_echomemory_tool(
-                        args,
-                        sdk,
-                        name,
-                        parsed_args,
-                        cache,
-                        retrieve_fn=echomemory_retrieve,
-                        hit_score_fn=hit_score,
+                        turn_search_queries.add(normalized_query)
+                    prepared_tool_calls.append(
+                        {
+                            "tool_call": tool_call,
+                            "name": name,
+                            "args": parsed_args,
+                            "duplicate_result": "",
+                        }
                     )
+
+            async def execute_prepared_tool(prepared: dict[str, Any]) -> tuple[str, str, int]:
+                duplicate_result = str(prepared.get("duplicate_result") or "")
+                if duplicate_result:
+                    return duplicate_result, "", 0
+                return await execute_echomemory_tool(
+                    args,
+                    sdk,
+                    str(prepared.get("name") or ""),
+                    dict(prepared.get("args") or {}),
+                    cache,
+                    retrieve_fn=echomemory_retrieve,
+                    hit_score_fn=hit_score,
+                )
+
+            # Match VikingBot semantics: execute tool calls from the same model
+            # turn concurrently, then append their results in the original order.
+            tool_results = await asyncio.gather(
+                *(execute_prepared_tool(prepared) for prepared in prepared_tool_calls)
+            )
+
+            for prepared, tool_result in zip(prepared_tool_calls, tool_results, strict=True):
+                tool_call = prepared["tool_call"]
+                name = str(prepared.get("name") or "")
+                parsed_args = dict(prepared.get("args") or {})
+                result_text, retrieval_error, result_count = tool_result
                 if retrieval_error:
                     retrieval_errors.append(retrieval_error)
                 tools_used.append(
@@ -3705,7 +2942,42 @@ async def call_echomemory_vikingboat_lite_loop(
     }
 
 
-VIKINGBOT_ALIGNED_PROMPT_MODES = {"vikingboat_lite", "vikingboat_compat"}
+VIKINGBOT_ALIGNED_PROMPT_MODES = {"vikingbot_agent_aligned"}
+
+
+async def retry_empty_answer_once(
+    args: argparse.Namespace,
+    messages: list[dict[str, Any]],
+    previous_result: dict[str, Any],
+) -> tuple[dict[str, Any], float, int]:
+    retry_started = time.time()
+    try:
+        retry_result, retry_ms = await timed_call_openai_async(
+            args.answer_base_url,
+            args.answer_model,
+            args.answer_token,
+            messages,
+            args.timeout_s,
+            0,
+        )
+    except ModelCallError as exc:
+        failed_result = dict(previous_result)
+        failed_result["model_retry_count"] = int(failed_result.get("model_retry_count") or 0) + 1
+        failed_result["empty_content_retry_used"] = True
+        failed_result["empty_content_retry_error"] = str(exc)
+        return failed_result, ms_since(retry_started), 1
+
+    for token_field in ("prompt_tokens", "completion_tokens", "total_tokens"):
+        retry_result[token_field] = int(previous_result.get(token_field) or 0) + int(
+            retry_result.get(token_field) or 0
+        )
+    retry_result["model_retry_count"] = int(previous_result.get("model_retry_count") or 0) + 1
+    retry_result.setdefault("iteration", previous_result.get("iteration", 0) or 1)
+    retry_result.setdefault("tools_used", previous_result.get("tools_used", []))
+    retry_result["tool_retrieval_error"] = previous_result.get("tool_retrieval_error", "")
+    retry_result["empty_content_retry_used"] = True
+    retry_result["empty_content_retry_error"] = ""
+    return retry_result, retry_ms, 1
 
 
 def locomo_question_scoped_args(
@@ -5959,6 +5231,238 @@ async def rescue_with_tool_loop_if_needed(
     return rescued
 
 
+def longmemeval_v047_alignment_enabled(args: argparse.Namespace) -> bool:
+    return (
+        str(getattr(args, "dataset_format", "") or "").strip().lower()
+        == "longmemeval"
+        and str(getattr(args, "longmemeval_alignment_profile", "") or "").strip()
+        == "openviking-v0.4.7"
+    )
+
+
+async def prepare_longmemeval_v047_prompt_items(
+    args: argparse.Namespace,
+    sdk: Any,
+    query: str,
+    candidates: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    candidate_limit = max(
+        0,
+        int(getattr(args, "longmemeval_candidate_limit", 50) or 50),
+    )
+    raw_rerank_limit = getattr(args, "longmemeval_rerank_limit", 10)
+    rerank_limit = max(
+        0,
+        int(10 if raw_rerank_limit is None else raw_rerank_limit),
+    )
+    max_context_chars = int(
+        getattr(args, "longmemeval_max_context_chars", 30000) or 30000
+    )
+    read_full_content = bool(
+        getattr(args, "longmemeval_full_content_read", True)
+    )
+    # VikingBot excludes its hidden summary files. EchoMemory exposes the
+    # equivalent artifacts as plain overview.md/abstract.md URIs.
+    excluded_basenames = {
+        ".abstract.md",
+        ".overview.md",
+        "abstract.md",
+        "overview.md",
+    }
+    prepared: list[dict[str, Any]] = []
+    read_errors: list[str] = []
+    fs_read_count = 0
+    inline_full_content_count = 0
+    retrieved_uris: list[str] = []
+
+    for raw_rank, raw_item in enumerate(candidates[:candidate_limit], 1):
+        item = dict(raw_item)
+        uri = memory_uri(item).strip()
+        basename = uri.rstrip("/").rsplit("/", 1)[-1]
+        if not uri or basename in excluded_basenames:
+            continue
+        retrieved_uris.append(uri)
+        item["rank"] = raw_rank
+        item["raw_rank"] = raw_rank
+        if read_full_content and hasattr(sdk, "fs_read"):
+            try:
+                payload = await sdk.fs_read(
+                    uri,
+                    ctx=sdk_ctx_kwargs(
+                        sdk,
+                        args.account,
+                        args.user_id,
+                        args.agent_id,
+                        "",
+                    ),
+                )
+                if isinstance(payload, dict):
+                    full_content = str(payload.get("content") or "").strip()
+                    resolved_uri = str(payload.get("resolved_uri") or "").strip()
+                else:
+                    full_content = str(payload or "").strip()
+                    resolved_uri = ""
+                if full_content:
+                    item["content"] = full_content
+                    item["_longmemeval_full_content_read"] = True
+                    if resolved_uri:
+                        item["_longmemeval_resolved_uri"] = resolved_uri
+                    fs_read_count += 1
+                elif memory_content(item):
+                    item["_longmemeval_inline_full_content"] = True
+                    inline_full_content_count += 1
+            except Exception as exc:
+                read_errors.append(f"{uri}: {exc}")
+                if memory_content(item):
+                    item["_longmemeval_inline_full_content"] = True
+                    inline_full_content_count += 1
+        elif memory_content(item):
+            item["_longmemeval_inline_full_content"] = True
+            inline_full_content_count += 1
+        prepared.append(item)
+
+    rerank_base_url = str(
+        getattr(args, "longmemeval_rerank_base_url", "")
+        or os.environ.get("LONGMEMEVAL_RERANK_BASE_URL")
+        or "https://dashscope.aliyuncs.com/compatible-api/v1/reranks"
+    ).strip()
+    rerank_model = str(
+        getattr(args, "longmemeval_rerank_model", "")
+        or os.environ.get("LONGMEMEVAL_RERANK_MODEL")
+        or "qwen3-rerank"
+    ).strip()
+    rerank_token = str(
+        getattr(args, "longmemeval_rerank_token", "")
+        or os.environ.get("LONGMEMEVAL_RERANK_API_KEY")
+        or os.environ.get("DASHSCOPE_API_KEY")
+        or getattr(args, "answer_token", "")
+        or ""
+    ).strip()
+    rerank_timeout_s = float(
+        getattr(args, "longmemeval_rerank_timeout_s", 120.0) or 120.0
+    )
+    rerank_scores: list[dict[str, Any]] = []
+    rerank_error = ""
+    reranked = list(prepared)
+    if rerank_limit > 0 and len(prepared) > 1:
+        if not rerank_token:
+            raise RuntimeError(
+                "OpenViking-v0.4.7 alignment requires a LongMemEval rerank API token"
+            )
+
+        documents = [memory_content(item) for item in prepared]
+
+        def _call_rerank() -> dict[str, Any]:
+            req = request.Request(
+                rerank_base_url,
+                data=json.dumps(
+                    {
+                        "model": rerank_model,
+                        "query": query,
+                        "documents": documents,
+                    },
+                    ensure_ascii=False,
+                ).encode("utf-8"),
+                headers={
+                    "Authorization": f"Bearer {rerank_token}",
+                    "Content-Type": "application/json",
+                },
+                method="POST",
+            )
+            with request.urlopen(req, timeout=rerank_timeout_s) as response:
+                return json.loads(
+                    response.read().decode("utf-8", errors="replace")
+                )
+
+        try:
+            rerank_payload = await asyncio.to_thread(_call_rerank)
+            results = list(rerank_payload.get("results") or [])
+            if len(results) != len(prepared):
+                raise RuntimeError(
+                    "unexpected rerank result length: "
+                    f"expected={len(prepared)} actual={len(results)}"
+                )
+            scores: list[float | None] = [None] * len(prepared)
+            for result in results:
+                index = int(result.get("index"))
+                if index < 0 or index >= len(prepared):
+                    raise RuntimeError(f"invalid rerank result index: {index}")
+                scores[index] = float(result.get("relevance_score") or 0.0)
+            if any(score is None for score in scores):
+                raise RuntimeError("rerank response did not score every candidate")
+            scored_items: list[dict[str, Any]] = []
+            for item, score in zip(prepared, scores, strict=True):
+                scored = dict(item)
+                scored["rerank_score"] = float(score)
+                scored_items.append(scored)
+                rerank_scores.append(
+                    {
+                        "uri": memory_uri(item),
+                        "raw_rank": item.get("raw_rank"),
+                        "score": float(score),
+                    }
+                )
+            scored_items.sort(
+                key=lambda item: (
+                    float(item.get("rerank_score") or 0.0),
+                    -int(item.get("raw_rank") or 0),
+                ),
+                reverse=True,
+            )
+            reranked = scored_items
+        except Exception as exc:
+            rerank_error = str(exc)
+            raise RuntimeError(
+                f"OpenViking-v0.4.7 rerank failed: {rerank_error}"
+            ) from exc
+
+    reranked = reranked[:rerank_limit] if rerank_limit > 0 else reranked
+    selected: list[dict[str, Any]] = []
+    skipped_uris: list[str] = []
+    context_chars = 0
+    for item in reranked:
+        content = memory_content(item)
+        content_chars = len(content)
+        if max_context_chars > 0 and context_chars + content_chars > max_context_chars:
+            skipped_uris.append(memory_uri(item))
+            continue
+        selected.append(item)
+        context_chars += content_chars
+
+    audit = {
+        "alignment_profile": "openviking-v0.4.7",
+        "prompt_source": OFFICIAL_LONGMEMEVAL_PROMPT_SOURCE,
+        "search_call_count": 1,
+        "candidate_limit": candidate_limit,
+        "candidate_count": len(prepared),
+        "retrieved_uris": retrieved_uris,
+        "full_content_read_enabled": read_full_content,
+        "full_content_read_count": fs_read_count + inline_full_content_count,
+        "fs_read_count": fs_read_count,
+        "inline_full_content_count": inline_full_content_count,
+        "full_content_read_errors": read_errors[:10],
+        "rerank_enabled": rerank_limit > 0,
+        "rerank_strategy": (
+            "openviking_v0.4.7_qwen3_rerank"
+            if rerank_limit > 0
+            else "none"
+        ),
+        "rerank_base_url": rerank_base_url if rerank_limit > 0 else "",
+        "rerank_model": rerank_model if rerank_limit > 0 else "",
+        "rerank_scores": rerank_scores,
+        "rerank_error": rerank_error,
+        "rerank_limit": rerank_limit,
+        "selected_count": len(selected),
+        "context_uris": [memory_uri(item) for item in selected],
+        "max_context_chars": max_context_chars,
+        "context_chars": context_chars,
+        "skipped_context_uris_by_char_limit": skipped_uris,
+        "tool_loop_enabled": False,
+        "platform_evidence_augmentation_enabled": False,
+    }
+    return selected, audit
+
+
 async def answer_question(
     args: argparse.Namespace,
     sdk: Any,
@@ -5970,7 +5474,15 @@ async def answer_question(
     started = time.time()
     retrieval_error = ""
     blackbox_http = str(getattr(args, "evidence_policy", "") or "").strip().lower() == "blackbox"
-    query = str(job.question or "").strip() if blackbox_http else build_vikingbot_question_prompt(job)
+    initial_retrieval_query_mode = str(
+        getattr(args, "initial_retrieval_query_mode", "vikingbot_prompt")
+        or "vikingbot_prompt"
+    ).strip()
+    query = (
+        str(job.question or "").strip()
+        if initial_retrieval_query_mode == "question_only"
+        else build_vikingbot_question_prompt(job)
+    )
     route = granularity_route(job.question, str(getattr(args, "granularity_router", "none") or "none"))
     setattr(args, "_granularity_route", route)
     retrieval_timing = default_retrieval_timing()
@@ -5983,39 +5495,21 @@ async def answer_question(
     else:
         hits = []
     native_hits = list(hits)
-    overview_hits: list[dict[str, Any]] = []
-    overview_audit: dict[str, Any] = {
-        "enabled": bool(getattr(args, "search_overview_enrichment", False)),
-        "candidate_count": 0,
-        "http_read_count": 0,
-        "hit_count": 0,
-        "candidate_uris": [],
-        "read_error_uris": [],
-        "hit_uris": [],
-    }
-    overview_started = time.time()
-    if (
-        blackbox_http
-        and bool(getattr(args, "qa_memory_injection", True))
-        and bool(getattr(args, "search_overview_enrichment", False))
-    ):
-        try:
-            overview_hits, overview_audit = await search_overview_enrichment_hits(args, sdk, native_hits)
-            record_retrieval_pass(retrieval_timing, "overview_enrichment", overview_hits)
-        except Exception as exc:
-            retrieval_error = "; ".join(
-                part for part in [retrieval_error, f"http_overview_enrichment: {exc}"] if part
-            )
-    retrieval_timing["overview_enrichment_ms"] = ms_since(overview_started)
-    retrieval_timing["overview_enrichment_audit"] = dict(overview_audit)
-    prompt_hits = [*native_hits, *overview_hits]
+    prompt_hits = list(native_hits)
+    longmemeval_alignment_audit: dict[str, Any] = {}
+    longmemeval_aligned_prompt_items: list[dict[str, Any]] | None = None
+    if longmemeval_v047_alignment_enabled(args):
+        (
+            longmemeval_aligned_prompt_items,
+            longmemeval_alignment_audit,
+        ) = await prepare_longmemeval_v047_prompt_items(
+            args,
+            sdk,
+            str(job.question or "").strip(),
+            native_hits,
+        )
+        prompt_hits = list(longmemeval_aligned_prompt_items)
     retrieval_completed_ms = ms_since(started)
-    segment_raw_started = time.time()
-    if blackbox_http:
-        segment_raw_readback_ms = 0.0
-    else:
-        prompt_hits = inject_segment_raw_readback(args, prompt_hits)
-        segment_raw_readback_ms = ms_since(segment_raw_started)
     log_retrieved_memory_preview(
         job,
         native_hits,
@@ -6023,20 +5517,18 @@ async def answer_question(
         hit_score_fn=hit_score,
         memory_type_fn=memory_type_of,
     )
-    if overview_hits:
-        print(
-            f"[overview] q{question_no or '-'} {job.question_id} "
-            f"http_reads={overview_audit.get('http_read_count', 0)} hits={len(overview_hits)}",
-            flush=True,
-        )
     tool_cache: dict[str, dict[str, Any]] = {}
     cache_started = time.time()
     cache_memory_items(tool_cache, prompt_hits)
     cache_memory_ms = ms_since(cache_started)
-    prompt_mode = str(getattr(args, "prompt_mode", "vikingboat_lite") or "vikingboat_lite")
+    prompt_mode = str(getattr(args, "prompt_mode", "vikingbot_agent_aligned") or "vikingbot_agent_aligned")
     aligned_prompt = prompt_mode in VIKINGBOT_ALIGNED_PROMPT_MODES
     longmemeval_job = str(getattr(job, "dataset_format", "") or "").strip().lower() == "longmemeval"
-    focus_candidates = [] if blackbox_http else list(getattr(args, "_last_retrieval_pool", []) or native_hits)
+    focus_candidates = (
+        []
+        if blackbox_http or longmemeval_v047_alignment_enabled(args)
+        else list(getattr(args, "_last_retrieval_pool", []) or native_hits)
+    )
     prefetch_text = ""
     prefetch_tools: list[dict[str, Any]] = []
     prefetch_error = ""
@@ -6053,18 +5545,21 @@ async def answer_question(
     user_hits, agent_hits = split_user_agent_hits(native_hits)
     formatting_started = time.time()
     prompt_items: list[dict[str, Any]] = []
-    overview_memory_block = ""
-    overview_included: list[dict[str, Any]] = []
     if bool(getattr(args, "qa_memory_injection", True)):
         if longmemeval_job:
-            prompt_items = select_memory_items_detailed(
-                native_hits,
-                int(getattr(args, "user_memory_budget_chars", 0) or 0)
-                + int(getattr(args, "agent_memory_budget_chars", 0) or 0),
-                hit_score_fn=hit_score,
-                memory_content_fn=memory_content,
+            prompt_items = (
+                list(longmemeval_aligned_prompt_items)
+                if longmemeval_aligned_prompt_items is not None
+                else select_memory_items_detailed(
+                    native_hits,
+                    int(getattr(args, "user_memory_budget_chars", 0) or 0)
+                    + int(getattr(args, "agent_memory_budget_chars", 0) or 0),
+                    hit_score_fn=hit_score,
+                    memory_content_fn=memory_content,
+                )
             )
-            user_memory_block, user_included = "", []
+            user_memory_block = "\n".join(memory_content(item) for item in prompt_items)
+            user_included = list(prompt_items)
             agent_memory_block, agent_included = "", []
         else:
             user_memory_block, user_included = format_memory_section_detailed(
@@ -6079,21 +5574,11 @@ async def answer_question(
                 hit_score_fn=hit_score,
                 memory_content_fn=memory_content,
             )
-        if overview_hits:
-            overview_memory_block, overview_included = format_memory_section_detailed(
-                overview_hits,
-                max(0, int(getattr(args, "overview_budget_chars", 0) or 0)),
-                hit_score_fn=hit_score,
-                memory_content_fn=memory_content,
-            )
     else:
         user_memory_block, user_included = "", []
         agent_memory_block, agent_included = "", []
     memory_format_ms = ms_since(formatting_started)
-    has_memory = bool(
-        (prompt_items if longmemeval_job else (user_memory_block or agent_memory_block))
-        or overview_memory_block
-    )
+    has_memory = bool(prompt_items if longmemeval_job else (user_memory_block or agent_memory_block))
     focus_snippets = (
         evidence_focus_snippets(
             job.question,
@@ -6117,7 +5602,7 @@ async def answer_question(
         )
     else:
         messages = (
-            build_vikingboat_lite_messages(
+            build_vikingbot_agent_aligned_messages(
                 args,
                 job,
                 user_memory_block,
@@ -6127,20 +5612,6 @@ async def answer_question(
             )
             if aligned_prompt
             else build_messages(job, user_memory_block, agent_memory_block, has_memory)
-        )
-    if overview_memory_block:
-        messages.insert(
-            max(1, len(messages) - 1),
-            {
-                "role": "user",
-                "content": (
-                    "## EchoMemory session overviews\n"
-                    "These summaries were fetched through the EchoMemory HTTP /fs/read API using "
-                    "session URIs derived from the native search results. Treat them as additional "
-                    "EchoMemory evidence only.\n\n"
-                    f"{overview_memory_block}"
-                ),
-            },
         )
     if not aligned_prompt and not longmemeval_job:
         if focus_snippets:
@@ -6156,7 +5627,6 @@ async def answer_question(
     message_build_ms = ms_since(message_build_started)
     injection_total_ms = round(
         retrieval_timing.get("total_ms", 0.0)
-        + segment_raw_readback_ms
         + cache_memory_ms
         + prefetch_ms
         + memory_format_ms
@@ -6168,6 +5638,7 @@ async def answer_question(
     fallback_llm_ms = 0.0
     rescue_llm_ms = 0.0
     refinement_llm_ms = 0.0
+    empty_content_retry_ms = 0.0
     llm_http_attempts = 0
     answer_stage = "none"
     if args.answer_token:
@@ -6286,7 +5757,24 @@ async def answer_question(
             sanitized_answer,
             is_unknownish_answer_fn=is_unknownish_answer,
         )
-    if raw_answer and sanitized_answer and sanitized_answer != raw_answer:
+    if args.answer_token and not sanitized_answer:
+        result, empty_content_retry_ms, empty_retry_attempts = await retry_empty_answer_once(
+            args,
+            messages,
+            result,
+        )
+        llm_http_attempts += empty_retry_attempts
+        answer_llm_ms += empty_content_retry_ms
+        answer_stage = f"{answer_stage}_empty_retry"
+        raw_answer = str(result.get("answer") or "").strip()
+        draft_for_refinement = raw_answer
+        sanitized_answer = sanitize_final_answer_text(raw_answer)
+        if longmemeval_job:
+            sanitized_answer = normalize_longmemeval_answer(
+                sanitized_answer,
+                is_unknownish_answer_fn=is_unknownish_answer,
+            )
+    if raw_answer and sanitized_answer != raw_answer:
         result["answer_sanitized"] = True
         result["raw_answer"] = compact(raw_answer, 2000)
         result["answer"] = sanitized_answer
@@ -6317,6 +5805,7 @@ async def answer_question(
     if (
         not blackbox_http
         and not should_refine
+        and not longmemeval_v047_alignment_enabled(args)
         and draft_for_refinement
         and bool(focus_candidates)
         and answer_refinement_needed(
@@ -6334,6 +5823,7 @@ async def answer_question(
     if (
         not blackbox_http
         and not should_refine
+        and not longmemeval_v047_alignment_enabled(args)
         and aligned_prompt
         and not bool(getattr(args, "vikingboat_tool_loop", False))
         and (
@@ -6381,7 +5871,7 @@ async def answer_question(
     if answer:
         result["answer"] = answer
     pre_override_answer = answer
-    if not blackbox_http:
+    if not blackbox_http and not longmemeval_v047_alignment_enabled(args):
         answer = generic_grounded_answer_override(job, answer, focus_candidates)
         answer = benchmark_answer_override(job, answer, focus_candidates)
         answer = hotpotqa_compact_answer(job, answer, focus_candidates)
@@ -6403,7 +5893,7 @@ async def answer_question(
     tool_name_counts = Counter(tool_names)
     tool_search_hits = tool_search_result_count(tools_used)
     tool_read_calls = tool_read_call_count(tools_used)
-    effective_retrieval_count = len(native_hits) + len(overview_hits) + tool_search_hits
+    effective_retrieval_count = len(native_hits) + tool_search_hits
     log_retrieval_resolution(
         job,
         question_no=question_no,
@@ -6441,7 +5931,7 @@ async def answer_question(
     )
     if result.get("model_error_kind"):
         health_status = str(result["model_error_kind"])
-    injected_items = [*user_included, *agent_included, *overview_included]
+    injected_items = [*user_included, *agent_included]
     retrieval_layers_used: list[str] = []
     for item in prompt_hits:
         layer = memory_type_of(item)
@@ -6458,22 +5948,10 @@ async def answer_question(
         memory_content_fn=memory_content,
     )
     final_evidence_source = memory_type_of(injected_items[0]) if injected_items else ""
-    augmentation_flags = strict_blackbox_augmentation_flags(retrieval_timing)
-    augmentation_paths = strict_blackbox_augmentation_paths(retrieval_timing)
-    http_enrichment_flags = allowed_http_enrichment_flags(retrieval_timing)
-    http_enrichment_paths = allowed_http_enrichment_paths(retrieval_timing)
-    augmentation_hits_added = {
-        key.removesuffix("_triggered"): int(
-            retrieval_timing.get(f"{key.removesuffix('_triggered')}_hits_added", 0) or 0
-        )
-        for key in augmentation_flags
-    }
     native_kind_counts = dict(Counter(memory_type_of(item) for item in native_hits))
     native_source_counts = dict(Counter(str(item.get("source") or "unknown") for item in native_hits))
-    overview_injected_chars = len(overview_memory_block)
     retrieval_breakdown = {
         **retrieval_timing,
-        "segment_raw_readback_ms": segment_raw_readback_ms,
         "cache_memory_ms": cache_memory_ms,
         "prefetch_ms": prefetch_ms,
         "memory_format_ms": memory_format_ms,
@@ -6502,6 +5980,18 @@ async def answer_question(
         question_no=question_no,
         extra={
             "answer": answer,
+            "evaluation_profile": str(
+                getattr(args, "evaluation_profile", EVALUATION_PROFILE_CUSTOM)
+                or EVALUATION_PROFILE_CUSTOM
+            ),
+            "evaluation_profile_historical_result": str(
+                evaluation_profile_metadata(args)[
+                    "evaluation_profile_historical_result"
+                ]
+            ),
+            "evaluation_profile_resolved_settings": evaluation_profile_metadata(args)[
+                "evaluation_profile_resolved_settings"
+            ],
             "retrieval_status": "ok" if retrieval_ok else "empty",
             "initial_retrieval_status": "ok" if native_hits else "empty",
             "initial_candidate_count": len(native_hits),
@@ -6523,13 +6013,6 @@ async def answer_question(
             "platform_score_recomputed": False,
             "native_result_order_preserved": True,
             "platform_evidence_injection_enabled": False,
-            "http_overview_enrichment_enabled": bool(getattr(args, "search_overview_enrichment", False)),
-            "allowed_http_enrichment_flags": http_enrichment_flags,
-            "allowed_http_enrichment_paths": http_enrichment_paths,
-            "overview_http_audit": overview_audit,
-            "overview_hits": overview_hits,
-            "overview_injected_count": len(overview_included),
-            "overview_injected_chars": overview_injected_chars,
             "native_http_result_count": len(native_hits),
             "native_http_result_kind_counts": native_kind_counts,
             "native_http_result_source_counts": native_source_counts,
@@ -6537,10 +6020,8 @@ async def answer_question(
             "final_evidence_source": final_evidence_source,
             "raw_span_uris": raw_span_uris,
             "injected_chars_by_layer": injected_chars_by_layer,
-            "strict_blackbox_augmentation_flags": augmentation_flags,
-            "strict_blackbox_augmentation_paths": augmentation_paths,
-            "strict_blackbox_augmentation_hits_added": augmentation_hits_added,
             "timing_breakdown": retrieval_breakdown,
+            "longmemeval_alignment": longmemeval_alignment_audit,
         },
     )
     return {
@@ -6552,14 +6033,39 @@ async def answer_question(
         "time_cost": f"{time.time() - started:.4f}",
         "memory_uri": "echo://user/memories/",
         "backend": "echomemory",
+        "evaluation_profile": str(
+            getattr(args, "evaluation_profile", EVALUATION_PROFILE_CUSTOM)
+            or EVALUATION_PROFILE_CUSTOM
+        ),
+        "evaluation_profile_historical_result": str(
+            evaluation_profile_metadata(args)["evaluation_profile_historical_result"]
+        ),
+        "evaluation_profile_resolved_settings": json.dumps(
+            evaluation_profile_metadata(args)["evaluation_profile_resolved_settings"],
+            ensure_ascii=False,
+            sort_keys=True,
+        ),
         "vikingboat_alignment_profile": VIKINGBOT_ALIGNMENT_PROFILE,
         "alignment_backend_route": ECHOMEMORY_HTTP_BLACKBOX_ROUTE,
         "identity_mode": str(getattr(args, "identity_mode", "fixed") or "fixed"),
         "qa_user_id": str(args.user_id),
         "qa_agent_id": str(args.agent_id),
         "relevant_memory": json.dumps(native_hits, ensure_ascii=False),
-        "overview_memory": json.dumps(overview_hits, ensure_ascii=False),
         "prompt_mode": prompt_mode,
+        "prompt_context_mode": str(
+            getattr(args, "prompt_context_mode", "vikingbot_aligned")
+            or "vikingbot_aligned"
+        ),
+        "prompt_system_mode": str(
+            getattr(args, "prompt_system_mode", "vikingbot_aligned")
+            or "vikingbot_aligned"
+        ),
+        "session_context_mode": str(
+            getattr(args, "session_context_mode", "single") or "single"
+        ),
+        "current_time_mode": str(
+            getattr(args, "current_time_mode", "runtime") or "runtime"
+        ),
         "native_prompt": query,
         "prompt_message_count": str(len(messages)),
         "prompt_preview": compact(json.dumps(messages, ensure_ascii=False), 5000),
@@ -6599,24 +6105,57 @@ async def answer_question(
         "raw_answer": compact(str(result.get("raw_answer") or ""), 2000),
         "retrieval_query_plan": json.dumps(query_plan, ensure_ascii=False),
         "retrieval_mode": args.retrieval_mode,
+        "longmemeval_alignment_profile": str(
+            getattr(args, "longmemeval_alignment_profile", "")
+        ),
+        "longmemeval_prompt_source": str(
+            longmemeval_alignment_audit.get("prompt_source") or ""
+        ),
+        "longmemeval_search_call_count": str(
+            longmemeval_alignment_audit.get("search_call_count") or 0
+        ),
+        "longmemeval_candidate_limit": str(
+            longmemeval_alignment_audit.get("candidate_limit") or 0
+        ),
+        "longmemeval_candidate_count": str(
+            longmemeval_alignment_audit.get("candidate_count") or 0
+        ),
+        "longmemeval_full_content_read_enabled": str(
+            bool(longmemeval_alignment_audit.get("full_content_read_enabled"))
+        ).lower(),
+        "longmemeval_full_content_read_count": str(
+            longmemeval_alignment_audit.get("full_content_read_count") or 0
+        ),
+        "longmemeval_rerank_strategy": str(
+            longmemeval_alignment_audit.get("rerank_strategy") or ""
+        ),
+        "longmemeval_rerank_limit": str(
+            longmemeval_alignment_audit.get("rerank_limit") or 0
+        ),
+        "longmemeval_selected_context_count": str(
+            longmemeval_alignment_audit.get("selected_count") or 0
+        ),
+        "longmemeval_max_context_chars": str(
+            longmemeval_alignment_audit.get("max_context_chars") or 0
+        ),
+        "longmemeval_context_chars": str(
+            longmemeval_alignment_audit.get("context_chars") or 0
+        ),
+        "longmemeval_context_uris": json.dumps(
+            longmemeval_alignment_audit.get("context_uris") or [],
+            ensure_ascii=False,
+        ),
+        "longmemeval_skipped_context_uris": json.dumps(
+            longmemeval_alignment_audit.get(
+                "skipped_context_uris_by_char_limit"
+            )
+            or [],
+            ensure_ascii=False,
+        ),
         "evidence_policy": "blackbox",
         "evidence_origin": "echomemory_http_api",
         "retrieval_source_mode": "echo_http_native",
         "platform_evidence_injection_enabled": "false",
-        "http_overview_enrichment_enabled": str(bool(getattr(args, "search_overview_enrichment", False))).lower(),
-        "allowed_http_enrichment_paths": json.dumps(http_enrichment_paths, ensure_ascii=False),
-        "overview_http_candidate_count": str(int(overview_audit.get("candidate_count") or 0)),
-        "overview_http_read_count": str(int(overview_audit.get("http_read_count") or 0)),
-        "overview_http_hit_count": str(int(overview_audit.get("hit_count") or 0)),
-        "overview_http_candidate_uris": json.dumps(overview_audit.get("candidate_uris") or [], ensure_ascii=False),
-        "overview_http_hit_uris": json.dumps(overview_audit.get("hit_uris") or [], ensure_ascii=False),
-        "overview_http_read_error_uris": json.dumps(
-            overview_audit.get("read_error_uris") or [],
-            ensure_ascii=False,
-        ),
-        "overview_injected_count": str(len(overview_included)),
-        "overview_injected_chars": str(overview_injected_chars),
-        "overview_budget_chars": str(max(0, int(getattr(args, "overview_budget_chars", 0) or 0))),
         "native_http_result_count": str(len(native_hits)),
         "native_http_result_kind_counts": json.dumps(native_kind_counts, ensure_ascii=False),
         "native_http_result_source_counts": json.dumps(native_source_counts, ensure_ascii=False),
@@ -6627,74 +6166,6 @@ async def answer_question(
         "final_evidence_source": final_evidence_source,
         "raw_span_uris": json.dumps(raw_span_uris, ensure_ascii=False),
         "injected_chars_by_layer": json.dumps(injected_chars_by_layer, ensure_ascii=False),
-        "strict_blackbox_augmentation_paths": json.dumps(augmentation_paths, ensure_ascii=False),
-        "strict_blackbox_augmentation_hits_added": json.dumps(augmentation_hits_added, ensure_ascii=False),
-        "strict_blackbox_augmentation_triggered": str(bool(augmentation_paths)).lower(),
-        "current_session_raw_fallback_triggered": str(augmentation_flags["current_session_raw_fallback_triggered"]).lower(),
-        "current_session_raw_fallback_hits_added": str(int(retrieval_timing.get("current_session_raw_fallback_hits_added", 0) or 0)),
-        "overview_enrichment_triggered": str(http_enrichment_flags["overview_enrichment_triggered"]).lower(),
-        "overview_enrichment_hits_added": str(int(retrieval_timing.get("overview_enrichment_hits_added", 0) or 0)),
-        "longmemeval_current_session_summary_fallback_triggered": str(
-            augmentation_flags["longmemeval_current_session_summary_fallback_triggered"]
-        ).lower(),
-        "longmemeval_current_session_summary_fallback_hits_added": str(
-            int(retrieval_timing.get("longmemeval_current_session_summary_fallback_hits_added", 0) or 0)
-        ),
-        "hotpot_empty_overview_fallback_triggered": str(
-            augmentation_flags["hotpot_empty_overview_fallback_triggered"]
-        ).lower(),
-        "hotpot_empty_overview_fallback_hits_added": str(
-            int(retrieval_timing.get("hotpot_empty_overview_fallback_hits_added", 0) or 0)
-        ),
-        "segment_readback_triggered": str(augmentation_flags["segment_readback_triggered"]).lower(),
-        "segment_readback_hits_added": str(int(retrieval_timing.get("segment_readback_hits_added", 0) or 0)),
-        "precision_session_readback_triggered": str(
-            augmentation_flags["precision_session_readback_triggered"]
-        ).lower(),
-        "precision_session_readback_hits_added": str(
-            int(retrieval_timing.get("precision_session_readback_hits_added", 0) or 0)
-        ),
-        "precision_grounded_projection_triggered": str(
-            augmentation_flags["precision_grounded_projection_triggered"]
-        ).lower(),
-        "precision_grounded_projection_hits_added": str(
-            int(retrieval_timing.get("precision_grounded_projection_hits_added", 0) or 0)
-        ),
-        **{
-            f"{key}_triggered": str(augmentation_flags[f"{key}_triggered"]).lower()
-            for key in (
-                "local_timeline_hints",
-                "local_segments",
-                "local_messages",
-                "local_session_summaries",
-                "local_atoms",
-                "local_memory_artifacts",
-                "local_graph_nodes",
-            )
-        },
-        **{
-            f"{key}_hits_added": str(int(retrieval_timing.get(f"{key}_hits_added", 0) or 0))
-            for key in (
-                "local_timeline_hints",
-                "local_segments",
-                "local_messages",
-                "local_session_summaries",
-                "local_atoms",
-                "local_memory_artifacts",
-                "local_graph_nodes",
-            )
-        },
-        "segment_readback_enabled": str(bool(getattr(args, "segment_readback", False))).lower(),
-        "current_session_raw_fallback_enabled": str(bool(getattr(args, "current_session_raw_fallback", False))).lower(),
-        "precision_session_readback_enabled": str(bool(getattr(args, "precision_session_readback", False))).lower(),
-        "precision_grounded_projection_enabled": str(bool(getattr(args, "precision_grounded_projection", False))).lower(),
-        "longmemeval_current_session_summary_fallback_enabled": str(
-            bool(getattr(args, "longmemeval_current_session_summary_fallback", False))
-        ).lower(),
-        "hotpot_empty_overview_fallback_enabled": str(
-            bool(getattr(args, "hotpot_empty_overview_fallback", False))
-        ).lower(),
-        "segment_window": str(int(getattr(args, "segment_window", 0) or 0)),
         "retrieval_count": str(len(native_hits)),
         "memory_hit_count": str(len(native_hits)),
         "initial_memory_hit_count": str(len(native_hits)),
@@ -6703,29 +6174,26 @@ async def answer_question(
         "user_memory_budget_chars": str(args.user_memory_budget_chars),
         "agent_memory_budget_chars": str(args.agent_memory_budget_chars),
         "initial_search_limit": str(args.top_k),
+        "initial_retrieval_query_mode": initial_retrieval_query_mode,
         "tool_search_limit": str(args.tool_search_limit),
+        "tool_query_dedup_scope": str(
+            getattr(args, "tool_query_dedup_scope", "turn") or "turn"
+        ),
+        "search_tool_target_uri_schema": str(
+            bool(getattr(args, "search_tool_target_uri_schema", False))
+        ).lower(),
         "platform_score_filtering": "false",
         "user_agent_memory_split": "true",
         "link_only_when_over_budget": "true",
-        "raw_turn_fallback": str(bool(args.local_messages)).lower(),
         "retrieval_tokens_est": str(
-            context_token_estimate(
-                "\n\n".join(part for part in [user_memory_block, overview_memory_block] if part),
-                agent_memory_block,
-            )
+            context_token_estimate(user_memory_block, agent_memory_block)
         ),
         "retrieval_latency_ms": str(round(retrieval_timing.get("total_ms", 0.0), 1)),
         "primary_search_ms": str(round(retrieval_timing.get("primary_search_ms", 0.0), 1)),
         "followup_search_ms": str(round(retrieval_timing.get("followup_search_ms", 0.0), 1)),
-        "current_session_raw_fallback_ms": str(round(retrieval_timing.get("current_session_raw_fallback_ms", 0.0), 1)),
-        "overview_enrichment_ms": str(round(retrieval_timing.get("overview_enrichment_ms", 0.0), 1)),
-        "segment_readback_ms": str(round(retrieval_timing.get("segment_readback_ms", 0.0), 1)),
-        "precision_grounded_projection_ms": str(round(retrieval_timing.get("precision_grounded_projection_ms", 0.0), 1)),
-        "local_evidence_ms": str(round(retrieval_timing.get("local_evidence_ms", 0.0), 1)),
         "dedup_ms": str(round(retrieval_timing.get("dedup_ms", 0.0), 1)),
         "rank_ms": str(round(retrieval_timing.get("rank_ms", 0.0), 1)),
         "postprocess_ms": str(round(retrieval_timing.get("postprocess_ms", 0.0), 1)),
-        "segment_raw_readback_ms": str(round(segment_raw_readback_ms, 1)),
         "cache_memory_ms": str(round(cache_memory_ms, 1)),
         "prefetch_ms": str(round(prefetch_ms, 1)),
         "memory_format_ms": str(round(memory_format_ms, 1)),
@@ -6735,17 +6203,22 @@ async def answer_question(
         "llm_fallback_ms": str(round(fallback_llm_ms, 1)),
         "llm_rescue_ms": str(round(rescue_llm_ms, 1)),
         "llm_refinement_ms": str(round(refinement_llm_ms, 1)),
+        "empty_content_retry_ms": str(round(empty_content_retry_ms, 1)),
         "llm_total_ms": str(round(answer_llm_ms + fallback_llm_ms + rescue_llm_ms + refinement_llm_ms, 1)),
         "llm_http_attempts": str(llm_http_attempts),
         "answer_stage": answer_stage,
         "end_to_end_ms": str(ms_since(started)),
         "context_preview": compact(
             f"### user memories:\n{user_memory_block}\n\n"
-            f"### agent memories:\n{agent_memory_block}\n\n"
-            f"### session overviews via EchoMemory HTTP:\n{overview_memory_block}",
+            f"### agent memories:\n{agent_memory_block}",
             3000,
         ),
         "answer_prompt_tokens": str(result.get("prompt_tokens") or 0),
+        "answer_temperature": (
+            "provider_default"
+            if bool(getattr(args, "omit_answer_temperature", False))
+            else str(float(args.answer_temperature))
+        ),
         "answer_completion_tokens": str(result.get("completion_tokens") or 0),
         "answer_total_tokens": str(result.get("total_tokens") or 0),
         "token_usage": token_usage_json(
@@ -6757,6 +6230,8 @@ async def answer_question(
         "refinement_focus": compact(str(result.get("refinement_focus") or ""), 1200),
         "model_status": "ok" if model_ok else "failed",
         "model_retry_count": str(result.get("model_retry_count", 0)),
+        "empty_content_retry_used": str(bool(result.get("empty_content_retry_used"))).lower(),
+        "empty_content_retry_error": str(result.get("empty_content_retry_error") or ""),
         "model_error_kind": str(result.get("model_error_kind") or ""),
         "model_error": str(result.get("model_error") or ""),
         "retrieval_status": "ok" if retrieval_ok else "empty",
@@ -6808,6 +6283,7 @@ async def run(args: argparse.Namespace) -> None:
         auth_key=args.echomem_auth_key,
         transport_mode=args.echomem_transport,
         http_timeout_s=args.echomem_http_timeout_s,
+        http_auto_auth=False,
     )
     data = read_json(Path(args.dataset).expanduser().resolve())
     question_filter = {q.strip() for q in args.questions.split(",") if q.strip()}
@@ -7001,6 +6477,7 @@ async def run(args: argparse.Namespace) -> None:
     llm_fallback_call_count = sum(1 for r in final_rows if int(r.get("answer_total_tokens") or 0) > 0)
     summary = {
         **alignment_metadata("echomemory", ECHOMEMORY_HTTP_BLACKBOX_ROUTE),
+        **evaluation_profile_metadata(args),
         "dataset_format": "locomo",
         "dataset": str(Path(args.dataset).expanduser().resolve()),
         "sample": args.sample,
@@ -7020,6 +6497,34 @@ async def run(args: argparse.Namespace) -> None:
         "vikingboat_alignment_profile": VIKINGBOT_ALIGNMENT_PROFILE,
         "alignment_backend_route": ECHOMEMORY_HTTP_BLACKBOX_ROUTE,
         "identity_mode": str(getattr(args, "identity_mode", "fixed") or "fixed"),
+        "prompt_context_mode": str(
+            getattr(args, "prompt_context_mode", "vikingbot_aligned")
+            or "vikingbot_aligned"
+        ),
+        "prompt_system_mode": str(
+            getattr(args, "prompt_system_mode", "vikingbot_aligned")
+            or "vikingbot_aligned"
+        ),
+        "session_context_mode": str(
+            getattr(args, "session_context_mode", "single") or "single"
+        ),
+        "current_time_mode": str(
+            getattr(args, "current_time_mode", "runtime") or "runtime"
+        ),
+        "initial_retrieval_query_mode": str(
+            getattr(args, "initial_retrieval_query_mode", "vikingbot_prompt")
+            or "vikingbot_prompt"
+        ),
+        "answer_temperature": (
+            None
+            if bool(getattr(args, "omit_answer_temperature", False))
+            else float(args.answer_temperature)
+        ),
+        "answer_temperature_source": (
+            "provider_default"
+            if bool(getattr(args, "omit_answer_temperature", False))
+            else "explicit"
+        ),
         "vikingbot_prompt_aligned": args.prompt_mode in VIKINGBOT_ALIGNED_PROMPT_MODES,
         "vikingboat_compat": bool(args.vikingboat_compat),
         "memory_tool_loop_enabled": bool(args.prompt_mode in VIKINGBOT_ALIGNED_PROMPT_MODES and args.vikingboat_tool_loop),
@@ -7039,6 +6544,12 @@ async def run(args: argparse.Namespace) -> None:
         "prefetch_context_chars": args.prefetch_context_chars,
         "max_iterations": args.max_iterations,
         "tool_search_limit": args.tool_search_limit,
+        "tool_query_dedup_scope": str(
+            getattr(args, "tool_query_dedup_scope", "turn") or "turn"
+        ),
+        "search_tool_target_uri_schema": bool(
+            getattr(args, "search_tool_target_uri_schema", False)
+        ),
         "platform_score_filtering": False,
         "retrieval_mode": args.retrieval_mode,
         "evidence_policy": "blackbox",
@@ -7052,7 +6563,11 @@ async def run(args: argparse.Namespace) -> None:
         "platform_score_recomputed": False,
         "native_result_order_preserved": True,
         "platform_evidence_injection_enabled": False,
-        "allowed_http_enrichment": ["overview.md"] if args.search_overview_enrichment else [],
+        "allowed_http_enrichment": (
+            ["overview.md"]
+            if bool(getattr(args, "search_overview_enrichment", False))
+            else []
+        ),
         "overview_budget_chars": max(0, int(getattr(args, "overview_budget_chars", 0) or 0)),
         "native_graph_policy": "server_controlled",
         "retrieval_ranker": args.retrieval_ranker,
@@ -7064,7 +6579,9 @@ async def run(args: argparse.Namespace) -> None:
         "segment_window": int(getattr(args, "segment_window", 0) or 0),
         "retrieval_uri_dedup_enabled": False,
         "platform_retrieval_postprocess_enabled": False,
-        "search_overview_enrichment_enabled": bool(args.search_overview_enrichment),
+        "search_overview_enrichment_enabled": bool(
+            getattr(args, "search_overview_enrichment", False)
+        ),
         "longmemeval_current_session_summary_fallback_enabled": bool(
             getattr(args, "longmemeval_current_session_summary_fallback", False)
         ),
@@ -7077,29 +6594,37 @@ async def run(args: argparse.Namespace) -> None:
         ),
         "top_k": args.top_k,
         "initial_search_limit": args.top_k,
-        "local_session_summaries": args.local_session_summaries,
+        "local_session_summaries": bool(
+            getattr(args, "local_session_summaries", False)
+        ),
         "local_segments": bool(getattr(args, "local_segments", False)),
-        "local_atoms": args.local_atoms,
-        "local_messages": args.local_messages,
-        "local_timeline_hints": args.local_timeline_hints,
+        "local_atoms": bool(getattr(args, "local_atoms", False)),
+        "local_messages": bool(getattr(args, "local_messages", False)),
+        "local_timeline_hints": bool(
+            getattr(args, "local_timeline_hints", False)
+        ),
         "local_memory_artifacts": bool(getattr(args, "local_memory_artifacts", False)),
-        "local_score_threshold": args.local_score_threshold,
-        "local_summary_max": args.local_summary_max,
+        "local_score_threshold": float(
+            getattr(args, "local_score_threshold", 0.0) or 0.0
+        ),
+        "local_summary_max": int(getattr(args, "local_summary_max", 0) or 0),
         "local_segment_max": int(getattr(args, "local_segment_max", 0) or 0),
         "local_segment_size": int(getattr(args, "local_segment_size", 0) or 0),
         "local_segment_stride": int(getattr(args, "local_segment_stride", 0) or 0),
         "local_segment_mode": str(getattr(args, "local_segment_mode", "raw") or "raw"),
         "local_segment_artifact_max_points": int(getattr(args, "local_segment_artifact_max_points", 0) or 0),
         "local_segment_artifact_max_chars": int(getattr(args, "local_segment_artifact_max_chars", 0) or 0),
-        "local_atom_max": args.local_atom_max,
-        "local_message_max": args.local_message_max,
-        "local_message_window": args.local_message_window,
+        "local_atom_max": int(getattr(args, "local_atom_max", 0) or 0),
+        "local_message_max": int(getattr(args, "local_message_max", 0) or 0),
+        "local_message_window": int(
+            getattr(args, "local_message_window", 0) or 0
+        ),
         "memory_budget_chars": args.user_memory_budget_chars + args.agent_memory_budget_chars,
         "user_memory_budget_chars": args.user_memory_budget_chars,
         "agent_memory_budget_chars": args.agent_memory_budget_chars,
         "user_agent_memory_split": True,
         "link_only_when_over_budget": True,
-        "raw_turn_fallback": bool(args.local_messages),
+        "raw_turn_fallback": bool(getattr(args, "local_messages", False)),
         "answer_model": args.answer_model,
         "judge_model": judge_settings["model"],
         "judge_base_url": judge_settings["base_url"],
@@ -7140,6 +6665,9 @@ async def run(args: argparse.Namespace) -> None:
         "model_tool_call_rows": sum(1 for r in final_rows if int(r.get("model_tool_call_count") or 0) > 0),
         "model_ok_count": sum(1 for r in final_rows if r.get("model_status") == "ok"),
         "model_failed_count": sum(1 for r in final_rows if r.get("model_status") == "failed"),
+        "empty_content_retry_count": sum(
+            1 for r in final_rows if str(r.get("empty_content_retry_used") or "").lower() == "true"
+        ),
         "retrieval_ok_count": sum(1 for r in final_rows if r.get("retrieval_status") == "ok"),
         "retrieval_empty_count": sum(1 for r in final_rows if r.get("retrieval_status") == "empty"),
         "answer_ok_count": sum(1 for r in final_rows if r.get("answer_status") == "ok"),
@@ -7265,6 +6793,16 @@ async def run(args: argparse.Namespace) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Run LoCoMo QA against EchoMemory memories.")
+    parser.add_argument(
+        "--evaluation-profile",
+        choices=EVALUATION_PROFILE_CHOICES,
+        default=EVALUATION_PROFILE_LEGACY_77,
+        help=(
+            "Apply one reproducible configuration bundle. The default legacy-77 restores "
+            "the historical 77.78%% setup; test-best selects the current VikingBot-aligned "
+            "85.19%% setup; custom preserves individually supplied flags."
+        ),
+    )
     parser.add_argument("--dataset", required=True)
     parser.add_argument("--out-dir", required=True)
     parser.add_argument("--sample", default="conv-30")
@@ -7284,11 +6822,39 @@ def main() -> None:
     parser.add_argument("--identity-mode", choices=["fixed", "sample_question"], default="fixed")
     parser.add_argument(
         "--prompt-mode",
-        choices=["vikingboat_lite", "vikingboat_compat", "one_shot"],
-        default="vikingboat_lite",
+        choices=["vikingbot_agent_aligned"],
+        default="vikingbot_agent_aligned",
     )
-    parser.add_argument("--vikingboat-compat", dest="vikingboat_compat", action="store_true")
-    parser.add_argument("--no-vikingboat-compat", dest="vikingboat_compat", action="store_false")
+    parser.add_argument(
+        "--prompt-context-mode",
+        choices=["vikingbot_aligned", "legacy_eval"],
+        default="vikingbot_aligned",
+        help="Compatibility bundle: legacy_eval restores the previous prompt, group session, and question-time context.",
+    )
+    parser.add_argument(
+        "--prompt-system-mode",
+        choices=["vikingbot_aligned", "legacy_eval"],
+        default="vikingbot_aligned",
+        help="Single-variable system-prompt ablation.",
+    )
+    parser.add_argument(
+        "--session-context-mode",
+        choices=["single", "group"],
+        default="single",
+        help="Single-variable current-session ablation.",
+    )
+    parser.add_argument(
+        "--current-time-mode",
+        choices=["runtime", "question_time"],
+        default="runtime",
+        help="Single-variable Current Time ablation.",
+    )
+    parser.add_argument(
+        "--initial-retrieval-query-mode",
+        choices=["vikingbot_prompt", "question_only"],
+        default="vikingbot_prompt",
+        help="Initial retrieval-query ablation; tool-generated follow-up queries are unchanged.",
+    )
     parser.add_argument("--top-k", type=int, default=VIKINGBOT_INITIAL_SEARCH_LIMIT)
     parser.add_argument(
         "--memory-budget-chars",
@@ -7312,63 +6878,23 @@ def main() -> None:
     )
     parser.add_argument("--retrieval-ranker", choices=["diversified", "score"], default="score")
     parser.add_argument("--granularity-router", choices=["none", "rule"], default="none")
-    parser.add_argument("--segment-readback", dest="segment_readback", action="store_true")
-    parser.add_argument("--no-segment-readback", dest="segment_readback", action="store_false")
-    parser.add_argument("--segment-readback-mode", choices=["all", "fine_only"], default="all")
-    parser.add_argument("--segment-window", type=int, default=2)
-    parser.add_argument("--segment-session-limit", type=int, default=6)
-    parser.add_argument("--segment-max-hits", type=int, default=8)
-    parser.add_argument("--segment-hits-per-session", type=int, default=1)
     parser.add_argument("--retrieval-uri-dedup", dest="retrieval_uri_dedup", action="store_true")
     parser.add_argument("--no-retrieval-uri-dedup", dest="retrieval_uri_dedup", action="store_false")
-    parser.add_argument("--no-local-session-summaries", dest="local_session_summaries", action="store_false")
-    parser.add_argument("--local-session-summaries", dest="local_session_summaries", action="store_true")
-    parser.add_argument("--no-local-segments", dest="local_segments", action="store_false")
-    parser.add_argument("--local-segments", dest="local_segments", action="store_true")
-    parser.add_argument("--local-segment-max", type=int, default=24)
-    parser.add_argument("--local-segment-size", type=int, default=4)
-    parser.add_argument("--local-segment-stride", type=int, default=4)
-    parser.add_argument("--local-segment-mode", choices=["raw", "artifact", "artifact+raw"], default="raw")
-    parser.add_argument("--local-segment-artifact-max-points", type=int, default=4)
-    parser.add_argument("--local-segment-artifact-max-chars", type=int, default=700)
-    parser.add_argument("--local-segment-raw-readback-max", type=int, default=2)
-    parser.add_argument("--local-segment-raw-readback-chars", type=int, default=900)
-    parser.add_argument("--current-session-raw-fallback", dest="current_session_raw_fallback", action="store_true")
-    parser.add_argument("--no-current-session-raw-fallback", dest="current_session_raw_fallback", action="store_false")
-    parser.add_argument("--current-session-raw-fallback-max-hits", type=int, default=3)
-    parser.add_argument("--current-session-raw-fallback-window", type=int, default=0)
-    parser.add_argument("--precision-session-readback", dest="precision_session_readback", action="store_true")
-    parser.add_argument("--no-precision-session-readback", dest="precision_session_readback", action="store_false")
-    parser.add_argument("--precision-session-limit", type=int, default=4)
-    parser.add_argument("--precision-session-max-hits", type=int, default=2)
-    parser.add_argument("--precision-session-window", type=int, default=0)
-    parser.add_argument("--precision-grounded-projection", dest="precision_grounded_projection", action="store_true")
-    parser.add_argument("--no-precision-grounded-projection", dest="precision_grounded_projection", action="store_false")
-    parser.add_argument("--precision-grounded-projection-source-limit", type=int, default=4)
-    parser.add_argument("--precision-grounded-projection-max-hits", type=int, default=3)
-    parser.add_argument("--no-local-atoms", dest="local_atoms", action="store_false")
-    parser.add_argument("--local-atoms", dest="local_atoms", action="store_true")
-    parser.add_argument(
-        "--local-messages",
-        dest="local_messages",
-        action="store_true",
-        help="Diagnostic only: include raw session messages.jsonl turns in the prompt.",
-    )
-    parser.add_argument("--no-local-messages", dest="local_messages", action="store_false")
-    parser.add_argument("--no-local-timeline-hints", dest="local_timeline_hints", action="store_false")
-    parser.add_argument("--local-timeline-hints", dest="local_timeline_hints", action="store_true")
-    parser.add_argument("--local-score-threshold", type=float, default=0.08)
-    parser.add_argument("--local-summary-max", type=int, default=12)
-    parser.add_argument("--local-atom-max", type=int, default=24)
-    parser.add_argument("--local-message-max", type=int, default=16)
-    parser.add_argument("--local-message-window", type=int, default=1)
-    parser.add_argument("--no-local-memory-artifacts", dest="local_memory_artifacts", action="store_false")
-    parser.add_argument("--local-memory-artifacts", dest="local_memory_artifacts", action="store_true")
-    parser.add_argument("--local-artifact-max", type=int, default=24)
     parser.add_argument("--vikingboat-tool-loop", dest="vikingboat_tool_loop", action="store_true")
     parser.add_argument("--no-vikingboat-tool-loop", dest="vikingboat_tool_loop", action="store_false")
     parser.add_argument("--tool-set", choices=["vikingboat_default", "search_read", "search_only", VIKINGBOT_TOOL_SET], default="search_read")
     parser.add_argument("--tool-search-limit", type=int, default=VIKINGBOT_TOOL_SEARCH_LIMIT)
+    parser.add_argument(
+        "--tool-query-dedup-scope",
+        choices=["turn", "question"],
+        default="turn",
+        help="Deduplicate identical model-generated search queries within one tool-call turn or across the whole question.",
+    )
+    parser.add_argument(
+        "--search-tool-target-uri-schema",
+        action="store_true",
+        help="Expose the historical unsupported target_uri search argument for ablation only.",
+    )
     parser.add_argument(
         "--tool-search-pool-multiplier",
         type=int,
@@ -7376,26 +6902,6 @@ def main() -> None:
         help="Optional HTTP search-depth multiplier before URI deduplication; strict black-box runs keep this at 1.",
     )
     parser.add_argument("--tool-log-chars", type=int, default=1200)
-    parser.add_argument("--search-overview-enrichment", dest="search_overview_enrichment", action="store_true")
-    parser.add_argument("--no-search-overview-enrichment", dest="search_overview_enrichment", action="store_false")
-    parser.add_argument(
-        "--overview-budget-chars",
-        type=int,
-        default=3000,
-        help="Maximum prompt characters read from overview.md through EchoMemory HTTP /fs/read.",
-    )
-    parser.add_argument(
-        "--longmemeval-current-session-summary-fallback",
-        dest="longmemeval_current_session_summary_fallback",
-        action="store_true",
-    )
-    parser.add_argument(
-        "--no-longmemeval-current-session-summary-fallback",
-        dest="longmemeval_current_session_summary_fallback",
-        action="store_false",
-    )
-    parser.add_argument("--hotpot-empty-overview-fallback", dest="hotpot_empty_overview_fallback", action="store_true")
-    parser.add_argument("--no-hotpot-empty-overview-fallback", dest="hotpot_empty_overview_fallback", action="store_false")
     parser.add_argument(
         "--exclude-session-summaries",
         action="store_true",
@@ -7406,13 +6912,11 @@ def main() -> None:
     parser.add_argument(
         "--compat-allow-initial-prefetch",
         action="store_true",
-        help="Keep initial prefetch enabled even when vikingboat_compat is on.",
+        help="Reserved compatibility flag; current QA mode keeps initial prefetch disabled.",
     )
     parser.add_argument("--prefetch-read-count", type=int, default=4)
     parser.add_argument("--prefetch-context-chars", type=int, default=5000)
     parser.add_argument("--max-iterations", type=int, default=VIKINGBOT_MAX_ITERATIONS)
-    parser.add_argument("--fallback-to-one-shot", dest="fallback_to_one_shot", action="store_true")
-    parser.add_argument("--no-fallback-to-one-shot", dest="fallback_to_one_shot", action="store_false")
     parser.add_argument("--toolloop-rescue-on-toollike-answer", dest="toolloop_rescue_on_toollike_answer", action="store_true")
     parser.add_argument("--no-toolloop-rescue-on-toollike-answer", dest="toolloop_rescue_on_toollike_answer", action="store_false")
     parser.add_argument(
@@ -7429,6 +6933,12 @@ def main() -> None:
         or "",
     )
     parser.add_argument("--answer-model", default=os.environ.get("JUDGE_MODEL") or os.environ.get("ECHOMEM_CHAT_MODEL") or "gpt-5.5")
+    parser.add_argument("--answer-temperature", type=float, default=0.7)
+    parser.add_argument(
+        "--omit-answer-temperature",
+        action="store_true",
+        help="Omit temperature from answer-model requests to reproduce the previous provider-default behavior.",
+    )
     parser.add_argument("--answer-token", default=os.environ.get("LOCOMO_JUDGE_TOKEN") or os.environ.get("JUDGE_TOKEN") or os.environ.get("OPENAI_API_KEY") or "")
     parser.add_argument("--judge-base-url", default=os.environ.get("JUDGE_BASE_URL", ""))
     parser.add_argument("--judge-model", default=os.environ.get("JUDGE_MODEL", "gpt-5.5"))
@@ -7453,64 +6963,18 @@ def main() -> None:
     parser.add_argument("--fallback-to-mock", action="store_true", default=False)
     parser.add_argument("--fallback-to-mock-embedding-only", action="store_true", default=False)
     parser.set_defaults(
-        local_session_summaries=False,
-        local_segments=False,
-        local_atoms=False,
-        local_messages=False,
-        local_timeline_hints=False,
-        local_memory_artifacts=False,
         vikingboat_tool_loop=True,
-        vikingboat_compat=None,
-        search_overview_enrichment=False,
+        vikingboat_compat=False,
         initial_tool_prefetch=False,
         retrieval_uri_dedup=True,
-        fallback_to_one_shot=True,
-        current_session_raw_fallback=False,
-        segment_readback=False,
-        precision_session_readback=False,
-        precision_grounded_projection=False,
-        longmemeval_current_session_summary_fallback=False,
-        hotpot_empty_overview_fallback=False,
+        fallback_to_one_shot=False,
         answer_refinement=False,
         toolloop_rescue_on_toollike_answer=False,
         qa_memory_injection=True,
-        compat_allow_local_evidence=False,
     )
     args = parser.parse_args()
-    forbidden_platform_evidence = {
-        "local_session_summaries": args.local_session_summaries,
-        "local_segments": args.local_segments,
-        "local_atoms": args.local_atoms,
-        "local_messages": args.local_messages,
-        "local_timeline_hints": args.local_timeline_hints,
-        "local_memory_artifacts": args.local_memory_artifacts,
-        "current_session_raw_fallback": args.current_session_raw_fallback,
-        "segment_readback": args.segment_readback,
-        "precision_session_readback": args.precision_session_readback,
-        "precision_grounded_projection": args.precision_grounded_projection,
-        "longmemeval_current_session_summary_fallback": args.longmemeval_current_session_summary_fallback,
-        "hotpot_empty_overview_fallback": args.hotpot_empty_overview_fallback,
-    }
-    enabled_platform_evidence = [name for name, enabled in forbidden_platform_evidence.items() if enabled]
-    if enabled_platform_evidence:
-        parser.error(
-            "EchoMemory LoCoMo QA is HTTP black-box only; platform evidence is forbidden: "
-            + ", ".join(enabled_platform_evidence)
-        )
-    if args.search_overview_enrichment and args.echomem_transport != "http":
-        parser.error("overview enrichment is allowed only through EchoMemory HTTP /fs/read")
-    args.local_session_summaries = False
-    args.local_segments = False
-    args.local_atoms = False
-    args.local_messages = False
-    args.local_timeline_hints = False
-    args.local_memory_artifacts = False
-    args.current_session_raw_fallback = False
-    args.segment_readback = False
-    args.precision_session_readback = False
-    args.precision_grounded_projection = False
-    args.longmemeval_current_session_summary_fallback = False
-    args.hotpot_empty_overview_fallback = False
+    requested_profile_settings = apply_evaluation_profile(args)
+    args.evaluation_profile_resolved_settings = requested_profile_settings
     args.initial_tool_prefetch = False
     answer_base_url = str(args.answer_base_url or "").strip()
     answer_model = str(args.answer_model or "").strip()
@@ -7525,40 +6989,26 @@ def main() -> None:
         os.environ["ECHOMEM_CHAT_API_KEY"] = answer_token
     if answer_token and not os.environ.get("DASHSCOPE_API_KEY"):
         os.environ["DASHSCOPE_API_KEY"] = answer_token
-    if args.vikingboat_compat is None:
-        args.vikingboat_compat = args.prompt_mode == "vikingboat_compat"
     if args.initial_tool_prefetch is None:
         args.initial_tool_prefetch = False
-    args.tool_set = normalize_echomemory_tool_set(args.tool_set, vikingboat_compat=bool(args.vikingboat_compat))
+    args.vikingboat_compat = False
+    args.tool_set = normalize_echomemory_tool_set(args.tool_set, vikingboat_compat=False)
     args.retrieval_mode = normalize_retrieval_mode(args.retrieval_mode)
-    requested_prompt_mode = str(args.prompt_mode or "one_shot")
+    requested_prompt_mode = str(args.prompt_mode or "vikingbot_agent_aligned")
     if requested_prompt_mode not in VIKINGBOT_ALIGNED_PROMPT_MODES:
-        args.prompt_mode = "one_shot"
-        args.vikingboat_compat = False
+        args.prompt_mode = "vikingbot_agent_aligned"
         args.vikingboat_tool_loop = False
         args.initial_tool_prefetch = False
     else:
         args.prompt_mode = requested_prompt_mode
-        if args.prompt_mode != "vikingboat_compat":
-            args.vikingboat_compat = False
-    if args.vikingboat_compat:
-        args.prompt_mode = "vikingboat_compat"
-        if not args.compat_allow_initial_prefetch:
-            args.initial_tool_prefetch = False
-        if not args.compat_allow_local_evidence:
-            args.local_session_summaries = False
-            args.local_atoms = False
-            args.local_messages = False
-            args.local_timeline_hints = False
-            args.local_memory_artifacts = False
-        args.tool_search_limit = max(int(args.tool_search_limit), VIKINGBOT_TOOL_SEARCH_LIMIT)
-    if args.retrieval_mode != "local" and not args.compat_allow_local_evidence:
-        args.local_session_summaries = False
-        args.local_atoms = False
-        args.local_messages = False
-        args.local_timeline_hints = False
-        args.local_memory_artifacts = False
+    if not args.compat_allow_initial_prefetch:
+        args.initial_tool_prefetch = False
+    args.tool_search_limit = max(int(args.tool_search_limit), VIKINGBOT_TOOL_SEARCH_LIMIT)
     hotpotqa_disable_answer_tooling(args)
+    args.evaluation_profile_resolved_settings = {
+        field: getattr(args, field)
+        for field in requested_profile_settings
+    }
     asyncio.run(run(args))
 
 

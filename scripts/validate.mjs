@@ -51,7 +51,7 @@ function checkRepositoryBoundary() {
   const secretPatterns = [
     /\bsk-[A-Za-z0-9_-]{16,}\b/g,
     /-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----/g,
-    /(?:api[_-]?key|password|token)\s*[=:]\s*["'][^"']{12,}["']/gi,
+    /(?:api[_-]?key|password|token)\s*[=:]\s*["'][^"'\r\n]{12,}["']/gi,
   ];
 
   for (const file of walk(root)) {

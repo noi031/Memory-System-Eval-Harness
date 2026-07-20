@@ -546,15 +546,15 @@ def collect_longmemeval_session_batches(item: dict[str, Any]) -> list[dict[str, 
                     "speaker": role,
                     "dia_id": f"{session_id}:{message_index}",
                     "created_at": (
-                        (session_dt.replace(second=0, microsecond=0)).isoformat()
+                        (
+                            session_dt.replace(second=0, microsecond=0)
+                            + timedelta(seconds=message_index)
+                        ).isoformat()
                         if session_dt is not None
                         else None
                     ),
                 }
             )
-            if session_dt is not None:
-                rows[-1]["created_at"] = session_dt.replace(second=0, microsecond=0).isoformat()
-                session_dt = session_dt.replace(second=0, microsecond=0) + timedelta(seconds=1)
         if rows:
             batches.append(
                 {
@@ -647,7 +647,13 @@ def longmemeval_job_plan(raw: Any, index: int, sample_filter: str = "all") -> tu
     question = str(item.get("question") or item.get("query") or "")
     answer = str(item.get("answer") or item.get("gold_answer") or item.get("target") or "")
     category = str(item.get("question_type") or item.get("category") or "longmemeval")
-    query_time = str(item.get("question_date") or item.get("query_time") or item.get("question_time") or "")
+    raw_query_time = str(item.get("question_date") or item.get("query_time") or item.get("question_time") or "")
+    parsed_query_time = parse_longmemeval_datetime(raw_query_time)
+    query_time = (
+        parsed_query_time.strftime("%Y-%m-%d")
+        if parsed_query_time is not None
+        else raw_query_time
+    )
     events = collect_longmemeval_events(item)
     if not events:
         events = collect_events(item)

@@ -28,7 +28,6 @@ def main() -> None:
                 "echomem_root": str(temp / "echomem"),
                 "echomem_transport": "http",
                 "echomem_base_url": "http://127.0.0.1:8015",
-                "tool_set": "vikingbot_native_safe",
                 "questions": "conv-30_qa0",
             },
             temp / "run",
@@ -58,6 +57,14 @@ def main() -> None:
         assert "--tool-min-score" not in generated_options
         assert spec.metadata["initial_score_threshold"] is None
         assert spec.metadata["tool_min_score"] is None
+        assert spec.metadata["top_k"] == 25
+        assert spec.metadata["tool_search_limit"] == 25
+        assert spec.metadata["qa_parallelism"] == 4
+        assert spec.metadata["answer_temperature"] == 0.7
+        assert spec.metadata["tool_set"] == "search_read"
+        assert spec.metadata["identity_mode"] == "fixed"
+        temperature_index = spec.command.index("--answer-temperature")
+        assert spec.command[temperature_index + 1] == "0.7"
 
         run_dir = temp / "runs" / "echomemory_qa_timestamp_workspace"
         run_dir.mkdir(parents=True)

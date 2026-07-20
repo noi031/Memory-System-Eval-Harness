@@ -340,7 +340,7 @@ def build_echomemory_qa_retry_missing_task(
         "--agent-id",
         str(payload.get("em_agent_id") or payload.get("agent_id") or "default"),
         "--prompt-mode",
-        str(payload.get("prompt_mode") or "vikingboat_lite"),
+        str(payload.get("prompt_mode") or "vikingbot_agent_aligned"),
         "--top-k",
         str(payload.get("top_k") or default_top_k),
         "--score-threshold",
@@ -386,9 +386,7 @@ def build_echomemory_qa_retry_missing_task(
     if token:
         command += ["--answer-token", str(token)]
     command.append("--vikingboat-tool-loop" if str(payload.get("vikingboat_tool_loop", True)).strip().lower() not in {"0", "false", "no", "off"} else "--no-vikingboat-tool-loop")
-    command.append("--vikingboat-compat" if str(payload.get("vikingboat_compat", False)).strip().lower() not in {"0", "false", "no", "off"} else "--no-vikingboat-compat")
     command.append("--initial-tool-prefetch" if str(payload.get("initial_tool_prefetch", False)).strip().lower() not in {"0", "false", "no", "off"} else "--no-initial-tool-prefetch")
-    command.append("--fallback-to-one-shot" if str(payload.get("fallback_to_one_shot", True)).strip().lower() not in {"0", "false", "no", "off"} else "--no-fallback-to-one-shot")
     return TaskSpec(command, str(input_file), payload.get("name") or "Retry missing EchoMemory QA questions")
 
 
@@ -442,7 +440,7 @@ def build_echomemory_qa_retry_failed_task(
         "--agent-id",
         str(payload.get("em_agent_id") or payload.get("agent_id") or "default"),
         "--prompt-mode",
-        str(payload.get("prompt_mode") or "vikingboat_lite"),
+        str(payload.get("prompt_mode") or "vikingbot_agent_aligned"),
         "--top-k",
         str(payload.get("top_k") or default_top_k),
         "--score-threshold",
@@ -488,9 +486,7 @@ def build_echomemory_qa_retry_failed_task(
     if token:
         command += ["--answer-token", str(token)]
     command.append("--vikingboat-tool-loop" if str(payload.get("vikingboat_tool_loop", True)).strip().lower() not in {"0", "false", "no", "off"} else "--no-vikingboat-tool-loop")
-    command.append("--vikingboat-compat" if str(payload.get("vikingboat_compat", False)).strip().lower() not in {"0", "false", "no", "off"} else "--no-vikingboat-compat")
     command.append("--initial-tool-prefetch" if str(payload.get("initial_tool_prefetch", False)).strip().lower() not in {"0", "false", "no", "off"} else "--no-initial-tool-prefetch")
-    command.append("--fallback-to-one-shot" if str(payload.get("fallback_to_one_shot", True)).strip().lower() not in {"0", "false", "no", "off"} else "--no-fallback-to-one-shot")
     return TaskSpec(command, output_file, payload.get("name") or "Retry failed EchoMemory QA rows")
 
 
@@ -546,7 +542,6 @@ def build_echoagent_live_task(
         str(out_dir),
     ]
 
-    # Optional parameters
     if payload.get("custom_scenario"):
         command.extend(["--custom-scenario", str(payload.get("custom_scenario"))])
     if payload.get("scenario_base_url"):
