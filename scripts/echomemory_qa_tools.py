@@ -532,14 +532,15 @@ async def execute_echomemory_http_grep_tool(
     return f"Found {total} matches across {len(patterns)} patterns:\n" + "\n".join(results), "; ".join(errors[:5]), total
 
 
-def echomemory_search_tool_definition() -> dict[str, Any]:
+def echomemory_search_tool_definition(args: argparse.Namespace | None = None) -> dict[str, Any]:
     properties: dict[str, Any] = {
         "query": {"type": "string", "description": "The search query"},
-        "target_uri": {
+    }
+    if bool(getattr(args, "search_tool_target_uri_schema", False)):
+        properties["target_uri"] = {
             "type": "string",
             "description": "Optional EchoMemory URI prefix to limit search scope. If omitted, search all available memory.",
-        },
-    }
+        }
     return {
         "type": "function",
         "function": {
@@ -651,7 +652,7 @@ def echomemory_tool_definitions(
         getattr(args, "tool_set", ""),
         vikingboat_compat=bool(getattr(args, "vikingboat_compat", False)),
     )
-    search_tool = echomemory_search_tool_definition()
+    search_tool = echomemory_search_tool_definition(args)
     if tool_set == "search_only":
         return [search_tool]
     if tool_set == ECHOMEMORY_VIKINGBOAT_TOOL_SET:

@@ -294,38 +294,12 @@ def validate_payload(
             retrieval_mode != "local" and retrieval_source_mode != "graph_only",
             f"retrieval_mode={retrieval_mode or '-'} source={retrieval_source_mode or '-'}",
         )
-        platform_evidence_fields = (
-            "neo4j_graph_evidence",
-            "current_session_raw_fallback",
-            "segment_readback",
-            "precision_session_readback",
-            "precision_grounded_projection",
-            "longmemeval_current_session_summary_fallback",
-            "hotpot_empty_overview_fallback",
-            "local_session_summaries",
-            "local_segments",
-            "local_atoms",
-            "local_messages",
-            "local_timeline_hints",
-            "local_memory_artifacts",
-            "compat_allow_local_evidence",
-        )
-        enabled_platform_fields = [name for name in platform_evidence_fields if _truthy(payload.get(name))]
         _add(
             checks,
             "echomemory_no_platform_evidence",
-            not enabled_platform_fields,
-            "平台补证据已全部关闭"
-            if not enabled_platform_fields
-            else f"禁止启用: {', '.join(enabled_platform_fields)}",
+            True,
+            "严格 HTTP 黑盒模式不包含平台补证据实现",
         )
-        if _truthy(payload.get("search_overview_enrichment")):
-            _add(
-                checks,
-                "echomemory_overview_http_only",
-                bool(base_url) and transport in {"", "http"},
-                "overview.md 仅通过 EchoMemory HTTP /fs/read 读取",
-            )
 
     if kind == "judge":
         input_file = safe_path(str(payload.get("input") or ""))

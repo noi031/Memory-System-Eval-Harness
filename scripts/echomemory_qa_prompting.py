@@ -22,6 +22,28 @@ def build_vikingboat_lite_messages(
     runtime = f"{'macOS' if platform.system() == 'Darwin' else platform.system()} {platform.machine()}, Python {platform.python_version()}"
     workspace_display = str(Path.cwd().resolve())
     tool_loop_enabled = bool(getattr(args, "vikingboat_tool_loop", False))
+    tool_set = str(getattr(args, "tool_set", "search_read") or "search_read").strip()
+    prompt_context_mode = str(
+        getattr(args, "prompt_context_mode", "vikingbot_aligned") or "vikingbot_aligned"
+    ).strip()
+    legacy_eval_bundle = prompt_context_mode == "legacy_eval"
+    prompt_system_mode = str(
+        getattr(args, "prompt_system_mode", "vikingbot_aligned") or "vikingbot_aligned"
+    ).strip()
+    session_context_mode = str(
+        getattr(args, "session_context_mode", "single") or "single"
+    ).strip()
+    current_time_mode = str(
+        getattr(args, "current_time_mode", "runtime") or "runtime"
+    ).strip()
+    legacy_eval_prompt = legacy_eval_bundle or prompt_system_mode == "legacy_eval"
+    group_chat_session = legacy_eval_bundle or session_context_mode == "group"
+    question_time_as_current = legacy_eval_bundle or current_time_mode == "question_time"
+    read_tool_guidance = (
+        "\n- For relevant summary or URI entries, use memory_read_many on their URIs to fetch full details to help resolve the query."
+        if tool_set != "search_only"
+        else ""
+    )
     execution_mode_note = (
         "- This run does not allow interactive tool execution. Use only the retrieved evidence already included below.\n"
         "- Never emit tool calls, XML tags, search plans, or 'let me search' style text.\n"
@@ -30,11 +52,18 @@ def build_vikingboat_lite_messages(
         else (
             "- The only authoritative evidence is returned by the exposed EchoMemory HTTP-backed memory tools.\n"
             "- For questions about remembered facts or personal context, use memory_search before concluding that no relevant record exists.\n"
-            "- Search results may contain partial summaries. Use memory_read_many on relevant summary or session URIs when more detail is needed.\n"
             "- A previous empty search does not prove that a different requested fact has no memory. Search again when the information need changes, but avoid duplicate calls with the same intent.\n"
-            "- Use semantic search for concepts and memory_grep for exact text or identifiers. Scope reads and grep to relevant sessions when possible.\n"
             "- Base the answer only on returned evidence, preserve exact names, dates, and values when present, and do not invent unsupported details.\n"
             "- Stop when the evidence is sufficient and answer directly and concisely. Reply 'unknown' only when the available evidence does not support an answer."
+            f"{read_tool_guidance}"
+        )
+        if legacy_eval_prompt
+        else (
+            "## EchoMemory Memory Retrieval\n"
+            "- For questions about the user's remembered facts, preferences, profile, or personal context, use memory_search for the current question before saying there is no relevant record.\n"
+            "- A previous empty search result does not prove that a different follow-up question has no memory; search again when the requested fact changes.\n"
+            "- Injected memory entries may contain full content or a URI with partial content that can be read for more detail."
+            f"{read_tool_guidance}"
         )
     )
     system = f"""# MemoryBench Agent
@@ -56,19 +85,30 @@ IMPORTANT:
 
 ## Memory
 - Long-term memories are created by EchoMemory session commit.
-
+{'''
 ## Evaluation alignment
-This run keeps the VikingBoat-style message layout and retrieval budgets for comparability, but the memory backend and exposed tools are EchoMemory."""
+This run keeps the VikingBoat-style message layout and retrieval budgets for comparability, but the memory backend and exposed tools are EchoMemory.
+''' if legacy_eval_prompt else ''}"""
     question_time = str(getattr(job, "query_time", "") or "").strip()
-    now = question_time if question_time and question_time != "-" else datetime.now().strftime("%Y-%m-%d %H:%M (%A)")
-    tz = time.strftime("%Z") or "UTC"
-    session_context = (
-        "## Current Session\n"
-        f"Channel: {getattr(args, 'vikingbot_channel', 'cli') or 'cli'}\n"
-        "**Group chat session.** Current user ID: user\n"
-        "Multiple users can participate in this conversation. Each user message is prefixed with the user ID in brackets like @<user_id>. "
-        "You should pay attention to who is speaking to understand the context. "
+    now = (
+        question_time
+        if question_time_as_current and question_time and question_time != "-"
+        else datetime.now().strftime("%Y-%m-%d %H:%M (%A)")
     )
+    tz = time.strftime("%Z") or "UTC"
+    if group_chat_session:
+        session_context = (
+            "## Current Session\n"
+            f"Channel: {getattr(args, 'vikingbot_channel', 'cli') or 'cli'}\n"
+            "**Group chat session.** Current user ID: user\n"
+            "Multiple users can participate in this conversation. Each user message is prefixed with the user ID in brackets like @<user_id>. "
+            "You should pay attention to who is speaking to understand the context. "
+        )
+    else:
+        session_context = (
+            "## Current Session\n"
+            f"Channel: {getattr(args, 'vikingbot_channel', 'cli') or 'cli'}"
+        )
     evidence = (
         f"### user memories:\n{user_memory or '(none)'}\n\n"
         f"### agent memories:\n{agent_memory or '(none)'}"
@@ -79,19 +119,37 @@ This run keeps the VikingBoat-style message layout and retrieval budgets for com
     ]
     if has_memory:
         memory_parts.append(f"## {MEMORY_SEARCH_TOOL_NAME}(query=[user_query])\n{evidence}")
-    if focus_snippets:
-        memory_parts.append(
-            "## Focused evidence\n"
-            "Prefer the exact facts in these high-signal lines when they directly answer the question.\n"
-            f"{compact(focus_snippets, 1800)}"
-        )
-    memory_parts.append("Use the retrieved memories as context and answer the user query directly. User's query:")
+    memory_parts.append(
+        "Use the retrieved memories as context and answer the user query directly. User's query:"
+        if legacy_eval_prompt
+        else "Reply in the same language as the user's query, ignoring the language of the reference materials. User's query:"
+    )
     memory_message = "\n\n---\n\n".join(memory_parts)
     return [
         {"role": "system", "content": system},
         {"role": "user", "content": memory_message},
         {"role": "user", "content": build_vikingbot_question_prompt(job)},
     ]
+
+
+def build_vikingbot_agent_aligned_messages(
+    args: argparse.Namespace,
+    job: Any,
+    user_memory: str,
+    agent_memory: str,
+    has_memory: bool,
+    focus_snippets: str = "",
+) -> list[dict[str, Any]]:
+    # Keep the VikingBot-compatible three-message layout while using an
+    # EchoMemory-specific system prompt and the actual exposed tool names.
+    return build_vikingboat_lite_messages(
+        args,
+        job,
+        user_memory,
+        agent_memory,
+        has_memory,
+        focus_snippets=focus_snippets,
+    )
 
 
 def format_longmemeval_memories_for_prompt(
@@ -131,7 +189,7 @@ def build_longmemeval_messages(
     if callable(official_prompt_builder):
         search_results: list[dict[str, Any]] = []
         for item in prompt_items:
-            memory = str(item.get("abstract") or item.get("content") or "").strip()
+            memory = str(item.get("content") or item.get("abstract") or "").strip()
             if not memory:
                 continue
             search_results.append(
@@ -146,7 +204,9 @@ def build_longmemeval_messages(
             search_results=search_results,
             question_date=job.query_time or "unknown",
         )
-        question_type = str(getattr(job, "category", "") or "longmemeval").strip()
+        # OpenViking v0.4.7's run_eval.py prepends this field after building
+        # the shared LongMemEval answer prompt.
+        question_type = str(getattr(job, "category", "") or "").strip()
         if question_type:
             prompt = f"Question Type: {question_type}\n\n{prompt}"
         if focus_snippets:
@@ -319,9 +379,7 @@ def build_messages(job: Any, user_memory: str, agent_memory: str, has_memory: bo
         f"### user memories:\n{user_memory or '(none)'}\n\n"
         f"### agent memories:\n{agent_memory or '(none)'}"
     )
-    memory_parts = [
-        "## Current Session\nChannel: cli\n**Group chat session.** Current user ID: user",
-    ]
+    memory_parts = ["## Current Session\nChannel: cli"]
     if has_memory:
         memory_parts.append(evidence)
     memory_parts.append("Use the retrieved memories as context and answer the user query directly.")

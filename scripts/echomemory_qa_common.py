@@ -23,6 +23,7 @@ from openviking_memory_qa import (
     call_openai,
     classify_model_error,
     csv_fieldnames,
+    model_http_headers,
     openai_payload_variants,
     openai_response_message,
     parse_openai_compatible_response,
@@ -38,10 +39,23 @@ MEMORY_GLOB_TOOL_NAME = "memory_glob"
 ECHOMEMORY_BACKEND_ROUTE = "custom_agent_echomemory_sdk_memory_tools"
 ECHOMEMORY_VIKINGBOAT_TOOL_SET = "vikingboat_default"
 LONGMEMEVAL_ABSTAIN_TEXT = "The information provided is not enough."
+OPENVIKING_V047_LONGMEMEVAL_ROOT = (
+    Path.home()
+    / "Code"
+    / "openviking"
+    / "versions"
+    / "v0.4.7"
+    / "benchmark"
+    / "longmemeval"
+    / "openviking"
+)
+OFFICIAL_LONGMEMEVAL_PROMPT_SOURCE = ""
 
 
 def load_official_longmemeval_prompt_builder() -> Any | None:
+    global OFFICIAL_LONGMEMEVAL_PROMPT_SOURCE
     candidates = [
+        OPENVIKING_V047_LONGMEMEVAL_ROOT / "longmemeval_prompts.py",
         Path.home() / "Code" / "openviking" / "versions" / "v0.4.4" / "benchmark" / "longmemeval" / "openviking" / "longmemeval_prompts.py",
     ]
     for path in candidates:
@@ -55,6 +69,7 @@ def load_official_longmemeval_prompt_builder() -> Any | None:
             spec.loader.exec_module(module)
             helper = getattr(module, "get_answer_generation_prompt", None)
             if callable(helper):
+                OFFICIAL_LONGMEMEVAL_PROMPT_SOURCE = str(path)
                 return helper
         except Exception:
             continue
@@ -147,7 +162,7 @@ def call_openai_without_signal(
             req = request.Request(
                 base_url.rstrip("/") + "/chat/completions",
                 data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
-                headers={"Content-Type": "application/json", "Authorization": f"Bearer {token}"},
+                headers=model_http_headers(token),
                 method="POST",
             )
             with request.urlopen(req, timeout=timeout) as resp:
@@ -231,26 +246,6 @@ def default_retrieval_timing() -> dict[str, Any]:
         "primary_search_ms": 0.0,
         "adaptive_followup_search_ms": 0.0,
         "followup_search_ms": 0.0,
-        "current_session_raw_fallback_ms": 0.0,
-        "current_session_raw_fallback_hits_added": 0,
-        "current_session_raw_fallback_triggered": False,
-        "overview_enrichment_ms": 0.0,
-        "overview_enrichment_hits_added": 0,
-        "overview_enrichment_triggered": False,
-        "longmemeval_current_session_summary_fallback_hits_added": 0,
-        "longmemeval_current_session_summary_fallback_triggered": False,
-        "hotpot_empty_overview_fallback_hits_added": 0,
-        "hotpot_empty_overview_fallback_triggered": False,
-        "segment_readback_ms": 0.0,
-        "segment_readback_hits_added": 0,
-        "segment_readback_triggered": False,
-        "precision_session_readback_ms": 0.0,
-        "precision_session_readback_hits_added": 0,
-        "precision_session_readback_triggered": False,
-        "precision_grounded_projection_ms": 0.0,
-        "precision_grounded_projection_hits_added": 0,
-        "precision_grounded_projection_triggered": False,
-        "local_evidence_ms": 0.0,
         "dedup_ms": 0.0,
         "rank_ms": 0.0,
         "postprocess_ms": 0.0,
@@ -258,7 +253,6 @@ def default_retrieval_timing() -> dict[str, Any]:
         "primary_search_queries": 0,
         "adaptive_followup_search_queries": 0,
         "followup_search_queries": 0,
-        "allow_local_evidence": False,
     }
 
 

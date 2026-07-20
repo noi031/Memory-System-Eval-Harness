@@ -11,6 +11,8 @@ import subprocess
 import sys
 from typing import Any
 
+from echomemory_evaluation_profiles import EVALUATION_PROFILE_CHOICES
+
 
 FAILURE_HEALTH = {"api_error", "timeout", "rate_limited", "retrieval_empty", "retrieval_error", "question_timeout"}
 FAILURE_ANSWER_STATUS = {"failed", "empty_or_unknown"}
@@ -95,6 +97,8 @@ def build_retry_command(args: argparse.Namespace, question_ids: list[str], round
     command = [
         resolve_python_bin(args.echomem_root),
         str(Path(__file__).resolve().parent.parent / "benchmark" / "locomo" / "echomemory" / "run_eval.py"),
+        "--evaluation-profile",
+        args.evaluation_profile,
         "--dataset",
         str(Path(args.dataset).expanduser().resolve()),
         "--out-dir",
@@ -120,7 +124,7 @@ def build_retry_command(args: argparse.Namespace, question_ids: list[str], round
         "--agent-id",
         args.agent_id,
         "--prompt-mode",
-        args.prompt_mode if args.prompt_mode != "one_shot" else "vikingboat_lite",
+        args.prompt_mode,
         "--top-k",
         str(args.top_k),
         "--memory-budget-chars",
@@ -165,25 +169,8 @@ def build_retry_command(args: argparse.Namespace, question_ids: list[str], round
     if args.echomem_auth_key:
         command += ["--echomem-auth-key", args.echomem_auth_key]
     command.append("--qa-memory-injection" if args.qa_memory_injection else "--no-qa-memory-injection")
-    command += [
-        "--no-local-session-summaries",
-        "--no-local-atoms",
-        "--no-local-messages",
-        "--no-local-timeline-hints",
-        "--no-local-memory-artifacts",
-    ]
     command.append("--vikingboat-tool-loop" if args.vikingboat_tool_loop else "--no-vikingboat-tool-loop")
-    command.append("--vikingboat-compat" if args.vikingboat_compat else "--no-vikingboat-compat")
     command.append("--initial-tool-prefetch" if args.initial_tool_prefetch else "--no-initial-tool-prefetch")
-    command.append("--fallback-to-one-shot" if args.fallback_to_one_shot else "--no-fallback-to-one-shot")
-    command += [
-        "--no-search-overview-enrichment",
-        "--no-current-session-raw-fallback",
-        "--no-precision-session-readback",
-        "--no-precision-grounded-projection",
-        "--no-longmemeval-current-session-summary-fallback",
-        "--no-hotpot-empty-overview-fallback",
-    ]
     if args.answer_token:
         command += ["--answer-token", args.answer_token]
     return command
@@ -192,6 +179,12 @@ def build_retry_command(args: argparse.Namespace, question_ids: list[str], round
 def main() -> None:
     parser = argparse.ArgumentParser(description="Retry failed EchoMemory QA rows and merge successful retries back into the source CSV.")
     parser.add_argument("--input", required=True, help="Original EchoMemory QA result CSV")
+    parser.add_argument(
+        "--evaluation-profile",
+        choices=EVALUATION_PROFILE_CHOICES,
+        default="custom",
+        help="Reuse the same bundled evaluation configuration when retrying failed rows.",
+    )
     parser.add_argument("--dataset", required=True)
     parser.add_argument("--out-dir", required=True)
     parser.add_argument("--echomem-root", required=True)
@@ -204,7 +197,7 @@ def main() -> None:
     parser.add_argument("--account", default="default")
     parser.add_argument("--user-id", default="default")
     parser.add_argument("--agent-id", default="default")
-    parser.add_argument("--prompt-mode", choices=["one_shot", "vikingboat_lite", "vikingboat_compat"], default="vikingboat_lite")
+    parser.add_argument("--prompt-mode", choices=["vikingbot_agent_aligned"], default="vikingbot_agent_aligned")
     parser.add_argument("--top-k", type=int, default=30)
     parser.add_argument("--memory-budget-chars", type=int, default=6000)
     parser.add_argument("--user-memory-budget-chars", type=int, default=4000)
@@ -227,12 +220,8 @@ def main() -> None:
     parser.add_argument("--max-iterations", type=int, default=50)
     parser.add_argument("--vikingboat-tool-loop", dest="vikingboat_tool_loop", action="store_true", default=True)
     parser.add_argument("--no-vikingboat-tool-loop", dest="vikingboat_tool_loop", action="store_false")
-    parser.add_argument("--vikingboat-compat", dest="vikingboat_compat", action="store_true", default=False)
-    parser.add_argument("--no-vikingboat-compat", dest="vikingboat_compat", action="store_false")
     parser.add_argument("--initial-tool-prefetch", dest="initial_tool_prefetch", action="store_true", default=False)
     parser.add_argument("--no-initial-tool-prefetch", dest="initial_tool_prefetch", action="store_false")
-    parser.add_argument("--fallback-to-one-shot", dest="fallback_to_one_shot", action="store_true", default=True)
-    parser.add_argument("--no-fallback-to-one-shot", dest="fallback_to_one_shot", action="store_false")
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
 
@@ -257,7 +246,12 @@ def main() -> None:
     round_dir = out_dir / "retry_failed_round1"
     round_dir.mkdir(parents=True, exist_ok=True)
     command = build_retry_command(args, question_ids, round_dir)
-    redacted = ["******" if index and command[index - 1] in {"--answer-token"} else item for index, item in enumerate(command)]
+    redacted = [
+        "******"
+        if index and command[index - 1] in {"--answer-token", "--echomem-auth-key"}
+        else item
+        for index, item in enumerate(command)
+    ]
     print("$ " + " ".join(redacted), flush=True)
     proc = subprocess.run(command, cwd=str(Path(__file__).resolve().parent.parent), text=True)
     summary["returncode"] = proc.returncode
