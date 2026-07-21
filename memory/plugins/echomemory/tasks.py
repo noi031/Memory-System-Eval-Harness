@@ -585,6 +585,9 @@ def build_echomemory_qa_command(
     memory_budget_chars = int(payload_value(payload, "memory_budget_chars", user_budget_chars + agent_budget_chars))
     qa_parallelism = int(payload_value(payload, "qa_parallelism", 4))
     answer_temperature = float(payload_value(payload, "answer_temperature", 0.7))
+    answer_thinking_mode = str(payload.get("answer_thinking_mode") or "disabled").strip().lower()
+    if answer_thinking_mode not in {"disabled", "provider_default"}:
+        answer_thinking_mode = "disabled"
     judge_every = int(payload_value(payload, "judge_every", 10))
     judge_parallel = int(payload_value(payload, "judge_parallel", 6))
     qa_memory_injection = bool_value(payload.get("qa_memory_injection"), True)
@@ -633,6 +636,8 @@ def build_echomemory_qa_command(
         payload.get("answer_base_url") or payload.get("judge_base_url") or defaults.get("judge_base_url") or "",
         "--answer-model",
         payload.get("answer_model") or payload.get("judge_model") or defaults.get("answer_model") or defaults.get("judge_model") or "deepseek-v4-flash",
+        "--answer-thinking-mode",
+        answer_thinking_mode,
         "--answer-temperature",
         str(answer_temperature),
         "--judge-base-url",
@@ -734,6 +739,7 @@ def build_echomemory_qa_command(
             "max_iterations": max_iterations,
             "qa_parallelism": qa_parallelism,
             "answer_temperature": answer_temperature,
+            "answer_thinking_mode": answer_thinking_mode,
             "judge_every": judge_every,
             "judge_parallel": judge_parallel,
             "qa_memory_injection_enabled": qa_memory_injection,

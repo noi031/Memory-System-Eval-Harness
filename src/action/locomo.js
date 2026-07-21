@@ -438,6 +438,7 @@ export function createLocomoActions(deps) {
         evidence_policy: "blackbox",
         retrieval_source_mode: "echo_http_native",
         qa_memory_injection: true,
+        answer_thinking_mode: "disabled",
         tool_set: "vikingbot_native_safe",
         tool_search_limit: normalizedForm.tool_search_limit,
         max_iterations: normalizedForm.max_iterations,

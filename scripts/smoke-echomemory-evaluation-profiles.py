@@ -17,6 +17,7 @@ from echomemory_evaluation_profiles import (
     EVALUATION_PROFILE_LEGACY_77,
     EVALUATION_PROFILE_TEST_BEST,
     apply_evaluation_profile,
+    evaluation_profile_explicit_overrides,
     evaluation_profile_metadata,
 )
 
@@ -42,6 +43,28 @@ def main() -> None:
     assert evaluation_profile_metadata(legacy)[
         "evaluation_profile_historical_result"
     ] == "77.78% (63/81)"
+
+    explicit_tool_disable = argparse.Namespace(
+        evaluation_profile=EVALUATION_PROFILE_LEGACY_77,
+        vikingboat_tool_loop=False,
+    )
+    explicit_overrides = evaluation_profile_explicit_overrides(
+        ["--no-vikingboat-tool-loop"]
+    )
+    explicit_settings = apply_evaluation_profile(
+        explicit_tool_disable,
+        explicit_overrides=explicit_overrides,
+    )
+    assert explicit_tool_disable.vikingboat_tool_loop is False
+    assert explicit_settings["vikingboat_tool_loop"] is False
+
+    implicit_tool_default = argparse.Namespace(
+        evaluation_profile=EVALUATION_PROFILE_LEGACY_77,
+        vikingboat_tool_loop=False,
+    )
+    implicit_settings = apply_evaluation_profile(implicit_tool_default)
+    assert implicit_tool_default.vikingboat_tool_loop is True
+    assert implicit_settings["vikingboat_tool_loop"] is True
 
     test_best = argparse.Namespace(evaluation_profile=EVALUATION_PROFILE_TEST_BEST)
     test_best_settings = apply_evaluation_profile(test_best)
