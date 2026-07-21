@@ -65,6 +65,7 @@ from echomemory_evaluation_profiles import (
     EVALUATION_PROFILE_CUSTOM,
     EVALUATION_PROFILE_LEGACY_77,
     apply_evaluation_profile,
+    evaluation_profile_explicit_overrides,
     evaluation_profile_metadata,
 )
 
@@ -1351,6 +1352,109 @@ def session_summary_allowed(args: argparse.Namespace) -> bool:
     return not bool(getattr(args, "exclude_session_summaries", False))
 
 
+async def sdk_read_echo_text(sdk: Any, args: argparse.Namespace, uri: str) -> str:
+    reader = getattr(sdk, "fs_read", None)
+    if not callable(reader):
+        return ""
+    try:
+        payload = await reader(
+            str(uri or "").strip(),
+            ctx=sdk_ctx_kwargs(sdk, args.account, args.user_id, args.agent_id),
+        )
+    except Exception:
+        return ""
+    if isinstance(payload, dict):
+        return str(payload.get("content") or "")
+    return ""
+
+
+def item_session_ids(item: dict[str, Any]) -> set[str]:
+    values: set[str] = set()
+    direct_session_id = str(item.get("session_id") or "").strip()
+    if direct_session_id:
+        values.add(direct_session_id)
+    for candidate in (memory_uri(item), str(item.get("evidence_uri") or "")):
+        text = str(candidate or "").strip()
+        if "/sessions/" not in text:
+            continue
+        tail = text.split("/sessions/", 1)[1].strip()
+        session_id = tail.split("/", 1)[0].split("#", 1)[0].strip()
+        if session_id:
+            values.add(session_id)
+    return values
+
+
+def filter_items_to_import_session(
+    items: list[dict[str, Any]],
+    import_session_id: str,
+) -> list[dict[str, Any]]:
+    target = str(import_session_id or "").strip()
+    if not target:
+        return list(items)
+    return [item for item in items if target in item_session_ids(item)]
+
+
+async def search_overview_enrichment_hits(
+    args: argparse.Namespace,
+    sdk: Any,
+    items: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    audit: dict[str, Any] = {
+        "enabled": bool(getattr(args, "search_overview_enrichment", False)),
+        "candidate_count": 0,
+        "http_read_count": 0,
+        "hit_count": 0,
+        "candidate_uris": [],
+        "read_error_uris": [],
+        "hit_uris": [],
+    }
+    if not session_summary_allowed(args) or not audit["enabled"]:
+        return [], audit
+    if getattr(sdk, "_compat_layout", "") != "http":
+        raise RuntimeError("overview enrichment requires EchoMemory HTTP transport")
+    if not callable(getattr(sdk, "fs_read", None)):
+        return [], audit
+
+    candidates: list[tuple[str, dict[str, Any]]] = []
+    seen: set[str] = set()
+    for item in items:
+        source = str(item.get("source") or "").strip()
+        if not re.fullmatch(r"[A-Za-z0-9_.-]+", source):
+            source = ENGINE_ID
+        for session_id in sorted(item_session_ids(item)):
+            uri = f"echo://engine/{source}/sessions/{session_id}/overview.md"
+            if uri in seen:
+                continue
+            seen.add(uri)
+            candidates.append((uri, item))
+
+    audit["candidate_count"] = len(candidates)
+    audit["candidate_uris"] = [uri for uri, _item in candidates]
+    hits: list[dict[str, Any]] = []
+    for native_rank, (uri, source_item) in enumerate(candidates, 1):
+        audit["http_read_count"] += 1
+        text = await sdk_read_echo_text(sdk, args, uri)
+        if not text:
+            audit["read_error_uris"].append(uri)
+            continue
+        hits.append(
+            {
+                "uri": uri,
+                "score": hit_score(source_item),
+                "content": text,
+                "memory_type": "session_summary",
+                "backend": "echomemory_http_fs_read",
+                "source": str(source_item.get("source") or ""),
+                "evidence_uri": uri,
+                "overview_source_rank": native_rank,
+                "overview_source_uri": memory_uri(source_item),
+            }
+        )
+        audit["hit_uris"].append(uri)
+    audit["hit_count"] = len(hits)
+    return hits, audit
+
+
 def inventory_like_session_summary(item: dict[str, Any]) -> bool:
     if memory_type_of(item) != "session_summary":
         return False
@@ -2359,6 +2463,19 @@ async def echomemory_retrieve(args: argparse.Namespace, sdk: Any, query: str) ->
         items, errors = await gather_search_items(sdk, context, [raw_query], args.top_k)
         timing["primary_search_ms"] = ms_since(primary_started)
         native_items = list(items[: max(0, int(args.top_k))])
+        overview_started = time.time()
+        overview_items, overview_audit = await search_overview_enrichment_hits(
+            args,
+            sdk,
+            native_items,
+        )
+        timing["overview_enrichment_ms"] = ms_since(overview_started)
+        timing["overview_http_read_count"] = int(overview_audit["http_read_count"])
+        timing["overview_http_hit_count"] = int(overview_audit["hit_count"])
+        timing["overview_injected_count"] = len(overview_items)
+        timing["overview_injected_chars"] = sum(
+            len(memory_content(item)) for item in overview_items
+        )
         timing["native_http_candidate_count"] = len(items)
         timing["native_http_selected_count"] = len(native_items)
         timing["native_http_result_kinds"] = dict(Counter(memory_type_of(item) for item in native_items))
@@ -2368,8 +2485,9 @@ async def echomemory_retrieve(args: argparse.Namespace, sdk: Any, query: str) ->
         timing["platform_retrieval_postprocess_enabled"] = False
         timing["postprocess_ms"] = 0.0
         timing["total_ms"] = ms_since(retrieve_started)
-        setattr(args, "_last_retrieval_pool", list(native_items))
-        return native_items, "; ".join(errors), timing
+        selected_items = [*native_items, *overview_items]
+        setattr(args, "_last_retrieval_pool", list(selected_items))
+        return selected_items, "; ".join(errors), timing
 
     dataset_format = str(getattr(args, "dataset_format", "") or "").strip().lower()
     hotpot_mode = dataset_format == "hotpotqa"
@@ -2742,6 +2860,9 @@ async def call_echomemory_vikingboat_lite_loop(
     attempts = max(1, args.model_retries + 1)
     for iteration in range(1, max(1, args.max_iterations) + 1):
         payload_variants = openai_payload_variants(args.answer_model, messages, default_openai_max_tokens(), tools)
+        if str(getattr(args, "answer_thinking_mode", "disabled")) == "disabled":
+            for payload in payload_variants:
+                payload["enable_thinking"] = False
         if not bool(getattr(args, "omit_answer_temperature", False)):
             for payload in payload_variants:
                 payload["temperature"] = float(args.answer_temperature)
@@ -6283,7 +6404,7 @@ async def run(args: argparse.Namespace) -> None:
         auth_key=args.echomem_auth_key,
         transport_mode=args.echomem_transport,
         http_timeout_s=args.echomem_http_timeout_s,
-        http_auto_auth=False,
+        http_auto_auth=True,
     )
     data = read_json(Path(args.dataset).expanduser().resolve())
     question_filter = {q.strip() for q in args.questions.split(",") if q.strip()}
@@ -6524,6 +6645,9 @@ async def run(args: argparse.Namespace) -> None:
             "provider_default"
             if bool(getattr(args, "omit_answer_temperature", False))
             else "explicit"
+        ),
+        "answer_thinking_mode": str(
+            getattr(args, "answer_thinking_mode", "disabled") or "disabled"
         ),
         "vikingbot_prompt_aligned": args.prompt_mode in VIKINGBOT_ALIGNED_PROMPT_MODES,
         "vikingboat_compat": bool(args.vikingboat_compat),
@@ -6800,7 +6924,8 @@ def main() -> None:
         help=(
             "Apply one reproducible configuration bundle. The default legacy-77 restores "
             "the historical 77.78%% setup; test-best selects the current VikingBot-aligned "
-            "85.19%% setup; custom preserves individually supplied flags."
+            "85.19%% setup; custom preserves individually supplied flags. Explicit "
+            "--vikingboat-tool-loop/--no-vikingboat-tool-loop switches override the profile."
         ),
     )
     parser.add_argument("--dataset", required=True)
@@ -6933,6 +7058,12 @@ def main() -> None:
         or "",
     )
     parser.add_argument("--answer-model", default=os.environ.get("JUDGE_MODEL") or os.environ.get("ECHOMEM_CHAT_MODEL") or "gpt-5.5")
+    parser.add_argument(
+        "--answer-thinking-mode",
+        choices=["disabled", "provider_default"],
+        default=os.environ.get("ANSWER_THINKING_MODE", "disabled"),
+        help="Disable provider thinking/reasoning mode by default; use provider_default only for an explicit ablation.",
+    )
     parser.add_argument("--answer-temperature", type=float, default=0.7)
     parser.add_argument(
         "--omit-answer-temperature",
@@ -6973,7 +7104,11 @@ def main() -> None:
         qa_memory_injection=True,
     )
     args = parser.parse_args()
-    requested_profile_settings = apply_evaluation_profile(args)
+    profile_explicit_overrides = evaluation_profile_explicit_overrides(sys.argv[1:])
+    requested_profile_settings = apply_evaluation_profile(
+        args,
+        explicit_overrides=profile_explicit_overrides,
+    )
     args.evaluation_profile_resolved_settings = requested_profile_settings
     args.initial_tool_prefetch = False
     answer_base_url = str(args.answer_base_url or "").strip()

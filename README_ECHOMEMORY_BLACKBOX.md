@@ -77,16 +77,47 @@ endpoints, caches the issued key in
 Provide an explicit key when the EchoMemory deployment disables auth
 bootstrap.
 
+Use the same client-state directory, account, and user identity for import and
+QA. The QA runner reuses the cached key to access the tenant that owns the
+imported memories. A fresh or mismatched client-state directory can point at a
+different identity and produce an empty retrieval result.
+
 ## Prerequisites
 
 - Python 3.9 or newer
 - Node.js 18 or newer for repository validation
 - a running EchoMemory HTTP service
+- your own OpenAI-compatible LLM and embedding model for EchoMemory
 - an OpenAI-compatible answer/judge model endpoint
 - the LoCoMo dataset in its original JSON format
 
 The dataset, credentials, EchoMemory workspace, injected memories, and run
 outputs are intentionally not included in this repository.
+
+> [!IMPORTANT]
+> Use model endpoints and credentials that you control. EchoMemory needs both
+> an LLM and an embedding model; the harness separately needs answer and judge
+> models. Placeholder or mock models must not be used for a reported accuracy
+> run. Record model names, provider endpoints, embedding dimensions, and
+> relevant sampling settings with the result.
+
+### Optional graph-memory setup
+
+If the EchoMemory configuration enables graph extraction or graph diffusion:
+
+1. Install and start Neo4j.
+2. Configure a valid Neo4j URI, username, password, and database in the
+   EchoMemory workspace.
+3. Install spaCy and the language model selected by EchoMemory:
+
+   ```bash
+   python -m pip install spacy
+   python -m spacy download en_core_web_sm
+   ```
+
+Neo4j and spaCy are not required for an atom/vector-only run. Graph tests can
+fail or lose graph evidence when either dependency is missing or
+misconfigured, so state whether graph retrieval was enabled in the report.
 
 ## Configure
 
@@ -94,7 +125,20 @@ outputs are intentionally not included in this repository.
 cp .env.example .env.local
 ```
 
-Set at least:
+First configure the EchoMemory service itself with your own models:
+
+```bash
+ECHOMEM_LLM_API_BASE=https://provider.example.com/compatible-mode/v1
+ECHOMEM_LLM_MODEL=your-llm-model
+ECHOMEM_LLM_API_KEY=your-llm-key
+
+ECHOMEM_EMBEDDING_API_BASE=https://provider.example.com/compatible-mode/v1
+ECHOMEM_EMBEDDING_MODEL=your-embedding-model
+ECHOMEM_EMBEDDING_API_KEY=your-embedding-key
+ECHOMEM_EMBEDDING_DIMENSIONS=1024
+```
+
+Then set the harness connection, dataset, answer model, and judge model:
 
 ```bash
 ECHOMEM_BASE_URL=http://127.0.0.1:18080
@@ -109,11 +153,18 @@ LOCOMO_AGENT_ID=default
 ANSWER_BASE_URL=https://provider.example.com/compatible-mode/v1
 ANSWER_MODEL=your-answer-model
 ANSWER_TOKEN=your-token
+ANSWER_THINKING_MODE=disabled
 
 JUDGE_BASE_URL=https://provider.example.com/compatible-mode/v1
 JUDGE_MODEL=your-judge-model
 JUDGE_TOKEN=your-token
 ```
+
+The answer runner sends `enable_thinking=false` by default. Use
+`ANSWER_THINKING_MODE=provider_default` only for a separately labeled
+thinking-mode ablation. For EchoMemory's internal extraction LLM, also disable
+thinking in your provider or workspace configuration when you need the
+default non-thinking benchmark profile.
 
 Load the variables:
 
@@ -205,6 +256,12 @@ EchoMemory service reports retrieval readiness.
 
 This first run verifies retrieval, answer generation, recall logging, and the
 judge without waiting for all 81 questions:
+
+Model-requested memory tools are enabled by default. Add only
+`--no-vikingboat-tool-loop` to disable them; this explicit switch overrides
+the default `legacy-77` evaluation profile, so `--evaluation-profile custom`
+is not required. Initial QA memory injection remains enabled unless
+`--no-qa-memory-injection` is also passed.
 
 ```bash
 python3 benchmark/locomo/echomemory/run_eval.py \

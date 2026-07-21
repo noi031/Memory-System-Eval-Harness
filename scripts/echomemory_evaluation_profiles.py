@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+from collections.abc import Iterable
 from typing import Any
 
 
@@ -12,6 +13,10 @@ EVALUATION_PROFILE_CHOICES = (
     EVALUATION_PROFILE_LEGACY_77,
     EVALUATION_PROFILE_TEST_BEST,
 )
+TOOL_LOOP_PROFILE_FLAGS = {
+    "--vikingboat-tool-loop",
+    "--no-vikingboat-tool-loop",
+}
 
 
 LOCOMO_EVALUATION_PROFILES: dict[str, dict[str, Any]] = {
@@ -70,7 +75,18 @@ LOCOMO_EVALUATION_PROFILES: dict[str, dict[str, Any]] = {
 }
 
 
-def apply_evaluation_profile(args: argparse.Namespace) -> dict[str, Any]:
+def evaluation_profile_explicit_overrides(argv: Iterable[str]) -> set[str]:
+    arguments = set(argv)
+    if arguments & TOOL_LOOP_PROFILE_FLAGS:
+        return {"vikingboat_tool_loop"}
+    return set()
+
+
+def apply_evaluation_profile(
+    args: argparse.Namespace,
+    *,
+    explicit_overrides: set[str] | None = None,
+) -> dict[str, Any]:
     profile_name = str(
         getattr(args, "evaluation_profile", EVALUATION_PROFILE_CUSTOM)
         or EVALUATION_PROFILE_CUSTOM
@@ -85,12 +101,14 @@ def apply_evaluation_profile(args: argparse.Namespace) -> dict[str, Any]:
             f"Unknown evaluation profile {profile_name!r}; expected one of: {choices}"
         ) from exc
 
+    overrides = explicit_overrides or set()
     resolved: dict[str, Any] = {}
     for field, value in profile.items():
         if field == "historical_result":
             continue
-        setattr(args, field, value)
-        resolved[field] = value
+        if field not in overrides:
+            setattr(args, field, value)
+        resolved[field] = getattr(args, field)
     return resolved
 
 
