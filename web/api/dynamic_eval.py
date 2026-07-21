@@ -28,6 +28,7 @@ def _inject_memories_to_echomem(
     session_id: str,
     memories: list[dict[str, Any]],
     user_id: str,
+    evaluator_id: str | None = None,
 ) -> dict[str, Any]:
     """Inject background memories into EchoMem for retrieval.
     
@@ -35,8 +36,12 @@ def _inject_memories_to_echomem(
     Uses the EchoMem direct API with auth key lookup from echoagent_registry.json.
     
     If the session already has committed archives, skip injection.
+    
+    Args:
+        evaluator_id: If provided, check stop flag for this evaluator during polling.
     """
     from pathlib import Path
+    from memory.dynamic_evaluator import is_evaluator_stopped
     
     print(f"[inject_memories] Function called with base_url={echomem_url}, session_id={session_id}, memories={len(memories)}, user_id={user_id}")
     base_url = echomem_url.rstrip("/")
@@ -207,6 +212,11 @@ def _inject_memories_to_echomem(
         
         print(f"[inject_memories] Waiting for commit to complete, archive_id={archive_id} (no timeout)")
         while True:
+            # Check if evaluator has been stopped
+            if evaluator_id and is_evaluator_stopped(evaluator_id):
+                print(f"[inject_memories] Evaluator {evaluator_id} stopped, aborting poll")
+                return {"success": False, "error": "Evaluation stopped by user", "messages_added": messages_added, "stopped": True}
+            
             try:
                 req = Request(
                     status_url,
@@ -392,6 +402,9 @@ def handle_dynamic_eval_post(
             result = generate_next_query(evaluator, context)
             send_json(result)
         except Exception as exc:
+            import traceback
+            traceback.print_exc()
+            print(f"[generate_user_query] Error: {exc}")
             send_json({"error": str(exc)}, 500)
         return True
 
@@ -429,6 +442,7 @@ def handle_dynamic_eval_post(
             session_id = payload.get("session_id")
             memories = payload.get("memories", [])
             user_id = payload.get("user_id", "eval_user")
+            evaluator_id = payload.get("evaluator_id")  # Optional: for stop flag checking
 
             print(f"[inject_memories] API called: echomem_url={echomem_url}, agent_id={agent_id}, session_id={session_id}, memories_count={len(memories)}, user_id={user_id}")
 
@@ -447,6 +461,7 @@ def handle_dynamic_eval_post(
                 session_id=session_id,
                 memories=memories,
                 user_id=user_id,
+                evaluator_id=evaluator_id,
             )
             send_json(result)
         except Exception as exc:
@@ -499,6 +514,20 @@ def handle_dynamic_eval_post(
                 return True
 
             send_json(evaluator.get_state())
+            return True
+
+        if action == "stop":
+            # Set stop flag for this evaluator
+            from memory.dynamic_evaluator import set_evaluator_stopped
+            set_evaluator_stopped(evaluator_id, True)
+            send_json({"status": "stopped", "evaluator_id": evaluator_id})
+            return True
+
+        if action == "clear_stop":
+            # Clear stop flag for this evaluator
+            from memory.dynamic_evaluator import clear_evaluator_stop_flag
+            clear_evaluator_stop_flag(evaluator_id)
+            send_json({"status": "cleared", "evaluator_id": evaluator_id})
             return True
 
     return False

@@ -24282,6 +24282,12 @@ function handleDynamicEvalDatasetFile(event) {
           // Also extract queries if available
           if (data.dataset_queries && Array.isArray(data.dataset_queries)) {
             DynamicEvalState.parsedQueries = data.dataset_queries;
+          } else {
+            // If no dataset_queries, extract from samples
+            const extractedQueries = extractQueriesFromDataset(data);
+            if (extractedQueries.length > 0) {
+              DynamicEvalState.parsedQueries = extractedQueries;
+            }
           }
           // Display in facts list
           renderDynamicEvalFacts(memories);
@@ -24456,6 +24462,80 @@ function extractBackgroundMemoriesFromDataset(data) {
   
   // Limit to 50 memories to avoid UI overflow
   return memories.slice(0, 50);
+}
+
+/**
+ * Extract user queries from dataset samples.
+ * Used in static mode to replay actual user queries from the dataset.
+ */
+function extractQueriesFromDataset(data) {
+  const queries = [];
+  
+  // Handle our exported format: samples[].conversation[].turns[]
+  if (data.samples && Array.isArray(data.samples)) {
+    for (const sample of data.samples) {
+      const conversation = sample.conversation;
+      if (!conversation || typeof conversation !== "object") continue;
+      
+      for (const [sessionId, sessionData] of Object.entries(conversation)) {
+        if (!sessionData || typeof sessionData !== "object") continue;
+        const turns = sessionData.turns;
+        if (!Array.isArray(turns)) continue;
+        
+        for (const turn of turns) {
+          if (!turn || typeof turn !== "object") continue;
+          const speaker = turn.speaker || turn.role || "";
+          if (speaker === "user") {
+            const text = turn.text || turn.content || "";
+            const groundFacts = turn.ground_facts || [];
+            if (text) {
+              queries.push({
+                query: text,
+                ground_facts: groundFacts,
+                complexity: turn.complexity || "medium",
+                reasoning: turn.reasoning || "From dataset sample",
+              });
+            }
+          }
+        }
+      }
+    }
+    if (queries.length > 0) {
+      return queries;
+    }
+  }
+  
+  // Handle LoCoMo format: array of samples with conversation
+  if (Array.isArray(data)) {
+    for (const sample of data) {
+      if (!sample || typeof sample !== "object") continue;
+      const conversation = sample.conversation || sample.dialogue || sample.history;
+      if (!conversation || typeof conversation !== "object") continue;
+      
+      for (const [key, turns] of Object.entries(conversation)) {
+        if (key.endsWith("_date_time")) continue;
+        if (!Array.isArray(turns)) continue;
+        
+        for (const turn of turns) {
+          if (!turn || typeof turn !== "object") continue;
+          const speaker = turn.speaker || turn.role || "";
+          if (speaker === "speaker_a" || speaker === "user") {
+            const text = turn.text || turn.content || "";
+            if (text) {
+              queries.push({
+                query: text,
+                ground_facts: [],
+                complexity: "medium",
+                reasoning: "From LoCoMo dataset",
+              });
+            }
+          }
+        }
+      }
+    }
+  }
+  
+  return queries;
 }
 
 // ---------------------------------------------------------------------------
@@ -25099,6 +25179,17 @@ async function startDynamicEval() {
   DynamicEvalState.avgCachedTokens = null;
   DynamicEvalState.newSessionCount = 0;
 
+  // Clear stop flag from previous run
+  const prevEvaluatorId = DynamicEvalState.evaluatorId;
+  if (prevEvaluatorId) {
+    api(`/api/dynamic/evaluators/${prevEvaluatorId}`, {
+      method: "POST",
+      body: JSON.stringify({ action: "clear_stop" }),
+    }).catch(err => {
+      console.warn("[startDynamicEval] Failed to clear stop flag:", err);
+    });
+  }
+
   // Read configuration
   const mode = $("dynamicEvalMode")?.value || "dynamic";
   // In static mode with parsed data, use parsed values instead of input values
@@ -25222,6 +25313,7 @@ async function startDynamicEval() {
             session_id: injectSessionId,
             memories: DynamicEvalState.memories,
             user_id: evalUserId,  // Use the same user as EchoAgent session
+            evaluator_id: DynamicEvalState.evaluatorId,  // For stop flag checking
           }),
         });
         const injectResult = await injectResponse.json();
@@ -25280,6 +25372,9 @@ async function runDynamicEvalRound(roundIndex, options) {
   const needNewSession = roundIndex === 0 ||
     (DynamicEvalState.results.length > 0 && Math.random() < newSessionRatio);
 
+  // Check if stopped
+  if (!DynamicEvalState.isRunning) return;
+
   if (needNewSession || !DynamicEvalState.echoAgentSessionId) {
     updateStatus(`正在创建新会话...`);
     DynamicEvalState.echoAgentSessionId = await echoAgentCreateSession(
@@ -25293,40 +25388,74 @@ async function runDynamicEvalRound(roundIndex, options) {
     updateMetrics();
   }
 
+  // Check if stopped
+  if (!DynamicEvalState.isRunning) return;
+
   // Generate next query
-  updateStatus(`正在生成查询 (${roundIndex + 1}/${DynamicEvalState.totalRounds})...`);
-  const queryResponse = await fetch("/api/dynamic/generate_user_query", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      evaluator_id: DynamicEvalState.evaluatorId,
-      context: {
-        round_index: roundIndex,
-        previous_queries: DynamicEvalState.results.map((r) => r.query),
-        previous_replies: DynamicEvalState.results.map((r) => r.reply),
-        is_new_session: needNewSession,
-      },
-    }),
-  });
+  // In static mode with parsed queries, use them directly instead of calling backend
+  let query, groundFacts, complexity, newSessionHint;
+  const mode = $("dynamicEvalMode")?.value || "dynamic";
+  
+  if (mode === "static") {
+    // Static mode: MUST use pre-parsed queries from dataset
+    if (!DynamicEvalState.parsedQueries || DynamicEvalState.parsedQueries.length === 0) {
+      throw new Error("静态模式需要数据集包含用户查询，但未能解析到任何查询。请确保数据集包含 samples[].conversation[].turns 或 dataset_queries 字段。");
+    }
+    if (roundIndex >= DynamicEvalState.parsedQueries.length) {
+      throw new Error(`静态模式查询索引超出范围：round ${roundIndex + 1}，但数据集只有 ${DynamicEvalState.parsedQueries.length} 条查询。`);
+    }
+    // Use pre-parsed query from dataset
+    const parsedQuery = DynamicEvalState.parsedQueries[roundIndex];
+    query = parsedQuery.query || parsedQuery.text || String(parsedQuery);
+    groundFacts = parsedQuery.ground_facts || [];
+    complexity = parsedQuery.complexity || "medium";
+    newSessionHint = parsedQuery.new_session_hint || false;
+    updateStatus(`使用数据集查询 (${roundIndex + 1}/${DynamicEvalState.totalRounds})...`);
+  } else {
+    // Dynamic mode: Generate query via backend
+    updateStatus(`正在生成查询 (${roundIndex + 1}/${DynamicEvalState.totalRounds})...`);
+    const queryResponse = await fetch("/api/dynamic/generate_user_query", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        evaluator_id: DynamicEvalState.evaluatorId,
+        context: {
+          round_index: roundIndex,
+          previous_queries: DynamicEvalState.results.map((r) => r.query),
+          previous_replies: DynamicEvalState.results.map((r) => r.reply),
+          is_new_session: needNewSession,
+        },
+      }),
+    });
 
-  if (!queryResponse.ok) {
-    throw new Error(`生成查询失败: ${queryResponse.status}`);
+    if (!queryResponse.ok) {
+      throw new Error(`生成查询失败: ${queryResponse.status}`);
+    }
+
+    const queryData = await queryResponse.json();
+    query = queryData.query;
+    groundFacts = queryData.ground_facts || [];
+    complexity = queryData.complexity || "simple";
+    newSessionHint = queryData.new_session_hint || false;
   }
-
-  const queryData = await queryResponse.json();
-  const query = queryData.query;
-  const groundFacts = queryData.ground_facts || [];
-  const complexity = queryData.complexity || "simple";
-  const newSessionHint = queryData.new_session_hint || false;
 
   // Update current query display
   updateCurrentRound(query, "", complexity, needNewSession);
+
+  // Check if stopped
+  if (!DynamicEvalState.isRunning) return;
 
   // Start SSE listener BEFORE sending message to capture recall events
   const memoryListener = startMemoryEventListener(echoAgentUrl, DynamicEvalState.echoAgentSessionId);
   
   // Wait for SSE connection to be ready before sending message
   await memoryListener.ready;
+
+  // Check if stopped
+  if (!DynamicEvalState.isRunning) {
+    memoryListener.stop();
+    return;
+  }
 
   // Send message to EchoAgent
   updateStatus(`正在发送查询到 EchoAgent...`);
@@ -25371,12 +25500,18 @@ async function runDynamicEvalRound(roundIndex, options) {
     }
   }
   
+  // Check if stopped before sending message
+  if (!DynamicEvalState.isRunning) return;
+
   const seq = await echoAgentSendMessage(
     echoAgentUrl,
     DynamicEvalState.echoAgentToken,
     DynamicEvalState.echoAgentSessionId,
     query
   );
+
+  // Check if stopped after sending message
+  if (!DynamicEvalState.isRunning) return;
 
   // Stream reply
   updateStatus(`正在接收回复...`);
@@ -25402,22 +25537,26 @@ async function runDynamicEvalRound(roundIndex, options) {
   const replyEl = $("dynamicEvalCurrentReply");
   if (replyEl) replyEl.textContent = replyResult.reply || "(无回复)";
 
-  // Stop SSE listener and collect recalled memories
-  // If we already have memoryItems from finalize, skip waiting for SSE events
-  var finalMemoryItems = memoryItemsFromFinalize;
-  if (finalMemoryItems.length > 0) {
-    console.log("[runDynamicEvalRound] Using memory items from finalize:", finalMemoryItems.length);
+  // Check if stopped before collecting memories
+  if (!DynamicEvalState.isRunning) {
     memoryListener.stop();
-  } else {
-    // Wait up to 60 seconds for debug_prefill event to arrive
-    updateStatus(`正在收集召回记忆...`);
-    console.log(`[runDynamicEvalRound] Flushing SSE events (60s timeout, wait for memories)...`);
-    const recalledMemories = await memoryListener.flush(60000, true);
-    memoryListener.stop();
-    console.log("[runDynamicEvalRound] Collected recalled memories from SSE:", recalledMemories.length);
-    finalMemoryItems = recalledMemories;
+    return;
   }
-  console.log("[runDynamicEvalRound] Final memory items to use:", finalMemoryItems.length);
+
+  // Stop SSE listener and use memory items from finalize response
+  // Check if stopped
+  if (!DynamicEvalState.isRunning) {
+    memoryListener.stop();
+    return;
+  }
+  memoryListener.stop();
+  
+  // Use memory items from finalize response directly (no need to wait for SSE)
+  var finalMemoryItems = memoryItemsFromFinalize || [];
+  console.log("[runDynamicEvalRound] Memory items from finalize:", finalMemoryItems.length);
+
+  // Check if stopped
+  if (!DynamicEvalState.isRunning) return;
 
   // Evaluate response quality (call backend API)
   updateStatus(`正在评估回复质量...`);
@@ -25761,6 +25900,17 @@ function toggleDynamicEvalRoundDetail(idx) {
 function stopDynamicEval() {
   DynamicEvalState.isRunning = false;
   updateStatus("已停止");
+  
+  // Notify backend to stop any ongoing operations
+  const evaluatorId = DynamicEvalState.evaluatorId;
+  if (evaluatorId) {
+    api(`/api/dynamic/evaluators/${evaluatorId}`, {
+      method: "POST",
+      body: JSON.stringify({ action: "stop" }),
+    }).catch(err => {
+      console.warn("[stopDynamicEval] Failed to notify backend:", err);
+    });
+  }
 }
 
 function exportDynamicEvalResults() {
@@ -25872,6 +26022,7 @@ function exportDynamicEvalResults() {
       round_id: r.round_id,
       speaker: "user",
       text: r.query,
+      ground_facts: r.ground_facts || [],
       timestamp: r.timestamp,
     });
     if (r.reply) {
@@ -25880,7 +26031,6 @@ function exportDynamicEvalResults() {
         speaker: "assistant",
         text: r.reply,
         recalled_memories: r.recalled_memories || [],
-        relevant_memory: r.relevant_memory || [],
         quality_score: r.quality_score,
       });
     }
