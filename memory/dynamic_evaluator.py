@@ -4,11 +4,18 @@ This module provides the MemoryDynamicEvaluator class for generating
 background memories and user queries in both static (dataset-based) and
 dynamic (LLM-generated) modes.
 
+Now supports loading prompts from YAML configuration files based on
+RealUserSim, IntellAgent, AgentProcessBench, RigorBench, and MemOps papers.
+
 Usage:
     from memory.dynamic_evaluator import MemoryDynamicEvaluator, get_evaluator, create_evaluator
 
-    # Create a new evaluator
-    evaluator = MemoryDynamicEvaluator(config)
+    # Create a new evaluator with custom config
+    evaluator = MemoryDynamicEvaluator({
+        "user_simulator_config": "realistic",
+        "evaluator_config": "memory_focused",
+        ...
+    })
     memories = evaluator.generate_background_memories()
 
     # Or use the global registry
@@ -34,6 +41,13 @@ if str(ROOT) not in __import__("sys").path:
     __import__("sys").path.insert(0, str(ROOT))
 
 from memory import llm
+from memory.prompt_config_loader import (
+    load_user_simulator_config,
+    load_evaluator_config,
+    get_prompt_template,
+    list_available_simulators,
+    list_available_evaluators,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -67,6 +81,16 @@ def remove_evaluator(evaluator_id: str) -> bool:
             del _EVALUATORS[evaluator_id]
             return True
         return False
+
+
+def get_available_simulators() -> list[dict[str, Any]]:
+    """List all available user simulator configurations."""
+    return list_available_simulators()
+
+
+def get_available_evaluators() -> list[dict[str, Any]]:
+    """List all available evaluator configurations."""
+    return list_available_evaluators()
 
 
 def list_evaluators() -> list[dict[str, Any]]:
@@ -190,7 +214,16 @@ THEME_POOL = [
 # ---------------------------------------------------------------------------
 
 class MemoryDynamicEvaluator:
-    """Dynamic evaluator for generating test scenarios and queries."""
+    """Dynamic evaluator for generating test scenarios and queries.
+    
+    Supports loading prompts from YAML configuration files for:
+    - User simulator behavior (persona, interaction mode, communication style)
+    - Evaluation prompts (response quality, memory recall, step evaluation)
+    
+    Config keys for prompt loading:
+        - user_simulator_config: Name of user simulator config (e.g., "default", "realistic", "difficult")
+        - evaluator_config: Name of evaluator config (e.g., "default", "memory_focused")
+    """
 
     def __init__(self, config: dict[str, Any]):
         """Initialize the evaluator.
@@ -203,6 +236,8 @@ class MemoryDynamicEvaluator:
                 - theme: Theme for generated memories (for dynamic mode)
                 - custom_scenario: Custom scenario text (skip LLM generation if provided)
                 - llm_config: LLM configuration (model, base_url, api_key)
+                - user_simulator_config: Name of user simulator config file
+                - evaluator_config: Name of evaluator config file
         """
         self.config = config
         self.mode = config.get("mode", "dynamic")
@@ -224,6 +259,59 @@ class MemoryDynamicEvaluator:
         self.model = llm_config.get("model", "deepseek-v4-flash")
         self.base_url = llm_config.get("base_url") or None
         self.api_key = llm_config.get("api_key") or None
+        
+        # Load prompt configurations
+        self.user_simulator_config: dict[str, Any] = {}
+        self.evaluator_config: dict[str, Any] = {}
+        
+        # Support both config name and direct YAML content
+        user_sim_config_yaml = config.get("user_simulator_config_yaml", "")
+        user_sim_config_name = config.get("user_simulator_config", "")
+        if user_sim_config_yaml:
+            import yaml
+            try:
+                self.user_simulator_config = yaml.safe_load(user_sim_config_yaml) or {}
+                print(f"[DynamicEvaluator] Loaded user simulator config from YAML content")
+            except Exception as e:
+                print(f"[DynamicEvaluator] Warning: Failed to parse user_simulator_config_yaml: {e}")
+        elif user_sim_config_name:
+            try:
+                self.user_simulator_config = load_user_simulator_config(user_sim_config_name)
+                print(f"[DynamicEvaluator] Loaded user simulator config: {user_sim_config_name}")
+            except FileNotFoundError as e:
+                print(f"[DynamicEvaluator] Warning: {e}")
+        
+        eval_config_yaml = config.get("evaluator_config_yaml", "")
+        eval_config_name = config.get("evaluator_config", "")
+        if eval_config_yaml:
+            import yaml
+            try:
+                self.evaluator_config = yaml.safe_load(eval_config_yaml) or {}
+                print(f"[DynamicEvaluator] Loaded evaluator config from YAML content")
+            except Exception as e:
+                print(f"[DynamicEvaluator] Warning: Failed to parse evaluator_config_yaml: {e}")
+        elif eval_config_name:
+            try:
+                self.evaluator_config = load_evaluator_config(eval_config_name)
+                print(f"[DynamicEvaluator] Loaded evaluator config: {eval_config_name}")
+            except FileNotFoundError as e:
+                print(f"[DynamicEvaluator] Warning: {e}")
+        
+        # Parse evaluation dimensions from config
+        self.eval_dimensions: list[dict[str, Any]] = []
+        if "dimensions" in self.evaluator_config:
+            self.eval_dimensions = self.evaluator_config["dimensions"]
+            total_max = sum(d.get("max_score", 0) for d in self.eval_dimensions)
+            print(f"[DynamicEvaluator] Loaded {len(self.eval_dimensions)} dimensions, total max score: {total_max}")
+        else:
+            # Default dimensions if not specified
+            self.eval_dimensions = [
+                {"name": "fact_coverage_score", "display_name": "事实覆盖", "max_score": 40},
+                {"name": "accuracy_score", "display_name": "准确性", "max_score": 30},
+                {"name": "relevance_score", "display_name": "相关性", "max_score": 20},
+                {"name": "recall_quality_score", "display_name": "召回质量", "max_score": 10},
+            ]
+            print(f"[DynamicEvaluator] Using default dimensions (no 'dimensions' key in config)")
         
         # Debug log
         print(f"[DynamicEvaluator] Config received: mode={self.mode}, num_memories={config.get('num_memories')}, theme={self.theme}")
@@ -718,12 +806,54 @@ class MemoryDynamicEvaluator:
         else:
             recalled_text = "(无召回记忆)"
 
-        prompt = EVALUATE_RESPONSE_PROMPT.format(
-            query=query,
-            reply=reply,
-            ground_facts=ground_facts_text,
-            recalled_memories=recalled_text,
-        )
+        # Use custom prompt from evaluator_config if available
+        eval_prompt_template = EVALUATE_RESPONSE_PROMPT
+        if self.evaluator_config:
+            # Support multiple prompt config formats
+            if "evaluate_prompt" in self.evaluator_config:
+                custom_prompt = self.evaluator_config["evaluate_prompt"]
+                if isinstance(custom_prompt, str) and custom_prompt.strip():
+                    eval_prompt_template = custom_prompt
+                    print(f"[DynamicEvaluator] Using custom evaluate_prompt from config")
+            elif "task_eval" in self.evaluator_config:
+                task_eval = self.evaluator_config["task_eval"]
+                if isinstance(task_eval, dict) and "prompt_template" in task_eval:
+                    custom_prompt = task_eval["prompt_template"]
+                    if isinstance(custom_prompt, str) and custom_prompt.strip():
+                        eval_prompt_template = custom_prompt
+                        print(f"[DynamicEvaluator] Using task_eval.prompt_template from config")
+
+        # Build format args - support both default and custom placeholder names
+        # Generate dimension criteria text if dimensions are defined
+        dimension_criteria = ""
+        if self.eval_dimensions:
+            criteria_parts = []
+            for i, dim in enumerate(self.eval_dimensions, 1):
+                name = dim.get("name", "")
+                display_name = dim.get("display_name", name)
+                max_score = dim.get("max_score", 0)
+                desc = dim.get("description", "")
+                criteria_parts.append(f"### {i}. {display_name} (0-{max_score} points)\n{desc}")
+            dimension_criteria = "\n\n".join(criteria_parts)
+        else:
+            dimension_criteria = "Use your judgment to evaluate the response quality."
+
+        format_args = {
+            "query": query,
+            "reply": reply,
+            "ground_facts": ground_facts_text,
+            "recalled_memories": recalled_text,
+            "dimension_criteria": dimension_criteria,
+            # Alternative placeholder names for custom prompts
+            "user_message": query,
+            "agent_response": reply,
+            "user_query": query,
+            "recall_items": recalled_text,
+            "expected_result": ground_facts_text,
+            "task_type": "memory_recall",
+        }
+
+        prompt = eval_prompt_template.format(**format_args)
 
         try:
             result = llm.openai_chat(
@@ -732,59 +862,83 @@ class MemoryDynamicEvaluator:
                     {"role": "user", "content": prompt},
                 ],
                 model=self.model,
-                temperature=0.3,  # Lower temperature for consistent evaluation
+                temperature=0.3,
                 api_key=self.api_key,
                 base_url=self.base_url,
                 timeout=60,
             )
 
             if "error" in result:
+                print(f"[DynamicEvaluator] LLM error: {result.get('error')}")
                 return self._fallback_evaluate(query, reply, ground_facts, recalled_memories)
 
             answer = result.get("answer", "")
             json_match = re.search(r"\{[\s\S]*\}", answer)
             if not json_match:
+                print(f"[DynamicEvaluator] No JSON found in answer: {answer[:200]}")
                 return self._fallback_evaluate(query, reply, ground_facts, recalled_memories)
 
             eval_data = json.loads(json_match.group())
 
-            # Validate and normalize
+            # Validate and normalize total score
             score = eval_data.get("score", 50)
             if not isinstance(score, (int, float)):
                 score = 50
             score = max(0, min(100, int(score)))
 
-            # Extract individual scores
-            fact_coverage = eval_data.get("fact_coverage_score", 0)
-            if not isinstance(fact_coverage, (int, float)):
-                fact_coverage = 0
-            fact_coverage = max(0, min(40, int(fact_coverage)))
+            # Dynamically extract dimension scores based on config
+            dimension_scores = {}
+            for dim in self.eval_dimensions:
+                dim_name = dim.get("name", "")
+                max_val = dim.get("max_score", 100)
+                if dim_name:
+                    val = eval_data.get("dimension_scores", {}).get(dim_name, eval_data.get(dim_name, 0))
+                    if not isinstance(val, (int, float)):
+                        val = 0
+                    dimension_scores[dim_name] = max(0, min(max_val, int(val)))
 
-            accuracy = eval_data.get("accuracy_score", 0)
-            if not isinstance(accuracy, (int, float)):
-                accuracy = 0
-            accuracy = max(0, min(30, int(accuracy)))
+            # If no dimension_scores in response, compute from total score proportionally
+            if not dimension_scores and self.eval_dimensions:
+                total_max = sum(d.get("max_score", 0) for d in self.eval_dimensions)
+                if total_max > 0:
+                    ratio = score / 100
+                    for dim in self.eval_dimensions:
+                        dim_name = dim.get("name", "")
+                        max_val = dim.get("max_score", 0)
+                        if dim_name:
+                            dimension_scores[dim_name] = int(max_val * ratio)
 
-            relevance = eval_data.get("relevance_score", 0)
-            if not isinstance(relevance, (int, float)):
-                relevance = 0
-            relevance = max(0, min(20, int(relevance)))
+            # Additional metadata
+            matched_facts = eval_data.get("matched_facts", 0)
+            total_facts = len(ground_facts) if ground_facts else 0
+            recall_helped = eval_data.get("recall_helped", False)
+            hallucination_detected = eval_data.get("hallucination_detected", False)
+            task_completed = eval_data.get("task_completed", False)
+            strengths = eval_data.get("strengths", [])
+            weaknesses = eval_data.get("weaknesses", [])
 
-            recall_quality = eval_data.get("recall_quality_score", 0)
-            if not isinstance(recall_quality, (int, float)):
-                recall_quality = 0
-            recall_quality = max(0, min(10, int(recall_quality)))
+            # Build dimension_info for frontend display
+            dimension_info = {}
+            for dim in self.eval_dimensions:
+                dim_name = dim.get("name", "")
+                if dim_name:
+                    dimension_info[dim_name] = {
+                        "display_name": dim.get("display_name", dim_name),
+                        "max_score": dim.get("max_score", 100),
+                    }
 
             return {
                 "score": score,
-                "fact_coverage_score": fact_coverage,
-                "accuracy_score": accuracy,
-                "relevance_score": relevance,
-                "recall_quality_score": recall_quality,
+                "dimension_scores": dimension_scores,
+                "dimension_info": dimension_info,
                 "reason": eval_data.get("reason", ""),
-                "matched_facts": eval_data.get("matched_facts", 0),
-                "total_facts": len(ground_facts) if ground_facts else 0,
-                "recall_helped": eval_data.get("recall_helped", False),
+                "matched_facts": matched_facts,
+                "total_facts": total_facts,
+                "recall_helped": recall_helped,
+                "hallucination_detected": hallucination_detected,
+                "task_completed": task_completed,
+                "strengths": strengths,
+                "weaknesses": weaknesses,
                 "details": eval_data.get("details", []),
             }
 

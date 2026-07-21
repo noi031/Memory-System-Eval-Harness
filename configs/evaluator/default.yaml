@@ -1,0 +1,579 @@
+# 评估器配置文件
+# 基于 AgentProcessBench / RigorBench / MemOps 等论文的设计模式
+# 用于定义任务执行过程评估和记忆系统评估的prompt模板
+
+# ============================================================
+# 基本信息
+# ============================================================
+name: "default"
+version: "1.0"
+description: "默认评估器配置 - 综合评估任务执行和记忆召回"
+
+# ============================================================
+# 评估维度定义
+# ============================================================
+evaluation_dimensions:
+  # 维度1: 任务执行过程评估
+  task_execution:
+    enabled: true
+    weight: 0.4                   # 在总评分中的权重
+    
+    sub_dimensions:
+      goal_achievement:
+        description: "任务目标达成程度"
+        weight: 0.25
+        score_range: [0, 10]
+        
+      path_quality:
+        description: "执行路径质量（是否选择合理方案）"
+        weight: 0.20
+        score_range: [0, 10]
+        
+      step_efficiency:
+        description: "步骤效率（是否有冗余操作）"
+        weight: 0.20
+        score_range: [0, 10]
+        
+      error_recovery:
+        description: "错误恢复能力"
+        weight: 0.20
+        score_range: [0, 10]
+        
+      verification_coverage:
+        description: "验证覆盖度（是否充分验证结果）"
+        weight: 0.15
+        score_range: [0, 10]
+        
+  # 维度2: 记忆召回评估
+  memory_recall:
+    enabled: true
+    weight: 0.35
+    
+    sub_dimensions:
+      recall_accuracy:
+        description: "召回准确性（召回的记忆是否相关）"
+        weight: 0.30
+        score_range: [0, 10]
+        
+      recall_completeness:
+        description: "召回完整性（是否遗漏关键记忆）"
+        weight: 0.25
+        score_range: [0, 10]
+        
+      recall_timeliness:
+        description: "召回时机（是否在正确时机召回）"
+        weight: 0.20
+        score_range: [0, 10]
+        
+      entity_binding:
+        description: "实体绑定准确性"
+        weight: 0.15
+        score_range: [0, 10]
+        
+      temporal_correctness:
+        description: "时序正确性"
+        weight: 0.10
+        score_range: [0, 10]
+        
+  # 维度3: 响应质量评估
+  response_quality:
+    enabled: true
+    weight: 0.25
+    
+    sub_dimensions:
+      fact_coverage:
+        description: "事实覆盖度（响应中使用了多少期望事实）"
+        weight: 0.40
+        score_range: [0, 10]
+        
+      accuracy:
+        description: "准确性（响应是否正确无误）"
+        weight: 0.30
+        score_range: [0, 10]
+        
+      relevance:
+        description: "相关性（响应是否针对用户问题）"
+        weight: 0.20
+        score_range: [0, 10]
+        
+      helpfulness:
+        description: "有用性（响应是否有帮助）"
+        weight: 0.10
+        score_range: [0, 10]
+
+# ============================================================
+# 速度度量配置
+# ============================================================
+speed_metrics:
+  # 召回延迟度量
+  recall_latency:
+    enabled: true
+    unit: "ms"
+    thresholds:
+      excellent: 50               # <50ms 优秀
+      good: 100                   # <100ms 良好
+      acceptable: 200             # <200ms 可接受
+      poor: 500                   # >=500ms 较差
+      
+  # Prefill延迟度量（打字期预取）
+  prefill_latency:
+    enabled: true
+    unit: "ms"
+    note: "应在用户打字防抖时间内完成（通常80ms）"
+    thresholds:
+      excellent: 30
+      good: 50
+      acceptable: 80
+      poor: 150
+      
+  # 端到端延迟
+  e2e_latency:
+    enabled: true
+    unit: "ms"
+    thresholds:
+      excellent: 200
+      good: 500
+      acceptable: 1000
+      poor: 2000
+      
+  # 吞吐量
+  throughput:
+    enabled: false                # 可选开启
+    unit: "QPS"
+
+# ============================================================
+# Prompt模板配置
+# ============================================================
+prompts:
+  # --------------------------------------------------------
+  # 响应质量评估Prompt
+  # --------------------------------------------------------
+  response_evaluation:
+    description: "评估AI响应质量"
+    
+    template: |
+      你是一个响应质量评估器，负责评估AI助手回复的质量。
+      
+      ## 用户查询
+      {query}
+      
+      ## AI响应
+      {response}
+      
+      ## 期望的背景事实
+      {ground_facts}
+      
+      ## 召回的记忆（AI用于生成响应的上下文）
+      {recalled_memories}
+      
+      ## 评估标准
+      
+      ### 1. 事实覆盖度 (0-10分)
+      响应中正确使用了多少期望事实？
+      - 10: 所有期望事实都被正确使用
+      - 7: 大部分事实使用正确
+      - 5: 约一半事实被使用
+      - 3: 少量事实被使用
+      - 0: 没有期望事实被使用
+      
+      ### 2. 准确性 (0-10分)
+      响应中的信息是否准确无误？
+      - 10: 完全准确，无幻觉
+      - 7: 大部分准确，有小瑕疵
+      - 5: 部分准确
+      - 3: 存在明显错误
+      - 0: 严重错误或幻觉
+      
+      ### 3. 相关性 (0-10分)
+      响应是否直接针对用户问题？
+      - 10: 完全针对问题
+      - 7: 大部分相关
+      - 5: 部分相关
+      - 3: 相关性低
+      - 0: 完全不相关
+      
+      ### 4. 有用性 (0-10分)
+      响应对用户是否有帮助？
+      - 10: 非常有帮助
+      - 7: 比较有帮助
+      - 5: 一般
+      - 3: 帮助有限
+      - 0: 无帮助
+      
+      请输出JSON格式：
+      {{
+        "fact_coverage_score": <0-10>,
+        "accuracy_score": <0-10>,
+        "relevance_score": <0-10>,
+        "helpfulness_score": <0-10>,
+        "total_score": <加权总分 0-10>,
+        "matched_facts": <正确使用的事实数量>,
+        "total_facts": <期望事实总数>,
+        "hallucination_detected": true|false,
+        "hallucination_details": "<如有幻觉，描述详情>",
+        "reason": "<中文简要解释>",
+        "improvement_suggestions": ["<改进建议>"]
+      }}
+      
+  # --------------------------------------------------------
+  # 记忆召回评估Prompt
+  # --------------------------------------------------------
+  memory_evaluation:
+    description: "评估记忆召回质量"
+    
+    template: |
+      你是一个记忆召回质量评估器。
+      
+      ## 用户查询
+      {query}
+      
+      ## 期望召回的记忆（标准答案）
+      {expected_memories}
+      
+      ## 实际召回的记忆
+      {actual_memories}
+      
+      ## 召回延迟
+      {latency_info}
+      
+      ## 评估标准
+      
+      ### 1. 召回准确性 (0-10分)
+      召回的记忆是否与查询相关？
+      - 10: 所有召回都高度相关
+      - 7: 大部分相关
+      - 5: 部分相关
+      - 3: 大部分不相关
+      - 0: 完全不相关
+      
+      ### 2. 召回完整性 (0-10分)
+      是否遗漏了关键记忆？
+      - 10: 无遗漏
+      - 7: 有轻微遗漏但不影响
+      - 5: 有一定遗漏
+      - 3: 遗漏较多
+      - 0: 严重遗漏
+      
+      ### 3. 召回时机 (0-10分)
+      是否在正确的时机召回？
+      - 10: 时机完美
+      - 7: 时机较好
+      - 5: 时机一般
+      - 3: 时机欠佳
+      - 0: 时机错误
+      
+      ### 4. 实体绑定准确性 (0-10分)
+      记忆是否绑定到正确的实体？
+      - 10: 所有实体绑定正确
+      - 7: 大部分正确
+      - 5: 部分正确
+      - 3: 大部分错误
+      - 0: 完全错误
+      
+      请输出JSON格式：
+      {{
+        "recall_accuracy_score": <0-10>,
+        "recall_completeness_score": <0-10>,
+        "recall_timeliness_score": <0-10>,
+        "entity_binding_score": <0-10>,
+        "true_positives": <正确召回的数量>,
+        "false_positives": <错误召回的数量>,
+        "false_negatives": <遗漏的数量>,
+        "precision": <精确率 0-1>,
+        "recall": <召回率 0-1>,
+        "f1_score": <F1分数 0-1>,
+        "latency_rating": "<excellent|good|acceptable|poor>",
+        "reason": "<中文简要解释>",
+        "missed_memories": ["<遗漏的记忆ID>"],
+        "irrelevant_memories": ["<不相关的召回ID>"]
+      }}
+      
+  # --------------------------------------------------------
+  # 步骤级过程评估Prompt (参考 AgentProcessBench)
+  # --------------------------------------------------------
+  step_evaluation:
+    description: "评估Agent执行轨迹的单个步骤"
+    
+    template: |
+      你是一个步骤质量评估器，负责评估Agent执行轨迹中的单个步骤。
+      
+      ## 任务描述
+      {task_description}
+      
+      ## 截至当前步骤的轨迹
+      {trajectory_so_far}
+      
+      ## 当前步骤
+      步骤编号: {step_number}
+      动作: {action}
+      观察: {observation}
+      
+      ## 评估维度
+      
+      ### 1. 正确性 (1-5分)
+      当前动作对于当前状态是否合适？
+      - 5: 完全正确且必要
+      - 4: 正确但可能有更优选择
+      - 3: 可接受但有改进空间
+      - 2: 不太合适
+      - 1: 明显错误
+      
+      ### 2. 进展度 (1-5分)
+      此步骤是否推进了任务目标？
+      - 5: 显著推进
+      - 4: 有所推进
+      - 3: 进展有限
+      - 2: 无进展
+      - 1: 倒退
+      
+      ### 3. 效率 (1-5分)
+      此步骤是否高效？
+      - 5: 高效且必要
+      - 4: 高效
+      - 3: 可接受
+      - 2: 有冗余
+      - 1: 明显低效
+      
+      ### 4. 安全性 (1-5分)
+      此步骤是否避免了有害结果？
+      - 5: 完全安全
+      - 4: 基本安全
+      - 3: 有风险但可控
+      - 2: 风险较高
+      - 1: 存在安全隐患
+      
+      请输出JSON格式：
+      {{
+        "correctness": <1-5>,
+        "progress": <1-5>,
+        "efficiency": <1-5>,
+        "safety": <1-5>,
+        "step_label": "<correct|neutral|erroneous>",
+        "error_type": "<none|planning|execution|verification|memory>",
+        "error_description": "<如有错误，描述>",
+        "reason": "<中文简要解释>",
+        "next_step_suggestion": "<如有改进建议>"
+      }}
+      
+  # --------------------------------------------------------
+  # 轨迹整体评估Prompt (参考 RigorBench)
+  # --------------------------------------------------------
+  trajectory_evaluation:
+    description: "评估完整的执行轨迹"
+    
+    template: |
+      你是一个轨迹质量评估器，负责评估Agent的完整执行轨迹。
+      
+      ## 任务描述
+      {task_description}
+      
+      ## 成功标准
+      {success_criteria}
+      
+      ## 完整轨迹
+      {full_trajectory}
+      
+      ## 最终结果
+      {final_outcome}
+      
+      ## RigorBench 五支柱评估
+      
+      ### 1. 规划保真度 (Planning Fidelity, 0-10分)
+      Agent的规划是否合理且被正确执行？
+      
+      ### 2. 验证覆盖度 (Verification Coverage, 0-10分)
+      Agent是否充分验证了关键操作？
+      
+      ### 3. 恢复效率 (Recovery Efficiency, 0-10分)
+      Agent如何从错误中恢复？
+      
+      ### 4. 克制质量 (Abstention Quality, 0-10分)
+      Agent是否知道何时不应行动？
+      
+      ### 5. 原子迁移完整性 (Atomic Transition Integrity, 0-10分)
+      单个步骤间的转换是否正确？
+      
+      请输出JSON格式：
+      {{
+        "planning_fidelity": <0-10>,
+        "verification_coverage": <0-10>,
+        "recovery_efficiency": <0-10>,
+        "abstention_quality": <0-10>,
+        "atomic_transition_integrity": <0-10>,
+        "rigor_score": "<加权综合分数>",
+        "goal_achieved": true|false,
+        "total_steps": <总步骤数>,
+        "efficient_steps": <高效步骤数>,
+        "error_steps": <错误步骤数>,
+        "recovery_attempts": <恢复尝试次数>,
+        "recovery_successes": <成功恢复次数>,
+        "reason": "<中文简要解释>",
+        "key_strengths": ["<主要优点>"],
+        "key_weaknesses": ["<主要弱点>"],
+        "failure_attribution": "<task_execution|memory_recall|both|neither>"
+      }}
+
+  # --------------------------------------------------------
+  # 记忆生命周期操作评估Prompt (参考 MemOps)
+  # --------------------------------------------------------
+  memory_operation_evaluation:
+    description: "评估记忆生命周期操作"
+    
+    template: |
+      你是一个记忆生命周期操作评估器。
+      
+      ## 记忆操作类型
+      {operation_type}
+      # 操作类型: remember | forget | update | reflect | compose
+      
+      ## 操作详情
+      {operation_details}
+      
+      ## 预期状态
+      {expected_state}
+      
+      ## 实际状态
+      {actual_state}
+      
+      ## 评估标准
+      
+      根据操作类型评估：
+      
+      1. Remember (记忆):
+         - 是否正确存储了新信息？
+         - 存储时机是否合适？
+         
+      2. Forget (遗忘):
+         - 是否正确移除了过期信息？
+         - 是否误删了有效信息？
+         
+      3. Update (更新):
+         - 是否正确更新了信息？
+         - 新旧值是否正确处理？
+         
+      4. Reflect (反思):
+         - 综合提取是否合理？
+         - 是否捕捉了关键洞察？
+         
+      5. Compose (组合):
+         - 多操作组合是否正确执行？
+         - 操作顺序是否合理？
+      
+      请输出JSON格式：
+      {{
+        "operation_correct": true|false,
+        "operation_score": <0-10>,
+        "timing_correct": true|false,
+        "state_transition_valid": true|false,
+        "issues": ["<问题列表>"],
+        "reason": "<中文简要解释>"
+      }}
+
+# ============================================================
+# 失败归因分析配置 (参考 Failure as a Process)
+# ============================================================
+failure_attribution:
+  enabled: true
+  
+  categories:
+    - id: "task_planning"
+      description: "任务规划错误"
+      subtypes:
+        - "wrong_goal_interpretation"
+        - "missing_planning_step"
+        - "incorrect_decomposition"
+        
+    - id: "task_execution"
+      description: "任务执行错误"
+      subtypes:
+        - "wrong_action"
+        - "missing_action"
+        - "action_order_error"
+        
+    - id: "memory_recall"
+      description: "记忆召回错误"
+      subtypes:
+        - "missing_recall"
+        - "wrong_recall"
+        - "stale_memory"
+        
+    - id: "memory_storage"
+      description: "记忆存储错误"
+      subtypes:
+        - "failed_to_store"
+        - "wrong_entity_binding"
+        - "temporal_confusion"
+        
+    - id: "verification"
+      description: "验证不足"
+      subtypes:
+        - "missing_verification"
+        - "incorrect_verification"
+        - "insufficient_coverage"
+        
+  prompt: |
+    分析任务失败的根本原因。
+    
+    ## 任务
+    {task}
+    
+    ## 执行轨迹
+    {trajectory}
+    
+    ## 记忆操作日志
+    {memory_logs}
+    
+    ## 失败点
+    {failure_point}
+    
+    请归因失败的主要原因：
+    
+    输出JSON格式：
+    {{
+      "primary_cause": "<category_id>",
+      "primary_subtype": "<subtype>",
+      "onset_step": <失败起始步骤>,
+      "detection_step": <失败被发现步骤>,
+      "recovery_attempted": true|false,
+      "recovery_successful": true|false,
+      "root_cause_description": "<详细描述>",
+      "contributing_factors": ["<次要因素>"],
+      "prevention_suggestions": ["<预防建议>"]
+    }}
+
+# ============================================================
+# LLM 配置
+# ============================================================
+llm_config:
+  model: "deepseek-v4-flash"
+  base_url: ""
+  api_key: ""
+  temperature: 0.3               # 较低温度保证一致性
+  max_tokens: 1000
+  timeout: 60
+
+# ============================================================
+# 输出配置
+# ============================================================
+output:
+  include_detailed_scores: true
+  include_reasoning: true
+  include_suggestions: true
+  language: "zh-CN"              # 输出语言
+
+# ============================================================
+# 评估元数据
+# ============================================================
+metadata:
+  author: "Memory-System-Eval-Harness"
+  created_at: "2025-01-20"
+  tags:
+    - "default"
+    - "comprehensive"
+    - "task-execution"
+    - "memory-recall"
+  references:
+    - "AgentProcessBench (arXiv:2603.14465)"
+    - "RigorBench (arXiv:2606.22678)"
+    - "MemOps (arXiv:2607.12893)"
+    - "Failure as a Process (arXiv:2607.09510)"

@@ -1,0 +1,97 @@
+# 用户模拟器配置
+# 定义模拟用户的行为特征和prompt模板
+
+# 模拟器类型: realistic | adversarial | cooperative | custom
+type: realistic
+
+# 用户画像模板
+persona_template: |
+  你是一个{age}岁的{occupation}，性格{personality}。
+  你正在使用一个AI助手来帮助你解决日常问题。
+  
+  你的沟通风格:
+  - {communication_style}
+  - 使用的语言风格: {language_style}
+  
+  当前任务背景:
+  {task_context}
+
+# 行为参数
+behavior:
+  # 打字风格: realistic(带停顿) | instant(瞬间发送)
+  typing_style: realistic
+  
+  # 平均打字速度 (ms/字符)
+  avg_typing_speed_ms: 100
+  
+  # 打字抖动范围 (ms)
+  typing_jitter_ms: 30
+  
+  # 是否模拟输入法候选
+  simulate_ime: true
+  
+  # 中途修改消息概率
+  edit_probability: 0.1
+  
+  # 中途取消消息概率
+  cancel_probability: 0.05
+
+# 对话行为
+dialogue:
+  # 首次响应等待时间范围 (秒)
+  first_response_delay_range: [1.0, 3.0]
+  
+  # 后续响应等待时间范围 (秒)
+  followup_delay_range: [0.5, 2.0]
+  
+  # 阅读速度 (字符/秒)
+  reading_speed: 15
+  
+  # 最大对话轮数
+  max_turns: 20
+
+# 任务执行
+task:
+  # 是否严格遵循任务指令
+  strict_mode: false
+  
+  # 允许偏离任务的概率
+  deviation_probability: 0.1
+  
+  # 任务完成后的结束概率
+  completion_end_probability: 0.8
+
+# LLM配置
+llm:
+  model: deepseek-v4-flash
+  base_url: ""
+  api_key: ""
+  temperature: 0.7
+  max_tokens: 500
+  timeout: 60
+
+# 用户画像池 (随机选择或指定)
+persona_pool:
+  - age: 25
+    occupation: 软件工程师
+    personality: 理性、直接、注重效率
+    communication_style: 简洁明了，喜欢用技术术语
+    language_style: 正式但口语化
+    
+  - age: 35
+    occupation: 产品经理
+    personality: 细致、善于沟通、考虑全面
+    communication_style: 详细描述需求，喜欢举例
+    language_style: 商务正式
+    
+  - age: 45
+    occupation: 企业高管
+    personality: 果断、目标导向
+    communication_style: 直接提出要求和期望
+    language_style: 正式商务
+    
+  - age: 28
+    occupation: 自由职业者
+    personality: 随和、有创意
+    communication_style: 轻松对话，偶尔开玩笑
+    language_style: 口语化、有表情

@@ -416,6 +416,9 @@ def handle_dynamic_eval_post(
             result = evaluator.evaluate_response(query, reply, ground_facts, recalled_memories)
             send_json(result)
         except Exception as exc:
+            import traceback
+            traceback.print_exc()
+            print(f"[evaluate_response] Error: {exc}")
             send_json({"error": str(exc)}, 500)
         return True
 
@@ -521,6 +524,26 @@ def handle_dynamic_eval_get(
     Returns:
         True if the path was handled, False otherwise
     """
+    # Endpoint: List available user simulator configs
+    if path == "/api/dynamic/user_simulators":
+        try:
+            from memory.prompt_config_loader import list_available_simulators
+            simulators = list_available_simulators()
+            send_json({"simulators": simulators})
+        except Exception as exc:
+            send_json({"error": str(exc)}, 500)
+        return True
+
+    # Endpoint: List available evaluator configs
+    if path == "/api/dynamic/evaluator_configs":
+        try:
+            from memory.prompt_config_loader import list_available_evaluators
+            evaluators = list_available_evaluators()
+            send_json({"evaluator_configs": evaluators})
+        except Exception as exc:
+            send_json({"error": str(exc)}, 500)
+        return True
+
     if path == "/api/dynamic/evaluators":
         try:
             evaluators = list_evaluators()

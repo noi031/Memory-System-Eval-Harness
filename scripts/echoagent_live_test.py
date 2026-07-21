@@ -298,6 +298,7 @@ def collect_round_metrics(
     send_time: float,
     prefetch_committed: bool,
     last_request: dict[str, Any],
+    memory_items: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     reply = reply_result.get("reply") or ""
     ttft = reply_result.get("ttft_ms")
@@ -328,6 +329,7 @@ def collect_round_metrics(
         "complexity": round_data.get("complexity", ""),
         "ground_facts": round_data.get("ground_facts", []),
         "error": reply_result.get("error", ""),
+        "relevant_memory": json.dumps(memory_items or [], ensure_ascii=False),
     }
 
 
@@ -666,6 +668,7 @@ def run_replay_test(
             # Simulate typing + send
             client_turn_id = ""
             prefetch_committed = False
+            memory_items = []
             if len(query) > 2:
                 try:
                     client_turn_id = simulate_typing(
@@ -675,8 +678,10 @@ def run_replay_test(
                     finalize_result = client.prefetch_finalize(qa_session_id, context_path, client_turn_id, query)
                     fin_data = finalize_result.get("data", finalize_result)
                     prefetch_committed = bool(fin_data.get("accepted"))
+                    memory_items = fin_data.get("memoryItems") or []
                 except Exception:
                     client_turn_id = ""
+                    memory_items = []
 
             send_time = time.monotonic()
             try:
@@ -715,7 +720,7 @@ def run_replay_test(
                 "is_injection": False,
                 "complexity": job.category,
             }
-            metrics = collect_round_metrics(round_data, reply_result, send_time, prefetch_committed, {})
+            metrics = collect_round_metrics(round_data, reply_result, send_time, prefetch_committed, {}, memory_items)
             metrics["session_id"] = qa_session_id
             metrics["question_id"] = job.question_id
             metrics["gold_answer"] = answer
@@ -750,7 +755,7 @@ def run_replay_test(
     fieldnames = [
         "round_id", "session_id", "query", "reply_length", "query_length",
         "ttft_ms", "cached_tokens", "prompt_tokens", "prefetch_committed", "is_new_session",
-        "is_injection", "complexity", "error",
+        "is_injection", "complexity", "error", "relevant_memory",
     ]
     with csv_path.open("w", encoding="utf-8", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction="ignore")
@@ -900,6 +905,7 @@ def run_test(args: argparse.Namespace) -> None:
 
             client_turn_id = ""
             prefetch_committed = False
+            memory_items = []
             if not round_data.get("is_injection") and len(query) > 2:
                 try:
                     client_turn_id = simulate_typing(
@@ -913,9 +919,11 @@ def run_test(args: argparse.Namespace) -> None:
                         log(f"    prefetch finalize rejected: reason={fin_data.get('reason', 'unknown')}")
                     else:
                         log(f"    prefetch committed={prefetch_committed}")
+                    memory_items = fin_data.get("memoryItems") or []
                 except Exception as exc:
                     log(f"    prefetch error: {exc}")
                     client_turn_id = ""
+                    memory_items = []
 
             send_time = time.monotonic()
             try:
@@ -966,7 +974,7 @@ def run_test(args: argparse.Namespace) -> None:
             except Exception:
                 pass
 
-            metrics = collect_round_metrics(round_data, reply_result, send_time, prefetch_committed, last_request)
+            metrics = collect_round_metrics(round_data, reply_result, send_time, prefetch_committed, last_request, memory_items)
             metrics["session_id"] = session_id
             all_rounds.append(metrics)
             # Track conversation for locomo export
@@ -1002,7 +1010,7 @@ def run_test(args: argparse.Namespace) -> None:
     fieldnames = [
         "round_id", "session_id", "query", "reply_length", "query_length",
         "ttft_ms", "cached_tokens", "prompt_tokens", "prefetch_committed", "is_new_session",
-        "is_injection", "complexity", "error",
+        "is_injection", "complexity", "error", "relevant_memory",
     ]
     with csv_path.open("w", encoding="utf-8", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction="ignore")
