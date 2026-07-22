@@ -121,6 +121,12 @@ bash scripts/start-workbench-stack.sh
 
 Open <http://127.0.0.1:4173/>.
 
+For a LoCoMo `legacy-77` tool-call ablation, use the same evaluation profile
+and change only `--vikingboat-tool-loop` versus
+`--no-vikingboat-tool-loop`. See
+[`README_ECHOMEMORY_BLACKBOX.md`](README_ECHOMEMORY_BLACKBOX.md#locomo-legacy-77-tool-on-vs-tool-off)
+for complete commands and required result checks.
+
 Status and stop commands:
 
 ```bash

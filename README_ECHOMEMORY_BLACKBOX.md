@@ -252,6 +252,78 @@ $RUN_DIR/import/echomemory_import_summary.json
 Do not start formal QA until all expected sessions are committed and the
 EchoMemory service reports retrieval readiness.
 
+## LoCoMo `legacy-77`: Tool On vs Tool Off
+
+The default LoCoMo evaluation profile is `legacy-77`. To compare model-requested
+memory tools without changing the prompt, retrieval query, time context, Top-K,
+memory budgets, ranking, or other profile settings, keep the command identical
+and change only the final tool-loop switch.
+
+With model-requested memory tools:
+
+```bash
+python3 benchmark/locomo/echomemory/run_eval.py \
+  --evaluation-profile legacy-77 \
+  --dataset "$LOCOMO_DATASET" \
+  --out-dir "$RUN_DIR/qa-legacy77-tool-on" \
+  --sample conv-30 \
+  --echomem-transport http \
+  --echomem-base-url "$ECHOMEM_BASE_URL" \
+  --workspace "$LOCOMO_CLIENT_STATE" \
+  --account "$LOCOMO_ACCOUNT" \
+  --user-id "$LOCOMO_USER_ID" \
+  --agent-id "$LOCOMO_AGENT_ID" \
+  --answer-base-url "$ANSWER_BASE_URL" \
+  --answer-model "$ANSWER_MODEL" \
+  --answer-token "$ANSWER_TOKEN" \
+  --judge-base-url "$JUDGE_BASE_URL" \
+  --judge-model "$JUDGE_MODEL" \
+  --judge-token "$JUDGE_TOKEN" \
+  --vikingboat-tool-loop
+```
+
+Without model-requested memory tools:
+
+```bash
+python3 benchmark/locomo/echomemory/run_eval.py \
+  --evaluation-profile legacy-77 \
+  --dataset "$LOCOMO_DATASET" \
+  --out-dir "$RUN_DIR/qa-legacy77-tool-off" \
+  --sample conv-30 \
+  --echomem-transport http \
+  --echomem-base-url "$ECHOMEM_BASE_URL" \
+  --workspace "$LOCOMO_CLIENT_STATE" \
+  --account "$LOCOMO_ACCOUNT" \
+  --user-id "$LOCOMO_USER_ID" \
+  --agent-id "$LOCOMO_AGENT_ID" \
+  --answer-base-url "$ANSWER_BASE_URL" \
+  --answer-model "$ANSWER_MODEL" \
+  --answer-token "$ANSWER_TOKEN" \
+  --judge-base-url "$JUDGE_BASE_URL" \
+  --judge-model "$JUDGE_MODEL" \
+  --judge-token "$JUDGE_TOKEN" \
+  --no-vikingboat-tool-loop
+```
+
+The explicit tool-loop switch overrides only `vikingboat_tool_loop` from the
+profile. All other effective settings remain those of `legacy-77`. Confirm the
+run metadata before comparing accuracy:
+
+```json
+{
+  "evaluation_profile": "legacy-77",
+  "prompt_context_mode": "legacy_eval",
+  "session_context_mode": "group",
+  "current_time_mode": "question_time",
+  "initial_retrieval_query_mode": "question_only",
+  "top_k": 25,
+  "memory_tool_loop_enabled": false
+}
+```
+
+For the tool-enabled run, `memory_tool_loop_enabled` must be `true`. For the
+tool-disabled run, `tool_call_total` and `tool_call_rows` must both be `0`.
+
 ## CLI: One-question Smoke Test
 
 This first run verifies retrieval, answer generation, recall logging, and the
