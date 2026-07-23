@@ -127,9 +127,9 @@ def append_echomemory_transport_args(command: list[str], payload: dict[str, Any]
 
 
 STRICT_READY_DATASET_FORMATS = {"hotpotqa", "longmemeval", "evolvingevents", "proagentbench", "tau2bench"}
-DEVELOP_FULL_COMMIT_WAIT_DEFAULT = 12
-DEVELOP_FULL_FLUSH_TIMEOUT_DEFAULT = 20
-DEVELOP_FULL_FLUSH_ATTEMPTS_DEFAULT = 1
+DEVELOP_FULL_COMMIT_WAIT_DEFAULT = 600
+DEVELOP_FULL_FLUSH_TIMEOUT_DEFAULT = 300
+DEVELOP_FULL_FLUSH_ATTEMPTS_DEFAULT = 2
 
 
 def import_wait_defaults(
@@ -148,7 +148,7 @@ def import_wait_defaults(
             DEVELOP_FULL_FLUSH_TIMEOUT_DEFAULT,
             DEVELOP_FULL_FLUSH_ATTEMPTS_DEFAULT,
         )
-    return 300, 600, 2
+    return 600, 300, 2
 
 
 def _python_command(raw: Any) -> str | None:
@@ -213,6 +213,11 @@ def _append_longmemeval_parallel_passthrough(
     judge_model: str,
 ) -> None:
     command.extend([
+        "--longmemeval-alignment-profile",
+        str(
+            payload.get("longmemeval_alignment_profile")
+            or "openviking-v0.4.7"
+        ),
         "--top-k",
         str(top_k),
         "--score-threshold",
@@ -256,11 +261,11 @@ def _append_longmemeval_parallel_passthrough(
         "--import-wait-mode",
         str(payload.get("import_wait_mode") or "full"),
         "--commit-wait-s",
-        str(payload_value(payload, "commit_wait_s", 300)),
+        str(payload_value(payload, "commit_wait_s", 600)),
         "--commit-call-timeout-s",
         str(payload_value(payload, "commit_call_timeout_s", 300)),
         "--flush-call-timeout-s",
-        str(payload_value(payload, "flush_call_timeout_s", 600)),
+        str(payload_value(payload, "flush_call_timeout_s", 300)),
         "--flush-attempts",
         str(payload_value(payload, "flush_attempts", 2)),
     ])
@@ -277,18 +282,10 @@ def _append_longmemeval_parallel_passthrough(
     if bool_value(payload.get("fallback_to_mock_embedding_only"), False):
         command.append("--fallback-to-mock-embedding-only")
     command.append("--no-vikingboat-tool-loop")
-    if bool_value(payload.get("vikingboat_compat"), prompt_mode == "vikingboat_compat"):
-        command.append("--vikingboat-compat")
-    else:
-        command.append("--no-vikingboat-compat")
     if bool_value(payload.get("initial_tool_prefetch"), False):
         command.append("--initial-tool-prefetch")
     else:
         command.append("--no-initial-tool-prefetch")
-    if bool_value(payload.get("fallback_to_one_shot"), True):
-        command.append("--fallback-to-one-shot")
-    else:
-        command.append("--no-fallback-to-one-shot")
     if bool_value(payload.get("toolloop_rescue_on_toollike_answer"), False):
         command.append("--toolloop-rescue-on-toollike-answer")
     else:
@@ -325,17 +322,17 @@ def build_echomemory_longmemeval_parallel_command(
         out_dir / "merged" / ("summary.json" if import_only else "echomemory_generic_qa_results.csv")
     )
     workspace = str(payload.get("workspace") or payload.get("echomemory_workspace") or str(run_dir / "echomemory_workspace"))
-    prompt_mode = str(payload.get("prompt_mode") or payload.get("qa_prompt_mode") or "one_shot").strip() or "one_shot"
-    if prompt_mode not in {"one_shot", "vikingboat_lite", "vikingboat_compat"}:
-        prompt_mode = "one_shot"
+    prompt_mode = str(payload.get("prompt_mode") or payload.get("qa_prompt_mode") or "vikingbot_agent_aligned").strip() or "vikingbot_agent_aligned"
+    if prompt_mode != "vikingbot_agent_aligned":
+        prompt_mode = "vikingbot_agent_aligned"
     score_threshold = float(payload_value(payload, "score_threshold", VIKINGBOT_INITIAL_MIN_SCORE))
-    tool_search_limit = int(payload_value(payload, "tool_search_limit", VIKINGBOT_TOOL_SEARCH_LIMIT))
+    tool_search_limit = int(payload_value(payload, "tool_search_limit", 25))
     tool_min_score = float(payload_value(payload, "tool_min_score", VIKINGBOT_TOOL_MIN_SCORE))
     requested_tool_set = str(payload.get("tool_set") or payload.get("openviking_tool_set") or "search_read")
     tool_set = normalize_echomemory_tool_set(requested_tool_set)
     requested_retrieval_mode = str(payload.get("retrieval_mode") or "").strip().lower()
     retrieval_mode = normalize_payload_retrieval_mode(payload)
-    top_k = int(payload_value(payload, "top_k", VIKINGBOT_INITIAL_SEARCH_LIMIT))
+    top_k = int(payload_value(payload, "top_k", 50))
     max_iterations = int(payload_value(payload, "max_iterations", 8))
     qa_parallelism = int(payload_value(payload, "qa_parallelism", 10))
     answer_base_url = payload.get("answer_base_url") or payload.get("judge_base_url") or defaults.get("judge_base_url") or "https://dashscope.aliyuncs.com/compatible-mode/v1"
@@ -404,6 +401,15 @@ def build_echomemory_longmemeval_parallel_command(
             "tool_search_limit": tool_search_limit,
             "tool_min_score": tool_min_score,
             "initial_search_limit": top_k,
+            "longmemeval_alignment_profile": str(
+                payload.get("longmemeval_alignment_profile")
+                or "openviking-v0.4.7"
+            ),
+            "longmemeval_session_import_mode": "split",
+            "longmemeval_candidate_limit": 50,
+            "longmemeval_rerank_limit": 10,
+            "longmemeval_max_context_chars": 30000,
+            "longmemeval_full_content_read_enabled": True,
             "initial_score_threshold": score_threshold,
             "initial_tool_prefetch_enabled": bool_value(payload.get("initial_tool_prefetch"), False),
             "prefetch_read_count": int(payload.get("prefetch_read_count") or 4),
@@ -555,34 +561,39 @@ def build_echomemory_qa_command(
         raise ValueError("LoCoMo EchoMemory QA requires echomem_base_url; local SDK evaluation is not a black-box run")
     if requested_transport not in {"", "http"}:
         raise ValueError("LoCoMo EchoMemory QA only supports EchoMemory HTTP black-box transport")
-    prompt_mode = str(payload.get("prompt_mode") or "vikingboat_lite")
-    if prompt_mode not in {"vikingboat_lite", "vikingboat_compat", "one_shot"}:
-        prompt_mode = "vikingboat_lite"
-    vikingboat_compat = bool_value(payload.get("vikingboat_compat"), prompt_mode == "vikingboat_compat")
+    prompt_mode = str(payload.get("prompt_mode") or "vikingbot_agent_aligned")
+    if prompt_mode != "vikingbot_agent_aligned":
+        prompt_mode = "vikingbot_agent_aligned"
+    vikingboat_compat = False
     vikingboat_tool_loop = bool_value(
         payload.get("vikingboat_tool_loop"),
-        prompt_mode != "one_shot",
+        True,
     )
     initial_tool_prefetch = False
     max_iterations = int(payload_value(payload, "max_iterations", VIKINGBOT_MAX_ITERATIONS))
     score_threshold = float(payload_value(payload, "score_threshold", VIKINGBOT_INITIAL_MIN_SCORE))
-    tool_search_limit = int(payload_value(payload, "tool_search_limit", VIKINGBOT_TOOL_SEARCH_LIMIT))
+    tool_search_limit = int(payload_value(payload, "tool_search_limit", 25))
     tool_min_score = float(payload_value(payload, "tool_min_score", VIKINGBOT_TOOL_MIN_SCORE))
     requested_tool_set = str(payload.get("tool_set") or payload.get("openviking_tool_set") or "search_read")
     tool_set = normalize_echomemory_tool_set(requested_tool_set)
     requested_retrieval_mode = "search"
     retrieval_mode = "search"
     retrieval_source_mode = "echo_http_native"
-    top_k = int(payload_value(payload, "top_k", VIKINGBOT_INITIAL_SEARCH_LIMIT))
+    top_k = int(payload_value(payload, "top_k", 25))
     user_budget_chars = int(payload_value(payload, "user_memory_budget_chars", VIKINGBOT_USER_MEMORY_BUDGET_CHARS))
     agent_budget_chars = int(payload_value(payload, "agent_memory_budget_chars", VIKINGBOT_AGENT_MEMORY_BUDGET_CHARS))
     memory_budget_chars = int(payload_value(payload, "memory_budget_chars", user_budget_chars + agent_budget_chars))
-    qa_parallelism = int(payload_value(payload, "qa_parallelism", 5))
+    qa_parallelism = int(payload_value(payload, "qa_parallelism", 4))
+    answer_temperature = float(payload_value(payload, "answer_temperature", 0.7))
+    answer_thinking_mode = str(payload.get("answer_thinking_mode") or "disabled").strip().lower()
+    if answer_thinking_mode not in {"disabled", "provider_default"}:
+        answer_thinking_mode = "disabled"
     judge_every = int(payload_value(payload, "judge_every", 10))
     judge_parallel = int(payload_value(payload, "judge_parallel", 6))
     qa_memory_injection = bool_value(payload.get("qa_memory_injection"), True)
-    search_overview_enrichment = bool_value(payload.get("search_overview_enrichment"), False)
-    overview_budget_chars = int(payload_value(payload, "overview_budget_chars", 3000))
+    identity_mode = str(payload.get("identity_mode") or "fixed").strip().lower()
+    if identity_mode not in {"fixed", "sample_question"}:
+        identity_mode = "fixed"
     command = [
         "/usr/bin/env",
         "python3",
@@ -604,7 +615,7 @@ def build_echomemory_qa_command(
         "--agent-id",
         str(payload.get("agent_id") or payload.get("em_agent_id") or "default"),
         "--identity-mode",
-        "sample_question",
+        identity_mode,
         "--prompt-mode",
         prompt_mode,
         "--top-k",
@@ -625,6 +636,10 @@ def build_echomemory_qa_command(
         payload.get("answer_base_url") or payload.get("judge_base_url") or defaults.get("judge_base_url") or "",
         "--answer-model",
         payload.get("answer_model") or payload.get("judge_model") or defaults.get("answer_model") or defaults.get("judge_model") or "deepseek-v4-flash",
+        "--answer-thinking-mode",
+        answer_thinking_mode,
+        "--answer-temperature",
+        str(answer_temperature),
         "--judge-base-url",
         str(payload.get("judge_base_url") or payload.get("answer_base_url") or defaults.get("judge_base_url") or ""),
         "--judge-model",
@@ -657,8 +672,6 @@ def build_echomemory_qa_command(
         str(payload.get("prefetch_context_chars") or 5000),
         "--max-iterations",
         str(max_iterations),
-        "--overview-budget-chars",
-        str(max(0, overview_budget_chars)),
     ]
     command.append("--qa-memory-injection" if qa_memory_injection else "--no-qa-memory-injection")
     if payload.get("echomem_config"):
@@ -669,46 +682,18 @@ def build_echomemory_qa_command(
         "echomem_base_url": echomem_base_url,
     }
     append_echomemory_transport_args(command, http_payload)
-    command.append(
-        "--search-overview-enrichment"
-        if search_overview_enrichment
-        else "--no-search-overview-enrichment"
-    )
-    command.extend([
-        "--no-current-session-raw-fallback",
-        "--no-segment-readback",
-        "--no-precision-session-readback",
-        "--no-precision-grounded-projection",
-        "--no-longmemeval-current-session-summary-fallback",
-        "--no-hotpot-empty-overview-fallback",
-    ])
     if payload.get("questions"):
         command += ["--questions", str(payload.get("questions") or "")]
     if payload.get("random_count"):
         command += ["--random-count", str(payload.get("random_count"))]
-    command.extend([
-        "--no-local-session-summaries",
-        "--no-local-atoms",
-        "--no-local-messages",
-        "--no-local-timeline-hints",
-        "--no-local-memory-artifacts",
-    ])
     if vikingboat_tool_loop:
         command.append("--vikingboat-tool-loop")
     else:
         command.append("--no-vikingboat-tool-loop")
-    if vikingboat_compat:
-        command.append("--vikingboat-compat")
-    else:
-        command.append("--no-vikingboat-compat")
     if initial_tool_prefetch:
         command.append("--initial-tool-prefetch")
     else:
         command.append("--no-initial-tool-prefetch")
-    if bool_value(payload.get("fallback_to_one_shot"), False):
-        command.append("--fallback-to-one-shot")
-    else:
-        command.append("--no-fallback-to-one-shot")
     if bool_value(payload.get("fallback_to_mock"), False):
         command.append("--fallback-to-mock")
     if bool_value(payload.get("fallback_to_mock_embedding_only"), False):
@@ -727,6 +712,7 @@ def build_echomemory_qa_command(
             "prompt_mode": prompt_mode,
             "vikingboat_compat": vikingboat_compat,
             "memory_tool_loop_enabled": vikingboat_tool_loop,
+            "tool_set": tool_set,
             "memory_tool_set": tool_set,
             "memory_tool_set_requested": requested_tool_set,
             "evidence_policy": "blackbox",
@@ -738,13 +724,9 @@ def build_echomemory_qa_command(
             "retrieval_score_source": "echomemory_http_native",
             "platform_score_recomputed": False,
             "native_result_order_preserved": True,
-            "neo4j_graph_evidence_enabled": False,
-            "search_overview_enrichment_enabled": search_overview_enrichment,
-            "overview_transport": "echomemory_http_fs_read" if search_overview_enrichment else "disabled",
-            "overview_budget_chars": max(0, overview_budget_chars),
             "platform_evidence_injection_enabled": False,
             "retrieval_mode_requested": requested_retrieval_mode or retrieval_mode,
-            "identity_mode": "sample_question",
+            "identity_mode": identity_mode,
             "tool_search_limit": tool_search_limit,
             "tool_min_score": None,
             "tool_min_score_observed": False,
@@ -756,6 +738,8 @@ def build_echomemory_qa_command(
             "prefetch_context_chars": int(payload.get("prefetch_context_chars") or 5000),
             "max_iterations": max_iterations,
             "qa_parallelism": qa_parallelism,
+            "answer_temperature": answer_temperature,
+            "answer_thinking_mode": answer_thinking_mode,
             "judge_every": judge_every,
             "judge_parallel": judge_parallel,
             "qa_memory_injection_enabled": qa_memory_injection,
@@ -764,10 +748,6 @@ def build_echomemory_qa_command(
             "memory_budget_chars": memory_budget_chars,
             "user_memory_budget_chars": user_budget_chars,
             "agent_memory_budget_chars": agent_budget_chars,
-            "local_messages": False,
-            "local_session_summaries": False,
-            "local_atoms": False,
-            "local_timeline_hints": False,
         },
     )
 
@@ -803,16 +783,16 @@ def build_echomemory_generic_qa_command(
     output_file = str(out_dir / "echomemory_generic_qa_results.csv")
     workspace = str(payload.get("workspace") or payload.get("echomemory_workspace") or str(run_dir / "echomemory_workspace"))
     token = payload.get("answer_token") or payload.get("judge_token") or resolve_judge_token(payload, config)
-    prompt_mode = str(payload.get("prompt_mode") or payload.get("qa_prompt_mode") or "one_shot").strip() or "one_shot"
-    if prompt_mode not in {"one_shot", "vikingboat_lite", "vikingboat_compat"}:
-        prompt_mode = "one_shot"
-    vikingboat_compat = bool_value(payload.get("vikingboat_compat"), prompt_mode == "vikingboat_compat")
+    prompt_mode = str(payload.get("prompt_mode") or payload.get("qa_prompt_mode") or "vikingbot_agent_aligned").strip() or "vikingbot_agent_aligned"
+    if prompt_mode != "vikingbot_agent_aligned":
+        prompt_mode = "vikingbot_agent_aligned"
+    vikingboat_compat = False
     vikingboat_tool_loop = bool_value(payload.get("vikingboat_tool_loop"), False)
     initial_tool_prefetch = bool_value(payload.get("initial_tool_prefetch"), False)
     if fmt == "hotpotqa":
         vikingboat_tool_loop = False
         initial_tool_prefetch = False
-    max_iterations = int(payload_value(payload, "max_iterations", VIKINGBOT_MAX_ITERATIONS if vikingboat_compat else 8))
+    max_iterations = int(payload_value(payload, "max_iterations", VIKINGBOT_MAX_ITERATIONS))
     score_threshold = float(payload_value(payload, "score_threshold", VIKINGBOT_INITIAL_MIN_SCORE))
     tool_search_limit = int(payload_value(payload, "tool_search_limit", VIKINGBOT_TOOL_SEARCH_LIMIT))
     tool_min_score = float(payload_value(payload, "tool_min_score", VIKINGBOT_TOOL_MIN_SCORE))
@@ -987,18 +967,10 @@ def build_echomemory_generic_qa_command(
         command.append("--vikingboat-tool-loop")
     else:
         command.append("--no-vikingboat-tool-loop")
-    if vikingboat_compat:
-        command.append("--vikingboat-compat")
-    else:
-        command.append("--no-vikingboat-compat")
     if initial_tool_prefetch:
         command.append("--initial-tool-prefetch")
     else:
         command.append("--no-initial-tool-prefetch")
-    if bool_value(payload.get("fallback_to_one_shot"), True):
-        command.append("--fallback-to-one-shot")
-    else:
-        command.append("--no-fallback-to-one-shot")
     if bool_value(payload.get("toolloop_rescue_on_toollike_answer"), False):
         command.append("--toolloop-rescue-on-toollike-answer")
     else:
@@ -1009,35 +981,6 @@ def build_echomemory_generic_qa_command(
         command.append("--judge-after")
     if bool_value(payload.get("official_eval_after"), fmt in {"longmemeval", "hotpotqa"}):
         command.append("--official-eval-after")
-    if retrieval_mode == "local":
-        if bool_value(payload.get("local_session_summaries"), False):
-            command.append("--local-session-summaries")
-        else:
-            command.append("--no-local-session-summaries")
-        if bool_value(payload.get("local_atoms"), False):
-            command.append("--local-atoms")
-        else:
-            command.append("--no-local-atoms")
-        if bool_value(payload.get("local_messages"), False):
-            command.append("--local-messages")
-        else:
-            command.append("--no-local-messages")
-        if bool_value(payload.get("local_timeline_hints"), False):
-            command.append("--local-timeline-hints")
-        else:
-            command.append("--no-local-timeline-hints")
-        if bool_value(payload.get("local_memory_artifacts"), False):
-            command.append("--local-memory-artifacts")
-        else:
-            command.append("--no-local-memory-artifacts")
-    else:
-        command.extend([
-            "--no-local-session-summaries",
-            "--no-local-atoms",
-            "--no-local-messages",
-            "--no-local-timeline-hints",
-            "--no-local-memory-artifacts",
-        ])
     return PluginTaskSpec(
         command=command,
         output_file=output_file,

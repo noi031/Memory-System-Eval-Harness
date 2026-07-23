@@ -1181,7 +1181,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--echoagent-url", default=os.environ.get("ECHOAGENT_URL", "http://127.0.0.1:31020"))
     parser.add_argument("--echomem-url", default=os.environ.get("ECHOMEM_URL", "http://127.0.0.1:8010"), help="EchoMem service URL for runtime metrics")
     parser.add_argument("--username", default=os.environ.get("ECHOAGENT_TEST_USERNAME", "test_user"))
-    parser.add_argument("--password", default=os.environ.get("ECHOAGENT_TEST_PASSWORD", "test_password"))
+    parser.add_argument(
+        "--password",
+        default=os.environ.get("ECHOAGENT_TEST_PASSWORD", ""),
+        help="EchoAgent password. Defaults to ECHOAGENT_TEST_PASSWORD.",
+    )
     parser.add_argument("--num-batches", type=int, default=int(os.environ.get("ECHOAGENT_TEST_BATCHES", "3")))
     parser.add_argument("--queries-per-batch", type=int, default=int(os.environ.get("ECHOAGENT_TEST_QUERIES", "5")))
     parser.add_argument("--new-session-ratio", type=float, default=float(os.environ.get("ECHOAGENT_TEST_NEW_SESSION_RATIO", "0.3")))
@@ -1212,6 +1216,8 @@ def build_parser() -> argparse.ArgumentParser:
 def main() -> None:
     parser = build_parser()
     args = parser.parse_args()
+    if not args.password:
+        parser.error("provide --password or set ECHOAGENT_TEST_PASSWORD")
 
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)

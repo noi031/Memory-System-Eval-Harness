@@ -73,16 +73,59 @@ imports, QA runs, judging, and report generation.
 No npm install is required. Browser code uses native ES modules and validation
 scripts use Node.js built-ins only.
 
+### Bring Your Own Models
+
+This repository does not provide model credentials or a hosted model service.
+Before running EchoMemory import or QA, configure models from your own
+OpenAI-compatible provider:
+
+- an LLM for EchoMemory extraction, summaries, intent routing, and graph work
+- an embedding model for EchoMemory indexing and retrieval
+- an answer model for benchmark QA
+- a judge model for LoCoMo correctness scoring
+
+Copy `.env.example` and replace every `your-*` value with your own endpoint,
+model name, and API key. Keep the embedding dimension consistent with the
+selected embedding model and the EchoMemory workspace configuration. Mock
+models and placeholder credentials are suitable only for code smoke tests,
+not for accuracy reporting.
+
+Answer-model thinking mode is disabled by default
+(`ANSWER_THINKING_MODE=disabled`). Enable the provider default only for an
+explicitly labeled ablation, because thinking mode changes latency, token
+usage, and potentially accuracy.
+
+### Optional Graph Dependencies
+
+EchoMemory can run without external graph retrieval, but graph-memory and
+graph-diffusion tests require additional local services and packages:
+
+- install and start Neo4j, then configure a valid URI, username, password, and
+  database in the EchoMemory workspace
+- install `spacy` and the language model required by your EchoMemory
+  configuration, for example `python -m spacy download en_core_web_sm`
+
+If Neo4j credentials are missing or invalid, graph tests may fail even when
+the HTTP, session, atom, and vector-memory paths are healthy. Record whether
+graph retrieval was enabled when publishing benchmark accuracy.
+
 ## Start
 
 ```bash
-git clone <repository-url>
-cd memory-benchmark-workbench
+git clone --branch v2 \
+  https://github.com/tech-innovation-group/Memory-System-Eval-Harness.git
+cd Memory-System-Eval-Harness
 
 bash scripts/start-workbench-stack.sh
 ```
 
 Open <http://127.0.0.1:4173/>.
+
+For a LoCoMo `legacy-77` tool-call ablation, use the same evaluation profile
+and change only `--vikingboat-tool-loop` versus
+`--no-vikingboat-tool-loop`. See
+[`README_ECHOMEMORY_BLACKBOX.md`](README_ECHOMEMORY_BLACKBOX.md#locomo-legacy-77-tool-on-vs-tool-off)
+for complete commands and required result checks.
 
 Status and stop commands:
 

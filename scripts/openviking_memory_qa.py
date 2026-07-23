@@ -1053,6 +1053,15 @@ def default_openai_max_tokens() -> int:
         return 1024
 
 
+def model_http_headers(token: str) -> dict[str, str]:
+    return {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {token}",
+        "User-Agent": os.environ.get("BENCHMARK_LLM_USER_AGENT")
+        or "Mozilla/5.0 (compatible; MemoryBenchmarkWorkbench/2.0)",
+    }
+
+
 def openai_payload_variants(
     model: str,
     messages: list[dict[str, Any]],
@@ -1877,7 +1886,7 @@ def call_openai(
             req = request.Request(
                 base_url.rstrip("/") + "/chat/completions",
                 data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
-                headers={"Content-Type": "application/json", "Authorization": f"Bearer {token}"},
+                headers=model_http_headers(token),
                 method="POST",
             )
             with request.urlopen(req, timeout=timeout) as resp:
@@ -2692,7 +2701,7 @@ def call_openai_vikingbot_loop(
                 req = request.Request(
                     args.answer_base_url.rstrip("/") + "/chat/completions",
                     data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
-                    headers={"Content-Type": "application/json", "Authorization": f"Bearer {args.answer_token}"},
+                    headers=model_http_headers(args.answer_token),
                     method="POST",
                 )
                 with request.urlopen(req, timeout=args.timeout_s) as resp:

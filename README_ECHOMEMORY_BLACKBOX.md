@@ -77,16 +77,47 @@ endpoints, caches the issued key in
 Provide an explicit key when the EchoMemory deployment disables auth
 bootstrap.
 
+Use the same client-state directory, account, and user identity for import and
+QA. The QA runner reuses the cached key to access the tenant that owns the
+imported memories. A fresh or mismatched client-state directory can point at a
+different identity and produce an empty retrieval result.
+
 ## Prerequisites
 
 - Python 3.9 or newer
 - Node.js 18 or newer for repository validation
 - a running EchoMemory HTTP service
+- your own OpenAI-compatible LLM and embedding model for EchoMemory
 - an OpenAI-compatible answer/judge model endpoint
 - the LoCoMo dataset in its original JSON format
 
 The dataset, credentials, EchoMemory workspace, injected memories, and run
 outputs are intentionally not included in this repository.
+
+> [!IMPORTANT]
+> Use model endpoints and credentials that you control. EchoMemory needs both
+> an LLM and an embedding model; the harness separately needs answer and judge
+> models. Placeholder or mock models must not be used for a reported accuracy
+> run. Record model names, provider endpoints, embedding dimensions, and
+> relevant sampling settings with the result.
+
+### Optional graph-memory setup
+
+If the EchoMemory configuration enables graph extraction or graph diffusion:
+
+1. Install and start Neo4j.
+2. Configure a valid Neo4j URI, username, password, and database in the
+   EchoMemory workspace.
+3. Install spaCy and the language model selected by EchoMemory:
+
+   ```bash
+   python -m pip install spacy
+   python -m spacy download en_core_web_sm
+   ```
+
+Neo4j and spaCy are not required for an atom/vector-only run. Graph tests can
+fail or lose graph evidence when either dependency is missing or
+misconfigured, so state whether graph retrieval was enabled in the report.
 
 ## Configure
 
@@ -94,7 +125,20 @@ outputs are intentionally not included in this repository.
 cp .env.example .env.local
 ```
 
-Set at least:
+First configure the EchoMemory service itself with your own models:
+
+```bash
+ECHOMEM_LLM_API_BASE=https://provider.example.com/compatible-mode/v1
+ECHOMEM_LLM_MODEL=your-llm-model
+ECHOMEM_LLM_API_KEY=your-llm-key
+
+ECHOMEM_EMBEDDING_API_BASE=https://provider.example.com/compatible-mode/v1
+ECHOMEM_EMBEDDING_MODEL=your-embedding-model
+ECHOMEM_EMBEDDING_API_KEY=your-embedding-key
+ECHOMEM_EMBEDDING_DIMENSIONS=1024
+```
+
+Then set the harness connection, dataset, answer model, and judge model:
 
 ```bash
 ECHOMEM_BASE_URL=http://127.0.0.1:18080
@@ -109,11 +153,18 @@ LOCOMO_AGENT_ID=default
 ANSWER_BASE_URL=https://provider.example.com/compatible-mode/v1
 ANSWER_MODEL=your-answer-model
 ANSWER_TOKEN=your-token
+ANSWER_THINKING_MODE=disabled
 
 JUDGE_BASE_URL=https://provider.example.com/compatible-mode/v1
 JUDGE_MODEL=your-judge-model
 JUDGE_TOKEN=your-token
 ```
+
+The answer runner sends `enable_thinking=false` by default. Use
+`ANSWER_THINKING_MODE=provider_default` only for a separately labeled
+thinking-mode ablation. For EchoMemory's internal extraction LLM, also disable
+thinking in your provider or workspace configuration when you need the
+default non-thinking benchmark profile.
 
 Load the variables:
 
@@ -201,10 +252,88 @@ $RUN_DIR/import/echomemory_import_summary.json
 Do not start formal QA until all expected sessions are committed and the
 EchoMemory service reports retrieval readiness.
 
+## LoCoMo `legacy-77`: Tool On vs Tool Off
+
+The default LoCoMo evaluation profile is `legacy-77`. To compare model-requested
+memory tools without changing the prompt, retrieval query, time context, Top-K,
+memory budgets, ranking, or other profile settings, keep the command identical
+and change only the final tool-loop switch.
+
+With model-requested memory tools:
+
+```bash
+python3 benchmark/locomo/echomemory/run_eval.py \
+  --evaluation-profile legacy-77 \
+  --dataset "$LOCOMO_DATASET" \
+  --out-dir "$RUN_DIR/qa-legacy77-tool-on" \
+  --sample conv-30 \
+  --echomem-transport http \
+  --echomem-base-url "$ECHOMEM_BASE_URL" \
+  --workspace "$LOCOMO_CLIENT_STATE" \
+  --account "$LOCOMO_ACCOUNT" \
+  --user-id "$LOCOMO_USER_ID" \
+  --agent-id "$LOCOMO_AGENT_ID" \
+  --answer-base-url "$ANSWER_BASE_URL" \
+  --answer-model "$ANSWER_MODEL" \
+  --answer-token "$ANSWER_TOKEN" \
+  --judge-base-url "$JUDGE_BASE_URL" \
+  --judge-model "$JUDGE_MODEL" \
+  --judge-token "$JUDGE_TOKEN" \
+  --vikingboat-tool-loop
+```
+
+Without model-requested memory tools:
+
+```bash
+python3 benchmark/locomo/echomemory/run_eval.py \
+  --evaluation-profile legacy-77 \
+  --dataset "$LOCOMO_DATASET" \
+  --out-dir "$RUN_DIR/qa-legacy77-tool-off" \
+  --sample conv-30 \
+  --echomem-transport http \
+  --echomem-base-url "$ECHOMEM_BASE_URL" \
+  --workspace "$LOCOMO_CLIENT_STATE" \
+  --account "$LOCOMO_ACCOUNT" \
+  --user-id "$LOCOMO_USER_ID" \
+  --agent-id "$LOCOMO_AGENT_ID" \
+  --answer-base-url "$ANSWER_BASE_URL" \
+  --answer-model "$ANSWER_MODEL" \
+  --answer-token "$ANSWER_TOKEN" \
+  --judge-base-url "$JUDGE_BASE_URL" \
+  --judge-model "$JUDGE_MODEL" \
+  --judge-token "$JUDGE_TOKEN" \
+  --no-vikingboat-tool-loop
+```
+
+The explicit tool-loop switch overrides only `vikingboat_tool_loop` from the
+profile. All other effective settings remain those of `legacy-77`. Confirm the
+run metadata before comparing accuracy:
+
+```json
+{
+  "evaluation_profile": "legacy-77",
+  "prompt_context_mode": "legacy_eval",
+  "session_context_mode": "group",
+  "current_time_mode": "question_time",
+  "initial_retrieval_query_mode": "question_only",
+  "top_k": 25,
+  "memory_tool_loop_enabled": false
+}
+```
+
+For the tool-enabled run, `memory_tool_loop_enabled` must be `true`. For the
+tool-disabled run, `tool_call_total` and `tool_call_rows` must both be `0`.
+
 ## CLI: One-question Smoke Test
 
 This first run verifies retrieval, answer generation, recall logging, and the
 judge without waiting for all 81 questions:
+
+Model-requested memory tools are enabled by default. Add only
+`--no-vikingboat-tool-loop` to disable them; this explicit switch overrides
+the default `legacy-77` evaluation profile, so `--evaluation-profile custom`
+is not required. Initial QA memory injection remains enabled unless
+`--no-qa-memory-injection` is also passed.
 
 ```bash
 python3 benchmark/locomo/echomemory/run_eval.py \

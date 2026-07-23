@@ -3404,6 +3404,19 @@ async def run(args: argparse.Namespace) -> None:
             print(f"[shutdown] sdk_close timeout_after={close_timeout_s:g}s continue_exit", flush=True)
         except Exception as exc:
             print(f"[shutdown] sdk_close error={compact(exc, 300)} continue_exit", flush=True)
+    strict_full_wait = (
+        str(getattr(args, "import_wait_mode", "full") or "full").strip().lower() == "full"
+        and not bool(getattr(args, "defer_artifact_wait", False))
+        and not bool(getattr(args, "skip_session_commit", False))
+    )
+    if strict_full_wait and int(summary.get("qa_ready_samples") or 0) < int(summary.get("samples") or 0):
+        print(
+            "[error] strict full import ended before every selected session became QA-ready; "
+            f"status={summary.get('status') or '-'} "
+            f"qa_ready_samples={summary.get('qa_ready_samples') or 0}/{summary.get('samples') or 0}",
+            flush=True,
+        )
+        raise SystemExit(3)
     if summary["incomplete_samples"] and not (summary["partial_samples"] or summary["pending_async_samples"]):
         raise SystemExit(2)
 
@@ -3428,10 +3441,10 @@ def main() -> None:
     parser.add_argument("--session-end", type=int, default=0, help="Last LoCoMo session number to import, inclusive.")
     parser.add_argument("--max-sessions", type=int, default=0)
     parser.add_argument("--import-wait-mode", choices=["full", "fast"], default="full")
-    parser.add_argument("--commit-wait-s", type=float, default=300.0)
+    parser.add_argument("--commit-wait-s", type=float, default=600.0)
     parser.add_argument("--commit-call-timeout-s", type=float, default=300.0)
-    parser.add_argument("--flush-call-timeout-s", type=float, default=600.0)
-    parser.add_argument("--flush-attempts", type=int, default=3)
+    parser.add_argument("--flush-call-timeout-s", type=float, default=300.0)
+    parser.add_argument("--flush-attempts", type=int, default=2)
     parser.add_argument("--runtime-open-timeout-s", type=float, default=180.0)
     parser.add_argument("--defer-artifact-wait", action="store_true", default=False)
     parser.add_argument("--skip-session-commit", action="store_true", default=False)

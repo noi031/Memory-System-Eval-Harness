@@ -25204,7 +25204,7 @@ async function runDynamicEvalRound(roundIndex, options) {
   const { echoAgentUrl, memoryEngineEndpoint, newSessionRatio } = options;
 
   DynamicEvalState.currentRound = roundIndex + 1;
-  updateProgress();
+  updateDynamicEvalProgress();
 
   // Determine if we need a new session
   const needNewSession = roundIndex === 0 ||
@@ -25472,7 +25472,7 @@ function updateStatus(text) {
   if (statusEl) statusEl.textContent = text;
 }
 
-function updateProgress() {
+function updateDynamicEvalProgress() {
   const progressBar = $("dynamicEvalProgressBar");
   const progressText = $("dynamicEvalProgressText");
   const progressPct = $("dynamicEvalProgressPct");
