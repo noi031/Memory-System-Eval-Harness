@@ -28,6 +28,8 @@ from typing import Any
 # Default config directories
 DEFAULT_USER_SIMULATOR_DIR = Path(__file__).resolve().parent.parent / "configs" / "user_simulator"
 DEFAULT_EVALUATOR_DIR = Path(__file__).resolve().parent.parent / "configs" / "evaluator"
+# Fallback: configs/custom/ holds templates shared across both config types
+_CUSTOM_CONFIG_DIR = Path(__file__).resolve().parent.parent / "configs" / "custom"
 
 
 def _load_yaml(path: Path) -> dict[str, Any]:
@@ -188,11 +190,21 @@ def load_user_simulator_config(
     if not config_path.exists():
         # Try with .yml extension
         config_path = config_dir / f"{name}.yml"
-        if not config_path.exists():
-            raise FileNotFoundError(
-                f"User simulator config not found: {name}. "
-                f"Searched in: {config_dir}"
-            )
+    
+    if not config_path.exists() and config_dir is DEFAULT_USER_SIMULATOR_DIR:
+        # Fallback: search in configs/custom/
+        for ext in (".yaml", ".yml"):
+            alt = _CUSTOM_CONFIG_DIR / f"{name}{ext}"
+            if alt.exists():
+                config_path = alt
+                break
+    
+    if not config_path.exists():
+        raise FileNotFoundError(
+            f"User simulator config not found: {name}. "
+            f"Searched in: {config_dir}"
+            + (f" and {_CUSTOM_CONFIG_DIR}" if config_dir is DEFAULT_USER_SIMULATOR_DIR else "")
+        )
     
     config = _load_yaml(config_path)
     config["_source_path"] = str(config_path)
@@ -238,11 +250,21 @@ def load_evaluator_config(
     if not config_path.exists():
         # Try with .yml extension
         config_path = config_dir / f"{name}.yml"
-        if not config_path.exists():
-            raise FileNotFoundError(
-                f"Evaluator config not found: {name}. "
-                f"Searched in: {config_dir}"
-            )
+    
+    if not config_path.exists() and config_dir is DEFAULT_EVALUATOR_DIR:
+        # Fallback: search in configs/custom/
+        for ext in (".yaml", ".yml"):
+            alt = _CUSTOM_CONFIG_DIR / f"{name}{ext}"
+            if alt.exists():
+                config_path = alt
+                break
+    
+    if not config_path.exists():
+        raise FileNotFoundError(
+            f"Evaluator config not found: {name}. "
+            f"Searched in: {config_dir}"
+            + (f" and {_CUSTOM_CONFIG_DIR}" if config_dir is DEFAULT_EVALUATOR_DIR else "")
+        )
     
     config = _load_yaml(config_path)
     config["_source_path"] = str(config_path)
@@ -310,23 +332,38 @@ def list_available_evaluators(config_dir: Path | str | None = None) -> list[dict
     else:
         config_dir = Path(config_dir)
     
-    if not config_dir.exists():
-        return []
-    
     configs = []
-    for path in config_dir.glob("*.yaml"):
-        try:
-            config = _load_yaml(path)
-            configs.append({
-                "name": config.get("name", path.stem),
-                "version": config.get("version", "unknown"),
-                "description": config.get("description", ""),
-                "path": str(path),
-                "dimensions": list(config.get("evaluation_dimensions", {}).keys()),
-            })
-        except Exception:
-            # Skip invalid configs
-            continue
+    
+    if config_dir.exists():
+        for path in config_dir.glob("*.yaml"):
+            try:
+                config = _load_yaml(path)
+                configs.append({
+                    "name": config.get("name", path.stem),
+                    "version": config.get("version", "unknown"),
+                    "description": config.get("description", ""),
+                    "path": str(path),
+                    "dimensions": list(config.get("evaluation_dimensions", {}).keys()),
+                })
+            except Exception:
+                continue
+    
+    # Also scan configs/custom/ for evaluator templates
+    if config_dir is DEFAULT_EVALUATOR_DIR and _CUSTOM_CONFIG_DIR.exists():
+        for path in _CUSTOM_CONFIG_DIR.glob("*evaluator*.yaml"):
+            try:
+                config = _load_yaml(path)
+                name = config.get("name", path.stem)
+                if not any(c["name"] == name for c in configs):
+                    configs.append({
+                        "name": name,
+                        "version": config.get("version", "unknown"),
+                        "description": config.get("description", ""),
+                        "path": str(path),
+                        "dimensions": list(config.get("evaluation_dimensions", {}).keys()),
+                    })
+            except Exception:
+                continue
     
     return configs
 

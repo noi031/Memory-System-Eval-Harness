@@ -24075,6 +24075,7 @@ const UI_ICON_PATHS = {
   download: '<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" x2="12" y1="15" y2="3"></line>',
   "external-link": '<path d="M15 3h6v6"></path><path d="M10 14 21 3"></path><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"></path>',
   copy: '<rect width="14" height="14" x="8" y="8" rx="2" ry="2"></rect><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"></path>',
+  "messages-square": '<path d="M14 9a2 2 0 0 1-2 2H6l-4 4V4a2 2 0 0 1 2-2h8a2 2 0 0 1 2 2z"></path><path d="M18 9h2a2 2 0 0 1 2 2v11l-4-4h-6a2 2 0 0 1-2-2v-1"></path>',
   gauge: '<path d="m12 14 4-4"></path><path d="M3.34 19a10 10 0 1 1 17.32 0"></path>',
   timer: '<line x1="10" x2="14" y1="2" y2="2"></line><line x1="12" x2="15" y1="14" y2="11"></line><circle cx="12" cy="14" r="8"></circle>',
 };
@@ -24705,170 +24706,6 @@ async function echoAgentCreateSession(baseUrl, _token, title, memoryEngineEndpoi
   return sessionId;
 }
 
-// Start SSE listener to collect recalled memories during message processing
-// Returns {stop: function, getMemories: function, ready: Promise}
-function startMemoryEventListener(baseUrl, sessionId) {
-  // Use SSE proxy for session-events (same issue as streaming)
-  var eventUrl = "/api/dynamic/streaming?" + 
-    "base_url=" + encodeURIComponent(baseUrl) +
-    "&session_id=" + encodeURIComponent(sessionId) +
-    "&path=" + encodeURIComponent("/v1/sessions/" + sessionId + "/session-events?include_snapshot=0") +
-    "&cookies=" + encodeURIComponent(EchoAgentSession.cookies ? EchoAgentSession.cookies.join("; ") : "");
-  
-  var recalledMemories = [];
-  var done = false;
-  var reader = null;
-  var readyResolve = null;
-  var readyPromise = new Promise(function(resolve) {
-    readyResolve = resolve;
-  });
-  var lastEventTime = Date.now();
-  var flushResolve = null;
-  
-  // Start SSE connection
-  fetch(eventUrl, {
-    method: "GET",
-    headers: {
-      "Accept": "text/event-stream",
-      "Last-Event-ID": "-1"
-    }
-  }).then(function(response) {
-    if (!response.ok) {
-      readyResolve();  // Resolve anyway to not block
-      return;
-    }
-    
-    // Connection established, signal ready
-    readyResolve();
-    
-    reader = response.body.getReader();
-    var decoder = new TextDecoder();
-    var buffer = "";
-    
-    function readChunk() {
-      if (done) {
-        if (flushResolve) flushResolve();
-        return;
-      }
-      reader.read().then(function(result) {
-        if (result.done || done) {
-          if (flushResolve) flushResolve();
-          return;
-        }
-        
-        buffer += decoder.decode(result.value, { stream: true });
-        var lines = buffer.split("\n");
-        buffer = lines.pop() || "";
-        
-        var eventType = "";
-        var eventData = "";
-        
-        for (var i = 0; i < lines.length; i++) {
-          var line = lines[i];
-          if (line.startsWith("event:")) {
-            eventType = line.substring(6).trim();
-          } else if (line.startsWith("data:")) {
-            eventData = line.substring(5).trim();
-          } else if (line === "" && eventType && eventData) {
-            // Update last event time when we receive any event
-            lastEventTime = Date.now();
-            
-            // Log all event types for debugging
-            console.log("[memoryListener] Received event:", eventType);
-            
-            // Process debug_prefill event with memory entries
-            if (eventType === "debug_prefill") {
-              try {
-                var data = JSON.parse(eventData);
-                console.log("[memoryListener] debug_prefill event received:", data.entryCount, "entries");
-                if (data.entries && data.entries.length > 0) {
-                  recalledMemories = data.entries.map(function(e) {
-                    return {
-                      memoryId: e.memoryId || "",
-                      text: e.text || "",
-                      score: e.score || 0,
-                      kind: e.kind || ""
-                    };
-                  });
-                  console.log("[memoryListener] Updated recalledMemories:", recalledMemories.length, "items");
-                }
-              } catch (parseErr) {
-                console.warn("[memoryListener] Failed to parse debug_prefill:", parseErr);
-              }
-            }
-            eventType = "";
-            eventData = "";
-          }
-        }
-        
-        readChunk();
-      }).catch(function(err) {
-        if (flushResolve) flushResolve();
-      });
-    }
-    
-    readChunk();
-  }).catch(function(err) {
-    readyResolve();  // Resolve anyway to not block
-  });
-  
-  return {
-    stop: function() {
-      done = true;
-      if (reader) {
-        try { reader.cancel(); } catch (e) {}
-      }
-    },
-    getMemories: function() {
-      return recalledMemories;
-    },
-    flush: function(timeoutMs, waitForMemories) {
-      // Wait for SSE events to be processed
-      // - timeoutMs: maximum time to wait (default 5000ms)
-      // - waitForMemories: if true, wait until at least one memory arrives or timeout
-      timeoutMs = timeoutMs || 5000;
-      waitForMemories = waitForMemories !== false; // default true
-      return new Promise(function(resolve) {
-        var startTime = Date.now();
-        var checkInterval = 100;
-        var lastMemoryCount = 0;
-        var stableCount = 0;
-        var check = function() {
-          var elapsed = Date.now() - startTime;
-          if (done) {
-            console.log("[memoryListener.flush] SSE closed, returning", recalledMemories.length, "memories");
-            resolve(recalledMemories);
-            return;
-          }
-          if (elapsed >= timeoutMs) {
-            console.log("[memoryListener.flush] Timeout after", elapsed, "ms, returning", recalledMemories.length, "memories");
-            resolve(recalledMemories);
-            return;
-          }
-          // If we have memories and count is stable for 2 checks, return
-          if (recalledMemories.length > 0) {
-            if (recalledMemories.length === lastMemoryCount) {
-              stableCount++;
-              if (stableCount >= 2) {
-                console.log("[memoryListener.flush] Stable at", recalledMemories.length, "memories, returning");
-                resolve(recalledMemories);
-                return;
-              }
-            } else {
-              lastMemoryCount = recalledMemories.length;
-              stableCount = 0;
-            }
-          }
-          // Continue waiting
-          setTimeout(check, checkInterval);
-        };
-        check();
-      });
-    },
-    ready: readyPromise
-  };
-}
-
 // Simulate typing by sending tick events to EchoAgent prefetch API
 async function simulateTyping(baseUrl, sessionId, content, typingSpeedMs, onChar) {
   if (!typingSpeedMs || typingSpeedMs <= 0) {
@@ -25178,6 +25015,7 @@ async function startDynamicEval() {
   DynamicEvalState.avgTtft = null;
   DynamicEvalState.avgCachedTokens = null;
   DynamicEvalState.newSessionCount = 0;
+  clearConversationHistory();
 
   // Clear stop flag from previous run
   const prevEvaluatorId = DynamicEvalState.evaluatorId;
@@ -25249,7 +25087,7 @@ async function startDynamicEval() {
       config = {
         mode: "static",
         num_memories: DynamicEvalState.parsedMemories.length,
-        custom_scenario: DynamicEvalState.parsedMemories.map(m => m.text).join("\n"),
+        parsed_memories: DynamicEvalState.parsedMemories.map(m => ({ id: m.id, text: m.text })),
         evaluator_config_yaml: evaluatorConfigContent || undefined,
         llm_config: {
           model,
@@ -25386,6 +25224,7 @@ async function runDynamicEvalRound(roundIndex, options) {
     DynamicEvalState.echoAgentContextSeq = 0;
     DynamicEvalState.newSessionCount++;
     updateMetrics();
+    appendSessionSeparator(DynamicEvalState.newSessionCount, DynamicEvalState.echoAgentSessionId);
   }
 
   // Check if stopped
@@ -25442,20 +25281,15 @@ async function runDynamicEvalRound(roundIndex, options) {
   // Update current query display
   updateCurrentRound(query, "", complexity, needNewSession);
 
+  // Append user turn to conversation history
+  appendConversationTurn("user", query, {
+    round: roundIndex + 1,
+    is_new_session: needNewSession,
+    sessionId: DynamicEvalState.echoAgentSessionId,
+  });
+
   // Check if stopped
   if (!DynamicEvalState.isRunning) return;
-
-  // Start SSE listener BEFORE sending message to capture recall events
-  const memoryListener = startMemoryEventListener(echoAgentUrl, DynamicEvalState.echoAgentSessionId);
-  
-  // Wait for SSE connection to be ready before sending message
-  await memoryListener.ready;
-
-  // Check if stopped
-  if (!DynamicEvalState.isRunning) {
-    memoryListener.stop();
-    return;
-  }
 
   // Send message to EchoAgent
   updateStatus(`正在发送查询到 EchoAgent...`);
@@ -25491,7 +25325,6 @@ async function runDynamicEvalRound(roundIndex, options) {
     console.log(`[runDynamicEvalRound] Memory items from finalize: ${memoryItemsFromFinalize.length}`);
     
     // Small delay to ensure finalize request is sent before message
-    // The actual memory collection will wait for SSE events in flush()
     await new Promise(resolve => setTimeout(resolve, 100));
     
     // Remove cursor after typing complete
@@ -25537,21 +25370,16 @@ async function runDynamicEvalRound(roundIndex, options) {
   const replyEl = $("dynamicEvalCurrentReply");
   if (replyEl) replyEl.textContent = replyResult.reply || "(无回复)";
 
-  // Check if stopped before collecting memories
-  if (!DynamicEvalState.isRunning) {
-    memoryListener.stop();
-    return;
-  }
+  // Append agent turn to conversation history
+  appendConversationTurn("agent", replyResult.reply || "(无回复)", {
+    round: roundIndex + 1,
+    sessionId: DynamicEvalState.echoAgentSessionId,
+  });
 
-  // Stop SSE listener and use memory items from finalize response
-  // Check if stopped
-  if (!DynamicEvalState.isRunning) {
-    memoryListener.stop();
-    return;
-  }
-  memoryListener.stop();
-  
-  // Use memory items from finalize response directly (no need to wait for SSE)
+  // Check if stopped before collecting memories
+  if (!DynamicEvalState.isRunning) return;
+
+  // Use memory items from finalize response directly
   var finalMemoryItems = memoryItemsFromFinalize || [];
   console.log("[runDynamicEvalRound] Memory items from finalize:", finalMemoryItems.length);
 
@@ -25668,6 +25496,63 @@ function updateCurrentRound(query, reply, complexity, isNewSession) {
   if (replyEl) replyEl.textContent = reply || "等待回复...";
   if (complexityEl) complexityEl.textContent = complexity || "-";
   if (isNewSessionEl) isNewSessionEl.textContent = isNewSession ? "新会话" : "同会话";
+}
+
+function clearConversationHistory(sessionLabel) {
+  const listEl = $("dynamicEvalConversationList");
+  if (listEl) listEl.innerHTML = "";
+  const tagEl = $("dynamicEvalConvSessionTag");
+  if (tagEl) tagEl.textContent = sessionLabel || "尚无会话";
+}
+
+function appendSessionSeparator(sessionNum, sessionId) {
+  const listEl = $("dynamicEvalConversationList");
+  if (!listEl) return;
+  const emptyEl = listEl.querySelector(".dynamic-eval-empty");
+  if (emptyEl) emptyEl.remove();
+  const sepEl = document.createElement("div");
+  sepEl.className = "dynamic-eval-conversation-session-divider";
+  const shortId = sessionId ? sessionId.substring(0, 8) : "";
+  sepEl.innerHTML =
+    '<span class="dynamic-eval-conversation-session-divider-label">' +
+    "新会话 · Session " + sessionNum +
+    (shortId ? ' · <code title="' + sessionId + '">' + shortId + "</code>" : "") +
+    "</span>";
+  listEl.appendChild(sepEl);
+  listEl.scrollTop = listEl.scrollHeight;
+  const tagEl = $("dynamicEvalConvSessionTag");
+  if (tagEl) tagEl.textContent = "Session " + sessionNum;
+}
+
+function appendConversationTurn(role, text, meta) {
+  const listEl = $("dynamicEvalConversationList");
+  if (!listEl) return;
+
+  // Remove empty-state placeholder
+  const emptyEl = listEl.querySelector(".dynamic-eval-empty");
+  if (emptyEl) emptyEl.remove();
+
+  const turnEl = document.createElement("div");
+  turnEl.className = `dynamic-eval-conversation-turn dynamic-eval-conversation-turn--${role}`;
+
+  const roleLabel = role === "user" ? "用户" : "助手";
+  const roundLabel = meta && meta.round != null ? ` · 轮次 ${meta.round}` : "";
+  const newSessionLabel = meta && meta.is_new_session ? " · 新会话" : "";
+  const shortSid = meta && meta.sessionId ? meta.sessionId.substring(0, 8) : "";
+  const sessionLabel = shortSid
+    ? ` · <code title="${meta.sessionId}">${shortSid}</code>`
+    : "";
+
+  turnEl.innerHTML =
+    '<div class="dynamic-eval-conversation-turn-meta">' +
+    '<span class="dynamic-eval-conversation-turn-role">' + roleLabel + '</span>' +
+    '<span>' + roundLabel + newSessionLabel + sessionLabel + '</span>' +
+    '</div>' +
+    '<div class="dynamic-eval-conversation-turn-bubble"></div>';
+  turnEl.querySelector(".dynamic-eval-conversation-turn-bubble").textContent = text || "(空)";
+
+  listEl.appendChild(turnEl);
+  listEl.scrollTop = listEl.scrollHeight;
 }
 
 function updateMetrics() {
@@ -25985,21 +25870,25 @@ function exportDynamicEvalResults() {
   }
 
   // Extract background memories from results - look up actual text by ID
+  // Deduplicate by ID: each memory appears once with its first source_round
+  const seenFactIds = new Set();
   DynamicEvalState.results.forEach((r, idx) => {
     if (r.ground_facts) {
-      r.ground_facts.forEach((f, fidx) => {
-        // ground_facts may be IDs like "f1", "f2" - look up actual text
+      r.ground_facts.forEach((f) => {
+        let factId = "";
         let factText = "";
         if (typeof f === "string") {
-          // It's an ID, look up the text
+          factId = f;
           factText = memoryLookup[f] || f;
         } else if (typeof f === "object") {
           factText = f.text || f.fact || JSON.stringify(f);
+          factId = f.id || "";
         }
-        
-        if (factText && factText.length > 2) {
+
+        if (factText && factText.length > 2 && !seenFactIds.has(factId)) {
+          seenFactIds.add(factId);
           backgroundMemories.push({
-            id: typeof f === "string" ? f : `f${backgroundMemories.length + 1}`,
+            id: factId || `f${backgroundMemories.length + 1}`,
             text: factText,
             source_round: idx,
           });

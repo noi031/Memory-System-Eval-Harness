@@ -527,9 +527,12 @@ def save_as_locomo_dataset(
                     if turn.get("speaker") == "user" and fid in turn.get("text", ""):
                         evidence.append(turn.get("dia_id", ""))
                         break
+        # Use ground truth (fact text) as the answer, not the AI's reply
+        fact_texts = [all_facts.get(fid, "") for fid in ground_facts if fid in all_facts]
+        answer = "; ".join(fact_texts) if fact_texts else r.get("reply", "")
         qa_pairs.append({
             "question": r.get("query", ""),
-            "answer": r.get("reply", ""),
+            "answer": answer,
             "evidence": evidence,
             "category": 1,  # Factual by default
         })
@@ -838,6 +841,18 @@ def run_test(args: argparse.Namespace) -> None:
                 "api_key": args.scenario_api_key,
             },
         }
+        if args.user_simulator_config:
+            sim_path = Path(args.user_simulator_config)
+            if sim_path.is_file():
+                evaluator_config["user_simulator_config_yaml"] = sim_path.read_text(encoding="utf-8")
+            else:
+                evaluator_config["user_simulator_config"] = args.user_simulator_config
+        if args.evaluator_config:
+            eval_path = Path(args.evaluator_config)
+            if eval_path.is_file():
+                evaluator_config["evaluator_config_yaml"] = eval_path.read_text(encoding="utf-8")
+            else:
+                evaluator_config["evaluator_config"] = args.evaluator_config
         evaluator = dynamic_evaluator.MemoryDynamicEvaluator(evaluator_config)
 
         # Generate background memories
@@ -1181,7 +1196,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--dataset-limit", type=int, default=0, help="Max QA questions to replay, 0=all")
     parser.add_argument("--save-dataset", default="", help="Save generated conversations as locomo-format dataset to this path (e.g. dataset/echoagent_gen_001.json)")
     parser.add_argument("--custom-scenario", default="", help="Custom scenario text. If provided, skip LLM generation and use this scenario directly")
-    
+    parser.add_argument("--user-simulator-config", default="", help="User simulator config name (searched in configs/user_simulator/) or file path")
+    parser.add_argument("--evaluator-config", default="", help="Evaluator config name (searched in configs/evaluator/ or configs/custom/) or file path")
+
     # New options for runtime/accuracy metrics separation
     parser.add_argument("--collect-runtime-metrics", action="store_true", default=True, help="Collect runtime metrics from Prometheus endpoints")
     parser.add_argument("--no-runtime-metrics", action="store_true", help="Disable runtime metrics collection")

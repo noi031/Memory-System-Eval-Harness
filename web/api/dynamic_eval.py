@@ -204,13 +204,13 @@ def _inject_memories_to_echomem(
     except Exception as e:
         return {"success": False, "error": f"Failed to commit: {e}", "messages_added": messages_added}
     
-    # Step 4: Poll for commit completion (no timeout - must wait for completion)
+    # Step 4: Poll for commit completion (no timeout - injection can take a long time)
     if archive_id:
         import time
         status_url = f"{base_url}/api/sessions/{session_id}/commits/{archive_id}"
         poll_interval = 3  # Poll every 3 seconds
         
-        print(f"[inject_memories] Waiting for commit to complete, archive_id={archive_id} (no timeout)")
+        print(f"[inject_memories] Waiting for commit to complete, archive_id={archive_id}")
         while True:
             # Check if evaluator has been stopped
             if evaluator_id and is_evaluator_stopped(evaluator_id):

@@ -76,6 +76,7 @@ persona_prompt: |
   - Ask follow-up questions when answers are incomplete
   - Don't reveal you are testing memory recall
   - Be direct and efficient, like a busy engineer
+  - You need to summarize the conversation history in your query
   - Generate conversation in Chinese
 
   ---

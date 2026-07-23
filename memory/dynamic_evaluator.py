@@ -190,9 +190,16 @@ def create_evaluator(config: dict[str, Any]) -> str:
 
 
 def get_evaluator(evaluator_id: str) -> "MemoryDynamicEvaluator | None":
-    """Get an evaluator by ID."""
+    """Get an evaluator by ID. Auto-removes expired evaluators."""
     with _EVALUATOR_LOCK:
-        return _EVALUATORS.get(evaluator_id)
+        evaluator = _EVALUATORS.get(evaluator_id)
+        if evaluator is None:
+            return None
+        if time.time() - evaluator.created_at > _EVALUATOR_TTL_SECONDS:
+            del _EVALUATORS[evaluator_id]
+            _EVALUATOR_STOP_FLAGS.pop(evaluator_id, None)
+            return None
+        return evaluator
 
 
 def remove_evaluator(evaluator_id: str) -> bool:
@@ -282,6 +289,7 @@ class MemoryDynamicEvaluator:
         self.mode = config.get("mode", "dynamic")
         self.theme = config.get("theme", "")
         self.custom_scenario = config.get("custom_scenario", "")
+        self.parsed_memories = config.get("parsed_memories", [])
         self.created_at = time.time()
 
         self.background_memories: list[dict[str, Any]] = []
@@ -380,9 +388,16 @@ class MemoryDynamicEvaluator:
                 "theme": self.theme,
             }
 
-        # Priority: custom_scenario > static dataset > dynamic generation
-        if self.custom_scenario:
-            # Custom scenario takes precedence regardless of mode
+        # Priority: parsed_memories > custom_scenario > static dataset > dynamic generation
+        if self.parsed_memories:
+            self.background_memories = [
+                {"id": m.get("id", f"f{i+1}"), "text": m.get("text", "")}
+                for i, m in enumerate(self.parsed_memories)
+                if m.get("text")
+            ]
+            if not self.theme:
+                self.theme = "自定义场景"
+        elif self.custom_scenario:
             self.background_memories = self._generate_memories_from_custom_scenario()
         elif self.mode == "static":
             self.background_memories = self._load_static_memories()
@@ -700,11 +715,20 @@ class MemoryDynamicEvaluator:
             for m in self.background_memories[:10]  # Limit for prompt length
         )
 
-        # Build history text
-        history_parts = []
-        for i, (q, r) in enumerate(zip(previous_queries[-5:], previous_replies[-5:])):
-            history_parts.append(f"User: {q[:100]}")
-            history_parts.append(f"Assistant: {r[:100]}")
+        # Build history text — accumulate from most recent round backwards
+        # until approximately 64K tokens (≈256K chars at ~4 chars/token) is reached
+        _MAX_HISTORY_CHARS = 256_000
+        history_parts: list[str] = []
+        total_chars = 0
+        for i in range(len(previous_queries) - 1, -1, -1):
+            q = previous_queries[i]
+            r = previous_replies[i] if i < len(previous_replies) else ""
+            entry = f"User: {q}\nAssistant: {r}"
+            if total_chars + len(entry) > _MAX_HISTORY_CHARS:
+                break
+            history_parts.append(entry)
+            total_chars += len(entry)
+        history_parts.reverse()
         history_text = "\n".join(history_parts) if history_parts else "(No previous conversation)"
 
         # Use persona_prompt from user_simulator_config - REQUIRED for dynamic mode

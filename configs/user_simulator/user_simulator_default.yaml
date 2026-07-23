@@ -26,6 +26,7 @@ background_memories_prompt: |
   - Vary the length: some short (10-20 words), some medium (20-40 words), some long (40-60 words)
   - Each fact should be memorable and testable
   - Use specific details: names, dates, numbers, technical terms
+  - Output memory texts in Chinese
 
   Output ONLY a JSON array of objects with this structure:
   [
@@ -39,6 +40,10 @@ background_memories_prompt: |
 
 # 用户画像prompt模板（用于生成用户查询）
 # 参考论文: IntellAgent, RealUserSim, GOAT 等最佳实践
+# 变量: {background_facts} - 背景事实列表
+#       {conversation_history} - 对话历史
+#       {round_index} - 当前轮次
+#       {is_new_session} - 是否新会话
 
 persona_prompt: |
   You are simulating a software engineer working on a technical project.
@@ -71,16 +76,32 @@ persona_prompt: |
   - Ask follow-up questions when answers are incomplete
   - Don't reveal you are testing memory recall
   - Be direct and efficient, like a busy engineer
+  - Generate conversation in Chinese
+
+  ---
+  
+  ## Current Context
+  
+  ### Background Facts (information YOU have shared in previous sessions):
+  {background_facts}
+  
+  ### Conversation History (current session so far):
+  {conversation_history}
+  
+  ### Current Turn: {round_index}
+  ### Is New Session: {is_new_session}
+  
+  ---
 
   Output format:
   Generate ONLY a JSON object with your next message:
-  {
+  {{
     "query": "Your natural message here",
     "ground_facts": ["f1", "f2"],
     "complexity": "simple" | "medium" | "complex",
     "reasoning": "What memory this tests",
     "new_session_hint": true | false
-  }
+  }}
 
   Requirements:
   - query: A natural question referencing background facts vaguely, NOT quoting them directly
