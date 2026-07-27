@@ -24802,8 +24802,8 @@ async function simulateTyping(baseUrl, sessionId, content, typingSpeedMs, onChar
       );
       console.log(`[simulateTyping] tick ${i+1}/${content.length}: accepted=${tickResult?.data?.accepted}, reason=${tickResult?.data?.reason || 'ok'}`);
     } catch (tickErr) {
-      console.warn(`[simulateTyping] tick ${i+1} failed:`, tickErr);
-      // Continue anyway - tick is optional
+      console.warn(`[simulateTyping] tick ${i+1} failed, skipping remaining ticks:`, tickErr);
+      break; // prefetch not supported (e.g. upstream branch) - skip remaining ticks
     }
     
     // Wait for the typing speed duration
