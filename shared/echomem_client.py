@@ -197,7 +197,20 @@ class EchoMemClient:
         timeout_s: float = 600.0,
         poll_interval_s: float = 2.0,
     ) -> CommitResult:
-        """Poll commit until completed/failed or timeout."""
+        """Poll commit until completed/failed or timeout.
+
+        timeout_s=0 means wait indefinitely.
+        """
+        if not archive_id:
+            self._log.error(
+                "poll_commit called with empty archive_id – commit did not return "
+                "an archive id, cannot poll status"
+            )
+            return CommitResult(
+                session_id, archive_id, "failed", 0.0, 0,
+                error="empty archive_id – commit returned no archive id",
+            )
+
         start = time.monotonic()
         polls = 0
         while True:
@@ -212,21 +225,29 @@ class EchoMemClient:
 
             try:
                 resp = self.commit_status(session_id, archive_id)
-            except Exception as e:
+            except urllib.error.HTTPError as e:
+                if e.code == 404:
+                    # 404 means the archive doesn't exist – a permanent error.
+                    self._log.error(
+                        "commit status returned 404: session=%s archive=%s "
+                        "(archive does not exist)",
+                        session_id, archive_id,
+                    )
+                    return CommitResult(
+                        session_id, archive_id, "failed", elapsed, polls,
+                        error="404 – archive not found",
+                    )
+                # Other HTTP errors: retry
                 self._log.warning(
                     "commit status poll error (poll %d): %s", polls, e,
                 )
-                # If the endpoint doesn't exist (404), treat as completed
-                # with a warning – some EchoMem versions don't have this API.
-                if isinstance(e, urllib.error.HTTPError) and e.code == 404:
-                    self._log.warning(
-                        "commit status endpoint returned 404 – "
-                        "treating as completed (API may not exist in this version)"
-                    )
-                    return CommitResult(
-                        session_id, archive_id, "completed", elapsed, polls,
-                        error="404 – endpoint not found, assumed completed",
-                    )
+                time.sleep(poll_interval_s)
+                continue
+            except Exception as e:
+                # Network errors, connection refused, etc.: retry
+                self._log.warning(
+                    "commit status poll error (poll %d): %s", polls, e,
+                )
                 time.sleep(poll_interval_s)
                 continue
 

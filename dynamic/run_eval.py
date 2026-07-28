@@ -557,6 +557,11 @@ def run_generate_mode(args, run: EvalRun, client: EchoAgentClient, llm: LLMClien
     )
     log.info("注入完成: %s (%.1fs, %d polls)",
              commit_result.status, commit_result.elapsed_s, commit_result.polls)
+    if commit_result.status not in ("completed",):
+        raise RuntimeError(
+            f"记忆注入失败: status={commit_result.status} "
+            f"error={commit_result.error} (session={inject_session_id})"
+        )
 
     session_id = ""
     session_count = 0
@@ -748,6 +753,10 @@ def run_replay_mode(args, run: EvalRun, client: EchoAgentClient, llm: LLMClient)
         )
         log.info("  注入完成: %s (%.1fs, %d polls)",
                  commit_result.status, commit_result.elapsed_s, commit_result.polls)
+        if commit_result.status not in ("completed",):
+            log.error("  记忆注入失败: status=%s error=%s, 跳过该样本",
+                      commit_result.status, commit_result.error)
+            continue
 
         # 在新 session 中进行 QA (测试跨 session 召回)
         qa_session = client.create_session(
@@ -1232,4 +1241,9 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception:
+        import traceback
+        traceback.print_exc()
+        raise SystemExit(1)
