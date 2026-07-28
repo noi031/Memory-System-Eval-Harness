@@ -119,13 +119,13 @@ class EchoAgentClient:
         self.user_uuid = user_info.get("id") or ""
 
     def get_memory_auth_key(self, memory_engine_endpoint: str) -> str:
-        """通过 echoagent 插件 credential 接口获取与召回一致的 auth_key。
+        """获取与 EchoAgent 召回时一致的 auth_key。
 
-        echoagent 插件用 TenantRegistry 将 EchoAgent 用户 UUID 映射到 EchoMem
-        auth_key。注入必须用同一个 auth_key, 否则记忆存到一个身份下, 召回用
-        另一个身份查, 永远找不到。
+        EchoAgent 的 transform 模式不传 userId, echoagent 插件默认用
+        "anonymous" 解析 auth_key。注入必须用同一个 auth_key, 否则记忆
+        存到一个 tenant 下, 召回用另一个 tenant 查, 永远找不到。
         """
-        body = {"mode": "credential", "userId": self.user_uuid}
+        body = {"mode": "credential", "userId": "anonymous"}
         data = json.dumps(body).encode("utf-8")
         req = Request(
             memory_engine_endpoint,
