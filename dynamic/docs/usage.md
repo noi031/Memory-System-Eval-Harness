@@ -49,6 +49,24 @@ python dynamic/run_eval.py \
 - **stream_reply** 失败 -> 记录 error, 继续下一轮
 - **send_message** seq 冲突 -> 自动重试 (3 次)
 
+## 注入身份自动解析
+
+注入阶段直连 EchoMem, QA 阶段经 EchoAgent -> echoagent 插件 -> EchoMem。
+两者必须使用相同的 `auth_key` 和 `agent_id`, 否则记忆存到一个身份下, 召回用另一个身份查, 永远找不到。
+
+**自动解析逻辑** (两种模式共用):
+
+1. 登录 EchoAgent 后, 从登录响应中提取用户 UUID (`user.id`)
+2. `agent_id` 默认设为 `echoagent` (与 echoagent 插件固定使用的值一致)
+3. 若 `--echomem-auth-key` 未指定, 调用 echoagent 插件的 `credential` 接口 (`POST {memory_engine_endpoint}` body `{"mode":"credential","userId":"<uuid>"}`)
+   - echoagent 插件用 `TenantRegistry` 将 UUID 映射到 EchoMem auth_key
+   - 若 UUID 已在 `echoagent_registry.json` 中, 直接返回已有的 auth_key
+   - 若不在, 自动 provision 新 tenant/user/key 并返回
+4. 解析到的 auth_key 同时用于注入和保存到 config.json
+
+> 显式指定 `--echomem-auth-key` 时跳过自动解析, 使用用户指定的值。
+> 显式指定 `--agent-id` (非 `default`) 时跳过自动设置。
+
 ## 指标
 
 | 指标 | 说明 |
@@ -58,8 +76,6 @@ python dynamic/run_eval.py \
 | `prompt_tokens` | 总 prompt token 数 |
 | `prefetch_committed` | prefill 是否成功 commit |
 | `score` | 配置驱动评测器评分 (0-100, 按维度细分) |
-
-未配置评测器时, 回退到内置简单 prompt (0-2 分制: recall/accuracy/relevance)。
 
 ## 评测器配置
 
@@ -74,7 +90,7 @@ python dynamic/run_eval.py \
 2. LLM 返回 JSON, 提取总分 (0-100) 和各维度分数 (钳制到 max_score 以内)
 3. 汇总为 `quality_report.json`
 
-未指定 `--evaluator-config` 且默认配置文件不存在时, 回退到内置的批量 `generate_quality_report` (0-2 分制)。
+未指定 `--evaluator-config` 且默认配置文件不存在时, 直接报错退出。
 
 ## 用户模拟器配置 (仅 Generate 模式)
 
@@ -134,12 +150,12 @@ Generate 模式支持 `--user-simulator-config`, 默认加载 `dynamic/configs/u
 | 参数 | 默认值 | 说明 |
 |---|---|---|
 | `--echomem-url` | `http://127.0.0.1:8010` | EchoMem 地址 (注入阶段直连) |
-| `--echomem-auth-key` | (空) | EchoMem X-Auth-Key |
+| `--echomem-auth-key` | (空) | EchoMem X-Auth-Key (留空时自动通过 echoagent 插件 credential 接口解析, 保证与召回身份一致) |
 | `--account` | `default` | EchoMem 账号 |
 | `--user-id` | `default` | EchoMem 用户 ID |
-| `--agent-id` | `default` | EchoMem Agent ID |
+| `--agent-id` | `default` | EchoMem Agent ID (默认自动设为 `echoagent`, 与 echoagent 插件一致) |
 | `--workspace` | (空) | EchoMem workspace 路径 |
-| `--commit-timeout-s` | `600` | 注入 commit 轮询超时 (秒) |
+| `--commit-timeout-s` | `0` | 注入 commit 轮询超时 (秒)，0 表示无限等待 |
 | `--commit-poll-interval-s` | `2` | 注入 commit 轮询间隔 (秒) |
 | `--echomem-log-dir` | (空) | EchoMem 日志目录 |
 

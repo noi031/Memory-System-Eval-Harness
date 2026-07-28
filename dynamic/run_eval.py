@@ -50,20 +50,14 @@ _CONFIGS_DIR = Path(__file__).resolve().parent / "configs"
 # Config loading
 # ---------------------------------------------------------------------------
 
-def _load_evaluator_config(path: str) -> dict[str, Any] | None:
-    """加载评测器配置 YAML。返回 None 表示未指定或加载失败。"""
-    if not path:
-        return None
+def _load_evaluator_config(path: str) -> dict[str, Any]:
+    """加载评测器配置 YAML。文件不存在或解析失败时直接报错。"""
     p = Path(path)
     if not p.is_file():
-        return None
-    try:
-        import yaml
-        with open(p, encoding="utf-8") as f:
-            return yaml.safe_load(f)
-    except Exception as e:
-        logging.warning("加载评测器配置失败 (%s): %s", path, e)
-        return None
+        raise FileNotFoundError(f"评测器配置文件不存在: {p}")
+    import yaml
+    with open(p, encoding="utf-8") as f:
+        return yaml.safe_load(f)
 
 
 # ---------------------------------------------------------------------------
@@ -82,6 +76,7 @@ class EchoAgentClient:
         self.username = username
         self.password = password
         self.token: str = ""
+        self.user_uuid: str = ""
         self._context_seq: dict[str, int] = {}
 
     def _headers(self, json_content: bool = True) -> dict[str, str]:
@@ -120,6 +115,30 @@ class EchoAgentClient:
                     self.token = cookie_header.split("access_token=")[1].split(";")[0]
         if not self.token:
             raise RuntimeError(f"登录成功但未获取 token: {list(result.keys())}")
+        user_info = result.get("user") or {}
+        self.user_uuid = user_info.get("id") or ""
+
+    def get_memory_auth_key(self, memory_engine_endpoint: str) -> str:
+        """通过 echoagent 插件 credential 接口获取与召回一致的 auth_key。
+
+        echoagent 插件用 TenantRegistry 将 EchoAgent 用户 UUID 映射到 EchoMem
+        auth_key。注入必须用同一个 auth_key, 否则记忆存到一个身份下, 召回用
+        另一个身份查, 永远找不到。
+        """
+        body = {"mode": "credential", "userId": self.user_uuid}
+        data = json.dumps(body).encode("utf-8")
+        req = Request(
+            memory_engine_endpoint,
+            data=data,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urlopen(req, timeout=15) as resp:
+            result = json.loads(resp.read().decode("utf-8", "replace"))
+        auth_key = result.get("result", {}).get("authKey", "")
+        if not auth_key:
+            raise RuntimeError(f"credential 接口未返回 authKey: {result}")
+        return auth_key
 
     def create_session(self, title: str = "", memory_engine_endpoint: str = "") -> str:
         """创建会话, 尝试启用记忆引擎 (失败则忽略)。"""
@@ -367,71 +386,6 @@ def compute_summary(rounds: list[dict[str, Any]]) -> dict[str, Any]:
 # Quality evaluation
 # ---------------------------------------------------------------------------
 
-QUALITY_EVAL_PROMPT = """You are an expert evaluator for a memory-augmented AI assistant. Given a set of test queries, the assistant's replies, and the ground-truth facts each query depends on, evaluate how well the assistant recalled and used those facts.
-
-For each query, score on a 0-2 scale:
-- 2: The reply correctly uses ALL ground-truth facts (complete recall)
-- 1: The reply uses SOME but not all ground-truth facts (partial recall)
-- 0: The reply does not use any ground-truth facts (recall failure)
-
-Also assess:
-- factual_accuracy: Does the reply contain correct information (no hallucination)? 0-2
-- relevance: Is the reply relevant to the query? 0-2
-
-Output ONLY valid JSON:
-{
-  "per_query": [
-    {
-      "round_id": "...",
-      "query": "...",
-      "ground_facts": ["f1", "f2"],
-      "recall_score": 0-2,
-      "factual_accuracy": 0-2,
-      "relevance": 0-2,
-      "reasoning": "brief explanation"
-    }
-  ],
-  "overall_score": 0.0-2.0,
-  "summary": "2-3 sentence overall assessment"
-}
-"""
-
-
-def generate_quality_report(
-    llm: LLMClient,
-    query_rounds: list[dict[str, Any]],
-    facts: dict[str, str],
-) -> dict[str, Any]:
-    """用 LLM 评估召回质量。"""
-    eval_items: list[dict[str, Any]] = []
-    for r in query_rounds:
-        ground_ids = r.get("ground_facts") or []
-        ground_texts = [facts.get(fid, fid) for fid in ground_ids]
-        eval_items.append({
-            "round_id": r.get("round_id", ""),
-            "query": r.get("query", ""),
-            "reply": (r.get("reply") or "")[:500],
-            "ground_facts": ground_texts,
-            "is_new_session": r.get("is_new_session", False),
-            "complexity": r.get("complexity", ""),
-        })
-
-    user_content = json.dumps(eval_items, ensure_ascii=False, indent=2)
-    resp = llm.chat([
-        {"role": "system", "content": QUALITY_EVAL_PROMPT},
-        {"role": "user", "content": f"Here are the test queries and replies to evaluate:\n\n{user_content}"},
-    ])
-    if resp.error:
-        return {"error": resp.error, "overall_score": 0.0}
-    try:
-        json_match = re.search(r"\{[\s\S]*\}", resp.content)
-        if json_match:
-            return json.loads(json_match.group())
-    except Exception:
-        pass
-    return {"error": "parse failed", "raw": resp.content[:500], "overall_score": 0.0}
-
-
 def _config_driven_evaluate(
     llm: LLMClient,
     evaluator_config: dict[str, Any],
@@ -537,12 +491,8 @@ def run_generate_mode(args, run: EvalRun, client: EchoAgentClient, llm: LLMClien
 
     # 加载评测器配置 (用于质量评估)
     evaluator_config_dict = _load_evaluator_config(args.evaluator_config)
-    if evaluator_config_dict:
-        log.info("评测器配置: %s", args.evaluator_config)
-    else:
-        log.warning("未加载评测器配置, 质量评估将使用内置简单 prompt")
+    log.info("评测器配置: %s", args.evaluator_config)
 
-    # 延迟导入 memory 模块
     from memory import dynamic_evaluator
 
     context_path = "/"
@@ -742,10 +692,7 @@ def run_replay_mode(args, run: EvalRun, client: EchoAgentClient, llm: LLMClient)
 
     # 加载评测器配置 (用于质量评估)
     evaluator_config_dict = _load_evaluator_config(args.evaluator_config)
-    if evaluator_config_dict:
-        log.info("评测器配置: %s", args.evaluator_config)
-    else:
-        log.warning("未加载评测器配置, 质量评估将使用内置简单 prompt")
+    log.info("评测器配置: %s", args.evaluator_config)
 
     from shared.dataset import load_locomo
 
@@ -1040,7 +987,7 @@ def _safe_json_loads(s: str) -> list:
 
 def _save_results(run: EvalRun, all_rounds: list[dict], all_facts: dict[str, str],
                   llm: LLMClient, config: dict[str, Any],
-                  evaluator_config: dict[str, Any] | None = None,
+                  evaluator_config: dict[str, Any],
                   theme: str = "",
                   background_memories: list[dict] | None = None,
                   dataset_queries: list[dict] | None = None,
@@ -1076,35 +1023,24 @@ def _save_results(run: EvalRun, all_rounds: list[dict], all_facts: dict[str, str
     # 质量评估: 逐条评估并合并到 round 对象
     query_rounds = [r for r in all_rounds if not r.get("is_injection") and r.get("reply")]
     if query_rounds and all_facts:
-        if evaluator_config:
-            log.info("使用配置驱动评测器评估 %d 条回复...", len(query_rounds))
-            for r in tqdm(query_rounds, desc="质量评估", unit="q"):
-                ground_ids = r.get("ground_facts") or []
-                ground_texts = [all_facts.get(fid, fid) for fid in ground_ids]
-                result = _config_driven_evaluate(
-                    llm, evaluator_config,
-                    r.get("query", ""), r.get("reply", ""),
-                    ground_texts,
-                    r.get("relevant_memory", ""),
-                )
-                r["quality_score"] = result.get("score")
-                r["dimension_scores"] = result.get("dimension_scores")
-                r["dimension_info"] = result.get("dimension_info")
-                r["quality_reason"] = result.get("quality_reason", "")
-                r["strengths"] = result.get("strengths")
-                r["weaknesses"] = result.get("weaknesses")
-                r["hallucination_detected"] = result.get("hallucination_detected")
-                r["task_completed"] = result.get("task_completed")
-        else:
-            log.info("生成质量评估报告 (%d queries)...", len(query_rounds))
-            fallback_report = generate_quality_report(llm, query_rounds, all_facts)
-            for item in fallback_report.get("per_query", []):
-                rid = item.get("round_id")
-                for r in query_rounds:
-                    if r.get("round_id") == rid:
-                        r["quality_score"] = item.get("recall_score")
-                        r["quality_reason"] = item.get("reasoning", "")
-                        break
+        log.info("使用配置驱动评测器评估 %d 条回复...", len(query_rounds))
+        for r in tqdm(query_rounds, desc="质量评估", unit="q"):
+            ground_ids = r.get("ground_facts") or []
+            ground_texts = [all_facts.get(fid, fid) for fid in ground_ids]
+            result = _config_driven_evaluate(
+                llm, evaluator_config,
+                r.get("query", ""), r.get("reply", ""),
+                ground_texts,
+                r.get("relevant_memory", ""),
+            )
+            r["quality_score"] = result.get("score")
+            r["dimension_scores"] = result.get("dimension_scores")
+            r["dimension_info"] = result.get("dimension_info")
+            r["quality_reason"] = result.get("quality_reason", "")
+            r["strengths"] = result.get("strengths")
+            r["weaknesses"] = result.get("weaknesses")
+            r["hallucination_detected"] = result.get("hallucination_detected")
+            r["task_completed"] = result.get("task_completed")
 
         # 保存 v2 格式质量报告
         v2_report = _build_v2_quality_report(all_rounds, summary, theme)
@@ -1171,7 +1107,7 @@ def build_parser() -> argparse.ArgumentParser:
     g = parser.add_argument_group("评测器配置")
     g.add_argument("--evaluator-config",
                    default=str(_CONFIGS_DIR / "evaluator_template.yaml"),
-                   help="评测器配置 YAML (默认 configs/evaluator_template.yaml)")
+                   help="评测器配置 YAML，路径相对于 run_eval.py (默认 configs/evaluator_template.yaml)")
 
     # Generate 模式参数
     g = parser.add_argument_group("Generate 模式")
@@ -1182,7 +1118,7 @@ def build_parser() -> argparse.ArgumentParser:
     g.add_argument("--typing-jitter-ms", type=int, default=20)
     g.add_argument("--user-simulator-config",
                    default=str(_CONFIGS_DIR / "user_simulator_default.yaml"),
-                   help="用户模拟器配置 (默认 configs/user_simulator_default.yaml)")
+                   help="用户模拟器配置，路径相对于 run_eval.py (默认 configs/user_simulator_default.yaml)")
 
     # LLM (用于场景生成和质量评估)
     g = parser.add_argument_group("LLM")
@@ -1198,7 +1134,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     # EchoMem 注入参数
     g = parser.add_argument_group("EchoMem 注入")
-    g.add_argument("--commit-timeout-s", type=float, default=600.0, help="注入 commit 轮询超时 (秒)")
+    g.add_argument("--commit-timeout-s", type=float, default=0.0, help="注入 commit 轮询超时 (秒)，0 表示无限等待")
     g.add_argument("--commit-poll-interval-s", type=float, default=2.0, help="注入 commit 轮询间隔 (秒)")
 
     # 输出
@@ -1235,7 +1171,29 @@ def main() -> None:
         print("错误: 需要 --password 或设置 ECHOAGENT_TEST_PASSWORD", file=sys.stderr)
         sys.exit(1)
 
-    # 创建评测运行
+    # 登录 EchoAgent (在创建 EvalRun 之前, 因为 auth_key 解析依赖登录)
+    client = EchoAgentClient(args.echoagent_url, args.username, args.password)
+    print(f"登录 EchoAgent ({args.echoagent_url})...")
+    try:
+        client.login()
+    except Exception as e:
+        print(f"登录失败: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    # 动态评测的 QA 经 EchoAgent -> echoagent 插件, 插件固定用 agent_id="echoagent"。
+    # 注入也需用相同的 agent_id, 否则 EchoMem 按 agent_id 过滤时召回不到注入的记忆。
+    if not args.agent_id or args.agent_id == "default":
+        args.agent_id = "echoagent"
+
+    # 注入直连 EchoMem, 必须用与召回相同的 auth_key。
+    # 通过 echoagent 插件 credential 接口解析, 保证身份一致。
+    if not args.echomem_auth_key:
+        try:
+            args.echomem_auth_key = client.get_memory_auth_key(args.memory_engine_endpoint)
+        except Exception as e:
+            print(f"警告: 解析 auth_key 失败: {e} - 注入将不携带身份, 召回可能无法匹配", file=sys.stderr)
+
+    # 创建评测运行 (在 auth_key 解析后, 确保保存的配置包含正确的 auth_key)
     results_root = Path(args.out_dir) if args.out_dir else Path(__file__).parent / "results"
     config = EvalConfig(
         echomem_url=args.echomem_url,
@@ -1253,15 +1211,8 @@ def main() -> None:
     )
     log = run.logger
 
-    # 创建 EchoAgent 客户端
-    client = EchoAgentClient(args.echoagent_url, args.username, args.password)
-    log.info("登录 EchoAgent (%s)...", args.echoagent_url)
-    try:
-        client.login()
-    except Exception as e:
-        log.error("登录失败: %s", e)
-        sys.exit(1)
-    log.info("登录成功 (user=%s)", args.username)
+    log.info("登录成功 (user=%s, uuid=%s)", args.username, client.user_uuid)
+    log.info("agent_id=%s, auth_key=%s", args.agent_id, "已设置" if args.echomem_auth_key else "未设置")
 
     # 创建 LLM 客户端 (用于质量评估)
     llm = LLMClient(

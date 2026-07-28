@@ -81,7 +81,7 @@ python benchmarks/locomo/run_eval.py \
 | `--top-k` | `10` | 检索记忆条数 (TOPK) |
 | `--memory-budget-chars` | `8000` | 注入 prompt 的记忆最大字符数 |
 | `--concurrency` | `4` | QA 并发数 |
-| `--commit-timeout-s` | `600.0` | Commit 轮询超时 (秒) |
+| `--commit-timeout-s` | `0` | Commit 轮询超时 (秒)，0 表示无限等待 |
 | `--commit-poll-interval-s` | `2.0` | Commit 轮询间隔 (秒) |
 | `--question-timeout-s` | `120.0` | 单题超时 (秒) |
 | `--out-dir` | `results` | 结果目录 |

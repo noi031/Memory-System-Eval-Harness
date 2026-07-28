@@ -41,7 +41,7 @@ class EvalConfig:
     concurrency: int = 4
 
     # Timeouts
-    commit_timeout_s: float = 600.0
+    commit_timeout_s: float = 0.0
     commit_poll_interval_s: float = 2.0
     question_timeout_s: float = 120.0
     llm_timeout_s: float = 120.0
@@ -205,7 +205,7 @@ def add_eval_args(parser) -> None:
     g.add_argument("--top-k", type=int, default=10, help="Number of memory items to retrieve (TOPK)")
     g.add_argument("--memory-budget-chars", type=int, default=8000, help="Max chars of memory to inject into prompt")
     g.add_argument("--concurrency", type=int, default=4, help="Number of concurrent QA tasks")
-    g.add_argument("--commit-timeout-s", type=float, default=600.0, help="Commit poll timeout")
+    g.add_argument("--commit-timeout-s", type=float, default=0.0, help="Commit poll timeout (0 = infinite)")
     g.add_argument("--commit-poll-interval-s", type=float, default=2.0)
     g.add_argument("--question-timeout-s", type=float, default=120.0, help="Per-question timeout")
     g.add_argument("--out-dir", default="results", help="Results root directory")

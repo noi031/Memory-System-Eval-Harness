@@ -136,8 +136,6 @@ class EchoMemClient:
     def open_session(self, title: str = "") -> str:
         """Create a new session, return its id."""
         body: dict[str, Any] = {
-            "account": self.account,
-            "user_id": self.user_id,
             "agent_id": self.agent_id,
         }
         if title:
@@ -146,6 +144,10 @@ class EchoMemClient:
             body["workspace"] = self.workspace
         resp = self._post("/api/sessions/open", body)
         sid = resp.get("session_id") or resp.get("id") or ""
+        if not sid:
+            scope = resp.get("scope", {})
+            if isinstance(scope, dict):
+                sid = scope.get("session_id") or ""
         if not sid:
             raise RuntimeError(f"open_session returned no id: {resp}")
         self._log.info("opened session %s (%s)", sid, title)
@@ -161,9 +163,6 @@ class EchoMemClient:
     ) -> dict[str, Any]:
         """Append one message to a session."""
         body: dict[str, Any] = {
-            "account": self.account,
-            "user_id": self.user_id,
-            "agent_id": self.agent_id,
             "role": role,
             "content": content,
         }
@@ -175,15 +174,14 @@ class EchoMemClient:
 
     def commit_session(self, session_id: str, keep_recent_count: int = 0) -> str:
         """Commit a session, return the archive_id."""
-        body: dict[str, Any] = {
-            "account": self.account,
-            "user_id": self.user_id,
-            "agent_id": self.agent_id,
-        }
+        body: dict[str, Any] = {}
         resp = self._post(f"/api/sessions/{session_id}/commit", body)
         aid = resp.get("archive_id") or resp.get("task_id") or ""
         if not aid:
-            # some versions return the id at top level
+            result = resp.get("result", {})
+            if isinstance(result, dict):
+                aid = result.get("archive_id") or result.get("task_id") or ""
+        if not aid:
             aid = resp.get("id", "")
         self._log.info("committed session %s -> archive %s", session_id, aid)
         return aid
@@ -205,7 +203,7 @@ class EchoMemClient:
         while True:
             polls += 1
             elapsed = time.monotonic() - start
-            if elapsed > timeout_s:
+            if timeout_s > 0 and elapsed > timeout_s:
                 self._log.warning(
                     "commit poll timeout: session=%s archive=%s (%.1fs, %d polls)",
                     session_id, archive_id, elapsed, polls,
@@ -232,12 +230,22 @@ class EchoMemClient:
                 time.sleep(poll_interval_s)
                 continue
 
-            status = (
-                resp.get("status")
-                or resp.get("stage")
-                or resp.get("state")
-                or ""
-            ).lower()
+            # EchoMem may return {"status": "completed"} or {"status": {"status": "completed", ...}}
+            raw_status = resp.get("status")
+            if isinstance(raw_status, dict):
+                status = (
+                    raw_status.get("status")
+                    or raw_status.get("stage")
+                    or raw_status.get("state")
+                    or ""
+                ).lower()
+            else:
+                status = (
+                    raw_status
+                    or resp.get("stage")
+                    or resp.get("state")
+                    or ""
+                ).lower()
 
             if status in ("completed", "done", "success"):
                 self._log.info(
@@ -251,9 +259,14 @@ class EchoMemClient:
                     "commit failed: session=%s archive=%s status=%s",
                     session_id, archive_id, status,
                 )
+                error_msg = status
+                if isinstance(raw_status, dict):
+                    error_msg = raw_status.get("error", status)
+                else:
+                    error_msg = resp.get("error", status)
                 return CommitResult(
                     session_id, archive_id, "failed", elapsed, polls,
-                    error=resp.get("error", status),
+                    error=error_msg,
                 )
 
             time.sleep(poll_interval_s)
@@ -271,8 +284,6 @@ class EchoMemClient:
         body: dict[str, Any] = {
             "query": query,
             "agent_id": agent_id or self.agent_id,
-            "account": self.account,
-            "user_id": self.user_id,
             "limit": top_k,
         }
         if session_id:
