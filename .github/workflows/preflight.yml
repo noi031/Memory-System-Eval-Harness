@@ -1,19 +1,18 @@
-name: V2 Validation
+name: V3 Preflight
 
 on:
   pull_request:
   push:
     branches:
-      - v2
+      - v3
       - main
-      - master
 
 permissions:
   contents: read
 
 jobs:
   validate:
-    name: Source and public-boundary checks
+    name: Python compile checks
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -24,10 +23,11 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Set up Node
-        uses: actions/setup-node@v4
-        with:
-          node-version: "20"
-
-      - name: Validate
-        run: node scripts/validate.mjs
+      - name: Compile check
+        run: |
+          python -m py_compile dynamic/run_eval.py
+          python -m py_compile benchmarks/locomo/run_eval.py
+          python -m py_compile benchmarks/hotpotqa/run_eval.py
+          python -m py_compile benchmarks/longmemeval/run_eval.py
+          python -m py_compile shared/dataset.py shared/echomem_client.py shared/eval_base.py shared/judge.py shared/llm_client.py shared/qa.py
+          python -m py_compile memory/dynamic_evaluator.py memory/llm.py memory/prompt_config_loader.py

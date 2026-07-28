@@ -1,0 +1,229 @@
+# 动态评测
+
+## 目标
+
+仿真 EchoAgent + EchoMem 线上真实效果, 测试端到端记忆召回质量和 prefill (KV-cache 预热) 延迟。
+
+## 两种模式
+
+### Generate 模式 (默认)
+
+LLM 生成场景: 生成背景记忆 -> 注入 EchoMem -> 逐轮生成 query -> 模拟打字 (prefetch tick) -> 发消息 -> 读 SSE 回复 -> 收集指标
+
+```bash
+python dynamic/run_eval.py \
+  --echoagent-url http://127.0.0.1:31020 \
+  --username test_user --password YOUR_PASSWORD \
+  --num-memories 5 --num-queries 10 \
+  --scenario-model deepseek-v4-flash \
+  --scenario-base-url https://ark.cn-beijing.volces.com/api/coding/v3 \
+  --scenario-api-key YOUR_API_KEY \
+  --llm-base-url https://ark.cn-beijing.volces.com/api/coding/v3 \
+  --llm-model doubao-seed-2.0-pro \
+  --llm-api-key YOUR_API_KEY
+```
+
+### Replay 模式
+
+回放 LoCoMo 数据集: 直接注入对话到 EchoMem -> 新 session QA (经 EchoAgent) -> 测试跨 session 召回
+
+注入阶段不经 EchoAgent, 直接调 EchoMem 的 `open_session` -> `add_message` -> `commit_session` -> `poll_commit` 流程, 不触发 LLM 生成。
+QA 阶段创建新 session 经 EchoAgent 发送 query, 测试完整管线 (含 prefill/TTFT)。
+
+```bash
+python dynamic/run_eval.py \
+  --echoagent-url http://127.0.0.1:31020 \
+  --username test_user --password YOUR_PASSWORD \
+  --dataset /path/to/locomo.json \
+  --dataset-sample sample_0 \
+  --dataset-limit 10 \
+  --llm-api-key YOUR_API_KEY
+```
+
+## 容错与回退
+
+所有 EchoAgent API 调用都有容错:
+- **prefetch/tick** 返回 404 -> 跳过打字模拟, 直接发消息
+- **prefetch/finalize** 返回 404 -> 跳过, 不影响消息发送
+- **memory-engine/test** 失败 -> 忽略, 继续使用 session
+- **stream_reply** 失败 -> 记录 error, 继续下一轮
+- **send_message** seq 冲突 -> 自动重试 (3 次)
+
+## 指标
+
+| 指标 | 说明 |
+|---|---|
+| `ttft_ms` | Time To First Token (首 token 延迟) |
+| `cached_tokens` | KV-cache 命中的 token 数 (prefill 效果) |
+| `prompt_tokens` | 总 prompt token 数 |
+| `prefetch_committed` | prefill 是否成功 commit |
+| `score` | 配置驱动评测器评分 (0-100, 按维度细分) |
+
+未配置评测器时, 回退到内置简单 prompt (0-2 分制: recall/accuracy/relevance)。
+
+## 评测器配置
+
+两种模式都支持 `--evaluator-config`, 默认加载 `dynamic/configs/evaluator_template.yaml`。
+
+配置文件定义:
+- **dimensions**: 评估维度列表, 每个维度含 `name`/`display_name`/`max_score`/`description`
+- **evaluate_prompt**: 评估 prompt 模板, 支持占位符 `{query}`/`{reply}`/`{ground_facts}`/`{recalled_memories}`/`{dimension_criteria}`
+
+质量评估流程:
+1. 对每条有回复的 query, 用配置的 prompt 模板渲染后调用 LLM
+2. LLM 返回 JSON, 提取总分 (0-100) 和各维度分数 (钳制到 max_score 以内)
+3. 汇总为 `quality_report.json`
+
+未指定 `--evaluator-config` 且默认配置文件不存在时, 回退到内置的批量 `generate_quality_report` (0-2 分制)。
+
+## 用户模拟器配置 (仅 Generate 模式)
+
+Generate 模式支持 `--user-simulator-config`, 默认加载 `dynamic/configs/user_simulator_default.yaml`。
+
+配置文件定义:
+- **background_memories_prompt**: 背景事实生成 prompt 模板
+- **persona_prompt**: 用户画像 prompt 模板, 生成下一轮 query
+
+该配置传递给 `MemoryDynamicEvaluator`, 影响场景生成和查询生成的行为。
+
+## 参数说明
+
+### EchoAgent 参数
+| 参数 | 默认值 | 说明 |
+|---|---|---|
+| `--echoagent-url` | `http://127.0.0.1:31020` | EchoAgent 后端地址 |
+| `--username` | `test_user` | 登录用户名 |
+| `--password` | (必填) | 登录密码 (也可通过 `ECHOAGENT_TEST_PASSWORD` 设置) |
+| `--memory-engine-endpoint` | `http://127.0.0.1:31030` | 记忆引擎端点 |
+
+### 模式选择
+| 参数 | 默认值 | 说明 |
+|---|---|---|
+| `--dataset` | (空) | 数据集路径 (指定则进入 replay 模式) |
+| `--dataset-sample` | `all` | Replay 模式: 筛选指定 sample (如 `sample_0`) |
+| `--dataset-limit` | `0` | Replay 模式: QA 数量上限 (0=全部) |
+
+### 评测器配置 (两种模式共用)
+| 参数 | 默认值 | 说明 |
+|---|---|---|
+| `--evaluator-config` | `configs/evaluator_template.yaml` | 评测器配置 YAML, 路径相对于 `run_eval.py` 所在目录 |
+
+### Generate 模式参数
+| 参数 | 默认值 | 说明 |
+|---|---|---|
+| `--num-memories` | `5` | 生成的背景记忆数 |
+| `--num-queries` | `10` | 生成的提问数 |
+| `--new-session-ratio` | `0.3` | 新开 session 概率 |
+| `--typing-speed-ms` | `200` | 打字速度 (毫秒/字符) |
+| `--typing-jitter-ms` | `20` | 打字抖动 (毫秒) |
+| `--user-simulator-config` | `configs/user_simulator_default.yaml` | 用户模拟器配置 YAML, 路径相对于 `run_eval.py` 所在目录 |
+
+### LLM 参数
+| 参数 | 默认值 | 说明 |
+|---|---|---|
+| `--scenario-model` | `deepseek-v4-flash` | 场景生成 LLM |
+| `--scenario-base-url` | (空) | 场景生成 base URL |
+| `--scenario-api-key` | (空) | 场景生成 API Key |
+| `--llm-base-url` | (空) | 质量评估 LLM base URL |
+| `--llm-model` | `doubao-seed-2.0-pro` | 质量评估 LLM |
+| `--llm-api-key` | (空) | 质量评估 API Key |
+
+> **base_url / api_key 互补**: scenario 和 llm 的 base_url / api_key, 一个有值另一个为空时, 空的自动复制有值的。两者都设置了则各自使用。
+
+### EchoMem 参数
+| 参数 | 默认值 | 说明 |
+|---|---|---|
+| `--echomem-url` | `http://127.0.0.1:8010` | EchoMem 地址 (注入阶段直连) |
+| `--echomem-auth-key` | (空) | EchoMem X-Auth-Key |
+| `--account` | `default` | EchoMem 账号 |
+| `--user-id` | `default` | EchoMem 用户 ID |
+| `--agent-id` | `default` | EchoMem Agent ID |
+| `--workspace` | (空) | EchoMem workspace 路径 |
+| `--commit-timeout-s` | `600` | 注入 commit 轮询超时 (秒) |
+| `--commit-poll-interval-s` | `2` | 注入 commit 轮询间隔 (秒) |
+| `--echomem-log-dir` | (空) | EchoMem 日志目录 |
+
+## 输出文件
+
+`dynamic/results/<timestamp>/` 下:
+- `config.json`, `run.log` - 配置和日志
+- `dataset.json` - v2 格式数据集 (含 theme/background_memories/dataset_queries/samples 对话 turns)
+- `dynamic_results.json` - 完整结果 (含每轮指标)
+- `dynamic_results.csv` - CSV 格式结果
+- `quality_report.json` - v2 格式质量评估报告 (含 avg_quality_score/avg_dimension_scores/每条 result 的 quality_score/dimension_info/quality_reason/strengths/weaknesses 等)
+- `summary.json` - 汇总指标
+- `echomem_logs/` - EchoMem 日志
+
+### dataset.json 格式 (参考 origin/v2 前端)
+
+```jsonc
+{
+  "exported_at": "<ISO 8601>",
+  "theme": "<string>",
+  "inject_session_id": "<string>|null",
+  "inject_user_id": "<string>|null",
+  "background_memories": [
+    { "id": "f1", "text": "...", "source_round": -1 }
+  ],
+  "dataset_queries": [
+    { "query": "...", "ground_facts": ["f1"], "complexity": "medium", "reasoning": "..." }
+  ],
+  "samples": [
+    {
+      "sample_id": "dynamic_eval_<timestamp>",
+      "conversation": {
+        "<session_id>": {
+          "session_id": "<string>",
+          "is_new": true,
+          "turns": [
+            { "round_id": "r0", "speaker": "user", "text": "<query>", "ground_facts": ["f1"] },
+            { "round_id": "r0", "speaker": "assistant", "text": "<reply>", "recalled_memories": [...], "quality_score": 85 }
+          ]
+        }
+      },
+      "metadata": { "total_rounds": 10, "new_session_count": 3, "avg_quality_score": 72.5 }
+    }
+  ]
+}
+```
+
+### quality_report.json 格式 (参考 origin/v2 前端)
+
+```jsonc
+{
+  "exported_at": "<ISO 8601>",
+  "theme": "<string>",
+  "total_queries": 10,
+  "avg_ttft_ms": 450,
+  "avg_cached_tokens": 1200,
+  "new_session_count": 3,
+  "summary": {
+    "avg_quality_score": 72.5,
+    "avg_dimension_scores": { "task_completion_score": 12.3, "fact_coverage_score": 10.5, ... },
+    "total_recalled_memories": 45
+  },
+  "results": [
+    {
+      "round_id": "r0",
+      "query": "...",
+      "reply": "...",
+      "session_id": "...",
+      "is_new_session": true,
+      "quality_score": 85,
+      "dimension_scores": { "task_completion_score": 13, ... },
+      "dimension_info": { "task_completion_score": { "display_name": "任务完成度", "max_score": 15 }, ... },
+      "quality_reason": "回复正确使用了所有事实...",
+      "strengths": ["事实覆盖完整"],
+      "weaknesses": ["回复稍显冗长"],
+      "hallucination_detected": false,
+      "task_completed": true,
+      "ttft_ms": 450,
+      "cached_tokens": 1200,
+      "prompt_tokens": 8000,
+      "recalled_memories_count": 5,
+      "ground_facts_count": 3,
+      "relevant_memory": [...]
+    }
+  ]
+}
+```

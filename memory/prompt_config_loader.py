@@ -25,11 +25,11 @@ from pathlib import Path
 from typing import Any
 
 
-# Default config directories
-DEFAULT_USER_SIMULATOR_DIR = Path(__file__).resolve().parent.parent / "configs" / "user_simulator"
-DEFAULT_EVALUATOR_DIR = Path(__file__).resolve().parent.parent / "configs" / "evaluator"
-# Fallback: configs/custom/ holds templates shared across both config types
-_CUSTOM_CONFIG_DIR = Path(__file__).resolve().parent.parent / "configs" / "custom"
+# Config files live in dynamic/configs/
+_DEFAULT_CONFIG_DIR = Path(__file__).resolve().parent.parent / "dynamic" / "configs"
+DEFAULT_USER_SIMULATOR_DIR = _DEFAULT_CONFIG_DIR
+DEFAULT_EVALUATOR_DIR = _DEFAULT_CONFIG_DIR
+_CUSTOM_CONFIG_DIR = _DEFAULT_CONFIG_DIR
 
 
 def _load_yaml(path: Path) -> dict[str, Any]:
