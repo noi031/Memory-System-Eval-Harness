@@ -298,17 +298,30 @@ def simulate_typing(
     typing_speed_ms: int = 100,
     jitter_ms: int = 20,
 ) -> tuple[str, bool]:
-    """逐字模拟打字。返回 (client_turn_id, committed)。
+    """模拟打字。返回 (client_turn_id, committed)。
 
     如果 prefetch/tick 接口不存在, 返回 ("", False) 表示跳过。
+    typing_speed_ms < 50 时进入快速模式: 只发 1 个 tick + finalize, 不逐字发。
     """
     client_turn_id = uuid.uuid4().hex[:12]
     committed = False
+
+    if typing_speed_ms < 50:
+        tick_result = client.prefetch_tick(session_id, context_path, client_turn_id, 1, text)
+        if tick_result is None:
+            return "", False
+        time.sleep(0.5)
+        finalize_result = client.prefetch_finalize(session_id, context_path, client_turn_id, text)
+        if finalize_result is not None:
+            fin_data = finalize_result.get("data", finalize_result)
+            committed = bool(fin_data.get("accepted"))
+            return client_turn_id, committed
+        return client_turn_id, False
+
     for i in range(1, len(text) + 1):
         draft = text[:i]
         tick_result = client.prefetch_tick(session_id, context_path, client_turn_id, i, draft)
         if tick_result is None:
-            # 接口不存在, 停止打字模拟
             return "", False
         tick_data = tick_result.get("data", tick_result)
         if not tick_data.get("accepted") and i == 1:
@@ -532,6 +545,7 @@ def run_generate_mode(args, run: EvalRun, client: EchoAgentClient, llm: LLMClien
         ftext = fact.get("text", "")
         if fid and ftext:
             all_facts[fid] = ftext
+            log.info("  [%s] %s", fid, ftext[:120])
 
     # 注入背景记忆到 EchoMem (不经 EchoAgent, 不触发 LLM 生成)
     echomem = EchoMemClient(
@@ -668,8 +682,10 @@ def run_generate_mode(args, run: EvalRun, client: EchoAgentClient, llm: LLMClien
         all_rounds.append(metrics)
         previous_queries.append(query)
         previous_replies.append(metrics.get("reply", ""))
-        log.info("  Q[%d] ttft=%sms cached=%d reply_len=%d",
-                 round_idx + 1, metrics["ttft_ms"], metrics["cached_tokens"], metrics["reply_length"])
+        log.info("  Q[%d] %s", round_idx + 1, query[:80])
+        log.info("    ttft=%sms cached=%d reply_len=%d",
+                 metrics["ttft_ms"], metrics["cached_tokens"], metrics["reply_length"])
+        log.info("    回复: %s", metrics["reply"][:200])
 
     _save_results(run, all_rounds, all_facts, llm, config={
         "mode": "generate",
@@ -691,7 +707,7 @@ def run_generate_mode(args, run: EvalRun, client: EchoAgentClient, llm: LLMClien
 # ---------------------------------------------------------------------------
 
 def run_replay_mode(args, run: EvalRun, client: EchoAgentClient, llm: LLMClient) -> None:
-    """Replay 模式: 回放数据集对话, 先注入再新会话 QA。"""
+    """Replay 模式: 回放 generate 模式导出的数据集, 先注入背景记忆再新会话 QA。"""
     log = run.logger
     log.info("模式: replay (回放数据集: %s)", args.dataset)
 
@@ -699,14 +715,22 @@ def run_replay_mode(args, run: EvalRun, client: EchoAgentClient, llm: LLMClient)
     evaluator_config_dict = _load_evaluator_config(args.evaluator_config)
     log.info("评测器配置: %s", args.evaluator_config)
 
-    from shared.dataset import load_locomo
+    # 加载 generate 模式导出的数据集
+    with open(args.dataset, encoding="utf-8") as f:
+        dataset = json.load(f)
 
-    jobs, plans = load_locomo(args.dataset, sample_filter=args.dataset_sample)
-    log.info("共 %d 个 sample, %d 个 QA 问题", len(plans), len(jobs))
+    background_memories = dataset.get("background_memories", [])
+    dataset_queries = dataset.get("dataset_queries", [])
+    log.info("共 %d 条背景记忆, %d 个 QA 问题", len(background_memories), len(dataset_queries))
+    for m in background_memories:
+        log.info("  [%s] %s", m.get("id", "?"), m.get("text", "")[:120])
 
     if args.dataset_limit > 0:
-        jobs = jobs[:args.dataset_limit]
-        log.info("限制 QA 数量为 %d", len(jobs))
+        dataset_queries = dataset_queries[:args.dataset_limit]
+        log.info("限制 QA 数量为 %d", len(dataset_queries))
+
+    # 构建 fact_id -> text 查找表
+    fact_lookup = {m.get("id", ""): m.get("text", "") for m in background_memories}
 
     context_path = "/"
     all_rounds: list[dict[str, Any]] = []
@@ -724,24 +748,27 @@ def run_replay_mode(args, run: EvalRun, client: EchoAgentClient, llm: LLMClient)
         max_retries=3,
     )
 
-    for plan_idx, plan in enumerate(tqdm(plans, desc="回放 sample", unit="sample")):
-        sample_id = plan.get("sample_id", f"sample_{plan_idx}")
-        events = plan.get("events") or []
-        if not events:
-            continue
-
-        log.info("[sample %d/%d] %s events=%d", plan_idx + 1, len(plans), sample_id, len(events))
-
-        # 注入对话: 直接注入 EchoMem (不经 EchoAgent, 不触发 LLM 生成)
-        inject_session = echomem.open_session(title=f"replay-{sample_id}")
-        for ev_idx, event in enumerate(tqdm(events, desc=f"  inject", unit="msg", leave=False)):
-            text = event.get("text", "")
-            if not text:
-                continue
+    # 注入背景记忆: 直接注入 EchoMem
+    # 复用数据集中的 inject_session_id, 若该 session 已有 archive 则跳过注入
+    inject_session_id = dataset.get("inject_session_id") or ""
+    inject_session = ""
+    events = [m for m in background_memories if m.get("text")]
+    if not events:
+        log.warning("数据集无背景记忆, 跳过注入")
+    elif inject_session_id and echomem.has_archives(inject_session_id):
+        log.info("[注入] session %s 已有 archive, 跳过注入", inject_session_id)
+        inject_session = inject_session_id
+    else:
+        log.info("[注入] %d 条记忆", len(events))
+        inject_session = echomem.open_session(
+            title=f"replay-{inject_session_id or 'dynamic_eval'}",
+            session_id=inject_session_id,
+        )
+        for ev_idx, event in enumerate(tqdm(events, desc="注入记忆", unit="mem", leave=False)):
             try:
                 echomem.add_message(
-                    inject_session, "user", text,
-                    created_at=event.get("time", ""),
+                    inject_session, "user", event["text"],
+                    created_at="",
                 )
             except Exception as exc:
                 log.warning("  注入 %d 失败: %s", ev_idx, exc)
@@ -754,89 +781,93 @@ def run_replay_mode(args, run: EvalRun, client: EchoAgentClient, llm: LLMClient)
         log.info("  注入完成: %s (%.1fs, %d polls)",
                  commit_result.status, commit_result.elapsed_s, commit_result.polls)
         if commit_result.status not in ("completed",):
-            log.error("  记忆注入失败: status=%s error=%s, 跳过该样本",
+            log.error("  记忆注入失败: status=%s error=%s, 跳过 QA",
                       commit_result.status, commit_result.error)
+
+    # 在新 session 中进行 QA (测试跨 session 召回)
+    qa_session = client.create_session(
+        title=f"replay-qa-{inject_session or 'dynamic_eval'}",
+        memory_engine_endpoint=args.memory_engine_endpoint,
+    )
+
+    for job_idx, q in enumerate(tqdm(dataset_queries, desc="提问", unit="q")):
+        query = q.get("query", "")
+        ground_facts = q.get("ground_facts", [])
+        answer = "; ".join(fact_lookup.get(fid, fid) for fid in ground_facts)
+        complexity = q.get("complexity", "simple")
+        question_id = f"q{job_idx}"
+        log.info("  [QA %d/%d] %s", job_idx + 1, len(dataset_queries), query[:60])
+
+        client_turn_id = ""
+        prefetch_committed = False
+        memory_items: list[dict[str, Any]] = []
+        if len(query) > 2:
+            client_turn_id, prefetch_committed = simulate_typing(
+                client, qa_session, context_path, query,
+                args.typing_speed_ms, args.typing_jitter_ms,
+            )
+
+        send_time = time.monotonic()
+        try:
+            msg_result = client.send_message(qa_session, context_path, query, client_turn_id)
+            msg_data = msg_result.get("data", msg_result)
+            messages_list = msg_data.get("messages") or []
+            seq = 0
+            for m in reversed(messages_list):
+                if m.get("status") in ("generating", "completed"):
+                    seq = m.get("seq", 0)
+                    break
+            if not seq and messages_list:
+                seq = messages_list[-1].get("seq", 0)
+            if not seq:
+                seq = msg_data.get("latestContextSeq") or 0
+        except Exception as exc:
+            log.error("  QA 发送失败: %s", exc)
+            all_rounds.append({
+                "round_id": question_id, "query": query, "reply": "",
+                "reply_length": 0, "query_length": len(query), "ttft_ms": None,
+                "cached_tokens": 0, "prompt_tokens": 0,
+                "prefetch_committed": prefetch_committed,
+                "is_new_session": True, "is_injection": False,
+                "complexity": complexity, "ground_facts": ground_facts,
+                "error": str(exc),
+            })
             continue
 
-        # 在新 session 中进行 QA (测试跨 session 召回)
-        qa_session = client.create_session(
-            title=f"replay-qa-{sample_id}",
-            memory_engine_endpoint=args.memory_engine_endpoint,
-        )
+        try:
+            reply_result = client.stream_reply(qa_session, context_path, seq)
+        except Exception as exc:
+            reply_result = {"reply": "", "ttft_ms": None, "error": str(exc)}
 
-        sample_jobs = [j for j in jobs if j.sample_id == sample_id]
-        for job_idx, job in enumerate(tqdm(sample_jobs, desc=f"  QA", unit="q", leave=False)):
-            query = job.question
-            answer = job.answer
-            log.info("  [QA %d/%d] %s", job_idx + 1, len(sample_jobs), query[:60])
-
-            client_turn_id = ""
-            prefetch_committed = False
-            memory_items: list[dict[str, Any]] = []
-            if len(query) > 2:
-                client_turn_id, prefetch_committed = simulate_typing(
-                    client, qa_session, context_path, query,
-                    args.typing_speed_ms, args.typing_jitter_ms,
-                )
-
-            send_time = time.monotonic()
-            try:
-                msg_result = client.send_message(qa_session, context_path, query, client_turn_id)
-                msg_data = msg_result.get("data", msg_result)
-                messages_list = msg_data.get("messages") or []
-                seq = 0
-                for m in reversed(messages_list):
-                    if m.get("status") in ("generating", "completed"):
-                        seq = m.get("seq", 0)
-                        break
-                if not seq and messages_list:
-                    seq = messages_list[-1].get("seq", 0)
-                if not seq:
-                    seq = msg_data.get("latestContextSeq") or 0
-            except Exception as exc:
-                log.error("  QA 发送失败: %s", exc)
-                all_rounds.append({
-                    "round_id": job.question_id, "query": query, "reply": "",
-                    "reply_length": 0, "query_length": len(query), "ttft_ms": None,
-                    "cached_tokens": 0, "prompt_tokens": 0,
-                    "prefetch_committed": prefetch_committed,
-                    "is_new_session": True, "is_injection": False,
-                    "complexity": job.category, "ground_facts": [answer],
-                    "error": str(exc),
-                })
-                continue
-
-            try:
-                reply_result = client.stream_reply(qa_session, context_path, seq)
-            except Exception as exc:
-                reply_result = {"reply": "", "ttft_ms": None, "error": str(exc)}
-
-            round_data = {
-                "id": job.question_id,
-                "query": query,
-                "ground_facts": [answer],
-                "new_session": True,
-                "is_injection": False,
-                "complexity": job.category,
-            }
-            metrics = collect_round_metrics(round_data, reply_result, send_time, prefetch_committed, memory_items)
-            metrics["session_id"] = qa_session
-            metrics["question_id"] = job.question_id
-            metrics["gold_answer"] = answer
-            all_rounds.append(metrics)
-            all_facts[job.question_id] = answer
-            log.info("    ttft=%sms reply_len=%d", metrics["ttft_ms"], metrics["reply_length"])
+        round_data = {
+            "id": question_id,
+            "query": query,
+            "ground_facts": ground_facts,
+            "new_session": True,
+            "is_injection": False,
+            "complexity": complexity,
+        }
+        metrics = collect_round_metrics(round_data, reply_result, send_time, prefetch_committed, memory_items)
+        metrics["session_id"] = qa_session
+        metrics["question_id"] = question_id
+        metrics["gold_answer"] = answer
+        all_rounds.append(metrics)
+        all_facts[question_id] = answer
+        log.info("    ttft=%sms reply_len=%d", metrics["ttft_ms"], metrics["reply_length"])
+        log.info("    回复: %s", metrics["reply"][:200])
 
     _save_results(run, all_rounds, all_facts, llm, config={
         "mode": "replay",
         "dataset": args.dataset,
-        "dataset_sample": args.dataset_sample,
         "dataset_limit": args.dataset_limit,
         "echoagent_url": args.echoagent_url,
         "echomem_url": args.echomem_url,
         "evaluator_config": args.evaluator_config,
     }, evaluator_config=evaluator_config_dict,
-       theme="replay",
+       theme=dataset.get("theme", "replay"),
+       background_memories=background_memories,
+       dataset_queries=dataset_queries,
+       inject_session_id=inject_session if background_memories else "",
        inject_user_id=args.user_id)
 
 
@@ -1109,7 +1140,6 @@ def build_parser() -> argparse.ArgumentParser:
     # 模式选择
     g = parser.add_argument_group("模式")
     g.add_argument("--dataset", default="", help="数据集路径 (指定则进入 replay 模式; 不指定则 generate 模式)")
-    g.add_argument("--dataset-sample", default="all")
     g.add_argument("--dataset-limit", type=int, default=0)
 
     # 评测器配置 (两种模式共用)

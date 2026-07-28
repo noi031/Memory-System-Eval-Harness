@@ -100,6 +100,7 @@ class EvalRun:
         self.logger = logging.getLogger(f"eval.{self.benchmark_name}")
         self.logger.setLevel(logging.DEBUG)
         self.logger.handlers.clear()
+        self.logger.propagate = False  # avoid duplicate output via parent "eval" logger
 
         # File handler – full detail
         fh = logging.FileHandler(self.result_dir / "run.log", encoding="utf-8")
@@ -120,6 +121,7 @@ class EvalRun:
             lg = logging.getLogger(name)
             lg.setLevel(logging.DEBUG)
             lg.handlers.clear()
+            lg.propagate = False
             lg.addHandler(fh)
             lg.addHandler(ch)
 

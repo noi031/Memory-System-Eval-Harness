@@ -133,11 +133,18 @@ class EchoMemClient:
 
     # -- session lifecycle -----------------------------------------------
 
-    def open_session(self, title: str = "") -> str:
-        """Create a new session, return its id."""
+    def open_session(self, title: str = "", session_id: str = "") -> str:
+        """Create a new session, return its id.
+
+        If session_id is provided, EchoMem will create (or reuse) a session
+        with that exact id. This allows replay mode to check whether the
+        session already has committed archives before re-injecting.
+        """
         body: dict[str, Any] = {
             "agent_id": self.agent_id,
         }
+        if session_id:
+            body["session_id"] = session_id
         if title:
             body["title"] = title
         if self.workspace:
@@ -152,6 +159,21 @@ class EchoMemClient:
             raise RuntimeError(f"open_session returned no id: {resp}")
         self._log.info("opened session %s (%s)", sid, title)
         return sid
+
+    def has_archives(self, session_id: str) -> bool:
+        """Check if a session already has committed archives.
+
+        Used to skip re-injection when replaying a dataset whose memories
+        were already injected in a previous run.
+        """
+        try:
+            resp = self._get(f"/api/sessions/{session_id}/archives")
+            archives = resp.get("archives", [])
+            if isinstance(archives, list) and archives:
+                return True
+        except Exception:
+            pass
+        return False
 
     def add_message(
         self,

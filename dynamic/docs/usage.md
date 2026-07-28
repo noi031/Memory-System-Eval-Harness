@@ -25,17 +25,18 @@ python dynamic/run_eval.py \
 
 ### Replay 模式
 
-回放 LoCoMo 数据集: 直接注入对话到 EchoMem -> 新 session QA (经 EchoAgent) -> 测试跨 session 召回
+回放 generate 模式导出的数据集: 先注入背景记忆到 EchoMem -> 新 session QA (经 EchoAgent) -> 测试跨 session 召回
 
 注入阶段不经 EchoAgent, 直接调 EchoMem 的 `open_session` -> `add_message` -> `commit_session` -> `poll_commit` 流程, 不触发 LLM 生成。
 QA 阶段创建新 session 经 EchoAgent 发送 query, 测试完整管线 (含 prefill/TTFT)。
+
+**跳过重复注入**: replay 模式从数据集读取 `inject_session_id`, 注入前先查 `GET /api/sessions/{id}/archives`。若该 session 已有 archive (说明之前已注入并 commit), 直接跳过注入阶段, 省去 EchoMem 重新抽取的时间。首次 replay 时正常注入, 后续 replay 同一数据集时自动跳过。
 
 ```bash
 python dynamic/run_eval.py \
   --echoagent-url http://127.0.0.1:31020 \
   --username test_user --password YOUR_PASSWORD \
-  --dataset /path/to/locomo.json \
-  --dataset-sample sample_0 \
+  --dataset /path/to/dataset.json \
   --dataset-limit 10 \
   --llm-api-key YOUR_API_KEY
 ```
@@ -56,12 +57,11 @@ python dynamic/run_eval.py \
 
 **自动解析逻辑** (两种模式共用):
 
-1. 登录 EchoAgent 后, 从登录响应中提取用户 UUID (`user.id`)
+1. 登录 EchoAgent 后获取用户信息
 2. `agent_id` 默认设为 `echoagent` (与 echoagent 插件固定使用的值一致)
-3. 若 `--echomem-auth-key` 未指定, 调用 echoagent 插件的 `credential` 接口 (`POST {memory_engine_endpoint}` body `{"mode":"credential","userId":"<uuid>"}`)
-   - echoagent 插件用 `TenantRegistry` 将 UUID 映射到 EchoMem auth_key
-   - 若 UUID 已在 `echoagent_registry.json` 中, 直接返回已有的 auth_key
-   - 若不在, 自动 provision 新 tenant/user/key 并返回
+3. 若 `--echomem-auth-key` 未指定, 调用 echoagent 插件的 `credential` 接口 (`POST {memory_engine_endpoint}` body `{"mode":"credential","userId":"anonymous"}`)
+   - EchoAgent 的 transform 模式不传 userId, echoagent 插件默认用 `anonymous` 解析 auth_key
+   - 注入必须用同一个 auth_key, 否则记忆存到一个身份下, 召回用另一个身份查, 永远找不到
 4. 解析到的 auth_key 同时用于注入和保存到 config.json
 
 > 显式指定 `--echomem-auth-key` 时跳过自动解析, 使用用户指定的值。
@@ -115,8 +115,7 @@ Generate 模式支持 `--user-simulator-config`, 默认加载 `dynamic/configs/u
 ### 模式选择
 | 参数 | 默认值 | 说明 |
 |---|---|---|
-| `--dataset` | (空) | 数据集路径 (指定则进入 replay 模式) |
-| `--dataset-sample` | `all` | Replay 模式: 筛选指定 sample (如 `sample_0`) |
+| `--dataset` | (空) | 数据集路径 (指定则进入 replay 模式; 不指定则 generate 模式) |
 | `--dataset-limit` | `0` | Replay 模式: QA 数量上限 (0=全部) |
 
 ### 评测器配置 (两种模式共用)
