@@ -8,38 +8,9 @@ The migration uses three different evidence classes. They must not be mixed.
 - Branch: `v2`
 - Audited commit: `a146a246c2fcce128229d19e05c87228affd829d`
 
-Tracked files at this commit are the authority for the latest committed v2
-CLI, dataset, metric, report, and recovery behavior.
-
-The `vikingbot-v2-head` profile is pinned to this commit and draws from:
-
-- settings: `memory/vikingboat_alignment.py`
-- EchoMemory-only prompt: `scripts/echomemory_qa_prompting.py`
-- read-only tool protocol: `scripts/echomemory_qa_tools.py`
-- iterative runtime: `scripts/echomemory_memory_qa.py`
-
-It exposes `memory_search`, `memory_read_many`, `memory_list`, `memory_grep`,
-and `memory_glob` through EchoMemory HTTP only. It carries no historical score
-claim.
-
-## Historical VikingBot Source
-
-- Prompt and loop commit:
-  `1f027927d2557dc67948499f9cb975bb664219df`
-- Source path: `scripts/openviking_memory_qa.py`
-- Profile introduction commit:
-  `c6bf307243866d02117bc71d05803a3770c5fb1c`
-- Profile source path: `scripts/echomemory_evaluation_profiles.py`
-
-The separate `vikingbot-historical-75` profile preserves the historical
-three-message prompt layout,
-workspace bootstrap, iterative model/tool loop, duplicate-query guard, and
-follow-up reflection message. The runtime adaptation replaces OpenViking tool
-names and calls with read-only EchoMemory HTTP `memory_search` and
-`memory_read_many` operations.
-
-This adaptation does not add an OpenViking backend, SDK, configuration, or
-runtime dependency.
+Tracked files at this commit are the authority for migrated v2 CLI, dataset,
+metric, report, and recovery behavior. Experimental v2 QA profiles are not
+registered in the current CLI.
 
 ## Actual Head-Clean `legacy-77` Run
 
@@ -59,6 +30,15 @@ question, provider-default answer temperature, Top-25 search, the historical
 The profile source metadata includes the prompt SHA-256 and reference artifact.
 Later HTTP URI correctness fixes are retained because they prevent invalid
 session reads without adding hidden evidence.
+
+## VikingBoat v0.4.11 Profiles
+
+The default `vikingboat0411` profile follows the prompt, question envelope,
+tool protocol, and iterative loop from OpenViking v0.4.11 while replacing
+OpenViking memory operations with read-only EchoMemory `memory_*` tools.
+
+`vikingboat0411-natural-no-tools` keeps the same initial retrieval basis but
+injects only complete memory excerpts and exposes no tool schema.
 
 ## Uncommitted v2 Worktree
 

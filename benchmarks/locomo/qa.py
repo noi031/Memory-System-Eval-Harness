@@ -17,7 +17,7 @@ from benchmarks.locomo.profiles import (
     profile_source,
 )
 from shared.eval_base import EvalConfig
-from shared.qa import BASE_QA_FIELDS, QAResult, run_concurrent_qa
+from shared.qa import BASE_QA_FIELDS, QAResult
 
 
 QA_FIELDS = (*BASE_QA_FIELDS, "retrieval_items_json")
@@ -241,17 +241,8 @@ def run_locomo_qa(
     try:
         if not pending_tasks:
             results = []
-        elif options.profile != "one-shot":
-            results = get_agent_plugin(AGENT_PLUGIN).run_qa(
-                pending_tasks,
-                memory_client,
-                llm,
-                concurrency=config.concurrency,
-                question_timeout_s=config.question_timeout_s,
-                progress_callback=on_progress,
-            )
         else:
-            results = run_concurrent_qa(
+            results = get_agent_plugin(AGENT_PLUGIN).run_qa(
                 pending_tasks,
                 memory_client,
                 llm,

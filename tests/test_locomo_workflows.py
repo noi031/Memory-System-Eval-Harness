@@ -23,7 +23,7 @@ from benchmarks.locomo.retry import (
 )
 from benchmarks.locomo.selection import parse_question_ids, select_questions
 from benchmarks.locomo.stats import summarize_judge_rows
-from benchmarks.locomo.profiles import HISTORICAL_PROFILE
+from benchmarks.locomo.profiles import VIKINGBOAT_0411_PROFILE
 from benchmarks.locomo.qa import (
     QA_FIELDS,
     QAOptions,
@@ -297,7 +297,7 @@ class LocomoQACheckpointTests(unittest.TestCase):
 
             plugin = FakePlugin()
             options = QAOptions(
-                profile=HISTORICAL_PROFILE,
+                profile=VIKINGBOAT_0411_PROFILE,
                 tool_search_limit=25,
                 user_memory_budget_chars=4000,
                 agent_memory_budget_chars=2000,
@@ -367,7 +367,7 @@ class LocomoQACheckpointTests(unittest.TestCase):
 
             plugin = FakePlugin()
             options = QAOptions(
-                profile=HISTORICAL_PROFILE,
+                profile=VIKINGBOAT_0411_PROFILE,
                 tool_search_limit=25,
                 user_memory_budget_chars=4000,
                 agent_memory_budget_chars=2000,
@@ -421,7 +421,7 @@ class LocomoQACheckpointTests(unittest.TestCase):
                     raise KeyboardInterrupt
 
             options = QAOptions(
-                profile=HISTORICAL_PROFILE,
+                profile=VIKINGBOAT_0411_PROFILE,
                 tool_search_limit=25,
                 user_memory_budget_chars=4000,
                 agent_memory_budget_chars=2000,
@@ -458,7 +458,7 @@ class LocomoQACheckpointTests(unittest.TestCase):
 class LocomoQAResumeTests(unittest.TestCase):
     def _options(self) -> QAOptions:
         return QAOptions(
-            profile=HISTORICAL_PROFILE,
+            profile=VIKINGBOAT_0411_PROFILE,
             tool_search_limit=25,
             user_memory_budget_chars=4000,
             agent_memory_budget_chars=2000,
@@ -530,7 +530,7 @@ class LocomoQAResumeTests(unittest.TestCase):
                     answer="one",
                     response="one",
                     retrieval_items=[{"uri": "echo://one"}],
-                    qa_profile=HISTORICAL_PROFILE,
+                    qa_profile=VIKINGBOAT_0411_PROFILE,
                 ),
                 QAResult(
                     question_id="q2",
@@ -539,7 +539,7 @@ class LocomoQAResumeTests(unittest.TestCase):
                     answer="two",
                     response="",
                     retrieval_error="timeout",
-                    qa_profile=HISTORICAL_PROFILE,
+                    qa_profile=VIKINGBOAT_0411_PROFILE,
                 ),
             ])
 

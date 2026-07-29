@@ -92,7 +92,7 @@ def load_qa_results(path: Path) -> list[QAResult]:
             completion_tokens=int(row.get("completion_tokens") or 0),
             tool_call_count=int(row.get("tool_call_count") or 0),
             iterations=int(row.get("iterations") or 1),
-            qa_profile=str(row.get("qa_profile") or "one-shot"),
+            qa_profile=str(row.get("qa_profile") or "vikingboat0411"),
         ))
     return results
 

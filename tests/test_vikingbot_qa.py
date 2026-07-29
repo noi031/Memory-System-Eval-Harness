@@ -22,16 +22,10 @@ from agents.vikingbot.vikingboat0411_prompting import (
 from backends.echomemory import SearchResult
 from benchmarks.locomo.profiles import (
     AGENT_PLUGIN,
-    HISTORICAL_PROFILE,
-    HISTORICAL_PROMPT_COMMIT,
-    HISTORICAL_SOURCE,
     LEGACY_77_PROFILE,
     LEGACY_77_REFERENCE,
     LEGACY_77_SETTINGS,
     LEGACY_77_SOURCE,
-    V2_ALIGNED_COMMIT,
-    V2_ALIGNED_PROFILE,
-    V2_ALIGNED_SETTINGS,
     VIKINGBOAT_0411_PROFILE,
     VIKINGBOAT_0411_SETTINGS,
     VIKINGBOAT_0411_NATURAL_NO_TOOLS_PROFILE,
@@ -70,7 +64,7 @@ class _FakeLLM:
     max_retries = 5
 
 
-class HistoricalVikingBotTests(unittest.TestCase):
+class VikingBotCoreTests(unittest.TestCase):
     def test_sanitizes_tool_loop_residue(self):
         self.assertEqual(
             "Jon offers dance classes and workshops.",
@@ -86,7 +80,7 @@ class HistoricalVikingBotTests(unittest.TestCase):
             ),
         )
 
-    def test_loads_historical_bootstrap_files(self):
+    def test_loads_bootstrap_files(self):
         with tempfile.TemporaryDirectory() as directory:
             workspace = Path(directory)
             (workspace / "SOUL.md").write_text("# Soul\nHistorical soul", encoding="utf-8")
@@ -142,7 +136,7 @@ class HistoricalVikingBotTests(unittest.TestCase):
                 answer="19 January 2023",
                 question_time="2023-07-23",
                 vikingbot_workspace="",
-                qa_profile=HISTORICAL_PROFILE,
+                qa_profile=LEGACY_77_PROFILE,
             )
 
         self.assertEqual(
@@ -152,7 +146,7 @@ class HistoricalVikingBotTests(unittest.TestCase):
         self.assertEqual("19 January 2023", result.response)
         self.assertEqual(1, result.tool_call_count)
         self.assertEqual(2, result.iterations)
-        self.assertEqual(HISTORICAL_PROFILE, result.qa_profile)
+        self.assertEqual(LEGACY_77_PROFILE, result.qa_profile)
         self.assertEqual(220, result.prompt_tokens)
         self.assertEqual(30, result.completion_tokens)
         self.assertEqual("vikingbot", result.trace["agent"])
@@ -270,121 +264,10 @@ class HistoricalVikingBotTests(unittest.TestCase):
             audit["read_files"][0]["tools"],
         )
 
-    def test_historical_profile_resolves_vikingbot_plugin(self):
+    def test_profile_resolves_vikingbot_plugin(self):
         plugin = get_agent_plugin(AGENT_PLUGIN)
 
         self.assertEqual("vikingbot", plugin.descriptor.id)
-
-    def test_historical_profile_pins_source_commits(self):
-        self.assertEqual(40, len(HISTORICAL_PROMPT_COMMIT))
-        self.assertEqual(
-            HISTORICAL_PROMPT_COMMIT,
-            HISTORICAL_SOURCE["prompt_commit"],
-        )
-        self.assertEqual(
-            "scripts/openviking_memory_qa.py",
-            HISTORICAL_SOURCE["prompt_path"],
-        )
-
-
-class V2AlignedVikingBotTests(unittest.TestCase):
-    def test_profile_pins_committed_v2_head_settings(self):
-        self.assertEqual(
-            "a146a246c2fcce128229d19e05c87228affd829d",
-            V2_ALIGNED_COMMIT,
-        )
-        self.assertEqual(30, V2_ALIGNED_SETTINGS["top_k"])
-        self.assertEqual(0.1, V2_ALIGNED_SETTINGS["initial_min_score"])
-        self.assertEqual(20, V2_ALIGNED_SETTINGS["tool_search_limit"])
-        self.assertEqual(0.35, V2_ALIGNED_SETTINGS["tool_min_score"])
-        self.assertEqual(
-            "vikingbot_native_safe",
-            V2_ALIGNED_SETTINGS["tool_set"],
-        )
-
-    def test_v2_prompt_is_echomemory_only(self):
-        messages = build_messages(
-            "What happened?",
-            "2026-07-28",
-            [SearchResult(
-                uri="echo://memory/1",
-                score=0.8,
-                content="A remembered fact.",
-            )],
-            4000,
-            2000,
-            "",
-            V2_ALIGNED_PROFILE,
-        )
-        prompt = "\n".join(str(item["content"]) for item in messages)
-
-        self.assertIn("using EchoMemory as the memory backend", prompt)
-        self.assertIn("public HTTP-backed memory tools", prompt)
-        self.assertNotIn("OpenViking", prompt)
-        self.assertIn(
-            "Do not assume access to local files, databases, shell commands",
-            prompt,
-        )
-
-    def test_v2_tool_set_matches_committed_read_only_protocol(self):
-        names = [
-            tool["function"]["name"]
-            for tool in tool_definitions("vikingbot_native_safe")
-        ]
-
-        self.assertEqual([
-            "memory_search",
-            "memory_read_many",
-            "memory_list",
-            "memory_grep",
-            "memory_glob",
-        ], names)
-
-    def test_v2_initial_score_threshold_filters_prompt_evidence(self):
-        class ThresholdEchoMem:
-            def search(self, _query, **_kwargs):
-                return [
-                    SearchResult(
-                        uri="echo://memory/low",
-                        score=0.05,
-                        content="low",
-                    ),
-                    SearchResult(
-                        uri="echo://memory/high",
-                        score=0.8,
-                        content="high",
-                    ),
-                ]
-
-        with patch(
-            "agents.vikingbot.runtime.chat_with_tools",
-            return_value=(
-                {"role": "assistant", "content": "high"},
-                10,
-                1,
-            ),
-        ):
-            result = answer_one_vikingbot_question(
-                ThresholdEchoMem(),
-                _FakeLLM(),
-                question_id="q1",
-                question="What was remembered?",
-                answer="high",
-                qa_profile=V2_ALIGNED_PROFILE,
-                initial_min_score=0.1,
-                tool_min_score=0.35,
-                tool_set="vikingbot_native_safe",
-            )
-
-        self.assertEqual(
-            ["echo://memory/high"],
-            [item["uri"] for item in result.retrieval_items],
-        )
-        self.assertEqual(
-            "vikingbot_native_safe",
-            result.trace["settings"]["tool_set"],
-        )
-
 
 class Legacy77VikingBotTests(unittest.TestCase):
     def test_profile_matches_actual_head_clean_reference_run(self):
@@ -577,7 +460,7 @@ class VikingBotRuntimeTests(unittest.TestCase):
                 question_id="q1",
                 question="Question",
                 answer="done",
-                qa_profile=V2_ALIGNED_PROFILE,
+                qa_profile=VIKINGBOAT_0411_PROFILE,
                 tool_query_dedup_scope="turn",
             )
 
@@ -617,7 +500,7 @@ class VikingBotRuntimeTests(unittest.TestCase):
                 question_id="q1",
                 question="Question",
                 answer="done",
-                qa_profile=V2_ALIGNED_PROFILE,
+                qa_profile=VIKINGBOAT_0411_PROFILE,
             )
 
         self.assertEqual(
@@ -1255,8 +1138,6 @@ class ProfileSchemaTests(unittest.TestCase):
         self.assertEqual(
             {
                 LEGACY_77_PROFILE,
-                HISTORICAL_PROFILE,
-                V2_ALIGNED_PROFILE,
                 VIKINGBOAT_0411_PROFILE,
                 VIKINGBOAT_0411_NATURAL_NO_TOOLS_PROFILE,
             },

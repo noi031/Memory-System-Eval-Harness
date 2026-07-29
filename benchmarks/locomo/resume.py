@@ -23,7 +23,6 @@ QA_CONTRACT_FILES = (
     "agents/vikingbot/tools.py",
     "agents/vikingbot/prompting.py",
     "agents/vikingbot/legacy77_prompting.py",
-    "agents/vikingbot/v2_prompting.py",
     "agents/vikingbot/vikingboat0411_prompting.py",
     "benchmarks/locomo/profiles/vikingboat0411_natural_no_tools.py",
     "agents/vikingbot/answers.py",
@@ -265,7 +264,7 @@ def _result_from_row(row: dict[str, str]) -> QAResult:
         completion_tokens=_parse_int(row.get("completion_tokens")),
         tool_call_count=_parse_int(row.get("tool_call_count")),
         iterations=_parse_int(row.get("iterations"), 1),
-        qa_profile=str(row.get("qa_profile") or "one-shot"),
+        qa_profile=str(row.get("qa_profile") or "vikingboat0411"),
         retrieval_latency_s=(
             _parse_float(row.get("retrieval_latency_ms")) / 1000
         ),

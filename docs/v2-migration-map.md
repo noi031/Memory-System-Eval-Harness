@@ -20,24 +20,21 @@ EchoMemory is the only backend in scope.
 
 | v2 source or historical source | Current destination |
 | --- | --- |
-| Historical VikingBot system prompt and workspace bootstrap | `agents/vikingbot/prompting.py`, `agents/vikingbot/bootstrap/` |
-| Historical `memory_search` and `memory_read_many` protocol | `agents/vikingbot/tools.py` |
-| Historical OpenAI-compatible iterative tool loop | `agents/vikingbot/runtime.py` |
+| VikingBot system prompt and workspace bootstrap | `agents/vikingbot/prompting.py`, `agents/vikingbot/bootstrap/` |
+| VikingBot read-only memory tool protocol | `agents/vikingbot/tools.py` |
+| OpenAI-compatible iterative tool loop | `agents/vikingbot/runtime.py` |
 | Reusable VikingBot entrypoint | `agents/vikingbot/plugin.py` |
 | Agent contract and lookup | `agents/base.py`, `agents/registry.py` |
-| July 17 LoCoMo settings and reference score | `benchmarks/locomo/profiles/vikingbot_historical.py` |
 | July 13 actual `head_clean` prompt, five-tool loop, and `63/81` settings | `agents/vikingbot/legacy77_prompting.py`, `benchmarks/locomo/profiles/legacy77.py` |
-| Committed v2 HEAD EchoMemory-only VikingBoat prompt, five-tool protocol, and alignment settings | `agents/vikingbot/v2_prompting.py`, `agents/vikingbot/tools.py`, `benchmarks/locomo/profiles/vikingbot_v2.py` |
+| VikingBoat v0.4.11 prompt, five-tool protocol, and alignment settings | `agents/vikingbot/vikingboat0411_prompting.py`, `agents/vikingbot/tools.py`, `benchmarks/locomo/profiles/vikingboat0411.py` |
 | v2 backend descriptor/config contract | `backends/base.py` |
 | v2 backend registry | `backends/registry.py` |
 | Existing EchoMemory HTTP search/read/list/glob implementation | `backends/echomemory/client.py` |
 | EchoMemory backend plugin | `backends/echomemory/plugin.py` |
 | Backend-neutral search and commit result types | `backends/types.py` |
 
-The profiles retain separate historical references: `legacy-77` targets the
-July 13, 2026 `head_clean` run (`63/81`, `77.78%`), while
-`vikingbot-historical-75` records the July 17 rejudged result (`61/81`,
-`75.31%`).
+The `legacy-77` profile targets the July 13, 2026 `head_clean` run (`63/81`,
+`77.78%`). The two VikingBoat v0.4.11 profiles carry no score claim.
 
 ## Backend Migration
 

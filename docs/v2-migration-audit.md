@@ -11,7 +11,7 @@ Source classes and pinned commits are documented in
 
 | v2 area | v3 implementation | Verification |
 | --- | --- | --- |
-| Historical and committed-v2 VikingBot prompts, read-only tool protocols, and iterative loop | `agents/vikingbot/`, `benchmarks/locomo/profiles/` | profile provenance, prompt boundary, five-tool protocol, threshold, QA, and CLI tests |
+| Supported VikingBot prompts, read-only tool protocols, and iterative loop | `agents/vikingbot/`, `benchmarks/locomo/profiles/` | profile provenance, prompt boundary, five-tool protocol, threshold, QA, and CLI tests |
 | Per-question VikingBot prompt/tool traces and answer cleanup | `agents/vikingbot/answers.py`, `benchmarks/locomo/agent_traces/` runtime artifacts | VikingBot trace and sanitizer tests |
 | Incremental LoCoMo QA/Judge checkpoints and validated QA resume | `benchmarks/locomo/qa.py`, `benchmarks/locomo/judge.py`, `benchmarks/locomo/resume.py` | ordered checkpoint, strict resume compatibility, and CLI integration tests |
 | EchoMemory backend descriptor, registry, and HTTP client | `backends/echomemory/` | backend contract tests and `scripts/backend_doctor.py` |
@@ -43,7 +43,7 @@ counts, workspace state, and readiness are not inferred.
 | v2 committed path family | Disposition |
 | --- | --- |
 | `benchmark/locomo/echomemory/*` | Migrated into `benchmarks/locomo/`; wrapper scripts replaced by the unified CLI |
-| `memory/vikingboat_alignment.py` | Migrated as the separate `vikingbot-v2-head` profile |
+| `memory/vikingboat_alignment.py` | Superseded by the retained `legacy-77` and VikingBoat v0.4.11 profiles |
 | `memory/plugins/echomemory/*` | HTTP transport and read-only agent behavior split between `backends/echomemory/` and `agents/vikingbot/`; SDK/workspace inspection excluded |
 | `memory/adapters/*`, plugin contracts and registries | Replaced by `backends/` contracts, registry, and backend doctor |
 | `memory/datasets.py` | Formal loaders split by dataset; custom dry-run parsing moved to `benchmarks/generic/` |

@@ -36,15 +36,6 @@ workspace，并保留 `ECHOMEM_AUTO_START=1`。下面两条命令会直接对该
   --resume-qa /path/to/interrupted-run \
   --resume-judge /path/to/interrupted-run
 
-# 显式运行简单 one-shot 对照
-./eval.sh locomo --sample conv-30 --reuse-memory-account --qa-profile one-shot
-
-# 使用 v2 已提交 HEAD 的 EchoMemory-only VikingBoat 对齐口径
-./eval.sh locomo \
-  --sample conv-30 \
-  --reuse-memory-account \
-  --qa-profile vikingbot-v2-head
-
 # 使用 VikingBot v0.4.11 prompt、工具语义和循环口径
 # 后端和模型可见工具均使用只读 EchoMemory memory_* 接口
 ./eval.sh locomo \
@@ -129,7 +120,7 @@ python benchmarks/locomo/run_eval.py \
 |---|---|---|
 | `--llm-base-url` | (空) | LLM API base URL (也可通过 `LLM_BASE_URL` 设置) |
 | `--llm-model` | `doubao-seed-2.0-pro` | LLM 模型名 |
-| `--llm-temperature` | `0.7` | one-shot 生成温度；历史 VikingBot profile 不显式发送 temperature |
+| `--llm-temperature` | `0.7` | 回答模型生成温度；profile 可选择不显式发送 temperature |
 | `--llm-max-tokens` | `1024` | LoCoMo 历史 profile 的最大生成 token 数 |
 | `--llm-timeout-s` | `120.0` | LLM 请求超时 (秒) |
 | `--llm-retries` | `3` | LLM 请求重试次数 |
@@ -138,13 +129,13 @@ python benchmarks/locomo/run_eval.py \
 | 参数 | 默认值 | 说明 |
 |---|---|---|
 | `--qa-profile` | 自动 | `--tools` 默认选择 `vikingboat0411`；`--no-tools` 默认选择 `vikingboat0411-natural-no-tools`。显式指定时可覆盖 |
-| `--top-k` | profile 决定 | historical=`25`；v2-head=`30` |
+| `--top-k` | profile 决定 | 三个保留 profile 均为 `25` |
 | `--memory-budget-chars` | `6000` | 总记忆字符预算 |
-| `--tool-search-limit` | profile 决定 | historical=`25`；v2-head=`20` |
-| `--initial-min-score` | profile 决定 | historical=`0`；v2-head=`0.1` |
-| `--tool-min-score` | profile 决定 | historical=`0`；v2-head=`0.35` |
-| `--tool-search-pool-multiplier` | profile 决定 | historical=`4`；v2-head=`1` |
-| `--tool-set` | profile 决定 | historical=`search_read`；v2-head=`vikingbot_native_safe`，增加只读 list/grep/glob |
+| `--tool-search-limit` | profile 决定 | 三个保留 profile 均为 `25` |
+| `--initial-min-score` | profile 决定 | `legacy-77=0`；VikingBoat 0.4.11 profiles=`0.1` |
+| `--tool-min-score` | profile 决定 | `legacy-77=0`；VikingBoat 0.4.11 profiles=`0.35` |
+| `--tool-search-pool-multiplier` | profile 决定 | 三个保留 profile 均为 `1` |
+| `--tool-set` | profile 决定 | `legacy-77=vikingbot_native_safe`；VikingBoat 0.4.11 profiles=`vikingbot_echo_native` |
 | `--tools` / `--no-tools` | `--tools` | 是否向回答模型暴露 profile 的记忆工具；关闭后保留相同 prompt 和初始检索注入，只执行一次模型调用 |
 | `--user-memory-budget-chars` | `4000` | user memory prompt 预算 |
 | `--agent-memory-budget-chars` | `2000` | agent memory prompt 预算 |
@@ -155,7 +146,7 @@ python benchmarks/locomo/run_eval.py \
 | `--concurrency` | `4` | QA 并发数 |
 | `--commit-timeout-s` | `0` | Commit 轮询超时 (秒)，0 表示无限等待 |
 | `--commit-poll-interval-s` | `2.0` | Commit 轮询间隔 (秒) |
-| `--question-timeout-s` | profile 决定 | 两个 VikingBot profile 均为 `600` 秒；0 表示不增加总限制 |
+| `--question-timeout-s` | profile 决定 | 三个保留 profile 均为 `600` 秒；0 表示不增加总限制 |
 | `--out-dir` | `results` | 结果目录 |
 | `--allow-incomplete-imports` | false | 导入未完成仍继续，仅限诊断 |
 | `--allow-memory-provenance-mismatch` | false | session manifest 与数据集/session-mode 不一致时仍继续；仅限诊断 |

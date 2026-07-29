@@ -66,7 +66,7 @@ class QAResult:
     completion_tokens: int = 0
     tool_call_count: int = 0
     iterations: int = 1
-    qa_profile: str = "one-shot"
+    qa_profile: str = "vikingboat0411"
     sample_id: str = ""
     category: str = ""
     retrieval_latency_s: float = 0.0

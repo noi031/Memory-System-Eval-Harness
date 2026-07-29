@@ -222,50 +222,6 @@ class StaticCliIntegrationTests(unittest.TestCase):
             self.assertEqual(0, summary["judge_errors"])
             self.assertEqual("injected", summary["memory_source"])
 
-    def test_locomo_v2_head_profile_full_cli_flow(self):
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            dataset = root / "locomo.json"
-            dataset.write_text(json.dumps([{
-                "sample_id": "conv-test",
-                "conversation": {
-                    "speaker_a": "Alex",
-                    "speaker_b": "Sam",
-                    "session_1": [{
-                        "speaker": "Alex",
-                        "dia_id": "d1",
-                        "text": "The answer is answer.",
-                    }],
-                    "session_1_date_time": "9:00 AM on 2 January, 2023",
-                },
-                "qa": [{
-                    "question": "What is the answer?",
-                    "answer": "answer",
-                }],
-            }]), encoding="utf-8")
-
-            summary = self._run(
-                "locomo",
-                dataset,
-                root / "results",
-                "--inject-memory",
-                "--qa-profile",
-                "vikingbot-v2-head",
-            )
-
-            self.assertEqual("completed", summary["status"])
-            self.assertEqual("vikingbot-v2-head", summary["qa_profile"])
-            self.assertEqual(30, summary["top_k"])
-            self.assertEqual(20, summary["tool_search_limit"])
-            self.assertEqual(
-                "vikingbot_native_safe",
-                summary["tool_set"],
-            )
-            self.assertEqual(
-                "a146a246c2fcce128229d19e05c87228affd829d",
-                summary["qa_profile_source"]["commit"],
-            )
-
     def test_locomo_reuses_existing_memory_without_import(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

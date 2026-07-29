@@ -1,4 +1,4 @@
-"""Natural one-shot baseline derived from VikingBot v0.4.11."""
+"""Natural no-tools baseline derived from VikingBot v0.4.11."""
 
 from __future__ import annotations
 

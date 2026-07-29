@@ -158,16 +158,6 @@ def build_messages(
             user_memory_budget_chars,
             agent_memory_budget_chars,
         )
-    if qa_profile == "vikingbot-v2-head":
-        from .v2_prompting import build_v2_aligned_messages
-
-        return build_v2_aligned_messages(
-            question,
-            question_time,
-            items,
-            user_memory_budget_chars,
-            agent_memory_budget_chars,
-        )
     user_items: list[SearchResult] = []
     agent_items: list[SearchResult] = []
     for item in items:

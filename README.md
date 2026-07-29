@@ -151,12 +151,6 @@ session_mode=locomo
 # 保留自动启动的 EchoMem 服务
 ./eval.sh locomo --start-echomem --keep-echomem --sample conv-30
 
-# 使用 v2 已提交 HEAD 的 EchoMemory-only VikingBoat prompt/五工具口径
-./eval.sh locomo \
-  --sample conv-30 \
-  --reuse-memory-account \
-  --qa-profile vikingbot-v2-head
-
 # 从中断运行继续，健康 QA/Judge 行不会再次调用模型
 ./eval.sh locomo \
   --sample conv-30 \
@@ -187,16 +181,10 @@ LoCoMo 在进入 QA 前还会校验数据集 SHA-256 和实际 session manifest�
 
 LoCoMo 未显式指定 profile 时，`--tools` 自动选择 `vikingboat0411`，
 `--no-tools` 自动选择 `vikingboat0411-natural-no-tools`。高级复现仍可通过
-`--qa-profile` 显式选择历史或其他固定 profile。
-历史 prompt/loop 与 profile 的固定提交及 EchoMemory 适配边界见
+`--qa-profile legacy-77` 显式选择 77% 历史复现口径。
+prompt/loop 来源与 EchoMemory 适配边界见
 `docs/v2-source-provenance.md`，并会写入 `summary.json` 和逐题
 `agent_traces/*.json`。
-
-`--qa-profile vikingbot-v2-head` 是另一个独立口径，固定到 v2 已提交
-commit `a146a246c2fcce128229d19e05c87228affd829d`。它使用 EchoMemory-only
-system prompt、初始 Top-30 / 0.1 阈值、工具 Top-20 / 0.35 阈值，以及
-`memory_search`、`memory_read_many`、`memory_list`、`memory_grep`、
-`memory_glob` 五个只读 HTTP 工具。该 profile 不携带历史分数声明。
 
 LoCoMo 默认按数据集原始 session 分批导入，避免把整段长对话压成一个
 超大 commit。快速检查可增加 `--max-sessions 1`；兼容旧单 session 行为时
