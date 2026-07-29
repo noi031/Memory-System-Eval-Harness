@@ -4,18 +4,12 @@ from __future__ import annotations
 
 import json
 import re
-import sys
 import urllib.request
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-# Add scripts/ to sys.path so we can import benchmark_adapter
-_SCRIPTS_DIR = Path(__file__).resolve().parent.parent / "scripts"
-if str(_SCRIPTS_DIR) not in sys.path:
-    sys.path.insert(0, str(_SCRIPTS_DIR))
-
-import benchmark_adapter as ba  # noqa: E402
+from shared import benchmark_adapter as ba
 
 # -- 数据集自动解析 ----------------------------------------------------------
 # 各 benchmark 的默认数据文件名和下载源

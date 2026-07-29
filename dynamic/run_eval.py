@@ -1,15 +1,13 @@
 #!/usr/bin/env python3
-"""动态评测脚本: 仿真 EchoAgent+EchoMem 线上真实效果。
+"""动态评测脚本: 通过 agent 插件评测不同 agent 的记忆系统效果。
 
 两种模式:
-  - generate: LLM 生成背景记忆 -> 注入 EchoMem -> 逐轮 QA 测试端到端召回+TTFT
-  - replay: 回放数据集对话, 直接注入 EchoMem -> 新会话 QA 测试跨 session 召回
+  - generate: LLM 生成背景记忆 -> 注入 -> 逐轮 QA 测试端到端召回+TTFT
+  - replay: 回放数据集对话, 注入背景记忆 -> 新会话 QA 测试跨 session 召回
 
-两种模式的注入阶段都直连 EchoMem (open_session -> add_message -> commit -> poll),
-不经 EchoAgent, 不触发 LLM 生成。QA 阶段走 EchoAgent 完整管线 (含 prefill/TTFT)。
-
-所有 EchoAgent API 调用都有容错: 接口不存在 (404) 时回退。
-例如 prefill/tick 返回 404 则跳过打字模拟, 直接发消息。
+记忆注入和 QA 的具体行为由 agent 插件决定 (--agent-plugin)。
+默认 echo_agent 插件: 注入直连 EchoMem, QA 走 EchoAgent 完整管线 (含 prefill/TTFT)。
+bare_llm 插件: 无记忆系统, 记忆拼入 system prompt, 仅作基线对比。
 
 用法见 docs/usage.md
 """
@@ -24,14 +22,9 @@ import os
 import random
 import re
 import sys
-import time
-import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
-from urllib.error import HTTPError, URLError
-from urllib.parse import quote
-from urllib.request import Request, urlopen
 
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(_PROJECT_ROOT) not in sys.path:
@@ -39,9 +32,9 @@ if str(_PROJECT_ROOT) not in sys.path:
 
 from tqdm import tqdm
 
-from shared.eval_base import EvalConfig, EvalRun, add_echomem_args, add_llm_args, add_eval_args, build_config_from_args
-from shared.echomem_client import EchoMemClient
+from shared.eval_base import EvalConfig, EvalRun, add_agent_plugin_args
 from shared.llm_client import LLMClient
+from agents import AgentPlugin, load_agent_plugin
 
 _CONFIGS_DIR = Path(__file__).resolve().parent / "configs"
 
@@ -58,318 +51,6 @@ def _load_evaluator_config(path: str) -> dict[str, Any]:
     import yaml
     with open(p, encoding="utf-8") as f:
         return yaml.safe_load(f)
-
-
-# ---------------------------------------------------------------------------
-# EchoAgent HTTP client (with graceful failure / fallback)
-# ---------------------------------------------------------------------------
-
-def _encode_context_path(context_path: str) -> str:
-    return quote(context_path, safe="")
-
-
-class EchoAgentClient:
-    """EchoAgent 后端 HTTP 客户端, 所有调用都有容错。"""
-
-    def __init__(self, base_url: str, username: str, password: str):
-        self.base_url = base_url.rstrip("/")
-        self.username = username
-        self.password = password
-        self.token: str = ""
-        self.user_uuid: str = ""
-        self._context_seq: dict[str, int] = {}
-
-    def _headers(self, json_content: bool = True) -> dict[str, str]:
-        headers: dict[str, str] = {}
-        if self.token:
-            headers["Authorization"] = f"Bearer {self.token}"
-        if json_content:
-            headers["Content-Type"] = "application/json"
-        return headers
-
-    def _request(self, method: str, path: str, body: dict | None = None, timeout: float = 30) -> dict[str, Any]:
-        url = f"{self.base_url}{path}"
-        data = json.dumps(body or {}).encode("utf-8") if body else None
-        req = Request(url, data=data, headers=self._headers(), method=method)
-        with urlopen(req, timeout=timeout) as resp:
-            raw = resp.read().decode("utf-8", "replace")
-            return json.loads(raw) if raw.strip() else {}
-
-    def login(self) -> None:
-        """登录获取 JWT token。"""
-        body = {"username": self.username, "password": self.password}
-        data = json.dumps(body).encode("utf-8")
-        req = Request(
-            f"{self.base_url}/v1/auth/login",
-            data=data,
-            headers={"Content-Type": "application/json"},
-            method="POST",
-        )
-        with urlopen(req, timeout=15) as resp:
-            result = json.loads(resp.read().decode("utf-8", "replace"))
-        self.token = result.get("access_token") or ""
-        if not self.token:
-            # 尝试从 cookie 获取
-            for cookie_header in resp.headers.get_all("Set-Cookie") or []:
-                if "access_token=" in cookie_header:
-                    self.token = cookie_header.split("access_token=")[1].split(";")[0]
-        if not self.token:
-            raise RuntimeError(f"登录成功但未获取 token: {list(result.keys())}")
-        user_info = result.get("user") or {}
-        self.user_uuid = user_info.get("id") or ""
-
-    def get_memory_auth_key(self, memory_engine_endpoint: str) -> str:
-        """获取与 EchoAgent 召回时一致的 auth_key。
-
-        EchoAgent 的 transform 模式不传 userId, echoagent 插件默认用
-        "anonymous" 解析 auth_key。注入必须用同一个 auth_key, 否则记忆
-        存到一个 tenant 下, 召回用另一个 tenant 查, 永远找不到。
-        """
-        body = {"mode": "credential", "userId": "anonymous"}
-        data = json.dumps(body).encode("utf-8")
-        req = Request(
-            memory_engine_endpoint,
-            data=data,
-            headers={"Content-Type": "application/json"},
-            method="POST",
-        )
-        with urlopen(req, timeout=15) as resp:
-            result = json.loads(resp.read().decode("utf-8", "replace"))
-        auth_key = result.get("result", {}).get("authKey", "")
-        if not auth_key:
-            raise RuntimeError(f"credential 接口未返回 authKey: {result}")
-        return auth_key
-
-    def create_session(self, title: str = "", memory_engine_endpoint: str = "") -> str:
-        """创建会话, 尝试启用记忆引擎 (失败则忽略)。"""
-        result = self._request("POST", "/v1/sessions", {"title": title or f"test-{uuid.uuid4().hex[:8]}"})
-        session_id = result.get("data", result).get("id") or result.get("id", "")
-        if session_id and memory_engine_endpoint:
-            try:
-                self._request("POST", f"/v1/sessions/{session_id}/memory-engine/test",
-                              {"endpoint": memory_engine_endpoint})
-                self._request("PUT", f"/v1/sessions/{session_id}/memory-engine",
-                              {"enabled": True, "endpoint": memory_engine_endpoint})
-            except Exception as exc:
-                logging.warning("启用记忆引擎失败 (session %s): %s", session_id, exc)
-        return session_id
-
-    def prefetch_tick(self, session_id: str, context_path: str, client_turn_id: str,
-                      revision: int, draft_text: str) -> dict[str, Any] | None:
-        """打字模拟 tick。返回 None 表示接口不存在或失败。"""
-        path = f"/v1/sessions/{session_id}/context-paths/{_encode_context_path(context_path)}/prefetch/tick"
-        try:
-            return self._request("POST", path, {
-                "clientTurnId": client_turn_id,
-                "revision": revision,
-                "draftText": draft_text,
-            })
-        except HTTPError as e:
-            if e.code == 404:
-                logging.debug("prefetch/tick 不存在 (404), 跳过打字模拟")
-                return None
-            raise
-        except Exception as e:
-            logging.debug("prefetch/tick 失败: %s", e)
-            return None
-
-    def prefetch_finalize(self, session_id: str, context_path: str, client_turn_id: str,
-                          full_content: str) -> dict[str, Any] | None:
-        """完成打字模拟。返回 None 表示接口不存在或失败。"""
-        path = f"/v1/sessions/{session_id}/context-paths/{_encode_context_path(context_path)}/prefetch/finalize"
-        try:
-            return self._request("POST", path, {
-                "clientTurnId": client_turn_id,
-                "fullContent": full_content,
-            })
-        except HTTPError as e:
-            if e.code == 404:
-                logging.debug("prefetch/finalize 不存在 (404), 跳过")
-                return None
-            raise
-        except Exception as e:
-            logging.debug("prefetch/finalize 失败: %s", e)
-            return None
-
-    def send_message(self, session_id: str, context_path: str, content: str,
-                     prefetch_client_turn_id: str = "") -> dict[str, Any]:
-        """发送消息, 自动处理 seq 冲突重试。"""
-        key = f"{session_id}:{context_path}"
-        after_seq = self._context_seq.get(key, 0)
-        path = f"/v1/sessions/{session_id}/context-paths/{_encode_context_path(context_path)}/messages"
-        result = {}
-        for attempt in range(3):
-            body: dict[str, Any] = {"content": content, "afterSeq": after_seq}
-            if prefetch_client_turn_id:
-                body["prefetchClientTurnId"] = prefetch_client_turn_id
-            result = self._request("POST", path, body)
-            data = result.get("data", result)
-            server_seq = data.get("latestContextSeq")
-            if isinstance(server_seq, int):
-                self._context_seq[key] = server_seq
-            if data.get("error") in ("CONTEXT_SEQ_OUTDATED", "SEQ_OUTDATED") and isinstance(server_seq, int):
-                after_seq = server_seq
-                continue
-            return result
-        return result
-
-    def stream_reply(self, session_id: str, context_path: str, seq: int,
-                     timeout: float = 300) -> dict[str, Any]:
-        """读取 SSE 流式回复, 返回 {reply, ttft_ms, done_event}。"""
-        url = (f"{self.base_url}/v1/sessions/{session_id}/context-paths/"
-               f"{_encode_context_path(context_path)}/streaming?seq={seq}")
-        headers = self._headers(json_content=False)
-        headers["Accept"] = "text/event-stream"
-        headers["Last-Event-ID"] = "-1"
-        req = Request(url, headers=headers)
-
-        reply_parts: list[str] = []
-        ttft_ms: float | None = None
-        send_time = time.monotonic()
-        done_event: dict[str, Any] = {}
-
-        with urlopen(req, timeout=timeout) as resp:
-            raw_buffer = b""
-            text_buffer = ""
-            while True:
-                chunk = resp.read(4096)
-                if not chunk:
-                    break
-                raw_buffer += chunk
-                try:
-                    text = raw_buffer.decode("utf-8")
-                    raw_buffer = b""
-                except UnicodeDecodeError:
-                    text = raw_buffer[:-3].decode("utf-8", errors="replace")
-                    raw_buffer = raw_buffer[-3:]
-                text_buffer += text
-                while "\n\n" in text_buffer:
-                    event_block, text_buffer = text_buffer.split("\n\n", 1)
-                    event_type = ""
-                    data_lines: list[str] = []
-                    for line in event_block.splitlines():
-                        if line.startswith("event:"):
-                            event_type = line[len("event:"):].strip()
-                        elif line.startswith("data:"):
-                            data_lines.append(line[len("data:"):])
-                    event_data = "\n".join(data_lines)
-                    if not event_data:
-                        continue
-                    try:
-                        data = json.loads(event_data)
-                    except json.JSONDecodeError:
-                        continue
-                    if event_type in ("create", "append"):
-                        if ttft_ms is None:
-                            ttft_ms = (time.monotonic() - send_time) * 1000
-                        fragment = data.get("fragment") or data.get("content") or ""
-                        if isinstance(fragment, dict):
-                            reply_parts.append(fragment.get("content") or "")
-                        else:
-                            reply_parts.append(str(fragment))
-                    elif event_type == "done":
-                        done_event = data if isinstance(data, dict) else {}
-                        if ttft_ms is None:
-                            ttft_ms = (time.monotonic() - send_time) * 1000
-                        return {"reply": "".join(reply_parts), "ttft_ms": ttft_ms, "done_event": done_event}
-                    elif event_type == "error":
-                        return {"reply": "".join(reply_parts), "ttft_ms": ttft_ms,
-                                "error": str(data), "done_event": {}}
-        return {"reply": "".join(reply_parts), "ttft_ms": ttft_ms, "done_event": done_event}
-
-    def get_last_request(self, session_id: str, context_path: str = "/") -> dict[str, Any]:
-        try:
-            path = (f"/v1/sessions/{session_id}/primary-model/last-request"
-                    f"?contextPath={_encode_context_path(context_path)}")
-            return self._request("GET", path)
-        except Exception:
-            return {}
-
-
-# ---------------------------------------------------------------------------
-# Typing simulation
-# ---------------------------------------------------------------------------
-
-def simulate_typing(
-    client: EchoAgentClient,
-    session_id: str,
-    context_path: str,
-    text: str,
-    typing_speed_ms: int = 100,
-    jitter_ms: int = 20,
-) -> tuple[str, bool]:
-    """模拟打字。返回 (client_turn_id, committed)。
-
-    如果 prefetch/tick 接口不存在, 返回 ("", False) 表示跳过。
-    typing_speed_ms < 50 时进入快速模式: 只发 1 个 tick + finalize, 不逐字发。
-    """
-    client_turn_id = uuid.uuid4().hex[:12]
-    committed = False
-
-    if typing_speed_ms < 50:
-        tick_result = client.prefetch_tick(session_id, context_path, client_turn_id, 1, text)
-        if tick_result is None:
-            return "", False
-        time.sleep(0.5)
-        finalize_result = client.prefetch_finalize(session_id, context_path, client_turn_id, text)
-        if finalize_result is not None:
-            fin_data = finalize_result.get("data", finalize_result)
-            committed = bool(fin_data.get("accepted"))
-            return client_turn_id, committed
-        return client_turn_id, False
-
-    for i in range(1, len(text) + 1):
-        draft = text[:i]
-        tick_result = client.prefetch_tick(session_id, context_path, client_turn_id, i, draft)
-        if tick_result is None:
-            return "", False
-        tick_data = tick_result.get("data", tick_result)
-        if not tick_data.get("accepted") and i == 1:
-            return client_turn_id, False
-        delay = typing_speed_ms + random.randint(-jitter_ms, jitter_ms)
-        time.sleep(max(10, delay) / 1000.0)
-
-    finalize_result = client.prefetch_finalize(session_id, context_path, client_turn_id, text)
-    if finalize_result is not None:
-        fin_data = finalize_result.get("data", finalize_result)
-        committed = bool(fin_data.get("accepted"))
-        return client_turn_id, committed
-    return client_turn_id, False
-
-
-# ---------------------------------------------------------------------------
-# Metrics collection
-# ---------------------------------------------------------------------------
-
-def collect_round_metrics(
-    round_data: dict[str, Any],
-    reply_result: dict[str, Any],
-    send_time: float,
-    prefetch_committed: bool,
-    memory_items: list[dict[str, Any]] | None = None,
-) -> dict[str, Any]:
-    reply = reply_result.get("reply") or ""
-    ttft = reply_result.get("ttft_ms")
-    done = reply_result.get("done_event") or {}
-    cached_tokens = int(done.get("cachedTokens") or done.get("cached_tokens") or 0)
-    prompt_tokens = int(done.get("promptTokens") or done.get("prompt_tokens") or 0)
-    return {
-        "round_id": round_data.get("id", ""),
-        "query": round_data.get("query", ""),
-        "reply": reply,
-        "reply_length": len(reply),
-        "query_length": len(round_data.get("query", "")),
-        "ttft_ms": round(ttft, 1) if ttft is not None else None,
-        "cached_tokens": cached_tokens,
-        "prompt_tokens": prompt_tokens,
-        "prefetch_committed": prefetch_committed,
-        "is_new_session": bool(round_data.get("new_session")),
-        "is_injection": bool(round_data.get("is_injection")),
-        "complexity": round_data.get("complexity", ""),
-        "ground_facts": round_data.get("ground_facts", []),
-        "error": reply_result.get("error", ""),
-        "relevant_memory": json.dumps(memory_items or [], ensure_ascii=False),
-    }
 
 
 def compute_summary(rounds: list[dict[str, Any]]) -> dict[str, Any]:
@@ -495,9 +176,7 @@ def _config_driven_evaluate(
 
 # ---------------------------------------------------------------------------
 # Generate mode
-# ---------------------------------------------------------------------------
-
-def run_generate_mode(args, run: EvalRun, client: EchoAgentClient, llm: LLMClient) -> None:
+def run_generate_mode(args, run: EvalRun, plugin: AgentPlugin, llm: LLMClient) -> None:
     """Generate 模式: LLM 生成场景, 测试端到端召回+TTFT。"""
     log = run.logger
     log.info("模式: generate (LLM 生成场景)")
@@ -506,7 +185,7 @@ def run_generate_mode(args, run: EvalRun, client: EchoAgentClient, llm: LLMClien
     evaluator_config_dict = _load_evaluator_config(args.evaluator_config)
     log.info("评测器配置: %s", args.evaluator_config)
 
-    from memory import dynamic_evaluator
+    from dynamic import dynamic_evaluator
 
     context_path = "/"
     all_rounds: list[dict[str, Any]] = []
@@ -547,35 +226,8 @@ def run_generate_mode(args, run: EvalRun, client: EchoAgentClient, llm: LLMClien
             all_facts[fid] = ftext
             log.info("  [%s] %s", fid, ftext[:120])
 
-    # 注入背景记忆到 EchoMem (不经 EchoAgent, 不触发 LLM 生成)
-    echomem = EchoMemClient(
-        base_url=args.echomem_url,
-        auth_key=args.echomem_auth_key,
-        account=args.account,
-        user_id=args.user_id,
-        agent_id=args.agent_id,
-        workspace=args.workspace,
-        timeout_s=60.0,
-        max_retries=3,
-    )
-    inject_session_id = echomem.open_session(title=f"generate-{evaluator.theme}")
-    for fact in tqdm(memories, desc="注入记忆", unit="mem"):
-        text = fact.get("text", "")
-        if text:
-            echomem.add_message(inject_session_id, "user", text)
-    archive_id = echomem.commit_session(inject_session_id)
-    commit_result = echomem.poll_commit(
-        inject_session_id, archive_id,
-        timeout_s=args.commit_timeout_s,
-        poll_interval_s=args.commit_poll_interval_s,
-    )
-    log.info("注入完成: %s (%.1fs, %d polls)",
-             commit_result.status, commit_result.elapsed_s, commit_result.polls)
-    if commit_result.status not in ("completed",):
-        raise RuntimeError(
-            f"记忆注入失败: status={commit_result.status} "
-            f"error={commit_result.error} (session={inject_session_id})"
-        )
+    # 注入背景记忆 (通过 agent 插件)
+    inject_session_id = plugin.inject_memories(memories)
 
     session_id = ""
     session_count = 0
@@ -617,69 +269,52 @@ def run_generate_mode(args, run: EvalRun, client: EchoAgentClient, llm: LLMClien
                 need_new = True
         if need_new:
             session_count += 1
-            session_id = client.create_session(
+            session_id = plugin.create_session(
                 title=f"test-{evaluator.theme}-s{session_count}",
-                memory_engine_endpoint=args.memory_engine_endpoint,
             )
             log.info("  新 session: %s", session_id)
 
-        # 打字模拟 (可能因接口不存在而跳过)
-        client_turn_id = ""
+        # 打字模拟 (agent 插件内部处理 prefill)
         prefetch_committed = False
         memory_items: list[dict[str, Any]] = []
-        if len(query) > 2:
-            client_turn_id, prefetch_committed = simulate_typing(
-                client, session_id, context_path, query,
+        if plugin.supports_typing_simulation and len(query) > 2:
+            typing_result = plugin.simulate_typing(
+                session_id, context_path, query,
                 args.typing_speed_ms, args.typing_jitter_ms,
             )
-            if prefetch_committed:
-                log.info("  prefetch committed")
-                # 尝试获取 memory items
-                fin_result = client.prefetch_finalize(session_id, context_path, client_turn_id, query)
-                if fin_result:
-                    fin_data = fin_result.get("data", fin_result)
-                    memory_items = fin_data.get("memoryItems") or []
+            if typing_result is not None:
+                prefetch_committed = typing_result.committed
+                memory_items = typing_result.memory_items
+                if prefetch_committed:
+                    log.info("  prefetch committed")
 
-        # 发送消息
-        send_time = time.monotonic()
-        try:
-            msg_result = client.send_message(session_id, context_path, query, client_turn_id)
-            msg_data = msg_result.get("data", msg_result)
-            if msg_data.get("error"):
-                raise RuntimeError(f"send failed: {msg_data.get('error')} {msg_data.get('message', '')}")
-            messages_list = msg_data.get("messages") or []
-            seq = 0
-            for m in reversed(messages_list):
-                if m.get("status") in ("generating", "completed"):
-                    seq = m.get("seq", 0)
-                    break
-            if not seq and messages_list:
-                seq = messages_list[-1].get("seq", 0)
-            if not seq:
-                seq = msg_data.get("latestContextSeq") or 0
-        except Exception as exc:
-            log.error("  发送失败: %s", exc)
-            all_rounds.append({
-                "round_id": round_data["id"], "query": query, "reply": "",
-                "reply_length": 0, "query_length": len(query), "ttft_ms": None,
-                "cached_tokens": 0, "prompt_tokens": 0,
-                "prefetch_committed": prefetch_committed,
-                "is_new_session": need_new, "is_injection": False,
-                "complexity": round_data.get("complexity", ""),
-                "ground_facts": round_data.get("ground_facts", []),
-                "error": str(exc),
-            })
-            continue
+        # 发送消息并获取回复
+        response = plugin.send_message(session_id, query, context_path)
 
-        # 读取回复
-        try:
-            reply_result = client.stream_reply(session_id, context_path, seq)
-        except Exception as exc:
-            reply_result = {"reply": "", "ttft_ms": None, "error": str(exc)}
-
-        metrics = collect_round_metrics(round_data, reply_result, send_time, prefetch_committed, memory_items)
+        metrics = {
+            "round_id": round_data["id"],
+            "query": query,
+            "reply": response.text,
+            "reply_length": len(response.text),
+            "query_length": len(query),
+            "ttft_ms": response.ttft_ms,
+            "cached_tokens": response.cached_tokens,
+            "prompt_tokens": response.prompt_tokens,
+            "prefetch_committed": prefetch_committed,
+            "is_new_session": need_new,
+            "is_injection": False,
+            "complexity": round_data.get("complexity", ""),
+            "ground_facts": round_data.get("ground_facts", []),
+            "error": response.error or "",
+            "relevant_memory": json.dumps(memory_items, ensure_ascii=False),
+        }
         metrics["session_id"] = session_id
         all_rounds.append(metrics)
+
+        if response.error:
+            log.error("  发送失败: %s", response.error)
+            continue
+
         previous_queries.append(query)
         previous_replies.append(metrics.get("reply", ""))
         log.info("  Q[%d] %s", round_idx + 1, query[:80])
@@ -691,7 +326,6 @@ def run_generate_mode(args, run: EvalRun, client: EchoAgentClient, llm: LLMClien
         "mode": "generate",
         "num_memories": args.num_memories,
         "num_queries": args.num_queries,
-        "echoagent_url": args.echoagent_url,
         "evaluator_config": args.evaluator_config,
         "user_simulator_config": args.user_simulator_config,
     }, evaluator_config=evaluator_config_dict,
@@ -699,14 +333,15 @@ def run_generate_mode(args, run: EvalRun, client: EchoAgentClient, llm: LLMClien
        background_memories=memories,
        dataset_queries=dataset_queries,
        inject_session_id=inject_session_id,
-       inject_user_id=args.user_id)
+       inject_user_id=getattr(args, "user_id", "default"))
 
 
 # ---------------------------------------------------------------------------
 # Replay mode
 # ---------------------------------------------------------------------------
 
-def run_replay_mode(args, run: EvalRun, client: EchoAgentClient, llm: LLMClient) -> None:
+
+def run_replay_mode(args, run: EvalRun, plugin: AgentPlugin, llm: LLMClient) -> None:
     """Replay 模式: 回放 generate 模式导出的数据集, 先注入背景记忆再新会话 QA。"""
     log = run.logger
     log.info("模式: replay (回放数据集: %s)", args.dataset)
@@ -736,58 +371,20 @@ def run_replay_mode(args, run: EvalRun, client: EchoAgentClient, llm: LLMClient)
     all_rounds: list[dict[str, Any]] = []
     all_facts: dict[str, str] = {}
 
-    # EchoMem 客户端 (直接注入记忆, 不经 EchoAgent)
-    echomem = EchoMemClient(
-        base_url=args.echomem_url,
-        auth_key=args.echomem_auth_key,
-        account=args.account,
-        user_id=args.user_id,
-        agent_id=args.agent_id,
-        workspace=args.workspace,
-        timeout_s=60.0,
-        max_retries=3,
-    )
-
-    # 注入背景记忆: 直接注入 EchoMem
-    # 复用数据集中的 inject_session_id, 若该 session 已有 archive 则跳过注入
+    # 注入背景记忆 (通过 agent 插件)
     inject_session_id = dataset.get("inject_session_id") or ""
     inject_session = ""
-    events = [m for m in background_memories if m.get("text")]
-    if not events:
-        log.warning("数据集无背景记忆, 跳过注入")
-    elif inject_session_id and echomem.has_archives(inject_session_id):
-        log.info("[注入] session %s 已有 archive, 跳过注入", inject_session_id)
-        inject_session = inject_session_id
-    else:
-        log.info("[注入] %d 条记忆", len(events))
-        inject_session = echomem.open_session(
-            title=f"replay-{inject_session_id or 'dynamic_eval'}",
-            session_id=inject_session_id,
-        )
-        for ev_idx, event in enumerate(tqdm(events, desc="注入记忆", unit="mem", leave=False)):
-            try:
-                echomem.add_message(
-                    inject_session, "user", event["text"],
-                    created_at="",
-                )
-            except Exception as exc:
-                log.warning("  注入 %d 失败: %s", ev_idx, exc)
-        archive_id = echomem.commit_session(inject_session)
-        commit_result = echomem.poll_commit(
-            inject_session, archive_id,
-            timeout_s=args.commit_timeout_s,
-            poll_interval_s=args.commit_poll_interval_s,
-        )
-        log.info("  注入完成: %s (%.1fs, %d polls)",
-                 commit_result.status, commit_result.elapsed_s, commit_result.polls)
-        if commit_result.status not in ("completed",):
-            log.error("  记忆注入失败: status=%s error=%s, 跳过 QA",
-                      commit_result.status, commit_result.error)
+    if background_memories:
+        try:
+            inject_session = plugin.inject_memories(
+                background_memories, session_id=inject_session_id,
+            )
+        except RuntimeError as exc:
+            log.error("  记忆注入失败: %s", exc)
 
     # 在新 session 中进行 QA (测试跨 session 召回)
-    qa_session = client.create_session(
+    qa_session = plugin.create_session(
         title=f"replay-qa-{inject_session or 'dynamic_eval'}",
-        memory_engine_endpoint=args.memory_engine_endpoint,
     )
 
     for job_idx, q in enumerate(tqdm(dataset_queries, desc="提问", unit="q")):
@@ -798,61 +395,48 @@ def run_replay_mode(args, run: EvalRun, client: EchoAgentClient, llm: LLMClient)
         question_id = f"q{job_idx}"
         log.info("  [QA %d/%d] %s", job_idx + 1, len(dataset_queries), query[:60])
 
-        client_turn_id = ""
+        # 打字模拟
         prefetch_committed = False
         memory_items: list[dict[str, Any]] = []
-        if len(query) > 2:
-            client_turn_id, prefetch_committed = simulate_typing(
-                client, qa_session, context_path, query,
+        if plugin.supports_typing_simulation and len(query) > 2:
+            typing_result = plugin.simulate_typing(
+                qa_session, context_path, query,
                 args.typing_speed_ms, args.typing_jitter_ms,
             )
+            if typing_result is not None:
+                prefetch_committed = typing_result.committed
+                memory_items = typing_result.memory_items
 
-        send_time = time.monotonic()
-        try:
-            msg_result = client.send_message(qa_session, context_path, query, client_turn_id)
-            msg_data = msg_result.get("data", msg_result)
-            messages_list = msg_data.get("messages") or []
-            seq = 0
-            for m in reversed(messages_list):
-                if m.get("status") in ("generating", "completed"):
-                    seq = m.get("seq", 0)
-                    break
-            if not seq and messages_list:
-                seq = messages_list[-1].get("seq", 0)
-            if not seq:
-                seq = msg_data.get("latestContextSeq") or 0
-        except Exception as exc:
-            log.error("  QA 发送失败: %s", exc)
-            all_rounds.append({
-                "round_id": question_id, "query": query, "reply": "",
-                "reply_length": 0, "query_length": len(query), "ttft_ms": None,
-                "cached_tokens": 0, "prompt_tokens": 0,
-                "prefetch_committed": prefetch_committed,
-                "is_new_session": True, "is_injection": False,
-                "complexity": complexity, "ground_facts": ground_facts,
-                "error": str(exc),
-            })
-            continue
+        # 发送消息并获取回复
+        response = plugin.send_message(qa_session, query, context_path)
 
-        try:
-            reply_result = client.stream_reply(qa_session, context_path, seq)
-        except Exception as exc:
-            reply_result = {"reply": "", "ttft_ms": None, "error": str(exc)}
-
-        round_data = {
-            "id": question_id,
+        metrics = {
+            "round_id": question_id,
             "query": query,
-            "ground_facts": ground_facts,
-            "new_session": True,
+            "reply": response.text,
+            "reply_length": len(response.text),
+            "query_length": len(query),
+            "ttft_ms": response.ttft_ms,
+            "cached_tokens": response.cached_tokens,
+            "prompt_tokens": response.prompt_tokens,
+            "prefetch_committed": prefetch_committed,
+            "is_new_session": True,
             "is_injection": False,
             "complexity": complexity,
+            "ground_facts": ground_facts,
+            "error": response.error or "",
+            "relevant_memory": json.dumps(memory_items, ensure_ascii=False),
         }
-        metrics = collect_round_metrics(round_data, reply_result, send_time, prefetch_committed, memory_items)
         metrics["session_id"] = qa_session
         metrics["question_id"] = question_id
         metrics["gold_answer"] = answer
         all_rounds.append(metrics)
         all_facts[question_id] = answer
+
+        if response.error:
+            log.error("  QA 发送失败: %s", response.error)
+            continue
+
         log.info("    ttft=%sms reply_len=%d", metrics["ttft_ms"], metrics["reply_length"])
         log.info("    回复: %s", metrics["reply"][:200])
 
@@ -860,15 +444,13 @@ def run_replay_mode(args, run: EvalRun, client: EchoAgentClient, llm: LLMClient)
         "mode": "replay",
         "dataset": args.dataset,
         "dataset_limit": args.dataset_limit,
-        "echoagent_url": args.echoagent_url,
-        "echomem_url": args.echomem_url,
         "evaluator_config": args.evaluator_config,
     }, evaluator_config=evaluator_config_dict,
        theme=dataset.get("theme", "replay"),
        background_memories=background_memories,
        dataset_queries=dataset_queries,
        inject_session_id=inject_session if background_memories else "",
-       inject_user_id=args.user_id)
+       inject_user_id=getattr(args, "user_id", "default"))
 
 
 # ---------------------------------------------------------------------------
@@ -1128,14 +710,12 @@ def _save_results(run: EvalRun, all_rounds: list[dict], all_facts: dict[str, str
 # ---------------------------------------------------------------------------
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="动态评测: 仿真 EchoAgent+EchoMem 线上效果")
-    # EchoAgent
-    g = parser.add_argument_group("EchoAgent")
-    g.add_argument("--echoagent-url", default=os.environ.get("ECHOAGENT_URL", "http://127.0.0.1:31020"))
-    g.add_argument("--username", default=os.environ.get("ECHOAGENT_TEST_USERNAME", "test_user"))
-    g.add_argument("--password", default=os.environ.get("ECHOAGENT_TEST_PASSWORD", ""))
-    g.add_argument("--memory-engine-endpoint",
-                   default=os.environ.get("GLOBAL_MEMORY_ENGINE_ENDPOINT", "http://127.0.0.1:31030"))
+    parser = argparse.ArgumentParser(description="动态评测: 支持 agent 插件, 默认 echo_agent")
+    # Agent 插件
+    g = parser.add_argument_group("Agent 插件")
+    g.add_argument("--agent-plugin", default=os.environ.get("AGENT_PLUGIN", "echo_agent"),
+                   help="agent 插件名称 (echo_agent / baseline_mem / bare_llm)")
+    add_agent_plugin_args(parser, default_plugin="echo_agent")
 
     # 模式选择
     g = parser.add_argument_group("模式")
@@ -1159,26 +739,25 @@ def build_parser() -> argparse.ArgumentParser:
                    default=str(_CONFIGS_DIR / "user_simulator_default.yaml"),
                    help="用户模拟器配置，路径相对于 run_eval.py (默认 configs/user_simulator_default.yaml)")
 
-    # LLM (用于场景生成和质量评估)
-    g = parser.add_argument_group("LLM")
+    # LLM (用于场景生成, 仅 generate 模式)
+    g = parser.add_argument_group("LLM (场景生成)")
     g.add_argument("--scenario-model", default=os.environ.get("ECHOAGENT_TEST_SCENARIO_MODEL", "deepseek-v4-flash"))
     g.add_argument("--scenario-base-url", default=os.environ.get("ECHOAGENT_TEST_SCENARIO_BASE_URL", ""))
     g.add_argument("--scenario-api-key", default=os.environ.get("ECHOAGENT_TEST_SCENARIO_API_KEY", ""))
-    g.add_argument("--llm-base-url", default=os.environ.get("LLM_BASE_URL", ""))
-    g.add_argument("--llm-model", default=os.environ.get("LLM_MODEL", "doubao-seed-2.0-pro"))
-    g.add_argument("--llm-api-key", default=os.environ.get("LLM_API_KEY", ""))
 
-    # EchoMem 日志
-    add_echomem_args(parser)
-
-    # EchoMem 注入参数
-    g = parser.add_argument_group("EchoMem 注入")
-    g.add_argument("--commit-timeout-s", type=float, default=0.0, help="注入 commit 轮询超时 (秒)，0 表示无限等待")
-    g.add_argument("--commit-poll-interval-s", type=float, default=2.0, help="注入 commit 轮询间隔 (秒)")
+    # LLM (用于质量评估)
+    g = parser.add_argument_group("LLM (质量评估)")
+    g.add_argument("--evaluator-model", default=os.environ.get("ECHOAGENT_TEST_EVALUATOR_MODEL", "doubao-seed-2.0-pro"),
+                   help="质量评估 LLM 模型名")
+    g.add_argument("--evaluator-base-url", default=os.environ.get("ECHOAGENT_TEST_EVALUATOR_BASE_URL", ""),
+                   help="质量评估 LLM base URL")
+    g.add_argument("--evaluator-api-key", default=os.environ.get("ECHOAGENT_TEST_EVALUATOR_API_KEY", ""),
+                   help="质量评估 LLM API key")
 
     # 输出
     g = parser.add_argument_group("输出")
     g.add_argument("--out-dir", default="", help="结果目录 (默认 dynamic/results/<timestamp>)")
+    g.add_argument("--echomem-log-dir", default="", help="EchoMem log directory for log collection")
 
     return parser
 
@@ -1186,78 +765,60 @@ def build_parser() -> argparse.ArgumentParser:
 def main() -> None:
     args = build_parser().parse_args()
 
-    # base_url 互补: 一个有另一个没有时, 没有的跟有的相同
-    if args.scenario_base_url and not args.llm_base_url:
-        args.llm_base_url = args.scenario_base_url
-    elif args.llm_base_url and not args.scenario_base_url:
-        args.scenario_base_url = args.llm_base_url
+    # evaluator / scenario 的 base_url / api_key 互补:
+    # 一个有值另一个为空时, 空的自动复制有值的。两者都设置了则各自使用。
+    if args.evaluator_base_url and not args.scenario_base_url:
+        args.scenario_base_url = args.evaluator_base_url
+    elif args.scenario_base_url and not args.evaluator_base_url:
+        args.evaluator_base_url = args.scenario_base_url
+    if args.evaluator_api_key and not args.scenario_api_key:
+        args.scenario_api_key = args.evaluator_api_key
+    elif args.scenario_api_key and not args.evaluator_api_key:
+        args.evaluator_api_key = args.scenario_api_key
 
-    # api_key 互补
-    if args.scenario_api_key and not args.llm_api_key:
-        args.llm_api_key = args.scenario_api_key
-    elif args.llm_api_key and not args.scenario_api_key:
-        args.scenario_api_key = args.llm_api_key
-
-    if not args.password:
-        # 尝试从 EchoAgent data/.env 获取
+    # echo_agent 插件需要密码登录 EchoAgent
+    if args.agent_plugin == "echo_agent" and not getattr(args, "password", ""):
         env_path = _PROJECT_ROOT.parent / "EchoAgent" / "data" / ".env"
         if env_path.exists():
             for line in env_path.read_text(encoding="utf-8").splitlines():
                 if line.startswith("JWT_SECRET="):
                     args.password = line.split("=", 1)[1].strip()
                     break
-    if not args.password:
+    if args.agent_plugin == "echo_agent" and not getattr(args, "password", ""):
         print("错误: 需要 --password 或设置 ECHOAGENT_TEST_PASSWORD", file=sys.stderr)
-        sys.exit(1)
-
-    # 登录 EchoAgent (在创建 EvalRun 之前, 因为 auth_key 解析依赖登录)
-    client = EchoAgentClient(args.echoagent_url, args.username, args.password)
-    print(f"登录 EchoAgent ({args.echoagent_url})...")
-    try:
-        client.login()
-    except Exception as e:
-        print(f"登录失败: {e}", file=sys.stderr)
         sys.exit(1)
 
     # 动态评测的 QA 经 EchoAgent -> echoagent 插件, 插件固定用 agent_id="echoagent"。
     # 注入也需用相同的 agent_id, 否则 EchoMem 按 agent_id 过滤时召回不到注入的记忆。
-    if not args.agent_id or args.agent_id == "default":
+    if not getattr(args, "agent_id", "") or getattr(args, "agent_id", "") == "default":
         args.agent_id = "echoagent"
 
-    # 注入直连 EchoMem, 必须用与召回相同的 auth_key。
-    # 通过 echoagent 插件 credential 接口解析, 保证身份一致。
-    if not args.echomem_auth_key:
-        try:
-            args.echomem_auth_key = client.get_memory_auth_key(args.memory_engine_endpoint)
-        except Exception as e:
-            print(f"警告: 解析 auth_key 失败: {e} - 注入将不携带身份, 召回可能无法匹配", file=sys.stderr)
+    # 加载 agent 插件 (load_agent_plugin 内部调 setup, 完成登录、auth_key 解析等)
+    config_dict = {k: v for k, v in vars(args).items()}
+    plugin = load_agent_plugin(args.agent_plugin, config_dict)
+    # 插件 setup 可能更新 config_dict (如解析 auth_key), 同步回 args
+    args.echomem_auth_key = config_dict.get("echomem_auth_key", "")
 
-    # 创建评测运行 (在 auth_key 解析后, 确保保存的配置包含正确的 auth_key)
+    # 创建评测运行
     results_root = Path(args.out_dir) if args.out_dir else Path(__file__).parent / "results"
     config = EvalConfig(
-        echomem_url=args.echomem_url,
-        echomem_auth_key=args.echomem_auth_key,
-        echomem_log_dir=args.echomem_log_dir,
-        llm_base_url=args.llm_base_url,
-        llm_model=args.llm_model,
-        llm_api_key=args.llm_api_key,
+        echomem_log_dir=getattr(args, "echomem_log_dir", ""),
     )
     run = EvalRun(
         benchmark_name="dynamic",
         results_root=results_root,
         config=config,
-        echomem_log_dir=args.echomem_log_dir,
+        echomem_log_dir=getattr(args, "echomem_log_dir", ""),
+        run_args={k: v for k, v in vars(args).items() if not k.startswith("_")},
     )
     log = run.logger
-
-    log.info("登录成功 (user=%s, uuid=%s)", args.username, client.user_uuid)
-    log.info("agent_id=%s, auth_key=%s", args.agent_id, "已设置" if args.echomem_auth_key else "未设置")
+    log.info("agent_plugin=%s", args.agent_plugin)
 
     # 创建 LLM 客户端 (用于质量评估)
     llm = LLMClient(
-        base_url=args.llm_base_url or args.scenario_base_url,
-        api_key=args.llm_api_key or args.scenario_api_key,
-        model=args.llm_model,
+        base_url=args.evaluator_base_url,
+        api_key=args.evaluator_api_key,
+        model=args.evaluator_model,
         temperature=0.3,
         max_tokens=4096,
         timeout_s=120.0,
@@ -1265,9 +826,9 @@ def main() -> None:
 
     # 选择模式
     if args.dataset:
-        run_replay_mode(args, run, client, llm)
+        run_replay_mode(args, run, plugin, llm)
     else:
-        run_generate_mode(args, run, client, llm)
+        run_generate_mode(args, run, plugin, llm)
 
 
 if __name__ == "__main__":

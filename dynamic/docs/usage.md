@@ -2,7 +2,14 @@
 
 ## 目标
 
-仿真 EchoAgent + EchoMem 线上真实效果, 测试端到端记忆召回质量和 prefill (KV-cache 预热) 延迟。
+通过 agent 插件评测不同 agent 的记忆系统效果。默认使用 `echo_agent` 插件, 仿真 EchoAgent + EchoMem 线上真实效果, 测试端到端记忆召回质量和 prefill (KV-cache 预热) 延迟。
+
+可用插件:
+- `echo_agent` (默认) -- EchoAgent + EchoMem 完整管线
+- `baseline_mem` -- EchoMem 检索 + LLM 生成 (基线 agent+记忆)
+- `bare_llm` -- 无记忆系统基线 (记忆拼入 system prompt)
+
+每个插件通过 `add_arguments` classmethod 声明自己的 CLI 参数, `--help` 只显示当前插件相关参数。详见 `agents/README.md`。
 
 ## 两种模式
 
@@ -16,11 +23,7 @@ python dynamic/run_eval.py \
   --username test_user --password YOUR_PASSWORD \
   --num-memories 5 --num-queries 10 \
   --scenario-model deepseek-v4-flash \
-  --scenario-base-url https://ark.cn-beijing.volces.com/api/coding/v3 \
-  --scenario-api-key YOUR_API_KEY \
-  --llm-base-url https://ark.cn-beijing.volces.com/api/coding/v3 \
-  --llm-model doubao-seed-2.0-pro \
-  --llm-api-key YOUR_API_KEY
+  --evaluator-api-key YOUR_API_KEY
 ```
 
 ### Replay 模式
@@ -38,10 +41,52 @@ python dynamic/run_eval.py \
   --username test_user --password YOUR_PASSWORD \
   --dataset /path/to/dataset.json \
   --dataset-limit 10 \
-  --llm-api-key YOUR_API_KEY
+  --evaluator-api-key YOUR_API_KEY
 ```
 
-## 容错与回退
+## Agent 插件
+
+评测流程通过 `AgentPlugin` 接口与被测 agent 交互, 不直接调用 agent 特定的 HTTP API。每个 agent 对应一个插件, 通过 `--agent-plugin` 选择。
+
+### 可用插件
+
+| 插件 | 说明 | 记忆注入 | 打字模拟 | 依赖 |
+|---|---|---|---|---|
+| `echo_agent` (默认) | EchoAgent + EchoMem 完整管线 | 直连 EchoMem (open/commit) | 支持 (prefetch tick/finalize) | EchoAgent 后端 + EchoMem |
+| `baseline_mem` | EchoMem 检索 + LLM 生成 (基线 agent+记忆) | 直连 EchoMem (open/commit) | 不支持 | EchoMem + LLM API |
+| `bare_llm` | 无记忆系统基线 | 记忆拼入 system prompt | 不支持 | 仅 LLM API |
+
+### 插件接口
+
+```python
+class AgentPlugin(ABC):
+    @classmethod
+    def add_arguments(cls, parser: argparse.ArgumentParser) -> None: ...
+    def setup(self, config: dict) -> None: ...
+    def inject_memories(self, memories: list[dict], session_id: str = "") -> str: ...
+    def create_session(self, title: str = "") -> str: ...
+    def send_message(self, session_id: str, message: str, context_path: str = "/") -> AgentResponse: ...
+    @property
+    def supports_typing_simulation(self) -> bool: ...
+    def simulate_typing(self, session_id, context_path, text, speed_ms, jitter_ms) -> TypingResult | None: ...
+    def teardown(self) -> None: ...
+```
+
+- `add_arguments(parser)` (classmethod): 声明该插件所需的 CLI 参数。`run_eval.py` 根据 `--agent-plugin` 值动态调用此方法, `--help` 只显示当前插件相关参数。
+- `setup(config)`: 初始化客户端。`config` 是所有 CLI 参数的扁平 dict。
+
+`AgentResponse` 标准字段: `text`, `ttft_ms`, `prompt_tokens`, `cached_tokens`, `prefetch_committed`, `memory_items`, `error`。
+
+### 自定义插件
+
+1. 在 `agents/` 下创建目录 (如 `agents/my_agent/`), 包含 `__init__.py` (空即可)
+2. 创建 `plugin.py`, 实现 `AgentPlugin` 子类
+3. 实现 `add_arguments` classmethod, 声明该插件所需的 CLI 参数
+4. 运行: `python dynamic/run_eval.py --agent-plugin my_agent ...`
+
+`registry.py` 自动扫描 `agents.<name>.plugin` 模块中 `AgentPlugin` 的子类, 无需手动注册。详见 `agents/README.md`。
+
+## 容错与回退 (echo_agent 插件)
 
 所有 EchoAgent API 调用都有容错:
 - **prefetch/tick** 返回 404 -> 跳过打字模拟, 直接发消息
@@ -50,7 +95,7 @@ python dynamic/run_eval.py \
 - **stream_reply** 失败 -> 记录 error, 继续下一轮
 - **send_message** seq 冲突 -> 自动重试 (3 次)
 
-## 注入身份自动解析
+## 注入身份自动解析 (echo_agent 插件)
 
 注入阶段直连 EchoMem, QA 阶段经 EchoAgent -> echoagent 插件 -> EchoMem。
 两者必须使用相同的 `auth_key` 和 `agent_id`, 否则记忆存到一个身份下, 召回用另一个身份查, 永远找不到。
@@ -104,13 +149,18 @@ Generate 模式支持 `--user-simulator-config`, 默认加载 `dynamic/configs/u
 
 ## 参数说明
 
-### EchoAgent 参数
+> CLI 参数分为通用参数 (所有插件可用) 和插件参数 (由 `--agent-plugin` 指定的插件通过 `add_arguments` 声明)。切换插件后可用参数会变化, 使用 `--help` 查看当前插件支持的参数。
+
+### Agent 插件
 | 参数 | 默认值 | 说明 |
 |---|---|---|
-| `--echoagent-url` | `http://127.0.0.1:31020` | EchoAgent 后端地址 |
-| `--username` | `test_user` | 登录用户名 |
-| `--password` | (必填) | 登录密码 (也可通过 `ECHOAGENT_TEST_PASSWORD` 设置) |
-| `--memory-engine-endpoint` | `http://127.0.0.1:31030` | 记忆引擎端点 |
+| `--agent-plugin` | `echo_agent` (env: `AGENT_PLUGIN`) | agent 插件名称 (`echo_agent` / `baseline_mem` / `bare_llm`) |
+
+### 通用参数 (所有插件)
+| 参数 | 默认值 | 说明 |
+|---|---|---|
+| `--out-dir` | `results` | 结果目录 |
+| `--echomem-log-dir` | (空) | EchoMem 日志目录 (用于收集日志到评测结果) |
 
 ### 模式选择
 | 参数 | 默认值 | 说明 |
@@ -133,30 +183,59 @@ Generate 模式支持 `--user-simulator-config`, 默认加载 `dynamic/configs/u
 | `--typing-jitter-ms` | `20` | 打字抖动 (毫秒) |
 | `--user-simulator-config` | `configs/user_simulator_default.yaml` | 用户模拟器配置 YAML, 路径相对于 `run_eval.py` 所在目录 |
 
-### LLM 参数
+### 场景生成 LLM 参数 (通用)
 | 参数 | 默认值 | 说明 |
 |---|---|---|
-| `--scenario-model` | `deepseek-v4-flash` | 场景生成 LLM |
+| `--scenario-model` | `deepseek-v4-flash` | 场景生成 LLM (仅 generate 模式使用) |
 | `--scenario-base-url` | (空) | 场景生成 base URL |
 | `--scenario-api-key` | (空) | 场景生成 API Key |
-| `--llm-base-url` | (空) | 质量评估 LLM base URL |
-| `--llm-model` | `doubao-seed-2.0-pro` | 质量评估 LLM |
-| `--llm-api-key` | (空) | 质量评估 API Key |
 
-> **base_url / api_key 互补**: scenario 和 llm 的 base_url / api_key, 一个有值另一个为空时, 空的自动复制有值的。两者都设置了则各自使用。
-
-### EchoMem 参数
+### 质量评估 LLM 参数 (通用)
 | 参数 | 默认值 | 说明 |
 |---|---|---|
+| `--evaluator-model` | `doubao-seed-2.0-pro` | 质量评估 LLM 模型名 |
+| `--evaluator-base-url` | (空) | 质量评估 base URL |
+| `--evaluator-api-key` | (空) | 质量评估 API Key |
+
+> **base_url / api_key 互补**: scenario 和 evaluator 的 base_url / api_key, 一个有值另一个为空时, 空的自动复制有值的。两者都设置了则各自使用。
+
+### echo_agent 插件参数
+| 参数 | 默认值 | 说明 |
+|---|---|---|
+| `--echoagent-url` | `http://127.0.0.1:31020` | EchoAgent 后端地址 |
+| `--username` | `test_user` | 登录用户名 |
+| `--password` | (必填) | 登录密码 (也可通过 `ECHOAGENT_TEST_PASSWORD` 设置) |
+| `--memory-engine-endpoint` | `http://127.0.0.1:31030` | 记忆引擎端点 |
 | `--echomem-url` | `http://127.0.0.1:8010` | EchoMem 地址 (注入阶段直连) |
-| `--echomem-auth-key` | (空) | EchoMem X-Auth-Key (留空时自动通过 echoagent 插件 credential 接口解析, 保证与召回身份一致) |
+| `--echomem-auth-key` | (空) | EchoMem X-Auth-Key (留空时自动通过 echoagent 插件 credential 接口解析) |
 | `--account` | `default` | EchoMem 账号 |
 | `--user-id` | `default` | EchoMem 用户 ID |
-| `--agent-id` | `default` | EchoMem Agent ID (默认自动设为 `echoagent`, 与 echoagent 插件一致) |
+| `--agent-id` | `default` | EchoMem Agent ID (默认自动设为 `echoagent`) |
 | `--workspace` | (空) | EchoMem workspace 路径 |
 | `--commit-timeout-s` | `0` | 注入 commit 轮询超时 (秒)，0 表示无限等待 |
 | `--commit-poll-interval-s` | `2` | 注入 commit 轮询间隔 (秒) |
-| `--echomem-log-dir` | (空) | EchoMem 日志目录 |
+
+### baseline_mem 插件参数
+| 参数 | 默认值 | 说明 |
+|---|---|---|
+| `--echomem-url` | `http://127.0.0.1:8010` | EchoMem 地址 |
+| `--echomem-auth-key` | (空) | EchoMem X-Auth-Key |
+| `--account` / `--user-id` / `--agent-id` | `default` | EchoMem 身份 |
+| `--workspace` | (空) | EchoMem workspace 路径 |
+| `--llm-base-url` / `--llm-api-key` / `--llm-model` | - | LLM 配置 (也用于 evaluator) |
+| `--llm-temperature` | `0.7` | 生成温度 |
+| `--llm-max-tokens` | `2048` | 最大生成 token |
+| `--top-k` | `10` | 检索条数 |
+| `--memory-budget-chars` | `8000` | 记忆注入 prompt 的字符上限 |
+| `--commit-timeout-s` | `0` | 注入 commit 轮询超时 |
+| `--commit-poll-interval-s` | `2.0` | 轮询间隔 |
+
+### bare_llm 插件参数
+| 参数 | 默认值 | 说明 |
+|---|---|---|
+| `--llm-base-url` / `--llm-api-key` / `--llm-model` | - | LLM 配置 (也用于 evaluator) |
+| `--llm-temperature` | `0.7` | 生成温度 |
+| `--llm-max-tokens` | `2048` | 最大生成 token |
 
 ## 输出文件
 

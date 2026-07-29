@@ -44,9 +44,10 @@ python benchmarks/hotpotqa/run_eval.py \
 | `--sample` | `all` | 筛选 sample |
 | `--questions` | `0` | 限制 QA 数量 (0=全部) |
 | `--import-mode` | `per_question` | 导入模式: `per_question` 或 `global` |
+| `--agent-plugin` | `baseline_mem` | QA 阶段使用的 agent 插件名，见 `agents/` 目录 |
 
 ### EchoMem / LLM / 评测参数
-与 LoCoMo 相同, 详见 `benchmarks/locomo/docs/usage.md` 中的参数表。
+默认使用 `baseline_mem` 插件, 参数与 LoCoMo 相同, 详见 `benchmarks/locomo/docs/usage.md` 中的参数表。切换 `--agent-plugin` 后可用参数会变化, 使用 `--help` 查看。
 
 HotpotQA 不需要 Judge 参数 (使用官方 F1/EM, 无需 LLM judge)。
 

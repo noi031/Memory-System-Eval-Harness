@@ -51,6 +51,7 @@ python benchmarks/longmemeval/run_eval.py \
 | `--dataset` | (自动) | LongMemEval JSON 数据集路径。不指定时自动在 `benchmarks/longmemeval/data/` 查找 `longmemeval_s_cleaned.json`, 找不到则从 HuggingFace 下载 |
 | `--sample` | `all` | 筛选 sample |
 | `--questions` | `0` | 限制 QA 数量 (0=全部) |
+| `--agent-plugin` | `baseline_mem` | QA 阶段使用的 agent 插件名，见 `agents/` 目录 |
 
 ### Judge 参数
 | 参数 | 默认值 | 说明 |
@@ -60,7 +61,7 @@ python benchmarks/longmemeval/run_eval.py \
 | `--judge-base-url` | (同 `--llm-base-url`) | Judge base URL |
 
 ### EchoMem / LLM / 评测参数
-与 LoCoMo 相同。
+默认使用 `baseline_mem` 插件, 参数与 LoCoMo 相同。切换 `--agent-plugin` 后可用参数会变化, 使用 `--help` 查看。
 
 ## 输出文件
 

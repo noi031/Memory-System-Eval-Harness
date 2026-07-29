@@ -8,7 +8,7 @@ Now supports loading prompts from YAML configuration files based on
 RealUserSim, IntellAgent, AgentProcessBench, RigorBench, and MemOps papers.
 
 Usage:
-    from memory.dynamic_evaluator import MemoryDynamicEvaluator, get_evaluator, create_evaluator
+    from dynamic.dynamic_evaluator import MemoryDynamicEvaluator, get_evaluator, create_evaluator
 
     # Create a new evaluator with custom config
     evaluator = MemoryDynamicEvaluator({
@@ -35,13 +35,8 @@ from pathlib import Path
 from typing import Any
 
 
-# Import LLM client
-ROOT = Path(__file__).resolve().parent
-if str(ROOT) not in __import__("sys").path:
-    __import__("sys").path.insert(0, str(ROOT))
-
-from memory import llm
-from memory.prompt_config_loader import (
+from . import llm
+from .prompt_config_loader import (
     load_user_simulator_config,
     load_evaluator_config,
     get_prompt_template,

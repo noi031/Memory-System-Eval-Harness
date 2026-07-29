@@ -40,6 +40,16 @@ python benchmarks/locomo/run_eval.py \
   --llm-api-key YOUR_API_KEY
 ```
 
+```bash
+# 使用 bare LLM 插件 (不接入记忆系统, 仅 LLM 基线)
+python benchmarks/locomo/run_eval.py \
+  --dataset /path/to/locomo.json \
+  --agent-plugin bare_llm \
+  --llm-api-key YOUR_API_KEY
+```
+
+> **注意**: `--echomem-url`、`--llm-*`、`--top-k` 等参数由当前 `--agent-plugin` 指定的插件声明 (默认 `baseline_mem`)。切换插件后可用参数会变化, 使用 `--help` 查看当前插件支持的参数。
+
 ## 参数说明
 
 ### 必填参数
@@ -54,7 +64,10 @@ python benchmarks/locomo/run_eval.py \
 | `--sample` | `all` | 筛选 sample: `all` 或 sample_id |
 | `--questions` | `0` | 限制 QA 数量 (0=全部) |
 
-### EchoMem 参数
+### EchoMem 参数 (baseline_mem 插件)
+
+> 以下参数由 `baseline_mem` 插件通过 `add_arguments` 声明, 切换 `--agent-plugin` 后可用参数会变化。使用 `--help` 查看当前插件支持的参数。
+
 | 参数 | 默认值 | 说明 |
 |---|---|---|
 | `--echomem-url` | `http://127.0.0.1:8010` | EchoMem HTTP 地址 |
@@ -65,7 +78,7 @@ python benchmarks/locomo/run_eval.py \
 | `--workspace` | (空) | EchoMem workspace 路径 |
 | `--echomem-log-dir` | (空) | EchoMem 日志目录 (用于收集日志到评测结果) |
 
-### LLM 参数
+### LLM 参数 (baseline_mem / bare_llm 插件)
 | 参数 | 默认值 | 说明 |
 |---|---|---|
 | `--llm-base-url` | (空) | LLM API base URL (也可通过 `LLM_BASE_URL` 设置) |
@@ -75,7 +88,7 @@ python benchmarks/locomo/run_eval.py \
 | `--llm-timeout-s` | `120.0` | LLM 请求超时 (秒) |
 | `--llm-retries` | `3` | LLM 请求重试次数 |
 
-### 评测参数
+### 评测参数 (baseline_mem 插件)
 | 参数 | 默认值 | 说明 |
 |---|---|---|
 | `--top-k` | `10` | 检索记忆条数 (TOPK) |
@@ -84,7 +97,10 @@ python benchmarks/locomo/run_eval.py \
 | `--commit-timeout-s` | `0` | Commit 轮询超时 (秒)，0 表示无限等待 |
 | `--commit-poll-interval-s` | `2.0` | Commit 轮询间隔 (秒) |
 | `--question-timeout-s` | `120.0` | 单题超时 (秒) |
+| `--agent-plugin` | `baseline_mem` | QA 阶段使用的 agent 插件名，见 `agents/` 目录 |
 | `--out-dir` | `results` | 结果目录 |
+
+> `--top-k`、`--memory-budget-chars`、`--commit-*` 由 `baseline_mem` 插件声明, 切换插件后这些参数不可用。`--concurrency`、`--question-timeout-s`、`--out-dir` 是通用评测参数, 所有插件都支持。
 
 ### Judge 参数
 | 参数 | 默认值 | 说明 |

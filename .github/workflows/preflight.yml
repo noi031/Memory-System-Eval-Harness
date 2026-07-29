@@ -29,5 +29,5 @@ jobs:
           python -m py_compile benchmarks/locomo/run_eval.py
           python -m py_compile benchmarks/hotpotqa/run_eval.py
           python -m py_compile benchmarks/longmemeval/run_eval.py
-          python -m py_compile shared/dataset.py shared/echomem_client.py shared/eval_base.py shared/judge.py shared/llm_client.py shared/qa.py
-          python -m py_compile memory/dynamic_evaluator.py memory/llm.py memory/prompt_config_loader.py
+          python -m py_compile shared/dataset.py shared/echomem_client.py shared/eval_base.py shared/judge.py shared/llm_client.py shared/benchmark_adapter.py shared/benchmark_runner.py
+          python -m py_compile agents/base.py agents/registry.py agents/baseline_mem/plugin.py agents/echo_agent/plugin.py agents/bare_llm/plugin.py

@@ -20,7 +20,6 @@ import logging
 import os
 import sys
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
@@ -30,11 +29,10 @@ if str(_PROJECT_ROOT) not in sys.path:
 from tqdm import tqdm
 
 from shared.dataset import load_hotpotqa, resolve_dataset_path
-from shared.echomem_client import EchoMemClient
-from shared.eval_base import EvalConfig, EvalRun, add_echomem_args, add_llm_args, add_eval_args, build_config_from_args
-from shared.llm_client import LLMClient
-from shared.qa import answer_one_question, QAResult
+from shared.eval_base import EvalConfig, EvalRun, add_eval_args, add_agent_plugin_args, build_config_from_args
 from shared.judge import answer_f1_em
+from shared.benchmark_runner import run_qa_phase
+from agents import load_agent_plugin
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -42,12 +40,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--dataset", default="", help="HotpotQA JSON 数据集路径 (不指定则自动查找或下载)")
     parser.add_argument("--sample", default="all", help="筛选 sample (all 或 sample index/id)")
     parser.add_argument("--questions", default="0", help="限制 QA 数量 (0=all)")
+    parser.add_argument("--agent-plugin", default="baseline_mem",
+                        help="Agent 插件名 (baseline_mem / echo_agent / bare_llm)")
     parser.add_argument("--import-mode", default="per_question",
                         choices=["per_question", "global"],
                         help="导入模式: per_question=每题各自导入; global=合并共享 session")
-    add_echomem_args(parser)
-    add_llm_args(parser)
     add_eval_args(parser)
+    add_agent_plugin_args(parser)
     return parser
 
 
@@ -63,6 +62,7 @@ def main() -> None:
         benchmark_name="hotpotqa",
         results_root=Path(__file__).parent / "results",
         config=config,
+        run_args={k: v for k, v in vars(args).items() if not k.startswith("_")},
     )
     log = run.logger
 
@@ -75,26 +75,11 @@ def main() -> None:
         jobs = jobs[: config.question_limit]
         log.info("限制 QA 数量为 %d", len(jobs))
 
-    echomem = EchoMemClient(
-        base_url=config.echomem_url,
-        auth_key=config.echomem_auth_key,
-        account=config.account,
-        user_id=config.user_id,
-        agent_id=config.agent_id,
-        workspace=config.workspace,
-        timeout_s=60.0,
-        max_retries=3,
-    )
-
-    llm = LLMClient(
-        base_url=config.llm_base_url,
-        api_key=config.llm_api_key,
-        model=config.llm_model,
-        temperature=config.llm_temperature,
-        max_tokens=config.llm_max_tokens,
-        timeout_s=config.llm_timeout_s,
-        max_retries=config.llm_retries,
-    )
+    # 加载 agent 插件 (load_agent_plugin 内部调 setup, 完成客户端初始化)
+    config_dict = {k: v for k, v in vars(args).items()}
+    plugin = load_agent_plugin(args.agent_plugin, config_dict)
+    args.echomem_auth_key = config_dict.get("echomem_auth_key", "")
+    log.info("agent_plugin=%s", args.agent_plugin)
 
     # -- 阶段 1: 导入记忆 --
     log.info("=" * 60)
@@ -106,21 +91,19 @@ def main() -> None:
     if args.import_mode == "global":
         # 所有 passages 合并到一个共享 session
         log.info("合并所有 context 到共享 session...")
-        shared_sid = echomem.open_session(title="hotpotqa_global")
-        total_msgs = 0
-        for plan in tqdm(plans, desc="导入 passages", unit="plan"):
+        all_memories = []
+        for plan in plans:
             for ev in plan.get("events", []):
-                text = ev.get("text", "")
-                if text:
-                    echomem.add_message(shared_sid, "user", text, created_at=ev.get("time", ""))
-                    total_msgs += 1
-        log.info("共导入 %d 条 passage", total_msgs)
-        archive_id = echomem.commit_session(shared_sid)
-        result = echomem.poll_commit(shared_sid, archive_id,
-                                     timeout_s=config.commit_timeout_s,
-                                     poll_interval_s=config.commit_poll_interval_s)
-        log.info("共享 session commit: %s (%.1fs)", result.status, result.elapsed_s)
-        import_results.append({"session_id": shared_sid, "status": result.status, "messages": total_msgs})
+                if ev.get("text"):
+                    all_memories.append({"text": ev.get("text", ""), "time": ev.get("time", "")})
+        start = time.monotonic()
+        shared_sid = plugin.inject_memories(all_memories)
+        elapsed = time.monotonic() - start
+        log.info("共导入 %d 条 passage (%.1fs)", len(all_memories), elapsed)
+        import_results.append({
+            "session_id": shared_sid, "status": "completed",
+            "messages": len(all_memories), "elapsed_s": round(elapsed, 1),
+        })
         for job in jobs:
             question_to_session[job.question_id] = shared_sid
 
@@ -128,23 +111,20 @@ def main() -> None:
         # per_question: 每题各自导入
         for job, plan in tqdm(list(zip(jobs, plans)), desc="导入记忆", unit="q"):
             try:
-                sid = echomem.open_session(title=f"hotpotqa_{job.question_id}")
-                events = plan.get("events", [])
-                for ev in events:
-                    text = ev.get("text", "")
-                    if text:
-                        echomem.add_message(sid, "user", text, created_at=ev.get("time", ""))
-                archive_id = echomem.commit_session(sid)
-                result = echomem.poll_commit(sid, archive_id,
-                                             timeout_s=config.commit_timeout_s,
-                                             poll_interval_s=config.commit_poll_interval_s)
+                memories = [
+                    {"text": ev.get("text", ""), "time": ev.get("time", "")}
+                    for ev in plan.get("events", []) if ev.get("text")
+                ]
+                start = time.monotonic()
+                sid = plugin.inject_memories(memories)
+                elapsed = time.monotonic() - start
                 question_to_session[job.question_id] = sid
                 import_results.append({
                     "question_id": job.question_id,
                     "session_id": sid,
-                    "status": result.status,
-                    "messages": len(events),
-                    "elapsed_s": round(result.elapsed_s, 1),
+                    "status": "completed",
+                    "messages": len(memories),
+                    "elapsed_s": round(elapsed, 1),
                 })
             except Exception as e:
                 log.error("  导入 %s 失败: %s", job.question_id, e)
@@ -165,58 +145,10 @@ def main() -> None:
     log.info("=" * 60)
     log.info("阶段 2: QA (共 %d 题, 并发=%d)", len(jobs), config.concurrency)
 
-    qa_tasks = []
-    for job in jobs:
-        qa_tasks.append({
-            "question_id": job.question_id,
-            "question": job.question,
-            "answer": job.answer,
-            "top_k": config.top_k,
-            "memory_budget_chars": config.memory_budget_chars,
-            "session_id": question_to_session.get(job.question_id, ""),
-            "agent_id": config.agent_id,
-        })
+    def resolve_session(job):
+        return question_to_session.get(job.question_id, "")
 
-    results_buffer: list[QAResult | None] = [None] * len(qa_tasks)
-    pbar = tqdm(total=len(qa_tasks), desc="QA", unit="q")
-
-    with ThreadPoolExecutor(max_workers=config.concurrency) as pool:
-        futures = {}
-        for idx, task in enumerate(qa_tasks):
-            fut = pool.submit(
-                answer_one_question,
-                echomem=echomem,
-                llm=llm,
-                question_id=task["question_id"],
-                question=task["question"],
-                answer=task["answer"],
-                top_k=task["top_k"],
-                memory_budget_chars=task["memory_budget_chars"],
-                session_id=task["session_id"],
-                agent_id=task["agent_id"],
-            )
-            futures[fut] = idx
-
-        for fut in as_completed(futures):
-            idx = futures[fut]
-            try:
-                results_buffer[idx] = fut.result()
-            except Exception as e:
-                log.error("QA %d 失败: %s", idx, e)
-                results_buffer[idx] = QAResult(
-                    question_id=qa_tasks[idx]["question_id"],
-                    question=qa_tasks[idx]["question"],
-                    answer=qa_tasks[idx]["answer"],
-                    response="",
-                    llm_error=str(e),
-                )
-            pbar.update(1)
-            r = results_buffer[idx]
-            if r:
-                log.info("  Q[%s] -> %s", r.question_id, r.response[:100])
-    pbar.close()
-
-    qa_results = [r for r in results_buffer if r is not None]
+    qa_results = run_qa_phase(plugin, jobs, resolve_session, config.concurrency, log)
 
     # 保存 QA 结果
     qa_csv = run.result_dir / "qa_results.csv"

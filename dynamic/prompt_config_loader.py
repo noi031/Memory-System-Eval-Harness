@@ -5,7 +5,7 @@ for user simulators and evaluators, based on the design patterns from
 RealUserSim, IntellAgent, AgentProcessBench, RigorBench, and MemOps papers.
 
 Usage:
-    from memory.prompt_config_loader import (
+    from dynamic.prompt_config_loader import (
         load_user_simulator_config,
         load_evaluator_config,
         list_available_simulators,
@@ -26,7 +26,7 @@ from typing import Any
 
 
 # Config files live in dynamic/configs/
-_DEFAULT_CONFIG_DIR = Path(__file__).resolve().parent.parent / "dynamic" / "configs"
+_DEFAULT_CONFIG_DIR = Path(__file__).resolve().parent / "configs"
 DEFAULT_USER_SIMULATOR_DIR = _DEFAULT_CONFIG_DIR
 DEFAULT_EVALUATOR_DIR = _DEFAULT_CONFIG_DIR
 _CUSTOM_CONFIG_DIR = _DEFAULT_CONFIG_DIR
