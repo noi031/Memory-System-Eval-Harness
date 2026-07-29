@@ -13,12 +13,21 @@
 
 ## 两种模式
 
+推荐从仓库根目录使用统一入口。首次运行会自动创建 `.venv` 并安装依赖：
+
+```bash
+# 验证本地配置、EchoAgent 登录、credential 映射和 EchoMem 健康状态，
+# 不生成场景、不注入数据、不执行 QA。
+./eval.sh dynamic --check \
+  --username test_user --password YOUR_PASSWORD
+```
+
 ### Generate 模式 (默认)
 
 LLM 生成场景: 生成背景记忆 -> 注入 EchoMem -> 逐轮生成 query -> 模拟打字 (prefetch tick) -> 发消息 -> 读 SSE 回复 -> 收集指标
 
 ```bash
-python dynamic/run_eval.py \
+./eval.sh dynamic \
   --echoagent-url http://127.0.0.1:31020 \
   --username test_user --password YOUR_PASSWORD \
   --num-memories 5 --num-queries 10 \
@@ -36,7 +45,7 @@ QA 阶段创建新 session 经 EchoAgent 发送 query, 测试完整管线 (含 p
 **跳过重复注入**: replay 模式从数据集读取 `inject_session_id`, 注入前先查 `GET /api/sessions/{id}/archives`。若该 session 已有 archive (说明之前已注入并 commit), 直接跳过注入阶段, 省去 EchoMem 重新抽取的时间。首次 replay 时正常注入, 后续 replay 同一数据集时自动跳过。
 
 ```bash
-python dynamic/run_eval.py \
+./eval.sh dynamic \
   --echoagent-url http://127.0.0.1:31020 \
   --username test_user --password YOUR_PASSWORD \
   --dataset /path/to/dataset.json \
@@ -145,7 +154,11 @@ Generate 模式支持 `--user-simulator-config`, 默认加载 `dynamic/configs/u
 - **background_memories_prompt**: 背景事实生成 prompt 模板
 - **persona_prompt**: 用户画像 prompt 模板, 生成下一轮 query
 
-该配置传递给 `MemoryDynamicEvaluator`, 影响场景生成和查询生成的行为。
+该配置传递给 `dynamic.simulator.MemoryDynamicEvaluator`, 影响场景生成和查询生成的行为。
+
+动态 CLI 已按职责拆分：`client.py` 负责 EchoAgent HTTP/SSE/prefetch，
+`simulator.py` 负责场景和 query 生成，`workflows.py` 统一 generate/replay
+执行路径，`metrics.py` 负责质量评估，`artifacts.py` 负责输出文件。
 
 ## 参数说明
 

@@ -1,0 +1,230 @@
+"""LoCoMo conversation import workflow."""
+
+from __future__ import annotations
+
+import csv
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+
+from tqdm import tqdm
+
+from shared.eval_base import EvalConfig
+
+
+IMPORT_FIELDS = (
+    "sample_id",
+    "session_key",
+    "session_id",
+    "archive_id",
+    "status",
+    "elapsed_s",
+    "message_count",
+    "submitted_messages",
+    "error",
+)
+
+
+@dataclass(frozen=True)
+class ImportOptions:
+    session_mode: str
+    max_sessions: int
+    reuse_existing_memory: bool
+    sample_filter: str
+
+
+@dataclass
+class ImportReport:
+    rows: list[dict[str, Any]]
+    sample_to_session_ids: dict[str, list[str]]
+    completed: int
+    total: int
+    incomplete: int
+    expected_messages: int = 0
+    submitted_messages: int = 0
+
+
+def resolve_session_mode(requested: str, plan_count: int) -> str:
+    mode = requested
+    if mode == "auto":
+        mode = "locomo" if plan_count <= 1 else "single"
+    if mode == "locomo" and plan_count > 1:
+        raise ValueError(
+            "session-mode locomo cannot safely isolate multiple samples; "
+            "use --session-mode auto or single"
+        )
+    return mode
+
+
+def selected_session_batches(
+    plan: dict[str, Any],
+    *,
+    session_mode: str,
+    max_sessions: int,
+) -> list[dict[str, Any]]:
+    batches = list(plan.get("session_batches") or [])
+    if max_sessions > 0:
+        batches = batches[:max_sessions]
+    if session_mode == "single" and batches:
+        return [{
+            "session_key": "all",
+            "date_time": "",
+            "messages": [
+                message
+                for batch in batches
+                for message in batch.get("messages", [])
+            ],
+        }]
+    return batches
+
+
+def _write_results(path: Path, rows: list[dict[str, Any]]) -> None:
+    with path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=IMPORT_FIELDS)
+        writer.writeheader()
+        writer.writerows(rows)
+
+
+def import_locomo_memory(
+    plans: list[dict[str, Any]],
+    memory_client,
+    config: EvalConfig,
+    options: ImportOptions,
+    result_dir: Path,
+    log,
+) -> ImportReport:
+    rows: list[dict[str, Any]] = []
+    sample_to_session_ids: dict[str, list[str]] = {}
+
+    if options.reuse_existing_memory:
+        rows.append({
+            "sample_id": options.sample_filter,
+            "session_key": "existing-memory",
+            "session_id": "",
+            "archive_id": "",
+            "status": "reused",
+            "elapsed_s": 0,
+            "message_count": 0,
+            "submitted_messages": 0,
+            "error": "",
+        })
+
+    plans_to_import = [] if options.reuse_existing_memory else plans
+    for plan in tqdm(plans_to_import, desc="导入记忆", unit="sample"):
+        sample_id = str(plan["sample_id"])
+        batches = selected_session_batches(
+            plan,
+            session_mode=options.session_mode,
+            max_sessions=options.max_sessions,
+        )
+        sample_to_session_ids[sample_id] = []
+        if not batches:
+            rows.append({
+                "sample_id": sample_id,
+                "session_key": "",
+                "session_id": "",
+                "archive_id": "",
+                "status": "error",
+                "elapsed_s": 0,
+                "message_count": 0,
+                "submitted_messages": 0,
+                "error": "no LoCoMo session batches found",
+            })
+            continue
+
+        for batch in tqdm(
+            batches,
+            desc=f"  {sample_id}",
+            unit="session",
+            leave=False,
+        ):
+            session_id = ""
+            archive_id = ""
+            messages = list(batch.get("messages") or [])
+            session_key = str(batch.get("session_key") or "")
+            submitted_messages = 0
+            try:
+                session_id = memory_client.open_session(
+                    title=f"locomo_{sample_id}_{session_key or 'session'}"
+                )
+                sample_to_session_ids[sample_id].append(session_id)
+                for message in messages:
+                    content = str(message.get("content") or "")
+                    if not content:
+                        continue
+                    memory_client.add_message(
+                        session_id,
+                        str(message.get("role") or "user"),
+                        content,
+                        created_at=str(message.get("created_at") or ""),
+                        role_id=str(
+                            message.get("role_id")
+                            or message.get("role")
+                            or ""
+                        ),
+                    )
+                    submitted_messages += 1
+                archive_id = memory_client.commit_session(session_id)
+                result = memory_client.poll_commit(
+                    session_id,
+                    archive_id,
+                    timeout_s=config.commit_timeout_s,
+                    poll_interval_s=config.commit_poll_interval_s,
+                )
+                rows.append({
+                    "sample_id": sample_id,
+                    "session_key": session_key,
+                    "session_id": session_id,
+                    "archive_id": archive_id,
+                    "status": result.status,
+                    "elapsed_s": round(result.elapsed_s, 1),
+                    "message_count": len(messages),
+                    "submitted_messages": submitted_messages,
+                    "error": result.error,
+                })
+                log.info(
+                    "  %s/%s: %s (%.1fs, %d msgs)",
+                    sample_id,
+                    session_key,
+                    result.status,
+                    result.elapsed_s,
+                    len(messages),
+                )
+            except Exception as exc:
+                log.error(
+                    "  %s/%s 导入失败: %s",
+                    sample_id,
+                    session_key,
+                    exc,
+                )
+                rows.append({
+                    "sample_id": sample_id,
+                    "session_key": session_key,
+                    "session_id": session_id,
+                    "archive_id": archive_id,
+                    "status": "error",
+                    "elapsed_s": 0,
+                    "message_count": len(messages),
+                    "submitted_messages": submitted_messages,
+                    "error": str(exc),
+                })
+
+    output_path = result_dir / "import_results.csv"
+    _write_results(output_path, rows)
+    log.info("导入结果已保存: %s", output_path)
+
+    formal_rows = [] if options.reuse_existing_memory else rows
+    completed = sum(1 for row in formal_rows if row["status"] == "completed")
+    return ImportReport(
+        rows=rows,
+        sample_to_session_ids=sample_to_session_ids,
+        completed=completed,
+        total=len(formal_rows),
+        incomplete=len(formal_rows) - completed,
+        expected_messages=sum(
+            int(row.get("message_count") or 0) for row in formal_rows
+        ),
+        submitted_messages=sum(
+            int(row.get("submitted_messages") or 0) for row in formal_rows
+        ),
+    )

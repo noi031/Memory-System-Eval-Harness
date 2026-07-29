@@ -1,6 +1,21 @@
 """Agent plugin package for the evaluation harness."""
 
-from agents.base import AgentPlugin, AgentResponse, TypingResult
-from agents.registry import get_plugin_class, load_agent_plugin
+from agents.base import (
+    AgentDescriptor,
+    AgentPlugin,
+    AgentResponse,
+    BenchmarkAgentPlugin,
+    TypingResult,
+)
+from agents.registry import get_agent_plugin, get_plugin_class, load_agent_plugin
 
-__all__ = ["AgentPlugin", "AgentResponse", "TypingResult", "get_plugin_class", "load_agent_plugin"]
+__all__ = [
+    "AgentDescriptor",
+    "AgentPlugin",
+    "AgentResponse",
+    "BenchmarkAgentPlugin",
+    "TypingResult",
+    "get_agent_plugin",
+    "get_plugin_class",
+    "load_agent_plugin",
+]

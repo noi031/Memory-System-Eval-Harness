@@ -7,13 +7,11 @@ body:
     attributes:
       value: |
         Share only redacted benchmark summaries. Do not attach API keys, `.env.local`, `judge.conf`, full `runs/`, or memory workspace data.
-  - type: dropdown
+  - type: input
     id: backend
     attributes:
       label: Memory backend
-      options:
-        - OpenViking
-        - EchoMem / EchoMemory
+      value: EchoMem / EchoMemory
     validations:
       required: true
   - type: input
