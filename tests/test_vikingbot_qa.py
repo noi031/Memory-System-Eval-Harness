@@ -29,9 +29,6 @@ from benchmarks.locomo.profiles import (
     LEGACY_77_REFERENCE,
     LEGACY_77_SETTINGS,
     LEGACY_77_SOURCE,
-    TEST_BEST_COMMIT,
-    TEST_BEST_PROFILE,
-    TEST_BEST_SETTINGS,
     V2_ALIGNED_COMMIT,
     V2_ALIGNED_PROFILE,
     V2_ALIGNED_SETTINGS,
@@ -525,91 +522,7 @@ class Legacy77VikingBotTests(unittest.TestCase):
         self.assertEqual(1, len(result.retrieval_items))
 
 
-class TestBestVikingBotTests(unittest.TestCase):
-    def test_profile_pins_committed_test_best_settings(self):
-        self.assertEqual(
-            "c6bf307243866d02117bc71d05803a3770c5fb1c",
-            TEST_BEST_COMMIT,
-        )
-        self.assertEqual(25, TEST_BEST_SETTINGS["top_k"])
-        self.assertEqual(0.7, TEST_BEST_SETTINGS["answer_temperature"])
-        self.assertFalse(TEST_BEST_SETTINGS["omit_answer_temperature"])
-        self.assertEqual(
-            "vikingbot_prompt",
-            TEST_BEST_SETTINGS["initial_retrieval_query_mode"],
-        )
-        self.assertEqual(
-            "turn",
-            TEST_BEST_SETTINGS["tool_query_dedup_scope"],
-        )
-
-    def test_test_best_prompt_uses_runtime_time_and_single_session(self):
-        messages = build_messages(
-            "When did it happen?",
-            "2023-07-23",
-            [SearchResult(
-                uri="echo://tenant/sessions/session-1",
-                score=1.0,
-                content="It happened yesterday.",
-            )],
-            4000,
-            2000,
-            "",
-            TEST_BEST_PROFILE,
-        )
-        prompt = "\n".join(str(item["content"]) for item in messages)
-
-        self.assertIn("## Current Session\nChannel: cli", prompt)
-        self.assertNotIn("Group chat session", prompt)
-        self.assertIn(
-            "Current date: 2023-07-23. Answer the question directly",
-            messages[-1]["content"],
-        )
-        self.assertNotIn(
-            "## Current Time: 2023-07-23",
-            messages[1]["content"],
-        )
-
-    def test_test_best_uses_prompt_query_and_explicit_temperature(self):
-        echomem = _FakeEchoMem()
-        call_kwargs: list[dict] = []
-
-        def fake_chat(*_args, **kwargs):
-            call_kwargs.append(kwargs)
-            return ({"role": "assistant", "content": "19 January 2023"}, 1, 1)
-
-        with patch(
-            "agents.vikingbot.runtime.chat_with_tools",
-            side_effect=fake_chat,
-        ):
-            result = answer_one_vikingbot_question(
-                echomem,
-                _FakeLLM(),
-                question_id="q1",
-                question="When did Jon lose his banking job?",
-                answer="19 January 2023",
-                question_time="2023-07-23",
-                qa_profile=TEST_BEST_PROFILE,
-                answer_temperature=0.7,
-                omit_answer_temperature=False,
-                initial_retrieval_query_mode="vikingbot_prompt",
-                tool_query_dedup_scope="turn",
-                retrieval_uri_dedup=False,
-            )
-
-        self.assertEqual(
-            [
-                "Current date: 2023-07-23. Answer the question directly: "
-                "When did Jon lose his banking job?"
-            ],
-            echomem.queries,
-        )
-        self.assertEqual(
-            {"omit_temperature": False, "answer_temperature": 0.7},
-            call_kwargs[0],
-        )
-        self.assertEqual("19 January 2023", result.response)
-
+class VikingBotRuntimeTests(unittest.TestCase):
     def test_same_turn_tools_execute_concurrently_in_original_order(self):
         barrier = threading.Barrier(2)
         worker_threads: list[int] = []
@@ -664,7 +577,7 @@ class TestBestVikingBotTests(unittest.TestCase):
                 question_id="q1",
                 question="Question",
                 answer="done",
-                qa_profile=TEST_BEST_PROFILE,
+                qa_profile=V2_ALIGNED_PROFILE,
                 tool_query_dedup_scope="turn",
             )
 
@@ -704,7 +617,7 @@ class TestBestVikingBotTests(unittest.TestCase):
                 question_id="q1",
                 question="Question",
                 answer="done",
-                qa_profile=TEST_BEST_PROFILE,
+                qa_profile=V2_ALIGNED_PROFILE,
             )
 
         self.assertEqual(
@@ -1344,7 +1257,6 @@ class ProfileSchemaTests(unittest.TestCase):
                 LEGACY_77_PROFILE,
                 HISTORICAL_PROFILE,
                 V2_ALIGNED_PROFILE,
-                TEST_BEST_PROFILE,
                 VIKINGBOAT_0411_PROFILE,
                 VIKINGBOAT_0411_NATURAL_NO_TOOLS_PROFILE,
             },
@@ -1355,7 +1267,7 @@ class ProfileSchemaTests(unittest.TestCase):
                 spec.settings.validate()
 
     def test_rejects_unknown_profile_field(self):
-        values = dict(TEST_BEST_SETTINGS)
+        values = dict(VIKINGBOAT_0411_SETTINGS)
         values["tool_query_dedup_scpoe"] = values.pop(
             "tool_query_dedup_scope"
         )
@@ -1364,7 +1276,7 @@ class ProfileSchemaTests(unittest.TestCase):
             ProfileSettings.from_mapping(values)
 
     def test_rejects_invalid_dedup_scope(self):
-        values = dict(TEST_BEST_SETTINGS)
+        values = dict(VIKINGBOAT_0411_SETTINGS)
         values["tool_query_dedup_scope"] = "global"
 
         with self.assertRaisesRegex(ValueError, "none, turn, or question"):

@@ -60,20 +60,6 @@ The profile source metadata includes the prompt SHA-256 and reference artifact.
 Later HTTP URI correctness fixes are retained because they prevent invalid
 session reads without adding hidden evidence.
 
-## Committed `test-best`
-
-- Profile commit:
-  `c6bf307243866d02117bc71d05803a3770c5fb1c`
-- Settings source: `scripts/echomemory_evaluation_profiles.py`
-- Prompt source: `scripts/echomemory_qa_prompting.py`
-- Tool source: `scripts/echomemory_qa_tools.py`
-- Loop source: `scripts/echomemory_memory_qa.py`
-
-The advertised `69/81` (`85.19%`) result used a different PR125 memory
-workspace. The historical `test-best` run against the current `head_clean`
-memory scored `56/81` (`69.14%`). These references are intentionally recorded
-separately.
-
 ## Uncommitted v2 Worktree
 
 The v2 checkout contains many modified and untracked files, including dated

@@ -40,7 +40,6 @@ from benchmarks.locomo.judge import (
 from benchmarks.locomo.profiles import (
     HISTORICAL_PROFILE,
     LEGACY_77_PROFILE,
-    TEST_BEST_PROFILE,
     V2_ALIGNED_PROFILE,
     default_vikingbot_workspace,
     profile_settings,
@@ -145,7 +144,6 @@ def build_parser() -> argparse.ArgumentParser:
             LEGACY_77_PROFILE,
             HISTORICAL_PROFILE,
             V2_ALIGNED_PROFILE,
-            TEST_BEST_PROFILE,
             VIKINGBOAT_0411_PROFILE,
             VIKINGBOAT_0411_NATURAL_NO_TOOLS_PROFILE,
             "one-shot",
@@ -154,8 +152,7 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "LoCoMo QA executor; legacy-77 preserves the actual July 13 "
             "head_clean 63/81 run, historical-75 preserves the July 17 run, "
-            "v2-head preserves committed v2 EchoMemory alignment"
-            "; test-best preserves the committed v2 best profile; "
+            "v2-head preserves committed v2 EchoMemory alignment; "
             "vikingboat0411 adapts the v0.4.11 VikingBot agent behavior to "
             "EchoMemory tools; vikingboat0411-natural-no-tools keeps only "
             "complete initially retrieved memory excerpts"

@@ -191,7 +191,7 @@ class LocomoComparisonTests(unittest.TestCase):
                 _write_csv(run_dir / "judge_results.csv", judge_rows)
                 (run_dir / "summary.json").write_text(
                     json.dumps({
-                        "qa_profile": "test-best",
+                        "qa_profile": "vikingboat0411",
                         "tool_protocol_sha256": ["tool-hash"],
                     }),
                     encoding="utf-8",
@@ -213,7 +213,7 @@ class LocomoComparisonTests(unittest.TestCase):
                             "base_url": "https://answer.test/v1",
                             "model": "model",
                         },
-                        "qa": {"profile": "test-best"},
+                        "qa": {"profile": "vikingboat0411"},
                         "qa_contract": {"sha256": "qa-hash"},
                     }),
                     encoding="utf-8",

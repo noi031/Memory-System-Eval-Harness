@@ -22,7 +22,6 @@ QA_CONTRACT_FILES = (
     "agents/vikingbot/runtime.py",
     "agents/vikingbot/tools.py",
     "agents/vikingbot/prompting.py",
-    "agents/vikingbot/test_best_prompting.py",
     "agents/vikingbot/legacy77_prompting.py",
     "agents/vikingbot/v2_prompting.py",
     "agents/vikingbot/vikingboat0411_prompting.py",

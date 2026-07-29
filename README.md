@@ -157,12 +157,6 @@ session_mode=locomo
   --reuse-memory-account \
   --qa-profile vikingbot-v2-head
 
-# 使用 v2 已提交 test-best profile（85.19% 对应另一份 PR125 memory）
-./eval.sh locomo \
-  --sample conv-30 \
-  --reuse-memory-account \
-  --qa-profile test-best
-
 # 从中断运行继续，健康 QA/Judge 行不会再次调用模型
 ./eval.sh locomo \
   --sample conv-30 \
@@ -203,15 +197,6 @@ commit `a146a246c2fcce128229d19e05c87228affd829d`。它使用 EchoMemory-only
 system prompt、初始 Top-30 / 0.1 阈值、工具 Top-20 / 0.35 阈值，以及
 `memory_search`、`memory_read_many`、`memory_list`、`memory_grep`、
 `memory_glob` 五个只读 HTTP 工具。该 profile 不携带历史分数声明。
-
-`--qa-profile test-best` 固定到 v2 commit
-`c6bf307243866d02117bc71d05803a3770c5fb1c`，保留 Top-25、显式
-temperature 0.7、运行时 Current Time、single-session prompt、
-`vikingbot_prompt` 初始检索 query、按 turn 搜索去重和五个只读工具。
-v2 的 `69/81 (85.19%)` 参考来自另一份 PR125 memory；当前
-`head_clean` 的历史 test-best 结果是 `56/81 (69.14%)`，不能混为同一基线。
-完整的 endpoint、Judge 漂移和复现规则见
-`docs/locomo-reproduction-findings.md`。
 
 LoCoMo 默认按数据集原始 session 分批导入，避免把整段长对话压成一个
 超大 commit。快速检查可增加 `--max-sessions 1`；兼容旧单 session 行为时

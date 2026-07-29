@@ -27,7 +27,6 @@ EchoMemory is the only backend in scope.
 | Agent contract and lookup | `agents/base.py`, `agents/registry.py` |
 | July 17 LoCoMo settings and reference score | `benchmarks/locomo/profiles/vikingbot_historical.py` |
 | July 13 actual `head_clean` prompt, five-tool loop, and `63/81` settings | `agents/vikingbot/legacy77_prompting.py`, `benchmarks/locomo/profiles/legacy77.py` |
-| Committed v2 `test-best` prompt/settings with memory-qualified score reference | `agents/vikingbot/test_best_prompting.py`, `benchmarks/locomo/profiles/test_best.py` |
 | Committed v2 HEAD EchoMemory-only VikingBoat prompt, five-tool protocol, and alignment settings | `agents/vikingbot/v2_prompting.py`, `agents/vikingbot/tools.py`, `benchmarks/locomo/profiles/vikingbot_v2.py` |
 | v2 backend descriptor/config contract | `backends/base.py` |
 | v2 backend registry | `backends/registry.py` |
@@ -38,8 +37,7 @@ EchoMemory is the only backend in scope.
 The profiles retain separate historical references: `legacy-77` targets the
 July 13, 2026 `head_clean` run (`63/81`, `77.78%`), while
 `vikingbot-historical-75` records the July 17 rejudged result (`61/81`,
-`75.31%`). `test-best`'s `69/81` reference belongs to a different PR125
-memory and is documented as such.
+`75.31%`).
 
 ## Backend Migration
 

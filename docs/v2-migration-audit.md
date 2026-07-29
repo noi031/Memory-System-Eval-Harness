@@ -80,16 +80,16 @@ SDK, or enable an OpenViking workflow.
 
 | Item | Status |
 | --- | --- |
-| Paid LoCoMo conv-30 81-question QA and Judge run | Completed for `test-best`; artifacts are retained under `benchmarks/locomo/results/` |
-| Reproduction score claim | Profile references are memory-qualified; `legacy-77` and `test-best` are represented separately |
+| Paid LoCoMo conv-30 81-question QA and Judge run | Completed for retained profiles; local artifacts are excluded from the repository |
+| Reproduction score claim | Retained profile references are memory-qualified |
 | Dirty/untracked v2 `legacy-77` experiment behavior | Migrated as an explicit tested profile because it is the actual `head_clean` reference run |
 
 ## Behavioral Guarantees
 
 1. `--reuse-memory-account` performs no session writes or commits.
 2. Reused and newly injected memory use the same LoCoMo QA and Judge path.
-3. Historical references remain distinct: July 13 `head_clean` `63/81`,
-   July 17 rejudged `61/81`, and PR125-memory `test-best` `69/81`.
+3. Historical references remain distinct: July 13 `head_clean` `63/81`
+   and July 17 rejudged `61/81`.
 4. The committed v2 HEAD profile is separate and makes no score claim.
 5. Agents live under `agents/<agent>/`; dataset policy stays under
    `benchmarks/<dataset>/`; memory transports live under `backends/<backend>/`.

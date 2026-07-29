@@ -45,12 +45,6 @@ workspace，并保留 `ECHOMEM_AUTO_START=1`。下面两条命令会直接对该
   --reuse-memory-account \
   --qa-profile vikingbot-v2-head
 
-# 使用 v2 已提交的 test-best 口径
-./eval.sh locomo \
-  --sample conv-30 \
-  --reuse-memory-account \
-  --qa-profile test-best
-
 # 使用 VikingBot v0.4.11 prompt、工具语义和循环口径
 # 后端和模型可见工具均使用只读 EchoMemory memory_* 接口
 ./eval.sh locomo \
@@ -169,11 +163,6 @@ python benchmarks/locomo/run_eval.py \
 | `--reuse-memory-account` | true | LoCoMo 默认复用已配置身份中的现有记忆，跳过 open/add/commit |
 | `--inject-memory` | false | 显式切换为重新注入：创建隔离身份并执行 open/add/commit |
 | `--keep-memory-account` | false | 评测结束后保留临时隔离身份，供 workspace 诊断 |
-
-`test-best` 的 v2 `69/81 (85.19%)` 参考来自 PR125 memory，不是当前
-`head_clean` memory。比较分数前必须同时核对 `memory_provenance`、
-answer/Judge endpoint、profile 和模型协议；详见
-`docs/locomo-reproduction-findings.md`。
 
 ### Judge 参数
 | 参数 | 默认值 | 说明 |

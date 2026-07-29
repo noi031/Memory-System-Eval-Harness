@@ -168,16 +168,6 @@ def build_messages(
             user_memory_budget_chars,
             agent_memory_budget_chars,
         )
-    if qa_profile == "test-best":
-        from .test_best_prompting import build_test_best_messages
-
-        return build_test_best_messages(
-            question,
-            question_time,
-            items,
-            user_memory_budget_chars,
-            agent_memory_budget_chars,
-        )
     user_items: list[SearchResult] = []
     agent_items: list[SearchResult] = []
     for item in items:
