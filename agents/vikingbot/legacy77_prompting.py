@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import platform
 import time
 from datetime import datetime
 from typing import Any
@@ -11,12 +10,10 @@ from backends import SearchResult
 
 from .prompting import format_memory
 
+LEGACY_77_RUNTIME = "macOS arm64, Python 3.14.6"
+
 
 def _system_prompt() -> str:
-    runtime = (
-        f"{'macOS' if platform.system() == 'Darwin' else platform.system()} "
-        f"{platform.machine()}, Python {platform.python_version()}"
-    )
     return f"""# MemoryBench Agent
 
 You are an AI assistant using EchoMemory as the memory backend.
@@ -24,7 +21,7 @@ When acquiring information, data, and knowledge, you **prioritize using EchoMemo
 You have access only to the EchoMemory tools exposed in this request.
 
 ## Runtime
-{runtime}
+{LEGACY_77_RUNTIME}
 
 ## Workspace
 EchoMemory is accessed through its public HTTP-backed memory tools. Do not assume access to local files, databases, shell commands, or hidden workspace artifacts.

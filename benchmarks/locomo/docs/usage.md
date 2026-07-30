@@ -29,6 +29,19 @@ workspace，并保留 `ECHOMEM_AUTO_START=1`。下面两条命令会直接对该
 # 重新注入到隔离身份
 ./eval.sh locomo --sample conv-30 --inject-memory --tools
 
+# 同一份新注入记忆的工具 / 无工具对照
+./eval.sh locomo \
+  --sample conv-30 \
+  --inject-memory \
+  --keep-memory-account \
+  --memory-identity-file .runtime/locomo-conv30.json \
+  --tools
+
+./eval.sh locomo \
+  --sample conv-30 \
+  --memory-identity-file .runtime/locomo-conv30.json \
+  --no-tools
+
 # 从中断运行继续；只复用健康行，失败和缺失题会重新 QA
 ./eval.sh locomo \
   --sample conv-30 \
@@ -158,6 +171,7 @@ python benchmarks/locomo/run_eval.py \
 | `--allow-incomplete-imports` | false | 导入未完成仍继续，仅限诊断 |
 | `--allow-memory-provenance-mismatch` | false | session manifest 与数据集/session-mode 不一致时仍继续；仅限诊断 |
 | `--memory-session-prefix` | 按 sample 推导 | `conv-30` 自动推导为 `echomem-locomo-conv-30-`；显式指定时覆盖 |
+| `--memory-identity-file` | (空) | 本地保存或复用隔离 EchoMem tenant 的身份文件；包含 auth key，文件以 `0600` 写入且不得提交 |
 | `--reuse-memory-account` | true | LoCoMo 默认复用已配置身份中的现有记忆，跳过 open/add/commit |
 | `--inject-memory` | false | 显式切换为重新注入：创建隔离身份并执行 open/add/commit |
 | `--keep-memory-account` | false | 评测结束后保留临时隔离身份，供 workspace 诊断 |

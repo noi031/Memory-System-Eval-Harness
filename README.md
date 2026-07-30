@@ -131,6 +131,25 @@ SHA-256。
 | `--tools` | `vikingboat0411` | 初始检索，并允许只读 `memory_*` 工具循环 |
 | `--no-tools` | `vikingboat0411-natural-no-tools` | 只使用完整初始记忆正文，不暴露工具 schema |
 
+要用同一份新注入的记忆对比两种模式，先保留隔离身份，再复用它：
+
+```bash
+./eval.sh locomo \
+  --sample conv-30 \
+  --inject-memory \
+  --keep-memory-account \
+  --memory-identity-file .runtime/locomo-conv30.json \
+  --tools
+
+./eval.sh locomo \
+  --sample conv-30 \
+  --memory-identity-file .runtime/locomo-conv30.json \
+  --no-tools
+```
+
+身份文件包含 EchoMem 临时 auth key，已由 `.gitignore` 排除，并以 `0600` 权限
+写入；不要提交或分享该文件。
+
 结果写入 `results/<run-name>/<timestamp>/`，主要文件包括
 `qa_results.csv`、`judge_results.csv`、`summary.json` 和
 `agent_traces/`。

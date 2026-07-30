@@ -124,6 +124,14 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--memory-identity-file",
+        default="",
+        help=(
+            "Local JSON file for a kept isolated EchoMem identity. A new "
+            "injection writes it; a later run reuses the identity from it."
+        ),
+    )
+    parser.add_argument(
         "--exclude-memory-file",
         action="append",
         default=[],
@@ -308,6 +316,66 @@ def load_qa_prompt_append(path_value: str) -> tuple[str, str, str]:
     return prompt, digest, path.name
 
 
+def load_memory_identity_file(path_value: str) -> dict[str, str]:
+    value = str(path_value or "").strip()
+    if not value:
+        return {}
+    path = Path(value).expanduser().resolve()
+    if not path.is_file():
+        return {}
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"Invalid memory identity file: {path}") from exc
+    if not isinstance(raw, dict):
+        raise ValueError(f"Invalid memory identity file: {path}")
+    required = ("tenant_id", "user_id", "auth_key")
+    identity = {
+        key: str(raw.get(key) or "").strip()
+        for key in (*required, "agent_id")
+    }
+    missing = [key for key in required if not identity[key]]
+    if missing:
+        raise ValueError(
+            "Memory identity file is missing "
+            f"{', '.join(missing)}: {path}"
+        )
+    return identity
+
+
+def write_memory_identity_file(
+    path_value: str,
+    identity: dict[str, str],
+    *,
+    auth_key: str,
+    agent_id: str,
+) -> None:
+    value = str(path_value or "").strip()
+    if not value:
+        return
+    path = Path(value).expanduser().resolve()
+    if not auth_key:
+        raise RuntimeError("Kept EchoMem identity has no auth key")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "tenant_id": identity["tenant_id"],
+        "user_id": identity["user_id"],
+        "agent_id": agent_id,
+        "auth_key": auth_key,
+    }
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        os.fchmod(fd, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            fd = -1
+            handle.write(
+                json.dumps(payload, ensure_ascii=False, indent=2) + "\n"
+            )
+    finally:
+        if fd >= 0:
+            os.close(fd)
+
+
 def main() -> None:
     args = build_parser().parse_args()
     apply_locomo_cli_defaults(args)
@@ -335,6 +403,22 @@ def main() -> None:
         system_prompt_append_sha256,
         system_prompt_append_source,
     ) = load_qa_prompt_append(args.qa_prompt_file)
+    saved_memory_identity = load_memory_identity_file(
+        args.memory_identity_file
+    )
+    if saved_memory_identity:
+        if args.inject_memory or args.keep_memory_account:
+            raise ValueError(
+                "An existing --memory-identity-file cannot be combined with "
+                "--inject-memory or --keep-memory-account"
+            )
+        args.reuse_memory_account = True
+        config.account = saved_memory_identity["tenant_id"]
+        config.user_id = saved_memory_identity["user_id"]
+        config.agent_id = (
+            saved_memory_identity["agent_id"] or config.agent_id
+        )
+        config.echomem_auth_key = saved_memory_identity["auth_key"]
     config.sample_filter = args.sample
     config.question_limit = args.questions
     validate_eval_config(config)
@@ -440,6 +524,13 @@ def main() -> None:
         keep=args.keep_memory_account,
     )
     apply_evaluation_identity(config, run, echomem, evaluation_identity)
+    if args.memory_identity_file and evaluation_identity["mode"] == "isolated":
+        write_memory_identity_file(
+            args.memory_identity_file,
+            evaluation_identity,
+            auth_key=echomem.auth_key,
+            agent_id=config.agent_id,
+        )
     log.info(
         "EchoMem identity: %s tenant=%s user=%s",
         evaluation_identity["mode"],
