@@ -313,6 +313,7 @@ def answer_one_vikingbot_question(
     retrieval_uri_dedup: bool = True,
     search_tool_target_uri_schema: bool = False,
     tools_enabled: bool = True,
+    search_enabled: bool = True,
     system_prompt_append: str = "",
     system_prompt_append_sha256: str = "",
     system_prompt_append_source: str = "",
@@ -337,24 +338,25 @@ def answer_one_vikingbot_question(
         if initial_retrieval_query_mode == "vikingbot_prompt"
         else question
     )
-    try:
-        items = echomem.search(initial_query, top_k=top_k, timeout_s=remaining())
-        items = [
-            item for item in items
-            if item.score >= initial_min_score
-        ]
-        if retrieval_uri_dedup:
-            deduped: list[SearchResult] = []
-            seen_uris: set[str] = set()
-            for item in items:
-                if item.uri and item.uri in seen_uris:
-                    continue
-                if item.uri:
-                    seen_uris.add(item.uri)
-                deduped.append(item)
-            items = deduped
-    except Exception as exc:
-        retrieval_error = str(exc)
+    if search_enabled:
+        try:
+            items = echomem.search(initial_query, top_k=top_k, timeout_s=remaining())
+            items = [
+                item for item in items
+                if item.score >= initial_min_score
+            ]
+            if retrieval_uri_dedup:
+                deduped: list[SearchResult] = []
+                seen_uris: set[str] = set()
+                for item in items:
+                    if item.uri and item.uri in seen_uris:
+                        continue
+                    if item.uri:
+                        seen_uris.add(item.uri)
+                    deduped.append(item)
+                items = deduped
+        except Exception as exc:
+            retrieval_error = str(exc)
     retrieval_latency_s += time.monotonic() - retrieval_started
     cache = {item.uri: item for item in items if item.uri}
     orchestration_started = time.monotonic()
@@ -367,6 +369,7 @@ def answer_one_vikingbot_question(
         vikingbot_workspace,
         qa_profile,
         system_prompt_append,
+        search_enabled,
     )
     trace: dict[str, Any] = {
         "schema_version": 1,
@@ -399,6 +402,7 @@ def answer_one_vikingbot_question(
                 search_tool_target_uri_schema
             ),
             "tools_enabled": tools_enabled,
+            "search_enabled": search_enabled,
             "system_prompt_append_sha256": system_prompt_append_sha256,
             "system_prompt_append_source": system_prompt_append_source,
         },
@@ -438,6 +442,7 @@ def answer_one_vikingbot_question(
         tool_definitions(
             tool_set,
             search_target_uri=search_tool_target_uri_schema,
+            search_enabled=search_enabled,
         )
         if tools_enabled
         else []
@@ -607,6 +612,16 @@ def answer_one_vikingbot_question(
                     return (
                         "Duplicate search skipped. Reformulate the query around a different "
                         "entity, event phrase, date clue, quote, object, or relation.",
+                        [],
+                        0.0,
+                        [],
+                    )
+                if (
+                    prepared["name"] == MEMORY_SEARCH_TOOL
+                    and not search_enabled
+                ):
+                    return (
+                        "memory_search is disabled for this evaluation.",
                         [],
                         0.0,
                         [],
@@ -898,6 +913,7 @@ def run_concurrent_vikingbot_qa(
                     False,
                 ),
                 tools_enabled=task.get("tools_enabled", True),
+                search_enabled=task.get("search_enabled", True),
                 system_prompt_append=task.get(
                     "system_prompt_append",
                     "",

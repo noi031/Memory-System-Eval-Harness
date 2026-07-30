@@ -45,6 +45,7 @@ class QAOptions:
     retrieval_uri_dedup: bool = True
     search_tool_target_uri_schema: bool = False
     tools_enabled: bool = True
+    search_enabled: bool = True
     system_prompt_append: str = ""
     system_prompt_append_sha256: str = ""
     system_prompt_append_source: str = ""
@@ -181,6 +182,7 @@ def build_qa_tasks(
                 options.search_tool_target_uri_schema
             ),
             "tools_enabled": options.tools_enabled,
+            "search_enabled": options.search_enabled,
             "system_prompt_append": options.system_prompt_append,
             "system_prompt_append_sha256": (
                 options.system_prompt_append_sha256

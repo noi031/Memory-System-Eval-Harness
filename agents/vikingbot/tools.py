@@ -22,6 +22,7 @@ def tool_definitions(
     tool_set: str = "search_read",
     *,
     search_target_uri: bool = False,
+    search_enabled: bool = True,
 ) -> list[dict[str, Any]]:
     echo_native = tool_set == "vikingbot_echo_native"
     search_properties: dict[str, Any] = {
@@ -55,8 +56,9 @@ def tool_definitions(
             "when a follow-up asks for a different remembered fact."
         )
     )
-    tools = [
-        {
+    tools = []
+    if search_enabled:
+        tools.append({
             "type": "function",
             "function": {
                 "name": MEMORY_SEARCH_TOOL,
@@ -67,8 +69,8 @@ def tool_definitions(
                     "required": ["query"],
                 },
             },
-        },
-        {
+        })
+    tools.append({
             "type": "function",
             "function": {
                 "name": MEMORY_READ_TOOL,
@@ -94,8 +96,7 @@ def tool_definitions(
                     "required": ["uris"],
                 },
             },
-        },
-    ]
+        })
     if tool_set not in {"vikingbot_native_safe", "vikingbot_echo_native"}:
         return tools
     tools.extend([

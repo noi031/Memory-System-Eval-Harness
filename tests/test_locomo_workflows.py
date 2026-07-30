@@ -117,6 +117,20 @@ class LocomoCliDefaultsTests(unittest.TestCase):
         )
         self.assertTrue(args.reuse_memory_account)
 
+    def test_no_search_keeps_tools_enabled(self):
+        args = build_locomo_parser().parse_args([
+            "--sample",
+            "conv-30",
+            "--tools",
+            "--no-search",
+        ])
+
+        apply_locomo_cli_defaults(args)
+
+        self.assertTrue(args.tools)
+        self.assertFalse(args.search)
+        self.assertEqual("vikingboat0411", args.qa_profile)
+
     def test_explicit_profile_preserves_strict_no_tools_ablation(self):
         args = build_locomo_parser().parse_args([
             "--sample",
@@ -142,6 +156,20 @@ class LocomoCliDefaultsTests(unittest.TestCase):
         apply_locomo_cli_defaults(args)
 
         self.assertFalse(args.reuse_memory_account)
+        self.assertEqual("", args.memory_session_prefix)
+
+    def test_memory_identity_file_disables_historical_prefix_inference(self):
+        args = build_locomo_parser().parse_args([
+            "--sample",
+            "conv-30",
+            "--memory-identity-file",
+            ".runtime/locomo-conv30.json",
+            "--no-tools",
+        ])
+
+        apply_locomo_cli_defaults(args)
+
+        self.assertTrue(args.reuse_memory_account)
         self.assertEqual("", args.memory_session_prefix)
 
     def test_vendored_locomo_dataset_has_expected_hash(self):

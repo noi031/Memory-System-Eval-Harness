@@ -112,6 +112,12 @@ session_mode=locomo
 ./eval.sh locomo --sample conv-30 --no-tools
 ```
 
+保留文件工具但关闭语义 `memory_search`，同时跳过初始向量检索：
+
+```bash
+./eval.sh locomo --sample conv-30 --tools --no-search
+```
+
 本地验证额外 prompt 时，通过文件参数追加到所选 profile 的 system prompt：
 
 ```bash
@@ -130,6 +136,7 @@ SHA-256。
 |---|---|---|
 | `--tools` | `vikingboat0411` | 初始检索，并允许只读 `memory_*` 工具循环 |
 | `--no-tools` | `vikingboat0411-natural-no-tools` | 只使用完整初始记忆正文，不暴露工具 schema |
+| `--tools --no-search` | `vikingboat0411` | 跳过初始语义检索且不暴露 `memory_search`；保留 `memory_read_many`、`memory_list`、`memory_grep`、`memory_glob` |
 
 要用同一份新注入的记忆对比两种模式，先保留隔离身份，再复用它：
 

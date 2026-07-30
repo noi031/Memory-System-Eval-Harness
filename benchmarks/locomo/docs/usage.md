@@ -20,6 +20,9 @@ workspace，并保留 `ECHOMEM_AUTO_START=1`。下面两条命令会直接对该
 # 自然无工具对照
 ./eval.sh locomo --sample conv-30 --no-tools
 
+# 关闭语义 memory_search 和初始向量检索，保留文件工具
+./eval.sh locomo --sample conv-30 --tools --no-search
+
 # 追加仅保存在本地的实验 prompt
 ./eval.sh locomo \
   --sample conv-30 \
@@ -156,6 +159,7 @@ python benchmarks/locomo/run_eval.py \
 | `--tool-search-pool-multiplier` | profile 决定 | 三个保留 profile 均为 `1` |
 | `--tool-set` | profile 决定 | `legacy-77=vikingbot_native_safe`；VikingBoat 0.4.11 profiles=`vikingbot_echo_native` |
 | `--tools` / `--no-tools` | `--tools` | 是否向回答模型暴露 profile 的记忆工具；关闭后保留相同 prompt 和初始检索注入，只执行一次模型调用 |
+| `--search` / `--no-search` | `--search` | 是否启用语义 `memory_search` 与初始向量检索；`--no-search` 保留 `memory_read_many`、`memory_list`、`memory_grep`、`memory_glob` |
 | `--user-memory-budget-chars` | `4000` | user memory prompt 预算 |
 | `--agent-memory-budget-chars` | `2000` | agent memory prompt 预算 |
 | `--max-iterations` | `50` | 单题最大模型/tool-loop 迭代数 |

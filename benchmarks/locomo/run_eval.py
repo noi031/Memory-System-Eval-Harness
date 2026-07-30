@@ -208,6 +208,15 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     qa.add_argument(
+        "--search",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "Enable semantic memory_search, including initial retrieval; "
+            "--no-search keeps the other memory tools"
+        ),
+    )
+    qa.add_argument(
         "--vikingbot-workspace",
         default=default_vikingbot_workspace(),
         help="Workspace supplying the historical SOUL.md and TOOLS.md bootstrap",
@@ -297,6 +306,7 @@ def apply_locomo_cli_defaults(args) -> None:
     if (
         args.reuse_memory_account
         and not args.memory_session_prefix
+        and not args.memory_identity_file
         and re.fullmatch(r"conv-\d+", sample)
     ):
         args.memory_session_prefix = f"echomem-locomo-{sample}-"
@@ -715,6 +725,7 @@ def main() -> None:
             False,
         ),
         tools_enabled=args.tools,
+        search_enabled=args.search,
         system_prompt_append=system_prompt_append,
         system_prompt_append_sha256=system_prompt_append_sha256,
         system_prompt_append_source=system_prompt_append_source,

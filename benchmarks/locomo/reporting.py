@@ -84,6 +84,7 @@ def build_summary(
         ),
         "qa_profile": qa_options.profile,
         "tools_enabled": qa_options.tools_enabled,
+        "search_enabled": qa_options.search_enabled,
         "qa_profile_reference": profile_reference(qa_options.profile),
         "qa_profile_source": profile_source(qa_options.profile),
         "qa_prompt_append": {

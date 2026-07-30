@@ -952,6 +952,44 @@ class VikingBoat0411Tests(unittest.TestCase):
             by_name["memory_grep"]["parameters"]["properties"]["pattern"]["type"],
         )
 
+    def test_search_ablation_keeps_non_search_tools_only(self):
+        tools = tool_definitions(
+            "vikingbot_echo_native",
+            search_target_uri=True,
+            search_enabled=False,
+        )
+
+        self.assertEqual(
+            {
+                "memory_read_many",
+                "memory_list",
+                "memory_grep",
+                "memory_glob",
+            },
+            {
+                tool["function"]["name"]
+                for tool in tools
+            },
+        )
+
+    def test_search_ablation_prompt_uses_filesystem_tools(self):
+        messages = build_messages(
+            "When did Jon lose his job?",
+            "2023-07-23",
+            [],
+            4000,
+            2000,
+            "",
+            VIKINGBOAT_0411_PROFILE,
+            search_enabled=False,
+        )
+        prompt = "\n".join(str(item["content"]) for item in messages)
+
+        self.assertNotIn("## memory_search(query=[user_query])", prompt)
+        self.assertIn("memory_grep", prompt)
+        self.assertIn("memory_glob", prompt)
+        self.assertIn("automatic initial retrieval are disabled", prompt)
+
     def test_memory_search_executes_against_echomemory(self):
         echomem = _FakeEchoMem()
         text, items = execute_tool(
@@ -1110,6 +1148,55 @@ class VikingBoat0411Tests(unittest.TestCase):
         self.assertEqual(1, result.iterations)
         self.assertFalse(result.trace["settings"]["tools_enabled"])
         self.assertEqual([], result.trace["tool_protocol"]["names"])
+
+    def test_search_ablation_skips_initial_search_and_hides_search_tool(self):
+        class NoSearchEchoMem(_FakeEchoMem):
+            def search(self, *_args, **_kwargs):
+                raise AssertionError("search must not run")
+
+        captured_tools: list[list[dict]] = []
+
+        def fake_chat(_llm, _messages, tools, _timeout, **_kwargs):
+            captured_tools.append(tools)
+            return (
+                {"role": "assistant", "content": "Unknown from available files."},
+                10,
+                2,
+            )
+
+        with patch(
+            "agents.vikingbot.runtime.chat_with_tools",
+            side_effect=fake_chat,
+        ):
+            result = answer_one_vikingbot_question(
+                NoSearchEchoMem(),
+                _FakeLLM(),
+                question_id="q-no-search",
+                question="When did Jon lose his job?",
+                answer="19 January 2023",
+                qa_profile=VIKINGBOAT_0411_PROFILE,
+                tool_set="vikingbot_echo_native",
+                search_enabled=False,
+            )
+
+        self.assertEqual([], result.trace["initial_retrieval"]["items"])
+        self.assertFalse(result.trace["settings"]["search_enabled"])
+        self.assertNotIn(
+            "memory_search",
+            result.trace["tool_protocol"]["names"],
+        )
+        self.assertEqual(
+            {
+                "memory_read_many",
+                "memory_list",
+                "memory_grep",
+                "memory_glob",
+            },
+            {
+                tool["function"]["name"]
+                for tool in captured_tools[0]
+            },
+        )
 
     def test_natural_no_tools_prompt_has_only_complete_memory(self):
         items = [

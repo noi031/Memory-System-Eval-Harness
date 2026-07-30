@@ -13,10 +13,37 @@ from backends import SearchResult
 from .prompting import build_question_prompt
 
 
-def _system_prompt() -> str:
+def _system_prompt(search_enabled: bool = True) -> str:
     runtime = (
         f"{'macOS' if platform.system() == 'Darwin' else platform.system()} "
         f"{platform.machine()}, Python {platform.python_version()}"
+    )
+    search_guidance = (
+        """| `memory_search` | Semantic retrieval across memories and supporting context |
+| `memory_read_many` | Reading the complete content of one or more known EchoMemory URIs |
+| `memory_list` | Browsing an EchoMemory URI hierarchy |
+| `memory_grep` | Regex or exact-text search inside EchoMemory content |
+| `memory_glob` | Finding resources by URI or filename pattern |
+
+### Retrieval Workflow
+
+- Use `memory_search` when the request is conceptual or semantic. Search results contain URIs and summaries, not necessarily full content.
+- Use `memory_read_many` on the relevant result URIs before relying on details that are not present in the summary. Batch independent URIs in one call.
+- Use `memory_grep` for known text or regex patterns, `memory_glob` for path patterns, and `memory_list` to explore a known directory.
+- Avoid repeating the same search intent within one turn. Search again when a follow-up asks for a different fact or when the stored state may have changed.
+- For questions about the user's remembered facts, preferences, profile, or personal context, search EchoMemory before concluding that no record exists."""
+        if search_enabled
+        else """| `memory_read_many` | Reading the complete content of one or more known EchoMemory URIs |
+| `memory_list` | Browsing an EchoMemory URI hierarchy |
+| `memory_grep` | Regex or exact-text lookup inside EchoMemory content |
+| `memory_glob` | Finding resources by URI or filename pattern |
+
+### Retrieval Workflow
+
+- Semantic `memory_search` is unavailable in this evaluation.
+- Use `memory_list` or `memory_glob` to discover resources, `memory_grep` to locate exact words, names, dates, or phrases, and `memory_read_many` to read relevant resources in full.
+- Prefer focused grep patterns derived from the question, then read the matching files before answering.
+- Do not conclude that no record exists until the available list, glob, grep, and read tools have been used appropriately."""
     )
     return f"""# vikingbot 🐈
 
@@ -94,19 +121,7 @@ Available EchoMemory tools may include:
 
 | Tool | Use it for |
 |------|------------|
-| `memory_search` | Semantic retrieval across memories and supporting context |
-| `memory_read_many` | Reading the complete content of one or more known EchoMemory URIs |
-| `memory_list` | Browsing an EchoMemory URI hierarchy |
-| `memory_grep` | Regex or exact-text search inside EchoMemory content |
-| `memory_glob` | Finding resources by URI or filename pattern |
-
-### Retrieval Workflow
-
-- Use `memory_search` when the request is conceptual or semantic. Search results contain URIs and summaries, not necessarily full content.
-- Use `memory_read_many` on the relevant result URIs before relying on details that are not present in the summary. Batch independent URIs in one call.
-- Use `memory_grep` for known text or regex patterns, `memory_glob` for path patterns, and `memory_list` to explore a known directory.
-- Avoid repeating the same search intent within one turn. Search again when a follow-up asks for a different fact or when the stored state may have changed.
-- For questions about the user's remembered facts, preferences, profile, or personal context, search EchoMemory before concluding that no record exists."""
+{search_guidance}"""
 
 
 def _filename(uri: str) -> str:
@@ -170,27 +185,47 @@ def build_vikingboat0411_messages(
     items: list[SearchResult],
     user_memory_budget_chars: int,
     agent_memory_budget_chars: int,
+    search_enabled: bool = True,
 ) -> list[dict[str, Any]]:
     del agent_memory_budget_chars
     memory = format_vikingbot_memory(items, user_memory_budget_chars)
     now = datetime.now().strftime("%Y-%m-%d %H:%M (%A)")
     tz = time.strftime("%Z") or "UTC"
+    retrieval_section = (
+        f"## memory_search(query=[user_query])\n### user memories:\n{memory or '(none)'}"
+        if search_enabled
+        else (
+            "## EchoMemory Search Ablation\n"
+            "Semantic search and automatic initial retrieval are disabled. "
+            "No memory excerpts have been pre-injected; use the available "
+            "list, glob, grep, and read tools."
+        )
+    )
+    retrieval_rules = (
+        "## EchoMemory Retrieval\n"
+        "- For questions about the user's remembered facts, preferences, profile, or personal context, use memory_search for the current question before saying there is no relevant record.\n"
+        "- A previous empty search result does not prove that a different follow-up question has no memory; search again when the requested fact changes.\n"
+        "- Injected memories preserve the unified EchoMemory relevance order across all available memory types, up to the top 25 results.\n"
+        "- Injected memory entries use two types: full means the full memory content is already shown; uri means only the URI is shown and it may still point to key facts.\n"
+        "- For relevant uri entries, use memory_read_many on their URIs to fetch full details to help you to resolve the query. "
+        if search_enabled
+        else (
+            "## EchoMemory Retrieval\n"
+            "- Use memory_list or memory_glob to discover session resources.\n"
+            "- Use memory_grep with names, dates, phrases, or other exact clues from the question.\n"
+            "- Use memory_read_many to inspect relevant matching resources before answering.\n"
+            "- memory_search is disabled and must not be requested."
+        )
+    )
     memory_message = "\n\n---\n\n".join([
         f"## Current Time: {now} ({tz})",
         "## Current Session\nChannel: cli",
-        f"## memory_search(query=[user_query])\n### user memories:\n{memory or '(none)'}",
-        (
-            "## EchoMemory Retrieval\n"
-            "- For questions about the user's remembered facts, preferences, profile, or personal context, use memory_search for the current question before saying there is no relevant record.\n"
-            "- A previous empty search result does not prove that a different follow-up question has no memory; search again when the requested fact changes.\n"
-            "- Injected memories preserve the unified EchoMemory relevance order across all available memory types, up to the top 25 results.\n"
-            "- Injected memory entries use two types: full means the full memory content is already shown; uri means only the URI is shown and it may still point to key facts.\n"
-            "- For relevant uri entries, use memory_read_many on their URIs to fetch full details to help you to resolve the query. "
-        ),
+        retrieval_section,
+        retrieval_rules,
         "Reply in the same language as the user's query, ignoring the language of the reference materials. User's query:",
     ])
     return [
-        {"role": "system", "content": _system_prompt()},
+        {"role": "system", "content": _system_prompt(search_enabled)},
         {"role": "user", "content": memory_message},
         {"role": "user", "content": build_question_prompt(question, question_time)},
     ]
