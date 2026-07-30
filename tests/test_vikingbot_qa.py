@@ -8,18 +8,18 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from agents import load_agent_plugin
-from agents.vikingbot.answers import sanitize_final_answer_text
-from agents.vikingbot.prompting import build_system_prompt
-from agents.vikingbot.prompting import build_messages
-from agents.vikingbot.legacy77_prompting import _system_prompt
-from agents.vikingbot.runtime import answer_one_vikingbot_question
-from agents.vikingbot.tools import _engine_uri, execute_tool, tool_definitions
-from agents.vikingbot.vikingboat0411_prompting import format_vikingbot_memory
-from agents.vikingbot.vikingboat0411_prompting import (
+from plugins import load_agent_plugin
+from plugins.vikingbot.answers import sanitize_final_answer_text
+from plugins.vikingbot.prompting import build_system_prompt
+from plugins.vikingbot.prompting import build_messages
+from plugins.vikingbot.legacy77_prompting import _system_prompt
+from plugins.vikingbot.runtime import answer_one_vikingbot_question
+from plugins.vikingbot.tools import _engine_uri, execute_tool, tool_definitions
+from plugins.vikingbot.vikingboat0411_prompting import format_vikingbot_memory
+from plugins.vikingbot.vikingboat0411_prompting import (
     format_natural_no_tools_memory,
 )
-from memories.echomemory import SearchResult
+from backends.memory_types import SearchResult
 from benchmarks.locomo.profiles import (
     AGENT_PLUGIN,
     LEGACY_77_PROFILE,
@@ -125,7 +125,7 @@ class VikingBotCoreTests(unittest.TestCase):
         ])
 
         with patch(
-            "agents.vikingbot.runtime.chat_with_tools",
+            "plugins.vikingbot.runtime.chat_with_tools",
             side_effect=lambda *_args: next(calls),
         ):
             result = answer_one_vikingbot_question(
@@ -223,7 +223,7 @@ class VikingBotCoreTests(unittest.TestCase):
         ])
 
         with patch(
-            "agents.vikingbot.runtime.chat_with_tools",
+            "plugins.vikingbot.runtime.chat_with_tools",
             side_effect=lambda *_args, **_kwargs: next(calls),
         ):
             result = answer_one_vikingbot_question(
@@ -382,7 +382,7 @@ class Legacy77VikingBotTests(unittest.TestCase):
         ])
 
         with patch(
-            "agents.vikingbot.runtime.chat_with_tools",
+            "plugins.vikingbot.runtime.chat_with_tools",
             side_effect=lambda *_args, **_kwargs: next(calls),
         ):
             result = answer_one_vikingbot_question(
@@ -446,11 +446,11 @@ class VikingBotRuntimeTests(unittest.TestCase):
 
         with (
             patch(
-                "agents.vikingbot.runtime.chat_with_tools",
+                "plugins.vikingbot.runtime.chat_with_tools",
                 side_effect=lambda *_args, **_kwargs: next(calls),
             ),
             patch(
-                "agents.vikingbot.runtime.execute_tool",
+                "plugins.vikingbot.runtime.execute_tool",
                 side_effect=fake_execute,
             ),
         ):
@@ -483,7 +483,7 @@ class VikingBotRuntimeTests(unittest.TestCase):
             "response_id": "response-1",
         }
         with patch(
-            "agents.vikingbot.runtime.chat_with_tools",
+            "plugins.vikingbot.runtime.chat_with_tools",
             return_value=(
                 {"role": "assistant", "content": "done"},
                 1,
@@ -995,7 +995,7 @@ class VikingBoat0411Tests(unittest.TestCase):
 
     def test_final_answer_is_not_rewritten_for_vikingboat0411(self):
         with patch(
-            "agents.vikingbot.runtime.chat_with_tools",
+            "plugins.vikingbot.runtime.chat_with_tools",
             return_value=(
                 {"role": "assistant", "content": "**Original answer**"},
                 10,
@@ -1051,7 +1051,7 @@ class VikingBoat0411Tests(unittest.TestCase):
             return next(calls)
 
         with patch(
-            "agents.vikingbot.runtime.chat_with_tools",
+            "plugins.vikingbot.runtime.chat_with_tools",
             side_effect=fake_chat,
         ):
             result = answer_one_vikingbot_question(
@@ -1090,7 +1090,7 @@ class VikingBoat0411Tests(unittest.TestCase):
             )
 
         with patch(
-            "agents.vikingbot.runtime.chat_with_tools",
+            "plugins.vikingbot.runtime.chat_with_tools",
             side_effect=fake_chat,
         ):
             result = answer_one_vikingbot_question(

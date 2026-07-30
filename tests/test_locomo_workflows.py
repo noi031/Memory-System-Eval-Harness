@@ -43,6 +43,7 @@ from benchmarks.locomo.run_eval import (
 )
 from shared.eval_base import EvalConfig
 from shared.qa import QAResult
+from plugins.base import AgentResponse
 
 
 class LocomoCliDefaultsTests(unittest.TestCase):
@@ -268,46 +269,29 @@ class LocomoQACheckpointTests(unittest.TestCase):
                 {"question_id": "q1"},
                 {"question_id": "q2"},
             ]
-            first_checkpoint_ids: list[str] = []
-
             class FakePlugin:
-                def run_qa(self, _tasks, _memory, _llm, **kwargs):
-                    callback = kwargs["progress_callback"]
-                    q2 = QAResult(
-                        question_id="q2",
-                        question="second",
-                        answer="two",
-                        response="two",
-                        trace={
-                            "question_id": "q2",
-                            "tool_audit": {
-                                "schema_version": 1,
-                                "tools_used": ["memory_list"],
-                                "tool_calls": [],
-                                "discovered_files": [],
-                                "read_files": [],
+                def send_message(self, session_id, message, context_path="/", *, extra=None):
+                    qid = (extra or {}).get("question_id", "")
+                    if qid == "q2":
+                        return AgentResponse(
+                            text="two",
+                            extra={
+                                "trace": {
+                                    "question_id": "q2",
+                                    "tool_audit": {
+                                        "schema_version": 1,
+                                        "tools_used": ["memory_list"],
+                                        "tool_calls": [],
+                                        "discovered_files": [],
+                                        "read_files": [],
+                                    },
+                                },
                             },
-                        },
-                    )
-                    callback(1, q2)
-                    with (
-                        result_dir / "qa_results.checkpoint.csv"
-                    ).open(encoding="utf-8", newline="") as handle:
-                        first_checkpoint_ids.extend(
-                            row["question_id"] for row in csv.DictReader(handle)
                         )
-                    self.assert_trace_written = (
-                        result_dir / "agent_traces" / "q2.json"
-                    ).is_file()
-                    q1 = QAResult(
-                        question_id="q1",
-                        question="first",
-                        answer="one",
-                        response="one",
-                        trace={"question_id": "q1"},
+                    return AgentResponse(
+                        text="one",
+                        extra={"trace": {"question_id": "q1"}},
                     )
-                    callback(2, q1)
-                    return [q1, q2]
 
             plugin = FakePlugin()
             options = QAOptions(
@@ -322,16 +306,12 @@ class LocomoQACheckpointTests(unittest.TestCase):
             run_locomo_qa(
                 tasks,
                 plugin,
-                object(),
-                object(),
-                EvalConfig(concurrency=2),
+                EvalConfig(concurrency=1),
                 options,
                 result_dir,
                 _Log(),
             )
 
-            self.assertEqual(["q2"], first_checkpoint_ids)
-            self.assertTrue(plugin.assert_trace_written)
             with (
                 result_dir / "qa_results.checkpoint.csv"
             ).open(encoding="utf-8", newline="") as handle:
@@ -341,6 +321,9 @@ class LocomoQACheckpointTests(unittest.TestCase):
             self.assertEqual(["q1", "q2"], final_ids)
             self.assertTrue(
                 (result_dir / "agent_traces" / "q1.json").is_file()
+            )
+            self.assertTrue(
+                (result_dir / "agent_traces" / "q2.json").is_file()
             )
             audit_rows = [
                 json.loads(line)
@@ -363,18 +346,10 @@ class LocomoQACheckpointTests(unittest.TestCase):
             class FakePlugin:
                 received_ids: list[str] = []
 
-                def run_qa(self, task_rows, _memory, _llm, **kwargs):
-                    self.received_ids = [
-                        str(task["question_id"]) for task in task_rows
-                    ]
-                    result = QAResult(
-                        question_id="q2",
-                        question="second",
-                        answer="two",
-                        response="two",
-                    )
-                    kwargs["progress_callback"](1, result)
-                    return [result]
+                def send_message(self, session_id, message, context_path="/", *, extra=None):
+                    qid = str((extra or {}).get("question_id", ""))
+                    self.received_ids.append(qid)
+                    return AgentResponse(text="two")
 
             plugin = FakePlugin()
             options = QAOptions(
@@ -395,9 +370,7 @@ class LocomoQACheckpointTests(unittest.TestCase):
             results = run_locomo_qa(
                 tasks,
                 plugin,
-                object(),
-                object(),
-                EvalConfig(concurrency=2),
+                EvalConfig(concurrency=1),
                 options,
                 result_dir,
                 _Log(),
@@ -418,15 +391,11 @@ class LocomoQACheckpointTests(unittest.TestCase):
             ]
 
             class InterruptingPlugin:
-                def run_qa(self, _tasks, _memory, _llm, **kwargs):
-                    result = QAResult(
-                        question_id="q1",
-                        question="first",
-                        answer="one",
-                        response="one",
-                    )
-                    kwargs["progress_callback"](1, result)
-                    raise KeyboardInterrupt
+                def send_message(self, session_id, message, context_path="/", *, extra=None):
+                    qid = (extra or {}).get("question_id", "")
+                    if qid == "q2":
+                        raise KeyboardInterrupt
+                    return AgentResponse(text="one")
 
             options = QAOptions(
                 profile=VIKINGBOAT_0411_PROFILE,
@@ -441,9 +410,7 @@ class LocomoQACheckpointTests(unittest.TestCase):
                 run_locomo_qa(
                     tasks,
                     InterruptingPlugin(),
-                    object(),
-                    object(),
-                    EvalConfig(concurrency=2),
+                    EvalConfig(concurrency=1),
                     options,
                     result_dir,
                     _Log(),
@@ -566,11 +533,11 @@ class LocomoQAResumeTests(unittest.TestCase):
         self.assertEqual(2, manifest["schema_version"])
         self.assertEqual(64, len(manifest["qa_contract"]["sha256"]))
         self.assertIn(
-            "agents/vikingbot/runtime.py",
+            "plugins/vikingbot/runtime.py",
             manifest["qa_contract"]["files"],
         )
         self.assertIn(
-            "agents/vikingbot/tools.py",
+            "plugins/vikingbot/tools.py",
             manifest["qa_contract"]["files"],
         )
 

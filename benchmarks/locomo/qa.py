@@ -12,6 +12,7 @@ from typing import Any
 from tqdm import tqdm
 
 from benchmarks.locomo.profiles import profile_source
+from shared.benchmark_qa import run_concurrent_qa
 from shared.eval_base import EvalConfig
 from shared.qa import BASE_QA_FIELDS, QAResult
 
@@ -192,8 +193,6 @@ def build_qa_tasks(
 def run_locomo_qa(
     tasks: list[dict[str, Any]],
     agent_plugin,
-    memory_client,
-    llm,
     config: EvalConfig,
     options: QAOptions,
     result_dir: Path,
@@ -250,10 +249,9 @@ def run_locomo_qa(
         if not pending_tasks:
             results = []
         else:
-            results = agent_plugin.run_qa(
+            results = run_concurrent_qa(
+                agent_plugin,
                 pending_tasks,
-                memory_client,
-                llm,
                 concurrency=config.concurrency,
                 question_timeout_s=config.question_timeout_s,
                 progress_callback=on_progress,

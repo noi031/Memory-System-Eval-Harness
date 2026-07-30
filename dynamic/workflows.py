@@ -1,4 +1,4 @@
-"""Generate and replay workflows for dynamic EchoAgent evaluation."""
+"""Generate and replay workflows for dynamic agent evaluation."""
 
 from __future__ import annotations
 
@@ -11,26 +11,11 @@ from tqdm import tqdm
 
 from benchmarks.locomo.dataset import load_dataset
 from dynamic.artifacts import save_results
-from dynamic.client import EchoAgentClient, simulate_typing
 from dynamic.metrics import collect_round_metrics, load_evaluator_config
 from dynamic.simulator import MemoryDynamicEvaluator
+from plugins.base import AgentPlugin
 from shared.eval_base import EvalRun
 from shared.llm_client import LLMClient
-
-
-def _message_seq(message_result: dict[str, Any]) -> int:
-    data = message_result.get("data") or message_result
-    if data.get("error"):
-        raise RuntimeError(
-            f"send failed: {data.get('error')} {data.get('message', '')}"
-        )
-    messages = data.get("messages") or []
-    for message in reversed(messages):
-        if message.get("status") in {"generating", "completed"}:
-            return int(message.get("seq") or 0)
-    if messages:
-        return int(messages[-1].get("seq") or 0)
-    return int(data.get("latestContextSeq") or 0)
 
 
 def _failed_round(
@@ -58,51 +43,42 @@ def _failed_round(
     }
 
 
-def _ask_echoagent(
+def _ask_agent(
     args,
-    client: EchoAgentClient,
+    agent_plugin: AgentPlugin,
     session_id: str,
     round_data: dict[str, Any],
 ) -> dict[str, Any]:
+    """Send a query through the agent plugin and collect metrics."""
     context_path = "/"
     query = str(round_data.get("query") or "")
-    client_turn_id = ""
     prefetch_committed = False
     memory_items: list[dict[str, Any]] = []
-    if len(query) > 2:
-        client_turn_id, prefetch_committed = simulate_typing(
-            client,
+
+    if agent_plugin.supports_typing_simulation and len(query) > 2:
+        typing_result = agent_plugin.simulate_typing(
             session_id,
             context_path,
             query,
             args.typing_speed_ms,
             args.typing_jitter_ms,
         )
-        if prefetch_committed:
-            final = client.prefetch_finalize(
-                session_id,
-                context_path,
-                client_turn_id,
-                query,
-            )
-            if final:
-                memory_items = (
-                    (final.get("data") or final).get("memoryItems") or []
-                )
+        if typing_result is not None:
+            prefetch_committed = typing_result.committed
+            memory_items = typing_result.memory_items
+
     sent_at = time.monotonic()
     try:
-        seq = _message_seq(client.send_message(
-            session_id,
-            context_path,
-            query,
-            client_turn_id,
-        ))
+        response = agent_plugin.send_message(session_id, query, context_path)
     except Exception as exc:
         return _failed_round(round_data, prefetch_committed, exc)
-    try:
-        reply = client.stream_reply(session_id, context_path, seq)
-    except Exception as exc:
-        reply = {"reply": "", "ttft_ms": None, "error": str(exc)}
+
+    reply = {
+        "reply": response.text,
+        "ttft_ms": response.ttft_ms,
+        "error": response.error,
+        "done_event": response.extra.get("done_event", {}),
+    }
     return collect_round_metrics(
         round_data,
         reply,
@@ -115,9 +91,8 @@ def _ask_echoagent(
 def run_generate_mode(
     args,
     run: EvalRun,
-    client: EchoAgentClient,
+    agent_plugin: AgentPlugin,
     llm: LLMClient,
-    memory_plugin,
 ) -> None:
     log = run.logger
     log.info("模式: generate (LLM 生成场景)")
@@ -155,7 +130,8 @@ def run_generate_mode(
     }
     log.info("theme=%s memories=%d", evaluator.theme, len(memories))
 
-    inject_session_id = memory_plugin.inject_memories(memories)
+    backend = getattr(args, "memory_backend", "echomem")
+    inject_session_id = agent_plugin.inject_memories(memories, backend=backend)
 
     rounds: list[dict[str, Any]] = []
     dataset_queries: list[dict[str, Any]] = []
@@ -194,11 +170,10 @@ def run_generate_mode(
             and random.random() < args.new_session_ratio
         ):
             session_count += 1
-            session_id = client.create_session(
+            session_id = agent_plugin.create_session(
                 title=f"test-{evaluator.theme}-s{session_count}",
-                memory_engine_endpoint=args.memory_engine_endpoint,
             )
-        metrics = _ask_echoagent(args, client, session_id, round_data)
+        metrics = _ask_agent(args, agent_plugin, session_id, round_data)
         metrics["session_id"] = session_id
         rounds.append(metrics)
         previous_queries.append(query)
@@ -236,9 +211,8 @@ def run_generate_mode(
 def run_replay_mode(
     args,
     run: EvalRun,
-    client: EchoAgentClient,
+    agent_plugin: AgentPlugin,
     llm: LLMClient,
-    memory_plugin,
 ) -> None:
     log = run.logger
     log.info("模式: replay (回放数据集: %s)", args.dataset)
@@ -251,6 +225,7 @@ def run_replay_mode(
         jobs = jobs[:args.dataset_limit]
     rounds: list[dict[str, Any]] = []
     facts: dict[str, str] = {}
+    backend = getattr(args, "memory_backend", "echomem")
     for plan_index, plan in enumerate(
         tqdm(plans, desc="回放 sample", unit="sample")
     ):
@@ -261,7 +236,9 @@ def run_replay_mode(
         if not events:
             continue
         try:
-            inject_session = memory_plugin.inject_memories(events)
+            inject_session = agent_plugin.inject_memories(
+                events, backend=backend,
+            )
         except RuntimeError as exc:
             log.error(
                 "记忆注入失败: sample=%s error=%s",
@@ -269,9 +246,8 @@ def run_replay_mode(
                 exc,
             )
             continue
-        qa_session = client.create_session(
+        qa_session = agent_plugin.create_session(
             title=f"replay-qa-{sample_id}",
-            memory_engine_endpoint=args.memory_engine_endpoint,
         )
         for job in (
             candidate for candidate in jobs
@@ -285,9 +261,9 @@ def run_replay_mode(
                 "is_injection": False,
                 "complexity": job.category,
             }
-            metrics = _ask_echoagent(
+            metrics = _ask_agent(
                 args,
-                client,
+                agent_plugin,
                 qa_session,
                 round_data,
             )

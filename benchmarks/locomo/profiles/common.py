@@ -8,7 +8,7 @@ from pathlib import Path
 
 AGENT_PLUGIN = "vikingbot"
 VIKINGBOT_WORKSPACE = (
-    Path(__file__).resolve().parents[3] / "agents" / "vikingbot" / "bootstrap"
+    Path(__file__).resolve().parents[3] / "plugins" / "vikingbot" / "bootstrap"
 )
 
 

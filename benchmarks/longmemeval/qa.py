@@ -8,6 +8,7 @@ from pathlib import Path
 
 from tqdm import tqdm
 
+from shared.benchmark_qa import run_concurrent_qa
 from shared.eval_base import EvalConfig
 from shared.qa import BASE_QA_FIELDS, QAResult
 
@@ -33,8 +34,6 @@ def build_qa_tasks(jobs, question_to_session: dict[str, str], config: EvalConfig
 def run_longmemeval_qa(
     tasks,
     agent_plugin,
-    memory_client,
-    llm,
     config: EvalConfig,
     result_dir: Path,
     log,
@@ -46,10 +45,9 @@ def run_longmemeval_qa(
         log.info("  Q[%s] -> %s", result.question_id, result.response[:100])
 
     try:
-        results = agent_plugin.run_qa(
+        results = run_concurrent_qa(
+            agent_plugin,
             tasks,
-            memory_client,
-            llm,
             concurrency=config.concurrency,
             question_timeout_s=config.question_timeout_s,
             progress_callback=on_progress,

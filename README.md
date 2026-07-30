@@ -5,11 +5,14 @@
 ## 目录结构
 
 ```
-agents/
-  vikingbot/        # 历史 VikingBot prompt、工具协议和 agent loop
-memories/
-  echomemory/       # EchoMemory 记忆插件
-  openviking/       # OpenViking 记忆插件
+plugins/              # 评测插件 (AgentPlugin 协议)
+  base.py             # AgentPlugin 抽象基类 (setup/inject_memories/create_session/...)
+  registry.py         # 插件发现与加载
+  bare_llm/           # 纯 LLM 基线 (system prompt + 上下文 + 用户查询)
+  echo_agent/         # EchoAgent 外部 agent 插件
+  vikingbot/          # VikingBot 历史 prompt、工具协议和 agent loop
+  echomem_mcp/        # EchoMem MCP agent + 记忆客户端
+  openviking_mcp/     # OpenViking MCP agent + 记忆客户端
 benchmarks/
   locomo/           # LoCoMo 数据集评测
     dataset.py      # LoCoMo 数据解析
@@ -25,11 +28,12 @@ benchmarks/
     data/ docs/ results/ run_eval.py
   generic/          # 非正式/自定义数据集 dry-run 解析
 dynamic/
-  client.py         # EchoAgent HTTP/SSE/prefetch
   simulator.py      # 场景与查询生成
   workflows.py      # generate/replay 工作流
   metrics.py        # 动态指标和质量评估
   artifacts.py      # JSON/CSV/报告输出
+  model_client.py   # 动态 LLM 客户端
+  prompt_config.py  # prompt 配置加载
   configs/ docs/ results/ run_eval.py
 shared/             # 共享库
   dataset_io.py     # 通用 JSON/JSONL 读取、下载和路径解析
@@ -38,15 +42,17 @@ shared/             # 共享库
   qa.py             # 通用 QA 数据结构和执行辅助
   recovery.py       # QA CSV 健康判定、恢复选择和成功行合并
   eval_base.py      # 评测基础设施 (配置, 日志, 结果目录, EchoMem 日志收集)
+  memory_types.py   # 记忆类型 (CommitResult, SearchResult, MemoryClient Protocol)
+  memory_args.py    # 记忆后端 CLI 参数 (--memory-backend 等)
 scripts/
-  benchmark_adapter.py # benchmarks/generic/adapter.py 的兼容 CLI 入口
-  backend_doctor.py    # 记忆插件注册和契约检查
+  backend_doctor.py    # 记忆客户端健康检查
   validate_evidence.py # QA 检索证据格式检查
 ```
 
 正式数据集的加载、Judge、指标、重试和报告都归属
-`benchmarks/<dataset>/`，不会通过 `scripts/benchmark_adapter.py` 间接执行。
-运行时只支持 EchoMemory；不包含 OpenViking backend、SDK、配置或数据集工作流。
+`benchmarks/<dataset>/`。评测针对 agent 插件而非记忆后端；记忆注入通过
+`AgentPlugin.inject_memories()` 统一完成，评测平台不直接感知记忆后端。
+当前支持 echomem 和 openviking 两个记忆后端，由 `--memory-backend` 参数选择。
 
 ## LoCoMo 测试
 

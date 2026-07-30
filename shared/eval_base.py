@@ -1,14 +1,19 @@
-"""Evaluation infrastructure: result directory, logging, config, dual plugin CLI.
+"""Evaluation infrastructure: result directory, logging, config, plugin CLI.
 
 Design intent: this module is the shared backbone for every benchmark
 run_eval. It provides:
-  - EvalConfig: a dataclass holding only benchmark-generic fields (LLM
-    credentials, concurrency, timeouts, dataset path). Memory-specific and
-    agent-specific connection params are NOT here -- they live in their
-    respective plugins.
-  - add_memory_plugin_args / add_agent_plugin_args: pre-parse sys.argv to
-    discover which plugin was requested, then delegate to that plugin's
-    add_arguments so its CLI args appear in --help and are parsed.
+  - EvalConfig: a dataclass holding benchmark-generic config fields. The
+    fields are populated from the unified argparse namespace by
+    build_config_from_args(), regardless of which plugin declared each arg.
+  - add_agent_plugin_args: pre-parse sys.argv to discover which plugin was
+    requested, then delegate to that plugin's add_arguments so its CLI args
+    (LLM credentials, QA behavior, memory backend connection, commit
+    timeouts, plugin-specific options) appear in --help and are parsed.
+  - add_llm_args / add_qa_args: shared helpers that plugins call inside
+    their add_arguments() to declare LLM and QA behavior params. Benchmark
+    run_eval does NOT call these directly.
+  - add_eval_args: declares only benchmark-infra params (--concurrency,
+    --out-dir, --allow-incomplete-imports). Called by benchmark run_eval.
   - EvalRun: manages the timestamped result directory, logging, and
     optional EchoMem log collection.
 """
@@ -30,10 +35,16 @@ from typing import Any
 
 @dataclass
 class EvalConfig:
-    """Common configuration for all benchmark evaluations."""
+    """Common configuration for all benchmark evaluations.
+
+    Fields are populated from the unified argparse namespace by
+    build_config_from_args().  The args may have been declared by the
+    benchmark (dataset, judge, concurrency), by the plugin (LLM, QA
+    behavior), or by the memory backend (connection, commit timeouts).
+    """
 
     # Plugins
-    memory_plugin: str = "none"
+    memory_backend: str = "echomem"
     agent_plugin: str = "bare_llm"
 
     # LLM for answering
@@ -207,17 +218,6 @@ def _scan_argv_for_plugin(flag: str, default: str) -> str:
     return default
 
 
-def add_memory_plugin_args(
-    parser: argparse.ArgumentParser,
-    default: str = "none",
-) -> None:
-    """Declare --memory-plugin and the selected plugin's CLI arguments."""
-    parser.add_argument("--memory-plugin", default=default, help="Memory plugin name")
-    plugin_name = _scan_argv_for_plugin("--memory-plugin", default)
-    from memories.registry import get_plugin_class
-    get_plugin_class(plugin_name).add_arguments(parser)
-
-
 def add_agent_plugin_args(
     parser: argparse.ArgumentParser,
     default_plugin: str = "bare_llm",
@@ -225,12 +225,17 @@ def add_agent_plugin_args(
     """Declare --agent-plugin and the selected plugin's CLI arguments."""
     parser.add_argument("--agent-plugin", default=default_plugin, help="Agent plugin name")
     plugin_name = _scan_argv_for_plugin("--agent-plugin", default_plugin)
-    from agents import get_plugin_class
+    from plugins import get_plugin_class
     get_plugin_class(plugin_name).add_arguments(parser)
 
 
 def add_llm_args(parser) -> None:
-    """Add common LLM CLI args."""
+    """Add common LLM CLI args.
+
+    Shared helper called by each plugin's add_arguments() to declare the
+    LLM credentials/params the plugin needs to build its LLMClient.
+    Benchmark run_eval does NOT call this directly.
+    """
     g = parser.add_argument_group("LLM")
     g.add_argument("--llm-base-url", default=os.getenv("LLM_BASE_URL", ""), help="LLM API base URL")
     g.add_argument("--llm-model", default=os.getenv("LLM_MODEL", "doubao-seed-2.0-pro"))
@@ -241,20 +246,34 @@ def add_llm_args(parser) -> None:
     g.add_argument("--llm-retries", type=int, default=3)
 
 
-def add_eval_args(parser) -> None:
-    """Add common evaluation args."""
-    g = parser.add_argument_group("Evaluation")
+def add_qa_args(parser) -> None:
+    """Add QA behavior CLI args (retrieval, prompt formatting, timeouts).
+
+    Shared helper called by each plugin's add_arguments() to declare the
+    QA params the plugin needs for memory retrieval and answer generation.
+    Benchmark run_eval does NOT call this directly.
+    """
+    g = parser.add_argument_group("QA")
     g.add_argument("--top-k", type=int, default=10, help="Number of memory items to retrieve (TOPK)")
     g.add_argument("--memory-budget-chars", type=int, default=8000, help="Max chars of memory to inject into prompt")
-    g.add_argument("--concurrency", type=int, default=4, help="Number of concurrent QA tasks")
-    g.add_argument("--commit-timeout-s", type=float, default=0.0, help="Commit poll timeout (0 = infinite)")
-    g.add_argument("--commit-poll-interval-s", type=float, default=2.0)
     g.add_argument(
         "--question-timeout-s",
         type=float,
         default=120.0,
         help="End-to-end retrieval and answer timeout per question (0 = no extra limit)",
     )
+
+
+def add_eval_args(parser) -> None:
+    """Add benchmark infrastructure args.
+
+    Only the params that belong to the benchmark itself: concurrency,
+    output directory, and import validation.  LLM, QA, and memory backend
+    params are declared by plugins via add_llm_args / add_qa_args /
+    add_memory_backend_args.
+    """
+    g = parser.add_argument_group("Evaluation")
+    g.add_argument("--concurrency", type=int, default=4, help="Number of concurrent QA tasks")
     g.add_argument("--out-dir", default="results", help="Results root directory")
     g.add_argument(
         "--allow-incomplete-imports",
@@ -264,23 +283,27 @@ def add_eval_args(parser) -> None:
 
 
 def build_config_from_args(args) -> EvalConfig:
-    """Build an EvalConfig from parsed argparse args."""
+    """Build an EvalConfig from parsed argparse args.
+
+    Uses getattr so it works even when a plugin doesn't declare every param
+    (e.g., echo_agent in dynamic mode doesn't declare QA params).
+    """
     return EvalConfig(
-        memory_plugin=getattr(args, "memory_plugin", "none"),
+        memory_backend=getattr(args, "memory_backend", "echomem"),
         agent_plugin=getattr(args, "agent_plugin", "bare_llm"),
-        llm_base_url=args.llm_base_url,
-        llm_model=args.llm_model,
-        llm_api_key=args.llm_api_key,
-        llm_temperature=args.llm_temperature,
-        llm_max_tokens=args.llm_max_tokens,
-        top_k=args.top_k,
-        memory_budget_chars=args.memory_budget_chars,
-        concurrency=args.concurrency,
-        commit_timeout_s=args.commit_timeout_s,
-        commit_poll_interval_s=args.commit_poll_interval_s,
-        question_timeout_s=args.question_timeout_s,
-        llm_timeout_s=args.llm_timeout_s,
-        llm_retries=args.llm_retries,
+        llm_base_url=getattr(args, "llm_base_url", ""),
+        llm_model=getattr(args, "llm_model", "doubao-seed-2.0-pro"),
+        llm_api_key=getattr(args, "llm_api_key", ""),
+        llm_temperature=getattr(args, "llm_temperature", 0.7),
+        llm_max_tokens=getattr(args, "llm_max_tokens", 2048),
+        top_k=getattr(args, "top_k", 10),
+        memory_budget_chars=getattr(args, "memory_budget_chars", 8000),
+        concurrency=getattr(args, "concurrency", 4),
+        commit_timeout_s=getattr(args, "commit_timeout_s", 0.0),
+        commit_poll_interval_s=getattr(args, "commit_poll_interval_s", 2.0),
+        question_timeout_s=getattr(args, "question_timeout_s", 120.0),
+        llm_timeout_s=getattr(args, "llm_timeout_s", 120.0),
+        llm_retries=getattr(args, "llm_retries", 3),
     )
 
 

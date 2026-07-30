@@ -50,7 +50,7 @@ An uncommitted file is migrated only when:
 
 1. it implements a reusable CLI capability that is still required;
 2. its behavior is independently inspected and tested; and
-3. its destination follows `benchmarks/<dataset>/`, `agents/<agent>/`,
+3. its destination follows `benchmarks/<dataset>/`, `plugins/<agent>/`,
    `backends/<backend>/`, or a genuinely backend-neutral `shared/` boundary.
 
 OpenViking integration, web UI code, workspace inspectors, and dated

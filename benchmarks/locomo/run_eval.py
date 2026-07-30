@@ -24,8 +24,7 @@ _PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
-from agents import load_agent_plugin
-from memories import load_memory_plugin
+from plugins import load_agent_plugin
 from benchmarks.locomo.dataset import load_dataset
 from benchmarks.locomo.diagnosis import diagnose_run
 from benchmarks.locomo.blackbox import write_artifacts as write_blackbox_artifacts
@@ -69,8 +68,6 @@ from shared.dataset_io import resolve_dataset_path
 from shared.eval_base import (
     EvalRun,
     add_agent_plugin_args,
-    add_memory_plugin_args,
-    add_llm_args,
     add_eval_args,
     build_config_from_args,
     results_root_for,
@@ -132,9 +129,7 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     # 共享参数
-    add_memory_plugin_args(parser)
     add_agent_plugin_args(parser, default_plugin="vikingbot")
-    add_llm_args(parser)
     add_eval_args(parser)
     qa = parser.add_argument_group("LoCoMo QA")
     qa.add_argument(
@@ -369,10 +364,10 @@ def main() -> None:
         })
         raise ValueError(message)
 
-    # 创建 memory 客户端
-    memory_config = {**vars(args), "benchmark_name": "locomo", "run_id": run.result_dir.name}
-    memory_plugin = load_memory_plugin(args.memory_plugin, memory_config)
-    echomem = memory_plugin.client
+    # 加载 agent 插件 (在记忆操作之前, setup 内部创建 memory_client)
+    agent_config = {**vars(args), "benchmark_name": "locomo", "run_id": run.result_dir.name}
+    agent_plugin = load_agent_plugin(args.agent_plugin, agent_config)
+    echomem = agent_plugin.memory_client
     echomem.health()
     evaluation_identity = {
         "mode": "reused" if args.reuse_memory_account else "isolated",
@@ -397,20 +392,6 @@ def main() -> None:
             "Memory session scope: prefix=%s",
             args.memory_session_prefix,
         )
-
-    # 创建 LLM 客户端
-    llm = LLMClient(
-        base_url=config.llm_base_url,
-        api_key=config.llm_api_key,
-        model=config.llm_model,
-        temperature=config.llm_temperature,
-        max_tokens=config.llm_max_tokens,
-        timeout_s=config.llm_timeout_s,
-        max_retries=config.llm_retries,
-    )
-
-    # 加载 agent 插件
-    agent_plugin = load_agent_plugin(args.agent_plugin, vars(args))
 
     # -- 阶段 1: 复用已有记忆或集中导入所有 session --
     log.info("=" * 60)
@@ -614,8 +595,6 @@ def main() -> None:
     qa_results = run_locomo_qa(
         qa_tasks,
         agent_plugin,
-        echomem,
-        llm,
         config,
         qa_options,
         run.result_dir,
@@ -777,7 +756,7 @@ def main() -> None:
         judge_report.correct,
         len(judge_report.rows),
     )
-    memory_plugin.teardown()
+    agent_plugin.teardown()
 
 
 if __name__ == "__main__":

@@ -8,7 +8,7 @@
 - `echo_agent` (默认) -- EchoAgent + EchoMem 完整管线
 - `bare_llm` -- 无记忆系统基线 (记忆拼入 system prompt)
 
-每个插件通过 `add_arguments` classmethod 声明自己的 CLI 参数, `--help` 只显示当前插件相关参数。详见 `agents/README.md`。
+每个插件通过 `add_arguments` classmethod 声明自己的 CLI 参数, `--help` 只显示当前插件相关参数。详见 `plugins/README.md`。
 
 ## 两种模式
 
@@ -31,7 +31,7 @@ LLM 生成场景: 生成背景记忆 -> 注入 EchoMem -> 逐轮生成 query -> 
   --username test_user --password YOUR_PASSWORD \
   --num-memories 5 --num-queries 10 \
   --scenario-model deepseek-v4-flash \
-  --evaluator-api-key YOUR_API_KEY
+  --llm-api-key YOUR_API_KEY
 ```
 
 ### Replay 模式
@@ -49,7 +49,7 @@ QA 阶段创建新 session 经 EchoAgent 发送 query, 测试完整管线 (含 p
   --username test_user --password YOUR_PASSWORD \
   --dataset /path/to/dataset.json \
   --dataset-limit 10 \
-  --evaluator-api-key YOUR_API_KEY
+  --llm-api-key YOUR_API_KEY
 ```
 
 ## Agent 插件
@@ -85,12 +85,12 @@ class AgentPlugin(ABC):
 
 ### 自定义插件
 
-1. 在 `agents/` 下创建目录 (如 `agents/my_agent/`), 包含 `__init__.py` (空即可)
+1. 在 `plugins/` 下创建目录 (如 `plugins/my_agent/`), 包含 `__init__.py` (空即可)
 2. 创建 `plugin.py`, 实现 `AgentPlugin` 子类
 3. 实现 `add_arguments` classmethod, 声明该插件所需的 CLI 参数
 4. 运行: `python dynamic/run_eval.py --agent-plugin my_agent ...`
 
-`registry.py` 自动扫描 `agents.<name>.plugin` 模块中 `AgentPlugin` 的子类, 无需手动注册。详见 `agents/README.md`。
+`registry.py` 自动扫描 `plugins.<name>.plugin` 模块中 `AgentPlugin` 的子类, 无需手动注册。详见 `plugins/README.md`。
 
 ## 容错与回退 (echo_agent 插件)
 
@@ -159,31 +159,31 @@ Generate 模式支持 `--user-simulator-config`, 默认加载 `dynamic/configs/u
 
 ## 参数说明
 
-> CLI 参数分为通用参数 (所有插件可用) 和插件参数 (由 `--agent-plugin` 指定的插件通过 `add_arguments` 声明)。切换插件后可用参数会变化, 使用 `--help` 查看当前插件支持的参数。
+> **参数归属**: run_eval 只定义评测参数 (模式选择、评测器配置、Generate 模式参数、
+> 场景生成 LLM、评测基础设施)。LLM 参数、记忆后端参数和插件特有参数均由所选
+> 插件通过 `add_arguments()` 声明。切换 `--agent-plugin` 后可用参数会变化，使用
+> `--help` 查看。参数归属设计详见 `benchmarks/doc/设计意图.md`。
 
 ### Agent 插件
 | 参数 | 默认值 | 说明 |
 |---|---|---|
-| `--agent-plugin` | `echo_agent` (env: `AGENT_PLUGIN`) | agent 插件名称 (`echo_agent` / `bare_llm`) |
+| `--agent-plugin` | `echo_agent` | agent 插件名称 (`echo_agent` / `bare_llm`) |
 
-### 通用参数 (所有插件)
-| 参数 | 默认值 | 说明 |
-|---|---|---|
-| `--out-dir` | `results` | 结果目录 |
-| `--echomem-log-dir` | (空) | EchoMem 日志目录 (用于收集日志到评测结果) |
+### 评测参数 (run_eval 自身)
 
-### 模式选择
+#### 模式选择
 | 参数 | 默认值 | 说明 |
 |---|---|---|
 | `--dataset` | (空) | 数据集路径 (指定则进入 replay 模式; 不指定则 generate 模式) |
+| `--dataset-sample` | `all` | 筛选 sample |
 | `--dataset-limit` | `0` | Replay 模式: QA 数量上限 (0=全部) |
 
-### 评测器配置 (两种模式共用)
+#### 评测器配置
 | 参数 | 默认值 | 说明 |
 |---|---|---|
 | `--evaluator-config` | `configs/evaluator_template.yaml` | 评测器配置 YAML, 路径相对于 `run_eval.py` 所在目录 |
 
-### Generate 模式参数
+#### Generate 模式参数
 | 参数 | 默认值 | 说明 |
 |---|---|---|
 | `--num-memories` | `5` | 生成的背景记忆数 |
@@ -193,21 +193,53 @@ Generate 模式支持 `--user-simulator-config`, 默认加载 `dynamic/configs/u
 | `--typing-jitter-ms` | `20` | 打字抖动 (毫秒) |
 | `--user-simulator-config` | `configs/user_simulator_default.yaml` | 用户模拟器配置 YAML, 路径相对于 `run_eval.py` 所在目录 |
 
-### 场景生成 LLM 参数 (通用)
+#### 场景生成 LLM (仅 generate 模式)
 | 参数 | 默认值 | 说明 |
 |---|---|---|
-| `--scenario-model` | `deepseek-v4-flash` | 场景生成 LLM (仅 generate 模式使用) |
+| `--scenario-model` | `deepseek-v4-flash` | 场景生成 LLM 模型名 |
 | `--scenario-base-url` | (空) | 场景生成 base URL |
 | `--scenario-api-key` | (空) | 场景生成 API Key |
 
-### 质量评估 LLM 参数 (通用)
+#### 评测基础设施
 | 参数 | 默认值 | 说明 |
 |---|---|---|
-| `--evaluator-model` | `doubao-seed-2.0-pro` | 质量评估 LLM 模型名 |
-| `--evaluator-base-url` | (空) | 质量评估 base URL |
-| `--evaluator-api-key` | (空) | 质量评估 API Key |
+| `--concurrency` | `4` | 并发数 |
+| `--out-dir` | `results` | 结果目录 (默认 `dynamic/results/<timestamp>`) |
+| `--allow-incomplete-imports` | false | 导入未完成仍继续，仅限诊断 |
 
-> **base_url / api_key 互补**: scenario 和 evaluator 的 base_url / api_key, 一个有值另一个为空时, 空的自动复制有值的。两者都设置了则各自使用。
+### LLM 参数 (通过插件声明)
+LLM 凭据和参数，由所选插件通过 `add_llm_args()` 声明。质量评估 LLM 使用
+`--llm-base-url` / `--llm-api-key` / `--llm-model`，与场景生成 LLM 互补。
+
+| 参数 | 默认值 | 说明 |
+|---|---|---|
+| `--llm-base-url` | (空) | LLM API base URL (也可通过 `LLM_BASE_URL` 设置) |
+| `--llm-model` | `doubao-seed-2.0-pro` | LLM 模型名 |
+| `--llm-api-key` | (空) | LLM API Key (也可通过 `LLM_API_KEY` 设置) |
+| `--llm-temperature` | `0.7` | 生成温度 |
+| `--llm-max-tokens` | `2048` | 最大生成 token |
+| `--llm-timeout-s` | `120.0` | LLM 请求超时 (秒) |
+| `--llm-retries` | `3` | LLM 请求重试次数 |
+
+> **base_url / api_key 互补**: scenario 和 LLM 的 base_url / api_key, 一个有值另一个为空时, 空的自动复制有值的。两者都设置了则各自使用。
+
+### 记忆后端参数 (通过插件声明)
+EchoMem/OpenViking 连接和身份管理参数，由所选插件通过 `add_memory_backend_args()` 声明。
+
+| 参数 | 默认值 | 说明 |
+|---|---|---|
+| `--memory-backend` | `echomem` | 记忆后端: `echomem` 或 `openviking` |
+| `--echomem-url` | `http://127.0.0.1:8010` | 记忆后端 HTTP 地址 |
+| `--echomem-auth-key` | (空) | 后端 X-Auth-Key (echo_agent 留空时自动解析) |
+| `--account` | `default` | 后端 account |
+| `--user-id` | `default` | 后端 user_id |
+| `--agent-id` | `default` | 后端 agent_id (echo_agent 默认自动设为 `echoagent`) |
+| `--workspace` | (空) | 后端 workspace 路径 |
+| `--echomem-log-dir` | (空) | 后端日志目录 (用于收集日志到评测结果) |
+| `--commit-timeout-s` | `0` | 注入 commit 轮询超时 (秒)，0 表示无限等待 |
+| `--commit-poll-interval-s` | `2.0` | 注入 commit 轮询间隔 (秒) |
+| `--reuse-memory-account` | false | 复用已配置身份中的现有记忆，跳过 open/add/commit |
+| `--keep-memory-account` | false | 评测结束后保留临时隔离身份，供诊断 |
 
 ### echo_agent 插件参数
 | 参数 | 默认值 | 说明 |
@@ -216,21 +248,9 @@ Generate 模式支持 `--user-simulator-config`, 默认加载 `dynamic/configs/u
 | `--username` | `test_user` | 登录用户名 |
 | `--password` | (必填) | 登录密码 (也可通过 `ECHOAGENT_TEST_PASSWORD` 设置) |
 | `--memory-engine-endpoint` | `http://127.0.0.1:31030` | 记忆引擎端点 |
-| `--echomem-url` | `http://127.0.0.1:8010` | EchoMem 地址 (注入阶段直连) |
-| `--echomem-auth-key` | (空) | EchoMem X-Auth-Key (留空时自动通过 echoagent 插件 credential 接口解析) |
-| `--account` | `default` | EchoMem 账号 |
-| `--user-id` | `default` | EchoMem 用户 ID |
-| `--agent-id` | `default` | EchoMem Agent ID (默认自动设为 `echoagent`) |
-| `--workspace` | (空) | EchoMem workspace 路径 |
-| `--commit-timeout-s` | `0` | 注入 commit 轮询超时 (秒)，0 表示无限等待 |
-| `--commit-poll-interval-s` | `2` | 注入 commit 轮询间隔 (秒) |
 
-### bare_llm 插件参数
-| 参数 | 默认值 | 说明 |
-|---|---|---|
-| `--llm-base-url` / `--llm-api-key` / `--llm-model` | - | LLM 配置 (也用于 evaluator) |
-| `--llm-temperature` | `0.7` | 生成温度 |
-| `--llm-max-tokens` | `2048` | 最大生成 token |
+> `bare_llm` 插件仅声明 LLM 参数 (`add_llm_args`) 和 QA 参数 (`add_qa_args`)，
+> 不声明记忆后端参数，适用于无记忆系统基线测试。
 
 ## 输出文件
 

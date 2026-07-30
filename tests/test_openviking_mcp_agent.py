@@ -6,8 +6,8 @@ import json
 import unittest
 from typing import Any
 
-from agents.openviking_mcp.runtime import MEMORY_TOOLS, _execute_tool
-from memories import SearchResult
+from plugins.openviking_mcp.runtime import MEMORY_TOOLS, _execute_tool
+from backends.memory_types import SearchResult
 
 
 class _MockMemoryClient:

@@ -11,8 +11,8 @@ Source classes and pinned commits are documented in
 
 | v2 area | v3 implementation | Verification |
 | --- | --- | --- |
-| Supported VikingBot prompts, read-only tool protocols, and iterative loop | `agents/vikingbot/`, `benchmarks/locomo/profiles/` | profile provenance, prompt boundary, five-tool protocol, threshold, QA, and CLI tests |
-| Per-question VikingBot prompt/tool traces and answer cleanup | `agents/vikingbot/answers.py`, `benchmarks/locomo/agent_traces/` runtime artifacts | VikingBot trace and sanitizer tests |
+| Supported VikingBot prompts, read-only tool protocols, and iterative loop | `plugins/vikingbot/`, `benchmarks/locomo/profiles/` | profile provenance, prompt boundary, five-tool protocol, threshold, QA, and CLI tests |
+| Per-question VikingBot prompt/tool traces and answer cleanup | `plugins/vikingbot/answers.py`, `benchmarks/locomo/agent_traces/` runtime artifacts | VikingBot trace and sanitizer tests |
 | Incremental LoCoMo QA/Judge checkpoints and validated QA resume | `benchmarks/locomo/qa.py`, `benchmarks/locomo/judge.py`, `benchmarks/locomo/resume.py` | ordered checkpoint, strict resume compatibility, and CLI integration tests |
 | EchoMemory backend descriptor, registry, and HTTP client | `backends/echomemory/` | backend contract tests and `scripts/backend_doctor.py` |
 | LoCoMo import, QA, Judge, retry, diagnosis, reports | `benchmarks/locomo/` | workflow, Judge, CLI, and reporting tests |
@@ -33,7 +33,7 @@ counts, workspace state, and readiness are not inferred.
 | --- | --- |
 | Mixed dataset scripts and shared path assumptions | Dataset-owned modules under `benchmarks/<dataset>/` |
 | Root-level generic adapter implementation | `benchmarks/generic/adapter.py` with a thin compatibility entrypoint |
-| Agent logic embedded in benchmark scripts | Agent plugins under `agents/<agent>/` |
+| Agent logic embedded in benchmark scripts | Agent plugins under `plugins/<agent>/` |
 | Direct EchoMemory client construction throughout scripts | `backends/echomemory/` registry and client boundary |
 | Repeated failed/missing-row recovery helpers | Shared primitives in `shared/recovery.py` plus dataset commands |
 | Root-level one-off launch scripts | Unified `eval.py` and `eval.sh` CLI dispatch |
@@ -44,7 +44,7 @@ counts, workspace state, and readiness are not inferred.
 | --- | --- |
 | `benchmark/locomo/echomemory/*` | Migrated into `benchmarks/locomo/`; wrapper scripts replaced by the unified CLI |
 | `memory/vikingboat_alignment.py` | Superseded by the retained `legacy-77` and VikingBoat v0.4.11 profiles |
-| `memory/plugins/echomemory/*` | HTTP transport and read-only agent behavior split between `backends/echomemory/` and `agents/vikingbot/`; SDK/workspace inspection excluded |
+| `memory/plugins/echomemory/*` | HTTP transport and read-only agent behavior split between `backends/echomemory/` and `plugins/vikingbot/`; SDK/workspace inspection excluded |
 | `memory/adapters/*`, plugin contracts and registries | Replaced by `backends/` contracts, registry, and backend doctor |
 | `memory/datasets.py` | Formal loaders split by dataset; custom dry-run parsing moved to `benchmarks/generic/` |
 | `memory/evidence_contract.py` | Migrated to `shared/evidence.py` and `scripts/validate_evidence.py` |
@@ -91,7 +91,7 @@ SDK, or enable an OpenViking workflow.
 3. Historical references remain distinct: July 13 `head_clean` `63/81`
    and July 17 rejudged `61/81`.
 4. The committed v2 HEAD profile is separate and makes no score claim.
-5. Agents live under `agents/<agent>/`; dataset policy stays under
+5. Agents live under `plugins/<agent>/`; dataset policy stays under
    `benchmarks/<dataset>/`; memory transports live under `backends/<backend>/`.
 6. The default backend registry contains only `echomemory`.
 
@@ -100,7 +100,7 @@ SDK, or enable an OpenViking workflow.
 The migration is accepted after:
 
 ```bash
-python -m compileall -q eval.py agents backends benchmarks dynamic scripts shared tests
+python -m compileall -q eval.py plugins backends benchmarks dynamic scripts shared tests
 python -m unittest discover -s tests -v
 python -m pip check
 git diff --check

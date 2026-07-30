@@ -8,7 +8,7 @@ ownership boundaries.
 
 | Destination | Responsibility |
 | --- | --- |
-| `agents/` | Cross-dataset agent prompts, tool protocols, runtimes, and registry |
+| `plugins/` | Cross-dataset agent prompts, tool protocols, runtimes, and registry |
 | `backends/` | Memory backend contracts and the EchoMemory plugin |
 | `benchmarks/<dataset>/` | Dataset loading, import workflows, profiles, metrics, judge, retry, and reports |
 | `shared/` | Backend-neutral HTTP, LLM, runtime, result, and utility code |
@@ -20,13 +20,13 @@ EchoMemory is the only backend in scope.
 
 | v2 source or historical source | Current destination |
 | --- | --- |
-| VikingBot system prompt and workspace bootstrap | `agents/vikingbot/prompting.py`, `agents/vikingbot/bootstrap/` |
-| VikingBot read-only memory tool protocol | `agents/vikingbot/tools.py` |
-| OpenAI-compatible iterative tool loop | `agents/vikingbot/runtime.py` |
-| Reusable VikingBot entrypoint | `agents/vikingbot/plugin.py` |
-| Agent contract and lookup | `agents/base.py`, `agents/registry.py` |
-| July 13 actual `head_clean` prompt, five-tool loop, and `63/81` settings | `agents/vikingbot/legacy77_prompting.py`, `benchmarks/locomo/profiles/legacy77.py` |
-| VikingBoat v0.4.11 prompt, five-tool protocol, and alignment settings | `agents/vikingbot/vikingboat0411_prompting.py`, `agents/vikingbot/tools.py`, `benchmarks/locomo/profiles/vikingboat0411.py` |
+| VikingBot system prompt and workspace bootstrap | `plugins/vikingbot/prompting.py`, `plugins/vikingbot/bootstrap/` |
+| VikingBot read-only memory tool protocol | `plugins/vikingbot/tools.py` |
+| OpenAI-compatible iterative tool loop | `plugins/vikingbot/runtime.py` |
+| Reusable VikingBot entrypoint | `plugins/vikingbot/plugin.py` |
+| Agent contract and lookup | `plugins/base.py`, `plugins/registry.py` |
+| July 13 actual `head_clean` prompt, five-tool loop, and `63/81` settings | `plugins/vikingbot/legacy77_prompting.py`, `benchmarks/locomo/profiles/legacy77.py` |
+| VikingBoat v0.4.11 prompt, five-tool protocol, and alignment settings | `plugins/vikingbot/vikingboat0411_prompting.py`, `plugins/vikingbot/tools.py`, `benchmarks/locomo/profiles/vikingboat0411.py` |
 | v2 backend descriptor/config contract | `backends/base.py` |
 | v2 backend registry | `backends/registry.py` |
 | Existing EchoMemory HTTP search/read/list/glob implementation | `backends/echomemory/client.py` |

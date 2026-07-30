@@ -74,6 +74,14 @@ python benchmarks/longmemeval/run_eval.py \
 | `--question-ids` | (空) | 逗号分隔的 question/native/sample ID |
 | `--random-count` | `0` | 从已筛选题目中稳定随机抽取数量 |
 | `--random-seed` | `30` | 随机抽样 seed |
+| `--agent-plugin` | `vikingbot` | QA 阶段使用的 agent 插件名，见 `plugins/` 目录 |
+
+### 评测参数 (benchmark 自身)
+| 参数 | 默认值 | 说明 |
+|---|---|---|
+| `--concurrency` | `4` | QA 并发数 |
+| `--out-dir` | `results` | 结果目录 |
+| `--allow-incomplete-imports` | false | 导入未完成仍继续，仅限诊断 |
 
 ### 并行参数
 | 参数 | 默认值 | 说明 |
@@ -89,8 +97,17 @@ python benchmarks/longmemeval/run_eval.py \
 | `--judge-api-key` | (同 `--llm-api-key`) | Judge API Key |
 | `--judge-base-url` | (同 `--llm-base-url`) | Judge base URL |
 
-### EchoMem / LLM / 评测参数
-与 LoCoMo 相同。
+### 插件参数 (LLM / QA / 记忆后端 / 插件特有)
+
+LongMemEval 默认使用 `vikingbot` 插件。LLM 凭据、QA 检索行为、记忆后端
+连接和 VikingBot 特有参数均由插件声明，不由 benchmark `run_eval` 直接定义。
+
+benchmark 只定义数据集参数和评测基础设施参数 (`--concurrency`、`--out-dir`、
+`--allow-incomplete-imports`)。切换 `--agent-plugin` 后可用参数会变化，
+使用 `--help` 查看。
+
+参数归属的完整设计说明见 `benchmarks/doc/设计意图.md`。
+参数明细表见 `benchmarks/locomo/docs/usage.md`（使用相同默认插件时参数一致）。
 
 ## 输出文件
 

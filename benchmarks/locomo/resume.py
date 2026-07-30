@@ -19,17 +19,17 @@ from shared.qa import QAResult
 MANIFEST_FILENAME = "qa_resume_manifest.json"
 JUDGE_MANIFEST_FILENAME = "judge_resume_manifest.json"
 QA_CONTRACT_FILES = (
-    "agents/vikingbot/runtime.py",
-    "agents/vikingbot/tools.py",
-    "agents/vikingbot/prompting.py",
-    "agents/vikingbot/legacy77_prompting.py",
-    "agents/vikingbot/vikingboat0411_prompting.py",
+    "plugins/vikingbot/runtime.py",
+    "plugins/vikingbot/tools.py",
+    "plugins/vikingbot/prompting.py",
+    "plugins/vikingbot/legacy77_prompting.py",
+    "plugins/vikingbot/vikingboat0411_prompting.py",
     "benchmarks/locomo/profiles/vikingboat0411_natural_no_tools.py",
-    "agents/vikingbot/answers.py",
+    "plugins/vikingbot/answers.py",
     "benchmarks/locomo/qa.py",
     "benchmarks/locomo/memory_scope.py",
-    "memories/echomemory/client.py",
-    "memories/base.py",
+    "backends/echomem/client.py",
+    "backends/memory_types.py",
 )
 
 

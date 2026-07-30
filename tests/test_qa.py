@@ -1,70 +1,72 @@
 from __future__ import annotations
 
-import time
 import unittest
 
+from plugins.bare_llm.plugin import BareLLMPlugin, _SYSTEM_PROMPT
 from shared.llm_client import LLMResponse
 from shared.qa import QAResult
-from agents.bare_llm.qa import answer_one_question, build_qa_prompt
-
-
-class _SlowEchoMem:
-    def search(self, *args, timeout_s=None, **kwargs):
-        self.timeout_s = timeout_s
-        time.sleep(0.02)
-        raise TimeoutError("retrieval timed out")
 
 
 class _RecordingLLM:
+    """Fake LLM that records the messages it receives."""
+
+    def __init__(self, response_text="answer", error=None):
+        self._response_text = response_text
+        self._error = error
+        self.timeout_s = None
+        self.messages = None
+
     def chat(self, messages, *, timeout_s=None):
         self.timeout_s = timeout_s
-        return LLMResponse("", 0, 0, 0.0, error="answer timed out")
-
-
-class QuestionTimeoutTests(unittest.TestCase):
-    def test_includes_benchmark_query_time_in_prompt(self) -> None:
-        messages = build_qa_prompt(
-            "What happened?",
-            [],
-            question_time="2023-01-19",
+        self.messages = messages
+        return LLMResponse(
+            content=self._response_text,
+            prompt_tokens=10,
+            completion_tokens=2,
+            elapsed_s=0.5,
+            error=self._error,
         )
 
-        self.assertIn("Current date: 2023-01-19", messages[-1]["content"])
 
-    def test_uses_one_deadline_for_retrieval_and_answer(self) -> None:
-        echomem = _SlowEchoMem()
+def _make_plugin(llm: _RecordingLLM) -> BareLLMPlugin:
+    plugin = BareLLMPlugin()
+    plugin._llm = llm  # type: ignore[attr-defined]
+    plugin._session_count = 0  # type: ignore[attr-defined]
+    return plugin
+
+
+class SendMessageTests(unittest.TestCase):
+    def test_does_not_retrieve_memory(self) -> None:
+        """bare_llm must not retrieve memory; memory_items is always empty."""
         llm = _RecordingLLM()
+        plugin = _make_plugin(llm)
 
-        result = answer_one_question(
-            echomem=echomem,
-            llm=llm,
-            question_id="q1",
-            question="question",
-            answer="answer",
-            question_timeout_s=0.1,
-        )
+        resp = plugin.send_message("s1", "What is 2+2?")
 
-        self.assertLessEqual(echomem.timeout_s, 0.1)
-        self.assertLess(llm.timeout_s, echomem.timeout_s)
-        self.assertEqual("retrieval timed out", result.retrieval_error)
-        self.assertEqual("answer timed out", result.llm_error)
+        self.assertEqual([], resp.memory_items)
 
-    def test_skips_answer_when_retrieval_exhausts_deadline(self) -> None:
-        echomem = _SlowEchoMem()
-        llm = _RecordingLLM()
+    def test_calls_llm_with_system_and_question(self) -> None:
+        llm = _RecordingLLM(response_text="42")
+        plugin = _make_plugin(llm)
 
-        result = answer_one_question(
-            echomem=echomem,
-            llm=llm,
-            question_id="q1",
-            question="question",
-            answer="answer",
-            question_timeout_s=0.001,
-        )
+        resp = plugin.send_message("s1", "What is the answer?")
 
-        self.assertFalse(hasattr(llm, "timeout_s"))
-        self.assertIn("question deadline exceeded", result.llm_error)
+        self.assertEqual("42", resp.text)
+        self.assertEqual("system", llm.messages[0]["role"])
+        self.assertEqual(_SYSTEM_PROMPT, llm.messages[0]["content"])
+        self.assertEqual("user", llm.messages[1]["role"])
+        self.assertIn("What is the answer?", llm.messages[1]["content"])
 
+    def test_propagates_llm_error(self) -> None:
+        llm = _RecordingLLM(error="api timeout")
+        plugin = _make_plugin(llm)
+
+        resp = plugin.send_message("s1", "question")
+
+        self.assertEqual("api timeout", resp.error)
+
+
+class CSVRowContractTests(unittest.TestCase):
     def test_csv_row_exposes_strict_blackbox_contract(self) -> None:
         result = QAResult(
             "q1",

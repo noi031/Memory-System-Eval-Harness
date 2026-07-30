@@ -5,8 +5,8 @@ from __future__ import annotations
 import json
 import unittest
 
-from agents.echomem_mcp.mcp_client import McpClient
-from agents.echomem_mcp.runtime import MCP_TOOLS
+from plugins.echomem_mcp.mcp_client import McpClient
+from plugins.echomem_mcp.runtime import MCP_TOOLS
 
 
 class SseParsingTests(unittest.TestCase):

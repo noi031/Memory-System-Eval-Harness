@@ -1,0 +1,112 @@
+"""MCP tool definitions and system prompt for the echomem_mcp agent plugin.
+
+The LLM is given EchoMem's MCP tools as OpenAI function-calling definitions.
+It decides when to search memory and which URIs to read.  Each tool call is
+forwarded to the MCP server via ``McpClient`` (in the plugin's send_message).
+"""
+
+from __future__ import annotations
+
+from typing import Any
+
+# -- MCP tool definitions (OpenAI function-calling format) ----------------
+
+MCP_TOOLS: list[dict[str, Any]] = [
+    {
+        "type": "function",
+        "function": {
+            "name": "memory_query",
+            "description": (
+                "Search long-term memory for information relevant to the query. "
+                "Returns ranked results with scores and source URIs."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "Natural language search query.",
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Maximum number of results (default 8).",
+                        "default": 8,
+                    },
+                },
+                "required": ["query"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "read",
+            "description": (
+                "Read the full content of one or more memory items by URI. "
+                "Pass a single echo:// URI or a comma-separated list."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "uris": {
+                        "type": "string",
+                        "description": "An echo:// URI or comma-separated list of URIs.",
+                    },
+                },
+                "required": ["uris"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "list",
+            "description": "List memory entries under a URI prefix.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "uri": {
+                        "type": "string",
+                        "description": "URI prefix to list entries under.",
+                    },
+                    "recursive": {
+                        "type": "boolean",
+                        "description": "Recurse into sub-directories (default false).",
+                        "default": False,
+                    },
+                    "max_depth": {
+                        "type": "integer",
+                        "description": "Maximum recursion depth (default 3).",
+                        "default": 3,
+                    },
+                },
+                "required": ["uri"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "glob",
+            "description": "Find memory URIs matching a glob pattern.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "pattern": {
+                        "type": "string",
+                        "description": "Glob pattern, e.g. echo://resources/**/*.md",
+                    },
+                },
+                "required": ["pattern"],
+            },
+        },
+    },
+]
+
+_SYSTEM_PROMPT = (
+    "You are a helpful assistant with access to a memory system via tools. "
+    "Use the memory_query tool to find relevant information, and the read tool "
+    "to read full content of specific memory items. "
+    "Answer the user's question concisely based on what you find. "
+    "If the memory does not contain the answer, say you don't know."
+)

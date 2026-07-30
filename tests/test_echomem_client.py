@@ -5,7 +5,7 @@ import threading
 import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from memories.echomemory import EchoMemClient
+from backends.echomem.client import EchoMemClient
 
 
 class _Handler(BaseHTTPRequestHandler):

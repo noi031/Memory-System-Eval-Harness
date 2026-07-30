@@ -96,6 +96,12 @@ python benchmarks/locomo/run_eval.py \
 
 ## 参数说明
 
+> **参数归属**: benchmark 只定义数据集参数、Judge 参数和评测基础设施参数
+> (`--concurrency`、`--out-dir`、`--allow-incomplete-imports`)。LLM 参数、
+> QA 检索参数、记忆后端参数和插件特有参数均由所选插件及其记忆后端声明，
+> 详见 `benchmarks/doc/设计意图.md`。切换 `--agent-plugin` 后可用参数会变化，
+> 使用 `--help` 查看。
+
 ### 必填参数
 | 参数 | 说明 |
 |---|---|
@@ -107,36 +113,48 @@ python benchmarks/locomo/run_eval.py \
 | `--dataset` | 内置 | 默认使用仓库中的 `benchmarks/locomo/data/locomo10.json` |
 | `--sample` | `all` | 筛选 sample: `all` 或 sample_id |
 | `--questions` | `0` | 限制 QA 数量 (0=全部) |
+| `--question-ids` | (空) | 逗号分隔的 question/native/sample ID，在 `--questions` 前应用 |
 | `--session-mode` | `auto` | 单 sample 按原始 session; 多 sample 各自合并; 也可显式选 `locomo`/`single` |
 | `--max-sessions` | `0` | 每个 sample 最多导入多少个原始 session (0=全部) |
 
-### EchoMem 参数
+### 记忆后端参数 (通过插件声明)
+EchoMem/OpenViking 连接和身份管理参数，由所选插件通过 `add_memory_backend_args()` 声明。
 | 参数 | 默认值 | 说明 |
 |---|---|---|
-| `--echomem-url` | `http://127.0.0.1:8010` | EchoMem HTTP 地址 |
-| `--echomem-auth-key` | (空) | EchoMem X-Auth-Key (也可通过 `ECHOMEM_AUTH_KEY` 设置) |
-| `--account` | `default` | EchoMem account |
-| `--user-id` | `default` | EchoMem user_id |
-| `--agent-id` | `default` | EchoMem agent_id |
-| `--workspace` | (空) | EchoMem workspace 路径 |
-| `--echomem-log-dir` | (空) | EchoMem 日志目录 (用于收集日志到评测结果) |
+| `--memory-backend` | `echomem` | 记忆后端选择: `echomem` 或 `openviking` (仅 vikingbot/echo_agent 插件) |
+| `--echomem-url` | `http://127.0.0.1:8010` | 记忆后端 HTTP 地址 |
+| `--echomem-auth-key` | (空) | 后端 X-Auth-Key (也可通过 `ECHOMEM_AUTH_KEY` 设置) |
+| `--account` | `default` | 后端 account |
+| `--user-id` | `default` | 后端 user_id |
+| `--agent-id` | `default` | 后端 agent_id |
+| `--workspace` | (空) | 后端 workspace 路径 |
+| `--echomem-log-dir` | (空) | 后端日志目录 (用于收集日志到评测结果) |
+| `--commit-timeout-s` | `0` | Commit 轮询超时 (秒)，0 表示无限等待 |
+| `--commit-poll-interval-s` | `2.0` | Commit 轮询间隔 (秒) |
+| `--reuse-memory-account` | true (LoCoMo) | 复用已配置身份中的现有记忆，跳过 open/add/commit。LoCoMo 默认为 true，除非指定 `--inject-memory` 或 `--keep-memory-account` |
+| `--keep-memory-account` | false | 评测结束后保留临时隔离身份，供 workspace 诊断 |
 
-### LLM 参数
+### LLM 参数 (通过插件声明)
 | 参数 | 默认值 | 说明 |
 |---|---|---|
 | `--llm-base-url` | (空) | LLM API base URL (也可通过 `LLM_BASE_URL` 设置) |
 | `--llm-model` | `doubao-seed-2.0-pro` | LLM 模型名 |
+| `--llm-api-key` | (空) | LLM API Key (也可通过 `LLM_API_KEY` 设置) |
 | `--llm-temperature` | `0.7` | 回答模型生成温度；profile 可选择不显式发送 temperature |
-| `--llm-max-tokens` | `1024` | LoCoMo 历史 profile 的最大生成 token 数 |
+| `--llm-max-tokens` | profile 决定 | LoCoMo 历史 profile 的最大生成 token 数 |
 | `--llm-timeout-s` | `120.0` | LLM 请求超时 (秒) |
 | `--llm-retries` | `3` | LLM 请求重试次数 |
 
-### 评测参数
+### QA 检索参数 (通过插件声明)
 | 参数 | 默认值 | 说明 |
 |---|---|---|
-| `--qa-profile` | 自动 | `--tools` 默认选择 `vikingboat0411`；`--no-tools` 默认选择 `vikingboat0411-natural-no-tools`。显式指定时可覆盖 |
 | `--top-k` | profile 决定 | 三个保留 profile 均为 `25` |
 | `--memory-budget-chars` | `6000` | 总记忆字符预算 |
+| `--question-timeout-s` | profile 决定 | 三个保留 profile 均为 `600` 秒；0 表示不增加总限制 |
+
+### VikingBot 插件参数
+| 参数 | 默认值 | 说明 |
+|---|---|---|
 | `--tool-search-limit` | profile 决定 | 三个保留 profile 均为 `25` |
 | `--initial-min-score` | profile 决定 | `legacy-77=0`；VikingBoat 0.4.11 profiles=`0.1` |
 | `--tool-min-score` | profile 决定 | `legacy-77=0`；VikingBoat 0.4.11 profiles=`0.35` |
@@ -146,21 +164,23 @@ python benchmarks/locomo/run_eval.py \
 | `--user-memory-budget-chars` | `4000` | user memory prompt 预算 |
 | `--agent-memory-budget-chars` | `2000` | agent memory prompt 预算 |
 | `--max-iterations` | `50` | 单题最大模型/tool-loop 迭代数 |
-| `--vikingbot-workspace` | 仓库内置历史 bootstrap | 默认使用 `agents/vikingbot/bootstrap/` 中固定的原始 `SOUL.md` 和 `TOOLS.md` 快照 |
+| `--vikingbot-workspace` | 仓库内置历史 bootstrap | 默认使用 `plugins/vikingbot/bootstrap/` 中固定的原始 `SOUL.md` 和 `TOOLS.md` 快照 |
+
+### 评测参数 (benchmark 自身)
+| 参数 | 默认值 | 说明 |
+|---|---|---|
+| `--agent-plugin` | `vikingbot` | QA 阶段使用的 agent 插件名，见 `plugins/` 目录。切换后可用参数会变化 |
+| `--qa-profile` | 自动 | `--tools` 默认选择 `vikingboat0411`；`--no-tools` 默认选择 `vikingboat0411-natural-no-tools`。显式指定时可覆盖 |
 | `--qa-prompt-file` | (空) | 将本地 UTF-8 文件追加到所选 profile 的 system prompt；`summary.json` 和 resume manifest 仅记录文件名和 SHA-256 |
 | `--checkpoint-interval` | `10` | 每完成 N 题写一次 `qa_results.checkpoint.csv`；0 表示关闭 |
 | `--resume-qa` | (空) | 从先前运行目录或 QA CSV 恢复健康答案；严格校验数据集、身份、模型和 QA 参数，且必须使用 `--reuse-memory-account` |
 | `--concurrency` | `4` | QA 并发数 |
-| `--commit-timeout-s` | `0` | Commit 轮询超时 (秒)，0 表示无限等待 |
-| `--commit-poll-interval-s` | `2.0` | Commit 轮询间隔 (秒) |
-| `--question-timeout-s` | profile 决定 | 三个保留 profile 均为 `600` 秒；0 表示不增加总限制 |
 | `--out-dir` | `results` | 结果目录 |
 | `--allow-incomplete-imports` | false | 导入未完成仍继续，仅限诊断 |
 | `--allow-memory-provenance-mismatch` | false | session manifest 与数据集/session-mode 不一致时仍继续；仅限诊断 |
 | `--memory-session-prefix` | 按 sample 推导 | `conv-30` 自动推导为 `echomem-locomo-conv-30-`；显式指定时覆盖 |
-| `--reuse-memory-account` | true | LoCoMo 默认复用已配置身份中的现有记忆，跳过 open/add/commit |
 | `--inject-memory` | false | 显式切换为重新注入：创建隔离身份并执行 open/add/commit |
-| `--keep-memory-account` | false | 评测结束后保留临时隔离身份，供 workspace 诊断 |
+| `--exclude-memory-file` | (空) | 隐藏并拒绝读取指定 EchoMemory 文件系统叶名；可多次指定 |
 
 ### Judge 参数
 | 参数 | 默认值 | 说明 |

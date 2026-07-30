@@ -52,10 +52,26 @@ python benchmarks/hotpotqa/run_eval.py \
 | `--questions` | `0` | 限制 QA 数量 (0=全部) |
 | `--question-ids` | (空) | 逗号分隔的 question/native/sample ID，在 `--questions` 前应用 |
 | `--import-mode` | `per_question` | 导入模式: `per_question` 或 `global` |
-| `--agent-plugin` | `bare_llm` | QA 阶段使用的 agent 插件名，见 `agents/` 目录 |
+| `--agent-plugin` | `vikingbot` | QA 阶段使用的 agent 插件名，见 `plugins/` 目录 |
 
-### EchoMem / LLM / 评测参数
-默认使用 `bare_llm` 插件, 参数与 LoCoMo 相同, 详见 `benchmarks/locomo/docs/usage.md` 中的参数表。切换 `--agent-plugin` 后可用参数会变化, 使用 `--help` 查看。
+### 评测参数 (benchmark 自身)
+| 参数 | 默认值 | 说明 |
+|---|---|---|
+| `--concurrency` | `4` | QA 并发数 |
+| `--out-dir` | `results` | 结果目录 |
+| `--allow-incomplete-imports` | false | 导入未完成仍继续，仅限诊断 |
+
+### 插件参数 (LLM / QA / 记忆后端 / 插件特有)
+
+HotpotQA 默认使用 `vikingbot` 插件。LLM 凭据、QA 检索行为、记忆后端连接
+和 VikingBot 特有参数均由插件声明，不由 benchmark `run_eval` 直接定义。
+
+benchmark 只定义数据集参数、评测基础设施参数 (`--concurrency`、`--out-dir`、
+`--allow-incomplete-imports`) 和本数据集特有的 `--import-mode`。切换
+`--agent-plugin` 后可用参数会变化，使用 `--help` 查看。
+
+参数归属的完整设计说明见 `benchmarks/doc/设计意图.md`。
+参数明细表见 `benchmarks/locomo/docs/usage.md`（使用相同默认插件时参数一致）。
 
 HotpotQA 不需要 Judge 参数。`--reuse-memory-account` 复用已配置身份并禁止
 open/add/commit；QA 结果保留 `retrieval_items_json`，用于从真实检索证据推导

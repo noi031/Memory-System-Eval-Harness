@@ -21,8 +21,7 @@ _PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
-from agents import load_agent_plugin
-from memories import load_memory_plugin
+from plugins import load_agent_plugin
 from benchmarks.longmemeval.dataset import load_dataset
 from benchmarks.longmemeval.evaluate import evaluate_longmemeval
 from benchmarks.longmemeval.import_memory import import_longmemeval_memory
@@ -37,8 +36,6 @@ from shared.dataset_io import resolve_dataset_path
 from shared.eval_base import (
     EvalRun,
     add_agent_plugin_args,
-    add_memory_plugin_args,
-    add_llm_args,
     add_eval_args,
     build_config_from_args,
     results_root_for,
@@ -79,9 +76,7 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Write the shard manifest without starting evaluation processes",
     )
-    add_memory_plugin_args(parser)
-    add_agent_plugin_args(parser)
-    add_llm_args(parser)
+    add_agent_plugin_args(parser, default_plugin="vikingbot")
     add_eval_args(parser)
     # judge 参数
     g = parser.add_argument_group("Judge")
@@ -188,9 +183,10 @@ def main() -> None:
         })
         raise ValueError(message)
 
-    memory_config = {**vars(args), "benchmark_name": "longmemeval", "run_id": run.result_dir.name}
-    memory_plugin = load_memory_plugin(args.memory_plugin, memory_config)
-    echomem = memory_plugin.client
+    # 加载 agent 插件 (在记忆操作之前, setup 内部创建 memory_client)
+    agent_config = {**vars(args), "benchmark_name": "longmemeval", "run_id": run.result_dir.name}
+    agent_plugin = load_agent_plugin(args.agent_plugin, agent_config)
+    echomem = agent_plugin.memory_client
     echomem.health()
     evaluation_identity = {
         "mode": "reused" if getattr(args, "reuse_memory_account", True) else "isolated",
@@ -206,19 +202,6 @@ def main() -> None:
         evaluation_identity.get("tenant_id", ""),
         evaluation_identity.get("user_id", ""),
     )
-
-    llm = LLMClient(
-        base_url=config.llm_base_url,
-        api_key=config.llm_api_key,
-        model=config.llm_model,
-        temperature=config.llm_temperature,
-        max_tokens=config.llm_max_tokens,
-        timeout_s=config.llm_timeout_s,
-        max_retries=config.llm_retries,
-    )
-
-    # 加载 agent 插件
-    agent_plugin = load_agent_plugin(args.agent_plugin, vars(args))
 
     # -- 阶段 1: 逐题隔离导入或复用已有记忆 --
     log.info("=" * 60)
@@ -274,8 +257,6 @@ def main() -> None:
     qa_results = run_longmemeval_qa(
         qa_tasks,
         agent_plugin,
-        echomem,
-        llm,
         config,
         run.result_dir,
         log,
@@ -343,7 +324,7 @@ def main() -> None:
         evaluation_report.correct,
         evaluation_report.graded,
     )
-    memory_plugin.teardown()
+    agent_plugin.teardown()
 
 
 if __name__ == "__main__":

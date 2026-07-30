@@ -59,7 +59,7 @@ class BackendDoctorTests(unittest.TestCase):
 
         self.assertEqual("ok", report["status"])
         self.assertEqual(
-            ["echomemory", "openviking", "none"],
+            ["echomem", "openviking", "none"],
             report["registered_backends"],
         )
         self.assertEqual([], report["failed_backends"])
