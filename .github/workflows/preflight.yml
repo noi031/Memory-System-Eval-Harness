@@ -23,11 +23,28 @@ jobs:
         with:
           python-version: "3.11"
 
+      - name: Install dependencies
+        run: python -m pip install -r requirements.txt
+
       - name: Compile check
+        run: python -m compileall -q eval.py agents backends benchmarks dynamic scripts shared tests
+
+      - name: Unit tests
+        run: python -m unittest discover -s tests -v
+
+      - name: Dependency check
+        run: python -m pip check
+
+      - name: EchoMemory-only backend contract
+        run: python scripts/backend_doctor.py --format json
+
+      - name: CLI shell syntax
+        run: bash -n eval.sh
+
+      - name: Reject OpenViking runtime dependencies
         run: |
-          python -m py_compile dynamic/run_eval.py
-          python -m py_compile benchmarks/locomo/run_eval.py
-          python -m py_compile benchmarks/hotpotqa/run_eval.py
-          python -m py_compile benchmarks/longmemeval/run_eval.py
-          python -m py_compile shared/dataset.py shared/echomem_client.py shared/eval_base.py shared/judge.py shared/llm_client.py shared/benchmark_adapter.py shared/benchmark_runner.py
-          python -m py_compile agents/base.py agents/registry.py agents/baseline_mem/plugin.py agents/echo_agent/plugin.py agents/bare_llm/plugin.py
+          if rg -n \
+            'import openviking|from openviking|OpenVikingClient|backend.*openviking' \
+            --glob '*.py' .; then
+            exit 1
+          fi

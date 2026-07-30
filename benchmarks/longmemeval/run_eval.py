@@ -12,237 +12,338 @@
 from __future__ import annotations
 
 import argparse
-import csv
-import json
-import logging
 import os
 import sys
-import time
+from datetime import datetime
 from pathlib import Path
 
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
-from tqdm import tqdm
-
-from shared.dataset import load_longmemeval, longmemeval_session_batches, resolve_dataset_path
-from shared.eval_base import EvalConfig, EvalRun, add_eval_args, add_agent_plugin_args, build_config_from_args
+from backends import create_backend_client
+from benchmarks.longmemeval.dataset import load_dataset
+from benchmarks.longmemeval.evaluate import evaluate_longmemeval
+from benchmarks.longmemeval.import_memory import import_longmemeval_memory
+from benchmarks.longmemeval.parallel import run_parallel
+from benchmarks.longmemeval.qa import build_qa_tasks, run_longmemeval_qa
+from benchmarks.longmemeval.reporting import build_summary
+from benchmarks.longmemeval.selection import (
+    parse_question_ids,
+    select_jobs_and_plans,
+)
+from shared.dataset_io import resolve_dataset_path
+from shared.eval_base import (
+    EvalRun,
+    add_echomem_args,
+    add_llm_args,
+    add_eval_args,
+    apply_evaluation_identity,
+    build_config_from_args,
+    isolate_evaluation_identity,
+    results_root_for,
+    validate_eval_config,
+)
+from shared.import_guard import require_complete_imports
 from shared.llm_client import LLMClient
-from shared.judge import longmemeval_judge
-from shared.benchmark_runner import run_qa_phase
-from agents import load_agent_plugin
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="LongMemEval benchmark evaluation")
+    parser.add_argument("--check", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--dataset", default="", help="LongMemEval JSON 数据集路径 (不指定则自动查找或下载)")
     parser.add_argument("--sample", default="all", help="筛选 sample (all 或 index/id)")
-    parser.add_argument("--questions", default="0", help="限制 QA 数量 (0=all)")
-    parser.add_argument("--agent-plugin", default="baseline_mem",
-                        help="Agent 插件名 (baseline_mem / echo_agent / bare_llm)")
+    parser.add_argument("--questions", type=int, default=0, help="限制 QA 数量 (0=all)")
+    parser.add_argument(
+        "--question-ids",
+        default="",
+        help="Comma-separated question/native/sample ids",
+    )
+    parser.add_argument("--random-count", type=int, default=0)
+    parser.add_argument("--random-seed", type=int, default=30)
+    parallel = parser.add_argument_group("Parallel execution")
+    parallel.add_argument(
+        "--parallel-shards",
+        type=int,
+        default=1,
+        help="Split selected questions across isolated CLI shard processes",
+    )
+    parallel.add_argument(
+        "--parallel-workers",
+        type=int,
+        default=2,
+        help="Maximum number of shard processes to run concurrently",
+    )
+    parallel.add_argument(
+        "--parallel-dry-run",
+        action="store_true",
+        help="Write the shard manifest without starting evaluation processes",
+    )
+    add_echomem_args(parser)
+    add_llm_args(parser)
     add_eval_args(parser)
-    add_agent_plugin_args(parser)
     # judge 参数
     g = parser.add_argument_group("Judge")
-    g.add_argument("--judge-model", default="", help="Judge LLM 模型名 (默认同 --llm-model)")
-    g.add_argument("--judge-api-key", default="", help="Judge API key (默认同 --llm-api-key)")
-    g.add_argument("--judge-base-url", default="", help="Judge base URL (默认同 --llm-base-url)")
+    g.add_argument("--judge-model", default=os.getenv("JUDGE_MODEL", ""), help="Judge LLM 模型名 (默认同 --llm-model)")
+    g.add_argument("--judge-api-key", default=os.getenv("JUDGE_TOKEN", ""), help="Judge API key (默认同 --llm-api-key)")
+    g.add_argument("--judge-base-url", default=os.getenv("JUDGE_BASE_URL", ""), help="Judge base URL (默认同 --llm-base-url)")
     return parser
 
 
 def main() -> None:
     args = build_parser().parse_args()
     config = build_config_from_args(args)
+    config.sample_filter = args.sample
+    config.question_limit = args.questions
+    validate_eval_config(config)
+    if args.random_count < 0:
+        raise ValueError("random count must be >= 0")
+    if args.parallel_shards < 1 or args.parallel_workers < 1:
+        raise ValueError("parallel shards and workers must be >= 1")
     dataset_path = resolve_dataset_path("longmemeval", args.dataset)
     config.dataset_path = dataset_path
-    config.sample_filter = args.sample
-    config.question_limit = int(args.questions)
+    question_ids = parse_question_ids(args.question_ids)
+    if args.check:
+        jobs, plans = load_dataset(dataset_path, sample_filter=args.sample)
+        jobs, plans = select_jobs_and_plans(
+            jobs,
+            plans,
+            question_ids=question_ids,
+            limit=config.question_limit,
+            random_count=args.random_count,
+            random_seed=args.random_seed,
+        )
+        if not jobs or not plans:
+            raise ValueError("dataset/sample filter produced no LongMemEval questions")
+        print(
+            f"[check] OK benchmark=longmemeval dataset={dataset_path} questions={len(jobs)}"
+        )
+        return
+    if args.parallel_shards > 1:
+        jobs, plans = load_dataset(dataset_path, sample_filter=args.sample)
+        jobs, plans = select_jobs_and_plans(
+            jobs,
+            plans,
+            question_ids=question_ids,
+            limit=config.question_limit,
+            random_count=args.random_count,
+            random_seed=args.random_seed,
+        )
+        if not jobs or not plans:
+            raise ValueError(
+                "dataset/sample filter produced no LongMemEval questions"
+            )
+        root = results_root_for(Path(__file__).parent, args.out_dir)
+        output_dir = root / (
+            "parallel_" + datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+        )
+        summary = run_parallel(
+            argv=sys.argv[1:],
+            question_ids=[job.question_id for job in jobs],
+            output_dir=output_dir,
+            shard_count=args.parallel_shards,
+            worker_count=args.parallel_workers,
+            dry_run=args.parallel_dry_run,
+        )
+        if not args.parallel_dry_run and summary["status"] != "completed":
+            raise SystemExit(2)
+        return
 
     run = EvalRun(
         benchmark_name="longmemeval",
-        results_root=Path(__file__).parent / "results",
+        results_root=results_root_for(Path(__file__).parent, args.out_dir),
         config=config,
-        run_args={k: v for k, v in vars(args).items() if not k.startswith("_")},
     )
     log = run.logger
 
     # 加载数据集
     log.info("加载 LongMemEval 数据集: %s", dataset_path)
-    jobs, plans = load_longmemeval(dataset_path, sample_filter=args.sample)
+    jobs, plans = load_dataset(dataset_path, sample_filter=args.sample)
     log.info("共 %d 个问题", len(jobs))
 
-    if config.question_limit > 0:
-        jobs = jobs[: config.question_limit]
-        plans = plans[: config.question_limit]
+    jobs, plans = select_jobs_and_plans(
+        jobs,
+        plans,
+        question_ids=question_ids,
+        limit=config.question_limit,
+        random_count=args.random_count,
+        random_seed=args.random_seed,
+    )
+    if question_ids:
+        log.info("按 question id 选择 %d 题", len(jobs))
+    elif args.random_count > 0:
+        log.info("随机选择 %d 题 (seed=%d)", len(jobs), args.random_seed)
+    elif config.question_limit > 0:
         log.info("限制 QA 数量为 %d", len(jobs))
+    if not jobs or not plans:
+        message = "dataset/sample filter produced no LongMemEval questions"
+        run.save_summary({
+            "status": "failed",
+            "phase": "dataset",
+            "dataset": dataset_path,
+            "sample_filter": args.sample,
+            "error": message,
+        })
+        raise ValueError(message)
 
-    # 加载 agent 插件 (load_agent_plugin 内部调 setup, 完成客户端初始化)
-    config_dict = {k: v for k, v in vars(args).items()}
-    plugin = load_agent_plugin(args.agent_plugin, config_dict)
-    args.echomem_auth_key = config_dict.get("echomem_auth_key", "")
-    log.info("agent_plugin=%s", args.agent_plugin)
+    echomem = create_backend_client(
+        "echomemory",
+        base_url=config.echomem_url,
+        api_key=config.echomem_auth_key,
+        account=config.account,
+        user_id=config.user_id,
+        agent_id=config.agent_id,
+        workspace=config.workspace,
+        timeout_s=60.0,
+        max_retries=3,
+    )
+    echomem.health()
+    evaluation_identity = isolate_evaluation_identity(
+        echomem,
+        "longmemeval",
+        run.result_dir.name,
+        reuse=args.reuse_memory_account,
+        keep=args.keep_memory_account,
+    )
+    apply_evaluation_identity(config, run, echomem, evaluation_identity)
+    log.info(
+        "EchoMem identity: %s tenant=%s user=%s",
+        evaluation_identity["mode"],
+        evaluation_identity["tenant_id"],
+        evaluation_identity["user_id"],
+    )
 
-    # -- 阶段 1: 逐题隔离导入 --
+    llm = LLMClient(
+        base_url=config.llm_base_url,
+        api_key=config.llm_api_key,
+        model=config.llm_model,
+        temperature=config.llm_temperature,
+        max_tokens=config.llm_max_tokens,
+        timeout_s=config.llm_timeout_s,
+        max_retries=config.llm_retries,
+    )
+
+    # -- 阶段 1: 逐题隔离导入或复用已有记忆 --
     log.info("=" * 60)
-    log.info("阶段 1: 逐题导入 haystack sessions (共 %d 题)", len(plans))
-
-    question_to_session: dict[str, str] = {}
-    import_results: list[dict] = []
-
-    for job, plan in tqdm(list(zip(jobs, plans)), desc="导入记忆", unit="q"):
+    reuse_existing_memory = args.reuse_memory_account
+    if reuse_existing_memory:
+        log.info("阶段 1: 跳过导入，复用 account-wide 已有记忆")
+    else:
+        log.info("阶段 1: 逐题导入 haystack sessions (共 %d 题)", len(plans))
+    import_report = import_longmemeval_memory(
+        jobs,
+        plans,
+        echomem,
+        config,
+        run.result_dir,
+        log,
+        reuse_existing_memory=reuse_existing_memory,
+    )
+    if reuse_existing_memory:
+        log.info("已有记忆复用模式：未执行任何写入或 commit")
+    else:
+        log.info(
+            "导入完成: %d/%d 成功",
+            import_report.completed,
+            import_report.total,
+        )
         try:
-            # 获取 session batches
-            batches = plan.get("session_batches") or []
-            if not batches:
-                batches = [{"session_key": "default", "date_time": "", "messages": [
-                    {"role": "user", "content": ev.get("text", ""), "created_at": ev.get("time", "")}
-                    for ev in plan.get("events", []) if ev.get("text")
-                ]}]
-
-            # 构建记忆列表: 合并所有 batch 的消息
-            memories = []
-            for batch in batches:
-                for msg in batch.get("messages", []):
-                    content = msg.get("content", "")
-                    if not content:
-                        continue
-                    memories.append({
-                        "text": content,
-                        "role": msg.get("role", "user"),
-                        "created_at": msg.get("created_at", ""),
-                        "role_id": msg.get("speaker", msg.get("role", "")),
-                    })
-
-            start = time.monotonic()
-            sid = plugin.inject_memories(memories)
-            elapsed = time.monotonic() - start
-            question_to_session[job.question_id] = sid
-            import_results.append({
-                "question_id": job.question_id,
-                "session_id": sid,
-                "status": "completed",
-                "messages": len(memories),
-                "sessions": len(batches),
-                "elapsed_s": round(elapsed, 1),
+            require_complete_imports(
+                import_report.rows,
+                allow_incomplete=args.allow_incomplete_imports,
+            )
+        except RuntimeError as exc:
+            run.save_summary({
+                "status": "failed",
+                "phase": "import",
+                "dataset": dataset_path,
+                "import_ok": import_report.completed,
+                "import_total": import_report.total,
+                "error": str(exc),
             })
-            log.info("  %s: completed (%.1fs, %d msgs, %d sessions)",
-                     job.question_id, elapsed, len(memories), len(batches))
-        except Exception as e:
-            log.error("  导入 %s 失败: %s", job.question_id, e)
-            import_results.append({"question_id": job.question_id, "status": "error", "error": str(e)})
-
-    ok_imports = sum(1 for r in import_results if r["status"] == "completed")
-    log.info("导入完成: %d/%d 成功", ok_imports, len(import_results))
-
-    import_csv = run.result_dir / "import_results.csv"
-    with open(import_csv, "w", encoding="utf-8", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=["question_id", "session_id", "status", "messages", "sessions", "elapsed_s", "error"])
-        writer.writeheader()
-        for r in import_results:
-            writer.writerow(r)
+            log.error("%s", exc)
+            raise SystemExit(2) from exc
 
     # -- 阶段 2: 逐题 QA --
     log.info("=" * 60)
     log.info("阶段 2: QA (共 %d 题, 并发=%d)", len(jobs), config.concurrency)
 
-    def resolve_session(job):
-        return question_to_session.get(job.question_id, "")
-
-    qa_results = run_qa_phase(plugin, jobs, resolve_session, config.concurrency, log)
-
-    qa_csv = run.result_dir / "qa_results.csv"
-    with open(qa_csv, "w", encoding="utf-8", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=[
-            "question_id", "question", "answer", "response",
-            "retrieval_error", "llm_error", "elapsed_s",
-            "prompt_tokens", "completion_tokens", "num_retrieved",
-        ])
-        writer.writeheader()
-        for r in qa_results:
-            writer.writerow(r.to_csv_row())
-    log.info("QA 结果已保存: %s", qa_csv)
+    qa_tasks = build_qa_tasks(
+        jobs,
+        import_report.question_to_session,
+        config,
+    )
+    qa_results = run_longmemeval_qa(
+        qa_tasks,
+        echomem,
+        llm,
+        config,
+        run.result_dir,
+        log,
+    )
 
     # -- 阶段 3: 官方 accuracy 评测 --
     log.info("=" * 60)
     log.info("阶段 3: LLM Judge (yes/no per question type)")
 
     judge_llm = LLMClient(
-        base_url=args.judge_base_url or getattr(args, "llm_base_url", ""),
-        api_key=args.judge_api_key or getattr(args, "llm_api_key", ""),
-        model=args.judge_model or getattr(args, "llm_model", "doubao-seed-2.0-pro"),
+        base_url=args.judge_base_url or config.llm_base_url,
+        api_key=args.judge_api_key or config.llm_api_key,
+        model=args.judge_model or config.llm_model,
         temperature=0.0,
         max_tokens=256,
-        timeout_s=getattr(args, "llm_timeout_s", 120.0),
-        max_retries=getattr(args, "llm_retries", 3),
+        timeout_s=config.llm_timeout_s,
+        max_retries=config.llm_retries,
     )
 
-    eval_results: list[dict] = []
-    type_acc: dict[str, list[bool]] = {}
-
-    for r, job in tqdm(list(zip(qa_results, jobs)), desc="Judge", unit="q"):
-        task_type = job.category
-        abstention = "_abs" in r.question_id
-        is_correct = longmemeval_judge(
-            judge_llm, task_type, r.question, r.answer, r.response, abstention=abstention
+    evaluation_report = evaluate_longmemeval(
+        qa_results,
+        jobs,
+        judge_llm,
+        run.result_dir,
+        log,
+    )
+    log.info(
+        "Judge 完成: %d/%d correct, accuracy=%.2f%%",
+        evaluation_report.correct,
+        evaluation_report.graded,
+        evaluation_report.overall_accuracy * 100,
+    )
+    for task_type, stats in evaluation_report.per_type.items():
+        log.info(
+            "  %s: %d/%d (%.1f%%)",
+            task_type,
+            stats["correct"],
+            stats["total"],
+            stats["accuracy"] * 100,
         )
-        eval_results.append({
-            "question_id": r.question_id,
-            "question_type": task_type,
-            "question": r.question,
-            "answer": r.answer,
-            "response": r.response,
-            "correct": is_correct,
-        })
-        type_acc.setdefault(task_type, []).append(is_correct)
-
-    eval_csv = run.result_dir / "eval_results.csv"
-    with open(eval_csv, "w", encoding="utf-8", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=["question_id", "question_type", "question", "answer", "response", "correct"])
-        writer.writeheader()
-        for r in eval_results:
-            writer.writerow(r)
-
-    # 统计
-    all_correct = sum(1 for r in eval_results if r["correct"])
-    accuracy = all_correct / max(len(eval_results), 1)
-    per_type: dict[str, dict] = {}
-    for t, scores in type_acc.items():
-        per_type[t] = {
-            "correct": sum(scores),
-            "total": len(scores),
-            "accuracy": round(sum(scores) / max(len(scores), 1), 4),
-        }
-
-    log.info("Judge 完成: %d/%d correct, accuracy=%.2f%%", all_correct, len(eval_results), accuracy * 100)
-    for t, s in per_type.items():
-        log.info("  %s: %d/%d (%.1f%%)", t, s["correct"], s["total"], s["accuracy"] * 100)
 
     # 收集 EchoMem 日志
     run.collect_echomem_logs()
 
-    summary = {
-        "benchmark": "longmemeval",
-        "dataset": dataset_path,
-        "total_questions": len(jobs),
-        "import_ok": ok_imports,
-        "import_total": len(import_results),
-        "qa_count": len(qa_results),
-        "qa_errors": sum(1 for r in qa_results if r.llm_error),
-        "retrieval_errors": sum(1 for r in qa_results if r.retrieval_error),
-        "accuracy": round(accuracy, 4),
-        "correct": all_correct,
-        "total": len(eval_results),
-        "per_type": per_type,
-        "avg_qa_elapsed_s": round(sum(r.elapsed_s for r in qa_results) / max(len(qa_results), 1), 2),
-        "total_prompt_tokens": sum(r.prompt_tokens for r in qa_results),
-        "total_completion_tokens": sum(r.completion_tokens for r in qa_results),
-    }
+    summary = build_summary(
+        dataset_path=dataset_path,
+        jobs=jobs,
+        import_report=import_report,
+        reuse_existing_memory=reuse_existing_memory,
+        qa_results=qa_results,
+        evaluation_report=evaluation_report,
+        evaluation_identity=evaluation_identity,
+    )
     run.save_summary(summary)
+
+    if summary["status"] != "completed":
+        log.error("评测包含运行错误，结果不能作为正式分数")
+        raise SystemExit(2)
 
     log.info("=" * 60)
     log.info("评测完成! 结果目录: %s", run.result_dir)
-    log.info("Accuracy: %.2f%% (%d/%d)", accuracy * 100, all_correct, len(eval_results))
+    log.info(
+        "Accuracy: %.2f%% (%d/%d)",
+        evaluation_report.overall_accuracy * 100,
+        evaluation_report.correct,
+        evaluation_report.graded,
+    )
 
 
 if __name__ == "__main__":

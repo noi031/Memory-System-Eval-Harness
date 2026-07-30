@@ -28,7 +28,6 @@ def _vlm_config_candidates(config_path: Path | None) -> list[dict[str, Any]]:
     paths = [
         config_path,
         Path.cwd() / "judge.conf",
-        Path.home() / ".openviking" / "ov.conf",
     ]
     for path in paths:
         if not path:

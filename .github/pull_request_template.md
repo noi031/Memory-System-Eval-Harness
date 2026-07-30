@@ -2,23 +2,22 @@
 
 Describe the change and the memory-evaluation workflow it affects.
 
-Current public backend scope: `OpenViking + EchoMemory`.
+Current backend scope: `EchoMemory`.
 
 ## Scope
 
 - [ ] LoCoMo workflow
-- [ ] OpenViking adapter
-- [ ] EchoMem / EchoMemory adapter
+- [ ] EchoMem / EchoMemory backend
+- [ ] VikingBot agent
 - [ ] Report export or run analysis
-- [ ] Web UI
-- [ ] Documentation or handoff materials
+- [ ] CLI or documentation
 
 ## Safety Checklist
 
 - [ ] I did not add `.env`, `.env.local`, `judge.conf`, API keys, bearer tokens, raw `runs/`, or memory workspaces.
-- [ ] The current backend scope remains OpenViking + EchoMemory.
-- [ ] If I changed `web/static`, I mirrored the core files to `static`.
-- [ ] I ran `./preflight.sh` locally, or explained why it could not run.
+- [ ] EchoMemory remains the only registered memory backend.
+- [ ] Reuse-memory QA paths do not open, add, commit, or delete memory.
+- [ ] I ran the unit tests and `python scripts/backend_doctor.py --format json`, or explained why they could not run.
 - [ ] Any attached report, screenshot, or log is redacted.
 
 ## Verification
@@ -26,7 +25,8 @@ Current public backend scope: `OpenViking + EchoMemory`.
 Paste the relevant safe output:
 
 ```text
-./preflight.sh
+.venv/bin/python -m unittest discover -s tests -v
+.venv/bin/python scripts/backend_doctor.py --format json
 ```
 
 ## Notes

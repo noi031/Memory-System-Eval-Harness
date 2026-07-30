@@ -5,7 +5,7 @@ for user simulators and evaluators, based on the design patterns from
 RealUserSim, IntellAgent, AgentProcessBench, RigorBench, and MemOps papers.
 
 Usage:
-    from dynamic.prompt_config_loader import (
+    from dynamic.prompt_config import (
         load_user_simulator_config,
         load_evaluator_config,
         list_available_simulators,

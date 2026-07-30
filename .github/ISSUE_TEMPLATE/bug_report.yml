@@ -15,13 +15,11 @@ body:
       placeholder: "20260607e or commit hash"
     validations:
       required: true
-  - type: dropdown
+  - type: input
     id: backend
     attributes:
       label: Memory backend
-      options:
-        - OpenViking
-        - EchoMem / EchoMemory
+      value: EchoMem / EchoMemory
     validations:
       required: true
   - type: input

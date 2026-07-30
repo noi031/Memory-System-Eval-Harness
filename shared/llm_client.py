@@ -22,6 +22,8 @@ class LLMResponse:
     completion_tokens: int
     elapsed_s: float
     error: str = ""
+    retry_count: int = 0
+    usage_observed: bool = False
 
 
 class LLMClient:
@@ -51,7 +53,12 @@ class LLMClient:
         self.max_retries = max_retries
         self.retry_backoff_s = retry_backoff_s
 
-    def chat(self, messages: list[dict[str, str]]) -> LLMResponse:
+    def chat(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        timeout_s: float | None = None,
+    ) -> LLMResponse:
         """Call /v1/chat/completions and return the response.
 
         Args:
@@ -74,11 +81,16 @@ class LLMClient:
         }
 
         start = time.monotonic()
+        request_timeout = self.timeout_s if timeout_s is None else max(0.001, timeout_s)
+        deadline = start + request_timeout
         last_err: str = ""
         for attempt in range(1, self.max_retries + 1):
             try:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise TimeoutError(f"LLM deadline exceeded after {request_timeout:g}s")
                 req = urllib.request.Request(url, data=data, headers=headers, method="POST")
-                with urllib.request.urlopen(req, timeout=self.timeout_s) as resp:
+                with urllib.request.urlopen(req, timeout=min(self.timeout_s, remaining)) as resp:
                     raw = resp.read().decode("utf-8")
                     obj = json.loads(raw)
                     content = (
@@ -93,6 +105,8 @@ class LLMClient:
                         prompt_tokens=int(usage.get("prompt_tokens", 0)),
                         completion_tokens=int(usage.get("completion_tokens", 0)),
                         elapsed_s=elapsed,
+                        retry_count=attempt - 1,
+                        usage_observed=isinstance(usage, dict) and bool(usage),
                     )
             except urllib.error.HTTPError as e:
                 body = ""
@@ -103,7 +117,11 @@ class LLMClient:
                 last_err = f"HTTP {e.code}: {body}"
                 logger.warning("LLM call failed: %s (attempt %d/%d)", last_err, attempt, self.max_retries)
                 if e.code >= 500 and attempt < self.max_retries:
-                    time.sleep(self.retry_backoff_s * attempt)
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        last_err = f"LLM deadline exceeded after {request_timeout:g}s"
+                        break
+                    time.sleep(min(self.retry_backoff_s * attempt, remaining))
                 else:
                     return LLMResponse(
                         content="",
@@ -111,12 +129,17 @@ class LLMClient:
                         completion_tokens=0,
                         elapsed_s=time.monotonic() - start,
                         error=last_err,
+                        retry_count=attempt - 1,
                     )
             except Exception as e:
                 last_err = str(e)
                 logger.warning("LLM call error: %s (attempt %d/%d)", last_err, attempt, self.max_retries)
                 if attempt < self.max_retries:
-                    time.sleep(self.retry_backoff_s * attempt)
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        last_err = f"LLM deadline exceeded after {request_timeout:g}s"
+                        break
+                    time.sleep(min(self.retry_backoff_s * attempt, remaining))
                 else:
                     return LLMResponse(
                         content="",
@@ -124,6 +147,7 @@ class LLMClient:
                         completion_tokens=0,
                         elapsed_s=time.monotonic() - start,
                         error=last_err,
+                        retry_count=attempt - 1,
                     )
         return LLMResponse(
             content="",
@@ -131,6 +155,7 @@ class LLMClient:
             completion_tokens=0,
             elapsed_s=time.monotonic() - start,
             error=last_err,
+            retry_count=max(0, self.max_retries - 1),
         )
 
     def judge(self, system_prompt: str, user_prompt: str) -> str:
@@ -140,5 +165,7 @@ class LLMClient:
             {"role": "user", "content": user_prompt},
         ])
         if resp.error:
-            logger.warning("Judge call error: %s", resp.error)
+            raise RuntimeError(f"judge call failed: {resp.error}")
+        if not resp.content.strip():
+            raise RuntimeError("judge call returned an empty response")
         return resp.content

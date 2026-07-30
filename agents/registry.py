@@ -10,7 +10,7 @@ from __future__ import annotations
 import importlib
 import logging
 
-from agents.base import AgentPlugin
+from agents.base import AgentPlugin, BenchmarkAgentPlugin
 
 logger = logging.getLogger("agent_registry")
 
@@ -41,3 +41,13 @@ def load_agent_plugin(name: str, config: dict) -> AgentPlugin:
     plugin.setup(config)
     logger.info("loaded agent plugin: %s (%s)", name, plugin_cls.__name__)
     return plugin
+
+
+def get_agent_plugin(agent_id: str) -> BenchmarkAgentPlugin:
+    """Return a benchmark-native agent implementation by stable id."""
+    normalized = str(agent_id or "").strip().lower()
+    if normalized == "vikingbot":
+        from agents.vikingbot.plugin import PLUGIN
+
+        return PLUGIN
+    raise ValueError(f"unknown benchmark agent plugin: {agent_id}")

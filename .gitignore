@@ -18,8 +18,11 @@ dataset/full/
 datasets/
 generated-reports/
 tmp/
-benchmarks/*/results/[0-9]*/
-dynamic/results/[0-9]*/
+results/
+benchmarks/*/results/*
+!benchmarks/*/results/.gitkeep
+dynamic/results/*
+!dynamic/results/.gitkeep
 *.log
 *.pid
 *.zip

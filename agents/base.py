@@ -9,6 +9,11 @@ from __future__ import annotations
 import argparse
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
+from typing import Any, Protocol
+
+from backends import MemoryClient
+from shared.llm_client import LLMClient
+from shared.qa import QAResult
 
 
 @dataclass
@@ -41,6 +46,34 @@ class AgentResponse:
     memory_items: list[dict] = field(default_factory=list)
     error: str | None = None
     extra: dict = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class AgentDescriptor:
+    """Metadata for benchmark-native agent implementations."""
+
+    id: str
+    name: str
+    description: str
+    capabilities: tuple[str, ...] = field(default_factory=tuple)
+
+
+class BenchmarkAgentPlugin(Protocol):
+    """Agent contract used by dataset-owned benchmark QA workflows."""
+
+    descriptor: AgentDescriptor
+
+    def run_qa(
+        self,
+        tasks: list[dict[str, Any]],
+        echomem: MemoryClient,
+        llm: LLMClient,
+        *,
+        concurrency: int,
+        question_timeout_s: float,
+        progress_callback=None,
+    ) -> list[QAResult]:
+        """Run benchmark QA tasks with the agent."""
 
 
 class AgentPlugin(ABC):

@@ -36,6 +36,26 @@ python benchmarks/longmemeval/run_eval.py \
   --judge-api-key YOUR_JUDGE_KEY \
   --judge-base-url https://api.openai.com/v1 \
   --llm-api-key YOUR_API_KEY
+
+# 指定题目 ID
+./eval.sh longmemeval \
+  --dataset /path/to/longmemeval.json \
+  --question-ids q1,q2,q3 \
+  --llm-api-key YOUR_API_KEY
+
+# 分成 8 个隔离 shard，最多并行 4 个进程，完成后自动合并
+./eval.sh longmemeval \
+  --dataset /path/to/longmemeval.json \
+  --parallel-shards 8 \
+  --parallel-workers 4 \
+  --llm-api-key YOUR_API_KEY
+
+# 只生成分片命令和 manifest，不启动评测
+./eval.sh longmemeval \
+  --dataset /path/to/longmemeval.json \
+  --parallel-shards 8 \
+  --parallel-dry-run \
+  --llm-api-key YOUR_API_KEY
 ```
 
 ## 参数说明
@@ -51,7 +71,16 @@ python benchmarks/longmemeval/run_eval.py \
 | `--dataset` | (自动) | LongMemEval JSON 数据集路径。不指定时自动在 `benchmarks/longmemeval/data/` 查找 `longmemeval_s_cleaned.json`, 找不到则从 HuggingFace 下载 |
 | `--sample` | `all` | 筛选 sample |
 | `--questions` | `0` | 限制 QA 数量 (0=全部) |
-| `--agent-plugin` | `baseline_mem` | QA 阶段使用的 agent 插件名，见 `agents/` 目录 |
+| `--question-ids` | (空) | 逗号分隔的 question/native/sample ID |
+| `--random-count` | `0` | 从已筛选题目中稳定随机抽取数量 |
+| `--random-seed` | `30` | 随机抽样 seed |
+
+### 并行参数
+| 参数 | 默认值 | 说明 |
+|---|---|---|
+| `--parallel-shards` | `1` | 按稳定 round-robin 切分为多少个隔离 CLI 进程 |
+| `--parallel-workers` | `2` | 同时运行的最大 shard 进程数 |
+| `--parallel-dry-run` | false | 只写 `parallel_manifest.json`，不执行 shard |
 
 ### Judge 参数
 | 参数 | 默认值 | 说明 |
@@ -61,7 +90,7 @@ python benchmarks/longmemeval/run_eval.py \
 | `--judge-base-url` | (同 `--llm-base-url`) | Judge base URL |
 
 ### EchoMem / LLM / 评测参数
-默认使用 `baseline_mem` 插件, 参数与 LoCoMo 相同。切换 `--agent-plugin` 后可用参数会变化, 使用 `--help` 查看。
+与 LoCoMo 相同。
 
 ## 输出文件
 
@@ -69,6 +98,21 @@ python benchmarks/longmemeval/run_eval.py \
 - `config.json`, `run.log` - 配置和日志
 - `import_results.csv` - 导入结果 (含 sessions 数量)
 - `qa_results.csv` - QA 结果
+- `qa_results.csv` 中的 `retrieval_items_json` - 原始检索证据及后端 metadata
 - `eval_results.csv` - Judge 结果 (question_id, question_type, correct)
 - `summary.json` - 汇总 (accuracy, per_type accuracy, token usage)
 - `echomem_logs/` - EchoMem 日志
+
+并行运行额外生成 `parallel_manifest.json`、每个 shard 的 `runner.log`、
+`parallel_summary.json`，以及 `merged/` 下去重合并后的 CSV 和
+`summary.json`。`recovery.py` 提供失败/缺失题识别、成功重试替换和稳定
+CSV 合并能力，供分片合并及后续恢复命令复用。
+
+可直接运行恢复工具：
+
+```bash
+python benchmarks/longmemeval/recovery.py \
+  --qa /path/to/run/qa_results.csv \
+  --dataset /path/to/longmemeval.json \
+  --out-dir /path/to/recovery
+```
