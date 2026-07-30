@@ -846,6 +846,37 @@ class VikingBotRuntimeTests(unittest.TestCase):
 
 
 class VikingBoat0411Tests(unittest.TestCase):
+    def test_local_prompt_file_content_only_appends_to_system_message(self):
+        baseline = build_messages(
+            "What happened?",
+            "2023-07-23",
+            [],
+            4000,
+            2000,
+            "",
+            VIKINGBOAT_0411_PROFILE,
+        )
+        candidate = build_messages(
+            "What happened?",
+            "2023-07-23",
+            [],
+            4000,
+            2000,
+            "",
+            VIKINGBOAT_0411_PROFILE,
+            "Use a second focused retrieval pass.",
+        )
+
+        self.assertEqual(baseline[1:], candidate[1:])
+        self.assertTrue(
+            candidate[0]["content"].startswith(baseline[0]["content"])
+        )
+        self.assertTrue(
+            candidate[0]["content"].endswith(
+                "Use a second focused retrieval pass."
+            )
+        )
+
     def test_profile_uses_echomemory_names_and_vikingbot_runtime_contract(self):
         self.assertEqual("vikingboat0411", VIKINGBOAT_0411_PROFILE)
         self.assertEqual(

@@ -86,6 +86,11 @@ def build_summary(
         "tools_enabled": qa_options.tools_enabled,
         "qa_profile_reference": profile_reference(qa_options.profile),
         "qa_profile_source": profile_source(qa_options.profile),
+        "qa_prompt_append": {
+            "enabled": bool(qa_options.system_prompt_append),
+            "source": qa_options.system_prompt_append_source,
+            "sha256": qa_options.system_prompt_append_sha256,
+        },
         "tool_call_total": sum(
             result.tool_call_count for result in qa_results
         ),

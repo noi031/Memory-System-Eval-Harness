@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -204,6 +205,14 @@ def build_parser() -> argparse.ArgumentParser:
         help="Workspace supplying the historical SOUL.md and TOOLS.md bootstrap",
     )
     qa.add_argument(
+        "--qa-prompt-file",
+        default="",
+        help=(
+            "Append a local UTF-8 text file to the selected profile's system "
+            "prompt; the file content is not copied into repository metadata"
+        ),
+    )
+    qa.add_argument(
         "--checkpoint-interval",
         type=int,
         default=10,
@@ -285,6 +294,20 @@ def apply_locomo_cli_defaults(args) -> None:
         args.memory_session_prefix = f"echomem-locomo-{sample}-"
 
 
+def load_qa_prompt_append(path_value: str) -> tuple[str, str, str]:
+    value = str(path_value or "").strip()
+    if not value:
+        return "", "", ""
+    path = Path(value).expanduser().resolve()
+    if not path.is_file():
+        raise ValueError(f"QA prompt file does not exist: {path}")
+    prompt = path.read_text(encoding="utf-8").strip()
+    if not prompt:
+        raise ValueError(f"QA prompt file is empty: {path}")
+    digest = hashlib.sha256(prompt.encode("utf-8")).hexdigest()
+    return prompt, digest, path.name
+
+
 def main() -> None:
     args = build_parser().parse_args()
     apply_locomo_cli_defaults(args)
@@ -307,6 +330,11 @@ def main() -> None:
         if getattr(args, name) is None:
             setattr(args, name, selected_profile[name])
     config = build_config_from_args(args)
+    (
+        system_prompt_append,
+        system_prompt_append_sha256,
+        system_prompt_append_source,
+    ) = load_qa_prompt_append(args.qa_prompt_file)
     config.sample_filter = args.sample
     config.question_limit = args.questions
     validate_eval_config(config)
@@ -596,6 +624,9 @@ def main() -> None:
             False,
         ),
         tools_enabled=args.tools,
+        system_prompt_append=system_prompt_append,
+        system_prompt_append_sha256=system_prompt_append_sha256,
+        system_prompt_append_source=system_prompt_append_source,
     )
     qa_tasks = build_qa_tasks(
         jobs,

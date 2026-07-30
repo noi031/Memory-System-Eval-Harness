@@ -313,6 +313,9 @@ def answer_one_vikingbot_question(
     retrieval_uri_dedup: bool = True,
     search_tool_target_uri_schema: bool = False,
     tools_enabled: bool = True,
+    system_prompt_append: str = "",
+    system_prompt_append_sha256: str = "",
+    system_prompt_append_source: str = "",
 ) -> QAResult:
     started = time.monotonic()
     deadline = started + question_timeout_s if question_timeout_s > 0 else None
@@ -363,6 +366,7 @@ def answer_one_vikingbot_question(
         agent_memory_budget_chars,
         vikingbot_workspace,
         qa_profile,
+        system_prompt_append,
     )
     trace: dict[str, Any] = {
         "schema_version": 1,
@@ -395,6 +399,8 @@ def answer_one_vikingbot_question(
                 search_tool_target_uri_schema
             ),
             "tools_enabled": tools_enabled,
+            "system_prompt_append_sha256": system_prompt_append_sha256,
+            "system_prompt_append_source": system_prompt_append_source,
         },
         "model_request": {
             "base_url": llm.base_url.rstrip("/"),
@@ -892,6 +898,18 @@ def run_concurrent_vikingbot_qa(
                     False,
                 ),
                 tools_enabled=task.get("tools_enabled", True),
+                system_prompt_append=task.get(
+                    "system_prompt_append",
+                    "",
+                ),
+                system_prompt_append_sha256=task.get(
+                    "system_prompt_append_sha256",
+                    "",
+                ),
+                system_prompt_append_source=task.get(
+                    "system_prompt_append_source",
+                    "",
+                ),
             ): index
             for index, task in enumerate(tasks)
         }

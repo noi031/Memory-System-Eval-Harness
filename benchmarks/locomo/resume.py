@@ -95,6 +95,9 @@ def build_qa_resume_manifest(
                 "search_tool_target_uri_schema": (
                     options.search_tool_target_uri_schema
                 ),
+                "system_prompt_append_sha256": (
+                    options.system_prompt_append_sha256
+                ),
             },
             "files": contract_files,
         },
@@ -142,6 +145,12 @@ def build_qa_resume_manifest(
             "retrieval_uri_dedup": options.retrieval_uri_dedup,
             "search_tool_target_uri_schema": (
                 options.search_tool_target_uri_schema
+            ),
+            "system_prompt_append_sha256": (
+                options.system_prompt_append_sha256
+            ),
+            "system_prompt_append_source": (
+                options.system_prompt_append_source
             ),
         },
         "qa_contract": {

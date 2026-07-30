@@ -40,12 +40,27 @@ from benchmarks.locomo.resume import (
 from benchmarks.locomo.run_eval import (
     apply_locomo_cli_defaults,
     build_parser as build_locomo_parser,
+    load_qa_prompt_append,
 )
 from shared.eval_base import EvalConfig
 from shared.qa import QAResult
 
 
 class LocomoCliDefaultsTests(unittest.TestCase):
+    def test_local_prompt_file_is_hashed_without_embedding_path(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "candidate.txt"
+            path.write_text("  local prompt experiment  \n", encoding="utf-8")
+
+            prompt, digest, source = load_qa_prompt_append(str(path))
+
+        self.assertEqual("local prompt experiment", prompt)
+        self.assertEqual(
+            hashlib.sha256(prompt.encode("utf-8")).hexdigest(),
+            digest,
+        )
+        self.assertEqual("candidate.txt", source)
+
     def test_tools_defaults_to_vikingboat_and_existing_memory(self):
         args = build_locomo_parser().parse_args([
             "--sample",

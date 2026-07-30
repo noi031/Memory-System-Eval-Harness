@@ -20,6 +20,12 @@ workspace，并保留 `ECHOMEM_AUTO_START=1`。下面两条命令会直接对该
 # 自然无工具对照
 ./eval.sh locomo --sample conv-30 --no-tools
 
+# 追加仅保存在本地的实验 prompt
+./eval.sh locomo \
+  --sample conv-30 \
+  --tools \
+  --qa-prompt-file /path/to/local-prompt.txt
+
 # 重新注入到隔离身份
 ./eval.sh locomo --sample conv-30 --inject-memory --tools
 
@@ -141,6 +147,7 @@ python benchmarks/locomo/run_eval.py \
 | `--agent-memory-budget-chars` | `2000` | agent memory prompt 预算 |
 | `--max-iterations` | `50` | 单题最大模型/tool-loop 迭代数 |
 | `--vikingbot-workspace` | 仓库内置历史 bootstrap | 默认使用 `agents/vikingbot/bootstrap/` 中固定的原始 `SOUL.md` 和 `TOOLS.md` 快照 |
+| `--qa-prompt-file` | (空) | 将本地 UTF-8 文件追加到所选 profile 的 system prompt；`summary.json` 和 resume manifest 仅记录文件名和 SHA-256 |
 | `--checkpoint-interval` | `10` | 每完成 N 题写一次 `qa_results.checkpoint.csv`；0 表示关闭 |
 | `--resume-qa` | (空) | 从先前运行目录或 QA CSV 恢复健康答案；严格校验数据集、身份、模型和 QA 参数，且必须使用 `--reuse-memory-account` |
 | `--concurrency` | `4` | QA 并发数 |

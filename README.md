@@ -112,6 +112,18 @@ session_mode=locomo
 ./eval.sh locomo --sample conv-30 --no-tools
 ```
 
+本地验证额外 prompt 时，通过文件参数追加到所选 profile 的 system prompt：
+
+```bash
+./eval.sh locomo \
+  --sample conv-30 \
+  --tools \
+  --qa-prompt-file /path/to/local-prompt.txt
+```
+
+prompt 文件不会进入代码仓；`summary.json` 和 resume manifest 仅记录文件名和
+SHA-256。
+
 两种模式使用相同的数据集和已有记忆：
 
 | 命令 | 默认 QA profile | 记忆行为 |

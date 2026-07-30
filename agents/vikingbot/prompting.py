@@ -125,39 +125,56 @@ def build_messages(
     agent_memory_budget_chars: int,
     vikingbot_workspace: str,
     qa_profile: str = "",
+    system_prompt_append: str = "",
 ) -> list[dict[str, Any]]:
+    def with_prompt_append(
+        messages: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        prompt = system_prompt_append.strip()
+        if not prompt:
+            return messages
+        updated = [dict(message) for message in messages]
+        for message in updated:
+            if message.get("role") == "system":
+                message["content"] = (
+                    f"{str(message.get('content') or '').rstrip()}"
+                    f"\n\n---\n\n{prompt}"
+                )
+                return updated
+        raise ValueError("QA prompt append requires a system message")
+
     if qa_profile == "legacy-77":
         from .legacy77_prompting import build_legacy77_messages
 
-        return build_legacy77_messages(
+        return with_prompt_append(build_legacy77_messages(
             question,
             question_time,
             items,
             user_memory_budget_chars,
             agent_memory_budget_chars,
-        )
+        ))
     if qa_profile == "vikingboat0411":
         from .vikingboat0411_prompting import build_vikingboat0411_messages
 
-        return build_vikingboat0411_messages(
+        return with_prompt_append(build_vikingboat0411_messages(
             question,
             question_time,
             items,
             user_memory_budget_chars,
             agent_memory_budget_chars,
-        )
+        ))
     if qa_profile == "vikingboat0411-natural-no-tools":
         from .vikingboat0411_prompting import (
             build_vikingboat0411_natural_no_tools_messages,
         )
 
-        return build_vikingboat0411_natural_no_tools_messages(
+        return with_prompt_append(build_vikingboat0411_natural_no_tools_messages(
             question,
             question_time,
             items,
             user_memory_budget_chars,
             agent_memory_budget_chars,
-        )
+        ))
     user_items: list[SearchResult] = []
     agent_items: list[SearchResult] = []
     for item in items:
@@ -179,8 +196,8 @@ def build_messages(
         f"## openviking_search(query=[user_query])\n{evidence}\n\n---\n\n"
         "Reply in the same language as the user's query, ignoring the language of the reference materials. User's query:"
     )
-    return [
+    return with_prompt_append([
         {"role": "system", "content": build_system_prompt(vikingbot_workspace)},
         {"role": "user", "content": memory_message},
         {"role": "user", "content": build_question_prompt(question, question_time)},
-    ]
+    ])
