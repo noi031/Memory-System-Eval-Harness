@@ -131,6 +131,58 @@ class LocomoCliDefaultsTests(unittest.TestCase):
         self.assertFalse(args.search)
         self.assertEqual("vikingboat0411", args.qa_profile)
 
+    def test_no_initial_search_keeps_semantic_tool_available(self):
+        args = build_locomo_parser().parse_args([
+            "--sample",
+            "conv-30",
+            "--tools",
+            "--no-initial-search",
+        ])
+
+        apply_locomo_cli_defaults(args)
+
+        self.assertTrue(args.search)
+        self.assertFalse(args.initial_search)
+
+    def test_filesystem_first_keeps_search_and_initial_candidates(self):
+        args = build_locomo_parser().parse_args([
+            "--sample",
+            "conv-30",
+            "--tools",
+            "--filesystem-first",
+        ])
+
+        apply_locomo_cli_defaults(args)
+
+        self.assertTrue(args.search)
+        self.assertTrue(args.initial_search)
+        self.assertTrue(args.filesystem_first)
+
+    def test_filesystem_first_requires_tools(self):
+        args = build_locomo_parser().parse_args([
+            "--sample",
+            "conv-30",
+            "--no-tools",
+            "--filesystem-first",
+        ])
+
+        with self.assertRaisesRegex(ValueError, "--filesystem-first"):
+            apply_locomo_cli_defaults(args)
+
+    def test_no_search_disables_initial_search(self):
+        args = build_locomo_parser().parse_args([
+            "--sample",
+            "conv-30",
+            "--tools",
+            "--no-search",
+            "--initial-search",
+        ])
+
+        apply_locomo_cli_defaults(args)
+
+        self.assertFalse(args.search)
+        self.assertFalse(args.initial_search)
+
     def test_explicit_profile_preserves_strict_no_tools_ablation(self):
         args = build_locomo_parser().parse_args([
             "--sample",

@@ -127,6 +127,7 @@ def build_messages(
     qa_profile: str = "",
     system_prompt_append: str = "",
     search_enabled: bool = True,
+    filesystem_first: bool = False,
 ) -> list[dict[str, Any]]:
     def with_prompt_append(
         messages: list[dict[str, Any]],
@@ -164,6 +165,7 @@ def build_messages(
             user_memory_budget_chars,
             agent_memory_budget_chars,
             search_enabled=search_enabled,
+            filesystem_first=filesystem_first,
         ))
     if qa_profile == "vikingboat0411-natural-no-tools":
         from .vikingboat0411_prompting import (

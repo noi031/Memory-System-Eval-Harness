@@ -118,6 +118,18 @@ session_mode=locomo
 ./eval.sh locomo --sample conv-30 --tools --no-search
 ```
 
+保留 `memory_search` 工具，但让模型自行决定是否搜索、不自动注入 top-k 候选：
+
+```bash
+./eval.sh locomo --sample conv-30 --tools --no-initial-search
+```
+
+保留初始语义候选和 `memory_search`，但提示模型优先用文件工具核验原始会话：
+
+```bash
+./eval.sh locomo --sample conv-30 --tools --filesystem-first
+```
+
 本地验证额外 prompt 时，通过文件参数追加到所选 profile 的 system prompt：
 
 ```bash
@@ -137,6 +149,8 @@ SHA-256。
 | `--tools` | `vikingboat0411` | 初始检索，并允许只读 `memory_*` 工具循环 |
 | `--no-tools` | `vikingboat0411-natural-no-tools` | 只使用完整初始记忆正文，不暴露工具 schema |
 | `--tools --no-search` | `vikingboat0411` | 跳过初始语义检索且不暴露 `memory_search`；保留 `memory_read_many`、`memory_list`、`memory_grep`、`memory_glob` |
+| `--tools --no-initial-search` | `vikingboat0411` | 不自动注入 top-k 候选，但保留 `memory_search` 与其他工具供模型按需调用 |
+| `--tools --filesystem-first` | `vikingboat0411` | 保留初始 top-k 候选和 `memory_search`，但要求先用 `memory_grep` / `memory_read_many` 等文件工具核验原始会话 |
 
 要用同一份新注入的记忆对比两种模式，先保留隔离身份，再复用它：
 

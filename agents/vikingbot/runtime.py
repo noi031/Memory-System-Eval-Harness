@@ -314,6 +314,8 @@ def answer_one_vikingbot_question(
     search_tool_target_uri_schema: bool = False,
     tools_enabled: bool = True,
     search_enabled: bool = True,
+    initial_search_enabled: bool = True,
+    filesystem_first: bool = False,
     system_prompt_append: str = "",
     system_prompt_append_sha256: str = "",
     system_prompt_append_source: str = "",
@@ -338,7 +340,7 @@ def answer_one_vikingbot_question(
         if initial_retrieval_query_mode == "vikingbot_prompt"
         else question
     )
-    if search_enabled:
+    if search_enabled and initial_search_enabled:
         try:
             items = echomem.search(initial_query, top_k=top_k, timeout_s=remaining())
             items = [
@@ -370,6 +372,7 @@ def answer_one_vikingbot_question(
         qa_profile,
         system_prompt_append,
         search_enabled,
+        filesystem_first,
     )
     trace: dict[str, Any] = {
         "schema_version": 1,
@@ -403,6 +406,8 @@ def answer_one_vikingbot_question(
             ),
             "tools_enabled": tools_enabled,
             "search_enabled": search_enabled,
+            "initial_search_enabled": initial_search_enabled,
+            "filesystem_first": filesystem_first,
             "system_prompt_append_sha256": system_prompt_append_sha256,
             "system_prompt_append_source": system_prompt_append_source,
         },
@@ -422,6 +427,7 @@ def answer_one_vikingbot_question(
             ),
         },
         "initial_retrieval": {
+            "enabled": initial_search_enabled,
             "query": initial_query,
             "items": _retrieval_rows(items),
             "error": retrieval_error,
@@ -914,6 +920,11 @@ def run_concurrent_vikingbot_qa(
                 ),
                 tools_enabled=task.get("tools_enabled", True),
                 search_enabled=task.get("search_enabled", True),
+                initial_search_enabled=task.get(
+                    "initial_search_enabled",
+                    True,
+                ),
+                filesystem_first=task.get("filesystem_first", False),
                 system_prompt_append=task.get(
                     "system_prompt_append",
                     "",

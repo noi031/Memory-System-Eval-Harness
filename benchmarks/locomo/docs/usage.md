@@ -23,6 +23,12 @@ workspace，并保留 `ECHOMEM_AUTO_START=1`。下面两条命令会直接对该
 # 关闭语义 memory_search 和初始向量检索，保留文件工具
 ./eval.sh locomo --sample conv-30 --tools --no-search
 
+# 关闭自动初始检索，但保留 memory_search 供模型自行调用
+./eval.sh locomo --sample conv-30 --tools --no-initial-search
+
+# 保留语义候选和 memory_search，但优先用文件工具核验原始会话
+./eval.sh locomo --sample conv-30 --tools --filesystem-first
+
 # 追加仅保存在本地的实验 prompt
 ./eval.sh locomo \
   --sample conv-30 \
@@ -160,6 +166,8 @@ python benchmarks/locomo/run_eval.py \
 | `--tool-set` | profile 决定 | `legacy-77=vikingbot_native_safe`；VikingBoat 0.4.11 profiles=`vikingbot_echo_native` |
 | `--tools` / `--no-tools` | `--tools` | 是否向回答模型暴露 profile 的记忆工具；关闭后保留相同 prompt 和初始检索注入，只执行一次模型调用 |
 | `--search` / `--no-search` | `--search` | 是否启用语义 `memory_search` 与初始向量检索；`--no-search` 保留 `memory_read_many`、`memory_list`、`memory_grep`、`memory_glob` |
+| `--initial-search` / `--no-initial-search` | `--initial-search` | 是否在首轮模型调用前自动注入 top-k 语义候选；关闭后仍可由模型调用 `memory_search` |
+| `--filesystem-first` / `--no-filesystem-first` | `--no-filesystem-first` | 是否保留语义候选和 `memory_search`，但提示模型优先用 `memory_grep` / `memory_read_many` 等文件工具核验原始会话 |
 | `--user-memory-budget-chars` | `4000` | user memory prompt 预算 |
 | `--agent-memory-budget-chars` | `2000` | agent memory prompt 预算 |
 | `--max-iterations` | `50` | 单题最大模型/tool-loop 迭代数 |

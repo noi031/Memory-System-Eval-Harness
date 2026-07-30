@@ -217,6 +217,25 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     qa.add_argument(
+        "--initial-search",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "Run automatic semantic retrieval before the first model turn; "
+            "--no-initial-search leaves memory_search available to the model"
+        ),
+    )
+    qa.add_argument(
+        "--filesystem-first",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help=(
+            "Keep semantic search enabled but instruct VikingBot to verify "
+            "answers with memory_grep/list/glob/read_many before relying on "
+            "semantic candidates"
+        ),
+    )
+    qa.add_argument(
         "--vikingbot-workspace",
         default=default_vikingbot_workspace(),
         help="Workspace supplying the historical SOUL.md and TOOLS.md bootstrap",
@@ -301,6 +320,10 @@ def apply_locomo_cli_defaults(args) -> None:
         args.reuse_memory_account = False
     else:
         args.reuse_memory_account = True
+    if not args.search:
+        args.initial_search = False
+    if args.filesystem_first and not args.tools:
+        raise ValueError("--filesystem-first requires --tools")
 
     sample = str(args.sample or "").strip()
     if (
@@ -726,6 +749,8 @@ def main() -> None:
         ),
         tools_enabled=args.tools,
         search_enabled=args.search,
+        initial_search_enabled=args.initial_search,
+        filesystem_first=args.filesystem_first,
         system_prompt_append=system_prompt_append,
         system_prompt_append_sha256=system_prompt_append_sha256,
         system_prompt_append_source=system_prompt_append_source,

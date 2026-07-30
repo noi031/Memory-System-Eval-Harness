@@ -990,6 +990,29 @@ class VikingBoat0411Tests(unittest.TestCase):
         self.assertIn("memory_glob", prompt)
         self.assertIn("automatic initial retrieval are disabled", prompt)
 
+    def test_filesystem_first_prompt_keeps_search_as_secondary_lead(self):
+        messages = build_messages(
+            "When did Jon lose his job?",
+            "2023-07-23",
+            [SearchResult(
+                uri="echo://account/sessions/session-1",
+                score=0.8,
+                content="Jon lost his job in January.",
+            )],
+            4000,
+            2000,
+            "",
+            VIKINGBOAT_0411_PROFILE,
+            search_enabled=True,
+            filesystem_first=True,
+        )
+        prompt = "\n".join(str(item["content"]) for item in messages)
+
+        self.assertIn("## memory_search(query=[user_query])", prompt)
+        self.assertIn("Treat injected memories as leads", prompt)
+        self.assertIn("memory_grep", prompt)
+        self.assertIn("Use memory_search only if raw-session lookup", prompt)
+
     def test_memory_search_executes_against_echomemory(self):
         echomem = _FakeEchoMem()
         text, items = execute_tool(
@@ -1197,6 +1220,86 @@ class VikingBoat0411Tests(unittest.TestCase):
                 for tool in captured_tools[0]
             },
         )
+
+    def test_no_initial_search_keeps_search_tool_without_backend_search(self):
+        class NoInitialSearchEchoMem(_FakeEchoMem):
+            def search(self, *_args, **_kwargs):
+                raise AssertionError("model did not request memory_search")
+
+        captured_tools: list[list[dict]] = []
+
+        def fake_chat(_llm, _messages, tools, _timeout, **_kwargs):
+            captured_tools.append(tools)
+            return (
+                {"role": "assistant", "content": "Unknown from available files."},
+                10,
+                2,
+            )
+
+        with patch(
+            "agents.vikingbot.runtime.chat_with_tools",
+            side_effect=fake_chat,
+        ):
+            result = answer_one_vikingbot_question(
+                NoInitialSearchEchoMem(),
+                _FakeLLM(),
+                question_id="q-no-initial-search",
+                question="When did Jon lose his job?",
+                answer="19 January 2023",
+                qa_profile=VIKINGBOAT_0411_PROFILE,
+                tool_set="vikingbot_echo_native",
+                initial_search_enabled=False,
+            )
+
+        self.assertFalse(result.trace["initial_retrieval"]["enabled"])
+        self.assertEqual([], result.trace["initial_retrieval"]["items"])
+        self.assertIn(
+            "memory_search",
+            result.trace["tool_protocol"]["names"],
+        )
+        self.assertIn(
+            "memory_search",
+            {
+                tool["function"]["name"]
+                for tool in captured_tools[0]
+            },
+        )
+
+    def test_filesystem_first_is_recorded_without_disabling_search(self):
+        captured_messages: list[list[dict]] = []
+
+        def fake_chat(_llm, messages, tools, _timeout, **_kwargs):
+            captured_messages.append(messages)
+            return (
+                {"role": "assistant", "content": "19 January 2023"},
+                10,
+                2,
+            )
+
+        with patch(
+            "agents.vikingbot.runtime.chat_with_tools",
+            side_effect=fake_chat,
+        ):
+            result = answer_one_vikingbot_question(
+                _FakeEchoMem(),
+                _FakeLLM(),
+                question_id="q-filesystem-first",
+                question="When did Jon lose his job?",
+                answer="19 January 2023",
+                qa_profile=VIKINGBOAT_0411_PROFILE,
+                tool_set="vikingbot_echo_native",
+                filesystem_first=True,
+            )
+
+        prompt = "\n".join(
+            str(message.get("content") or "")
+            for message in captured_messages[0]
+        )
+        self.assertTrue(result.trace["settings"]["search_enabled"])
+        self.assertTrue(result.trace["settings"]["initial_search_enabled"])
+        self.assertTrue(result.trace["settings"]["filesystem_first"])
+        self.assertIn("memory_search", result.trace["tool_protocol"]["names"])
+        self.assertIn("Treat injected memories as leads", prompt)
 
     def test_natural_no_tools_prompt_has_only_complete_memory(self):
         items = [
