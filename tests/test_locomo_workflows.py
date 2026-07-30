@@ -40,13 +40,38 @@ from benchmarks.locomo.resume import (
 from benchmarks.locomo.run_eval import (
     apply_locomo_cli_defaults,
     build_parser as build_locomo_parser,
+    load_memory_identity_file,
     load_qa_prompt_append,
+    write_memory_identity_file,
 )
 from shared.eval_base import EvalConfig
 from shared.qa import QAResult
 
 
 class LocomoCliDefaultsTests(unittest.TestCase):
+    def test_kept_memory_identity_file_round_trips_with_private_mode(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "identity.json"
+            write_memory_identity_file(
+                str(path),
+                {"tenant_id": "tenant-1", "user_id": "user-1"},
+                auth_key="auth-secret",
+                agent_id="agent-1",
+            )
+
+            identity = load_memory_identity_file(str(path))
+
+            self.assertEqual(
+                {
+                    "tenant_id": "tenant-1",
+                    "user_id": "user-1",
+                    "agent_id": "agent-1",
+                    "auth_key": "auth-secret",
+                },
+                identity,
+            )
+            self.assertEqual(0o600, path.stat().st_mode & 0o777)
+
     def test_local_prompt_file_is_hashed_without_embedding_path(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "candidate.txt"
