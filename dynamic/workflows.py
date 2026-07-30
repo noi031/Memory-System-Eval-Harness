@@ -9,7 +9,6 @@ from typing import Any
 
 from tqdm import tqdm
 
-from backends import create_backend_client
 from benchmarks.locomo.dataset import load_dataset
 from dynamic.artifacts import save_results
 from dynamic.client import EchoAgentClient, simulate_typing
@@ -113,25 +112,12 @@ def _ask_echoagent(
     )
 
 
-def _memory_client(args):
-    return create_backend_client(
-        "echomemory",
-        base_url=args.echomem_url,
-        api_key=args.echomem_auth_key,
-        account=args.account,
-        user_id=args.user_id,
-        agent_id=args.agent_id,
-        workspace=args.workspace,
-        timeout_s=60.0,
-        max_retries=3,
-    )
-
-
 def run_generate_mode(
     args,
     run: EvalRun,
     client: EchoAgentClient,
     llm: LLMClient,
+    memory_plugin,
 ) -> None:
     log = run.logger
     log.info("模式: generate (LLM 生成场景)")
@@ -169,28 +155,7 @@ def run_generate_mode(
     }
     log.info("theme=%s memories=%d", evaluator.theme, len(memories))
 
-    memory = _memory_client(args)
-    inject_session_id = memory.open_session(
-        title=f"generate-{evaluator.theme}"
-    )
-    for fact in tqdm(memories, desc="注入记忆", unit="mem"):
-        if fact.get("text"):
-            memory.add_message(
-                inject_session_id,
-                "user",
-                str(fact["text"]),
-            )
-    archive_id = memory.commit_session(inject_session_id)
-    commit = memory.poll_commit(
-        inject_session_id,
-        archive_id,
-        timeout_s=args.commit_timeout_s,
-        poll_interval_s=args.commit_poll_interval_s,
-    )
-    if commit.status != "completed":
-        raise RuntimeError(
-            f"记忆注入失败: status={commit.status} error={commit.error}"
-        )
+    inject_session_id = memory_plugin.inject_memories(memories)
 
     rounds: list[dict[str, Any]] = []
     dataset_queries: list[dict[str, Any]] = []
@@ -273,6 +238,7 @@ def run_replay_mode(
     run: EvalRun,
     client: EchoAgentClient,
     llm: LLMClient,
+    memory_plugin,
 ) -> None:
     log = run.logger
     log.info("模式: replay (回放数据集: %s)", args.dataset)
@@ -285,7 +251,6 @@ def run_replay_mode(
         jobs = jobs[:args.dataset_limit]
     rounds: list[dict[str, Any]] = []
     facts: dict[str, str] = {}
-    memory = _memory_client(args)
     for plan_index, plan in enumerate(
         tqdm(plans, desc="回放 sample", unit="sample")
     ):
@@ -295,33 +260,13 @@ def run_replay_mode(
         events = plan.get("events") or []
         if not events:
             continue
-        inject_session = memory.open_session(title=f"replay-{sample_id}")
-        for event in tqdm(
-            events,
-            desc="  inject",
-            unit="msg",
-            leave=False,
-        ):
-            if event.get("text"):
-                memory.add_message(
-                    inject_session,
-                    "user",
-                    str(event["text"]),
-                    created_at=str(event.get("time") or ""),
-                )
-        archive_id = memory.commit_session(inject_session)
-        commit = memory.poll_commit(
-            inject_session,
-            archive_id,
-            timeout_s=args.commit_timeout_s,
-            poll_interval_s=args.commit_poll_interval_s,
-        )
-        if commit.status != "completed":
+        try:
+            inject_session = memory_plugin.inject_memories(events)
+        except RuntimeError as exc:
             log.error(
-                "记忆注入失败: sample=%s status=%s error=%s",
+                "记忆注入失败: sample=%s error=%s",
                 sample_id,
-                commit.status,
-                commit.error,
+                exc,
             )
             continue
         qa_session = client.create_session(

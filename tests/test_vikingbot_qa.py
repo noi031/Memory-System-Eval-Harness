@@ -8,7 +8,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from agents import get_agent_plugin
+from agents import load_agent_plugin
 from agents.vikingbot.answers import sanitize_final_answer_text
 from agents.vikingbot.prompting import build_system_prompt
 from agents.vikingbot.prompting import build_messages
@@ -19,7 +19,7 @@ from agents.vikingbot.vikingboat0411_prompting import format_vikingbot_memory
 from agents.vikingbot.vikingboat0411_prompting import (
     format_natural_no_tools_memory,
 )
-from backends.echomemory import SearchResult
+from memories.echomemory import SearchResult
 from benchmarks.locomo.profiles import (
     AGENT_PLUGIN,
     LEGACY_77_PROFILE,
@@ -265,7 +265,7 @@ class VikingBotCoreTests(unittest.TestCase):
         )
 
     def test_profile_resolves_vikingbot_plugin(self):
-        plugin = get_agent_plugin(AGENT_PLUGIN)
+        plugin = load_agent_plugin(AGENT_PLUGIN, {})
 
         self.assertEqual("vikingbot", plugin.descriptor.id)
 

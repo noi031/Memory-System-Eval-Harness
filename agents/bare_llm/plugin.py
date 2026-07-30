@@ -1,40 +1,50 @@
-"""Bare LLM plugin: no memory system, memories go into the system prompt.
+"""Bare LLM plugin: baseline agent with system prompt + memory/query assembly.
 
-Used as a baseline to compare agents with vs without a memory system.
+In benchmark QA mode, ``run_qa`` uses the single-turn retrieve-then-generate
+flow defined in ``agents/bare_llm/qa.py``: search the memory client (provided
+by the memory plugin), assemble a system+memory+question prompt, and call
+the LLM once.  When the memory plugin is ``none``, this is truly memoryless;
+when it is ``echomemory``, it becomes a retrieval-augmented baseline.
+
+In dynamic mode, ``send_message`` issues a stateless LLM call with no
+background context.  Memory injection (if needed) is handled by the memory
+plugin, not by this plugin.
 """
 
 from __future__ import annotations
 
 import argparse
-import logging
 import time
-import uuid
+from typing import Any
 
-from agents.base import AgentPlugin, AgentResponse
+from agents.base import AgentDescriptor, AgentPlugin, AgentResponse
+from agents.bare_llm.qa import run_concurrent_qa
+from memories import MemoryClient
 from shared.llm_client import LLMClient
-from shared.eval_base import add_llm_args
+from shared.qa import QAResult
 
-logger = logging.getLogger("agent.bare_llm")
-
-_SYSTEM_PROMPT = (
-    "You are a helpful assistant. Answer the user's question based on the "
-    "background information provided below. If the answer is not in the "
-    "background information, say you don't know.\n\n"
-    "Background information:\n{memories}"
-)
+_SYSTEM_PROMPT = "You are a helpful assistant."
 
 
 class BareLLMPlugin(AgentPlugin):
-    """Bare LLM without a memory system.
+    """Bare LLM baseline: system prompt + memory/query assembly.
 
-    Background memories are concatenated into the system prompt. There is
-    no retrieval, no prefill, and no session management -- each call is
-    stateless except for the shared background context.
+    Each call is stateless -- no retrieval loop, no prefill, no session
+    management. In benchmark mode, ``run_qa`` runs the single-turn RAG flow
+    from ``agents/bare_llm/qa.py``. In dynamic mode, ``send_message`` issues
+    a plain LLM call with no background context.
     """
+
+    descriptor = AgentDescriptor(
+        id="bare_llm",
+        name="Bare LLM",
+        description="Stateless LLM; no agent framework, no memory retrieval.",
+    )
 
     @classmethod
     def add_arguments(cls, parser: argparse.ArgumentParser) -> None:
-        add_llm_args(parser)
+        """LLM args are declared by the benchmark's build_parser via add_llm_args."""
+        pass
 
     def setup(self, config: dict) -> None:
         self._llm = LLMClient(
@@ -46,15 +56,26 @@ class BareLLMPlugin(AgentPlugin):
             timeout_s=config.get("llm_timeout_s", 120.0),
             max_retries=config.get("llm_retries", 3),
         )
-        self._memories_by_session: dict[str, list[dict]] = {}
         self._session_count = 0
 
-    def inject_memories(self, memories: list[dict], session_id: str = "") -> str:
-        sid = session_id or f"bare_llm_{uuid.uuid4().hex[:8]}"
-        self._memories_by_session[sid] = [m for m in memories if m.get("text")]
-        logger.info("存储 %d 条背景记忆到 session %s (拼入 system prompt)",
-                    len(self._memories_by_session[sid]), sid)
-        return sid
+    def run_qa(
+        self,
+        tasks: list[dict[str, Any]],
+        memory_client: MemoryClient,
+        llm: LLMClient,
+        *,
+        concurrency: int,
+        question_timeout_s: float,
+        progress_callback=None,
+    ) -> list[QAResult]:
+        return run_concurrent_qa(
+            tasks,
+            memory_client,
+            llm,
+            concurrency=concurrency,
+            question_timeout_s=question_timeout_s,
+            progress_callback=progress_callback,
+        )
 
     def create_session(self, title: str = "") -> str:
         self._session_count += 1
@@ -67,15 +88,9 @@ class BareLLMPlugin(AgentPlugin):
     def send_message(
         self, session_id: str, message: str, context_path: str = "/"
     ) -> AgentResponse:
-        memories = self._memories_by_session.get(session_id, [])
-        memories_text = "\n".join(
-            f"- {m.get('text', '')}" for m in memories
-        )
-        system_prompt = _SYSTEM_PROMPT.format(memories=memories_text or "N/A")
-
         start = time.monotonic()
         resp = self._llm.chat([
-            {"role": "system", "content": system_prompt},
+            {"role": "system", "content": _SYSTEM_PROMPT},
             {"role": "user", "content": message},
         ])
         elapsed_s = time.monotonic() - start

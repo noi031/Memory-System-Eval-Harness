@@ -1,9 +1,21 @@
-"""Evaluation infrastructure: result directory, logging, config, EchoMem log collection."""
+"""Evaluation infrastructure: result directory, logging, config, dual plugin CLI.
+
+Design intent: this module is the shared backbone for every benchmark
+run_eval. It provides:
+  - EvalConfig: a dataclass holding only benchmark-generic fields (LLM
+    credentials, concurrency, timeouts, dataset path). Memory-specific and
+    agent-specific connection params are NOT here -- they live in their
+    respective plugins.
+  - add_memory_plugin_args / add_agent_plugin_args: pre-parse sys.argv to
+    discover which plugin was requested, then delegate to that plugin's
+    add_arguments so its CLI args appear in --help and are parsed.
+  - EvalRun: manages the timestamped result directory, logging, and
+    optional EchoMem log collection.
+"""
 
 from __future__ import annotations
 
 import argparse
-import atexit
 import json
 import logging
 import os
@@ -16,20 +28,13 @@ from pathlib import Path
 from typing import Any
 
 
-_PENDING_IDENTITY_CLEANUPS: list[Any] = []
-
-
 @dataclass
 class EvalConfig:
     """Common configuration for all benchmark evaluations."""
 
-    # EchoMem connection
-    echomem_url: str = "http://127.0.0.1:8010"
-    echomem_auth_key: str = ""
-    account: str = "default"
-    user_id: str = "default"
-    agent_id: str = "default"
-    workspace: str = ""
+    # Plugins
+    memory_plugin: str = "none"
+    agent_plugin: str = "bare_llm"
 
     # LLM for answering
     llm_base_url: str = ""
@@ -52,9 +57,6 @@ class EvalConfig:
     llm_timeout_s: float = 120.0
     llm_retries: int = 3
 
-    # EchoMem log directory (passed in, not fetched via API)
-    echomem_log_dir: str = ""
-
     # Dataset
     dataset_path: str = ""
     sample_filter: str = "all"
@@ -62,11 +64,9 @@ class EvalConfig:
 
     def to_dict(self) -> dict[str, Any]:
         d = asdict(self)
-        # mask api keys
-        for k in ("llm_api_key", "echomem_auth_key"):
-            v = d.get(k, "")
-            if v:
-                d[k] = v[:4] + "***" + v[-4:] if len(v) > 8 else "***"
+        v = d.get("llm_api_key", "")
+        if v:
+            d["llm_api_key"] = v[:4] + "***" + v[-4:] if len(v) > 8 else "***"
         return d
 
 
@@ -92,7 +92,7 @@ class EvalRun:
     ):
         self.benchmark_name = benchmark_name
         self.config = config or EvalConfig()
-        self.echomem_log_dir = echomem_log_dir or self.config.echomem_log_dir
+        self.echomem_log_dir = echomem_log_dir
         self.started_at = datetime.now(timezone.utc)
         self.started_monotonic = time.monotonic()
         ts = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
@@ -193,81 +193,40 @@ class EvalRun:
         return f"{time.monotonic() - start:.1f}s"
 
 
-def add_echomem_args(parser, *, include_isolation: bool = True) -> None:
-    """Add common EchoMem CLI args to an argparse parser."""
-    g = parser.add_argument_group("EchoMem")
-    g.add_argument(
-        "--echomem-url",
-        default=os.getenv("ECHOMEM_BASE_URL", "http://127.0.0.1:8010"),
-        help="EchoMem HTTP base URL",
-    )
-    g.add_argument("--echomem-auth-key", default=os.getenv("ECHOMEM_AUTH_KEY", ""), help="EchoMem X-Auth-Key")
-    g.add_argument("--account", default=os.getenv("ECHOMEM_ACCOUNT", "default"))
-    g.add_argument("--user-id", default=os.getenv("ECHOMEM_USER_ID", "default"))
-    g.add_argument("--agent-id", default=os.getenv("ECHOMEM_AGENT_ID", "default"))
-    g.add_argument("--workspace", default=os.getenv("ECHOMEM_WORKSPACE", ""), help="EchoMem workspace path")
-    g.add_argument("--echomem-log-dir", default="", help="EchoMem log directory for log collection")
-    if include_isolation:
-        identity = g.add_mutually_exclusive_group()
-        identity.add_argument(
-            "--reuse-memory-account",
-            action="store_true",
-            help="Reuse the configured EchoMem identity instead of isolating this evaluation run",
-        )
-        identity.add_argument(
-            "--keep-memory-account",
-            action="store_true",
-            help="Keep the isolated EchoMem tenant after evaluation for diagnostics",
-        )
+# ------------------------------------------------------------------ #
+#  CLI arg helpers                                                    #
+# ------------------------------------------------------------------ #
+
+def _scan_argv_for_plugin(flag: str, default: str) -> str:
+    """Pre-parse sys.argv to find --flag VALUE or --flag=VALUE."""
+    for index, arg in enumerate(sys.argv):
+        if arg == flag and index + 1 < len(sys.argv):
+            return sys.argv[index + 1]
+        if arg.startswith(f"{flag}="):
+            return arg.split("=", 1)[1]
+    return default
 
 
-def isolate_evaluation_identity(
-    echomem,
-    benchmark: str,
-    run_id: str,
-    *,
-    reuse: bool,
-    keep: bool = False,
-) -> dict[str, str]:
-    """Provision a clean EchoMem identity unless explicit reuse was requested."""
-    if reuse:
-        return {
-            "mode": "reused",
-            "retention": "existing",
-            "tenant_id": echomem.account,
-            "user_id": echomem.user_id,
-        }
-    label = f"eval-{benchmark}-{run_id}"[:120]
-    identity = echomem.provision_isolated_identity(label)
-    if not keep:
-        _PENDING_IDENTITY_CLEANUPS.append(echomem)
-    return {
-        "mode": "isolated",
-        "retention": "kept" if keep else "ephemeral",
-        **identity,
-    }
+def add_memory_plugin_args(
+    parser: argparse.ArgumentParser,
+    default: str = "none",
+) -> None:
+    """Declare --memory-plugin and the selected plugin's CLI arguments."""
+    parser.add_argument("--memory-plugin", default=default, help="Memory plugin name")
+    plugin_name = _scan_argv_for_plugin("--memory-plugin", default)
+    from memories.registry import get_plugin_class
+    get_plugin_class(plugin_name).add_arguments(parser)
 
 
-def cleanup_pending_evaluation_identities() -> None:
-    """Delete ephemeral benchmark tenants while their EchoMem service is online."""
-    logger = logging.getLogger("eval.identity")
-    while _PENDING_IDENTITY_CLEANUPS:
-        echomem = _PENDING_IDENTITY_CLEANUPS.pop()
-        try:
-            echomem.delete_current_identity()
-        except Exception as exc:
-            logger.warning("Failed to delete ephemeral EchoMem identity: %s", exc)
-
-
-atexit.register(cleanup_pending_evaluation_identities)
-
-
-def apply_evaluation_identity(config: EvalConfig, run: EvalRun, echomem, identity: dict[str, str]) -> None:
-    """Keep saved run configuration aligned with the effective EchoMem identity."""
-    config.account = identity["tenant_id"]
-    config.user_id = identity["user_id"]
-    config.echomem_auth_key = echomem.auth_key
-    run.save_config()
+def add_agent_plugin_args(
+    parser: argparse.ArgumentParser,
+    default_plugin: str = "bare_llm",
+) -> None:
+    """Declare --agent-plugin and the selected plugin's CLI arguments."""
+    parser.add_argument("--agent-plugin", default=default_plugin, help="Agent plugin name")
+    plugin_name = _scan_argv_for_plugin("--agent-plugin", default_plugin)
+    from agents import get_plugin_class
+    get_plugin_class(plugin_name).add_arguments(parser)
 
 
 def add_llm_args(parser) -> None:
@@ -307,12 +266,8 @@ def add_eval_args(parser) -> None:
 def build_config_from_args(args) -> EvalConfig:
     """Build an EvalConfig from parsed argparse args."""
     return EvalConfig(
-        echomem_url=args.echomem_url,
-        echomem_auth_key=args.echomem_auth_key,
-        account=args.account,
-        user_id=args.user_id,
-        agent_id=args.agent_id,
-        workspace=args.workspace,
+        memory_plugin=getattr(args, "memory_plugin", "none"),
+        agent_plugin=getattr(args, "agent_plugin", "bare_llm"),
         llm_base_url=args.llm_base_url,
         llm_model=args.llm_model,
         llm_api_key=args.llm_api_key,
@@ -326,7 +281,6 @@ def build_config_from_args(args) -> EvalConfig:
         question_timeout_s=args.question_timeout_s,
         llm_timeout_s=args.llm_timeout_s,
         llm_retries=args.llm_retries,
-        echomem_log_dir=args.echomem_log_dir,
     )
 
 
@@ -340,8 +294,6 @@ def results_root_for(benchmark_dir: str | Path, out_dir: str) -> Path:
 
 def validate_eval_config(config: EvalConfig) -> None:
     errors: list[str] = []
-    if not config.echomem_url.strip():
-        errors.append("missing EchoMem URL")
     if not config.llm_base_url.strip():
         errors.append("missing LLM base URL")
     if not config.llm_model.strip():
@@ -370,21 +322,3 @@ def validate_eval_config(config: EvalConfig) -> None:
         errors.append("questions must be >= 0")
     if errors:
         raise ValueError("; ".join(errors))
-
-
-def add_agent_plugin_args(
-    parser: argparse.ArgumentParser,
-    default_plugin: str = "baseline_mem",
-) -> None:
-    """Add CLI arguments declared by a generic runtime agent plugin."""
-    plugin_name = default_plugin
-    for index, arg in enumerate(sys.argv):
-        if arg == "--agent-plugin" and index + 1 < len(sys.argv):
-            plugin_name = sys.argv[index + 1]
-            break
-        if arg.startswith("--agent-plugin="):
-            plugin_name = arg.split("=", 1)[1]
-            break
-    from agents import get_plugin_class
-
-    get_plugin_class(plugin_name).add_arguments(parser)

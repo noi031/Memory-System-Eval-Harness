@@ -7,8 +7,9 @@
 ```
 agents/
   vikingbot/        # 历史 VikingBot prompt、工具协议和 agent loop
-backends/
-  echomemory/       # 当前唯一记忆后端
+memories/
+  echomemory/       # EchoMemory 记忆插件
+  openviking/       # OpenViking 记忆插件
 benchmarks/
   locomo/           # LoCoMo 数据集评测
     dataset.py      # LoCoMo 数据解析
@@ -39,7 +40,7 @@ shared/             # 共享库
   eval_base.py      # 评测基础设施 (配置, 日志, 结果目录, EchoMem 日志收集)
 scripts/
   benchmark_adapter.py # benchmarks/generic/adapter.py 的兼容 CLI 入口
-  backend_doctor.py    # EchoMemory backend 注册和契约检查
+  backend_doctor.py    # 记忆插件注册和契约检查
   validate_evidence.py # QA 检索证据格式检查
 ```
 

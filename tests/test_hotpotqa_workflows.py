@@ -5,7 +5,7 @@ import unittest
 from pathlib import Path
 from types import SimpleNamespace
 
-from backends.types import CommitResult
+from memories.base import CommitResult
 from benchmarks.hotpotqa.evaluate import (
     answer_metrics,
     evaluate_hotpotqa,

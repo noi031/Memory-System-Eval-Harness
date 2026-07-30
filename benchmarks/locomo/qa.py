@@ -11,11 +11,7 @@ from typing import Any
 
 from tqdm import tqdm
 
-from agents import get_agent_plugin
-from benchmarks.locomo.profiles import (
-    AGENT_PLUGIN,
-    profile_source,
-)
+from benchmarks.locomo.profiles import profile_source
 from shared.eval_base import EvalConfig
 from shared.qa import BASE_QA_FIELDS, QAResult
 
@@ -142,6 +138,7 @@ def build_qa_tasks(
     sample_to_session_ids: dict[str, list[str]],
     config: EvalConfig,
     options: QAOptions,
+    agent_id: str = "",
 ) -> list[dict[str, Any]]:
     tasks: list[dict[str, Any]] = []
     for job in jobs:
@@ -155,7 +152,7 @@ def build_qa_tasks(
             "top_k": config.top_k,
             "memory_budget_chars": config.memory_budget_chars,
             "session_id": session_ids[0] if len(session_ids) == 1 else "",
-            "agent_id": config.agent_id,
+            "agent_id": agent_id,
             "question_time": job.query_time,
             "tool_search_limit": options.tool_search_limit,
             "user_memory_budget_chars": options.user_memory_budget_chars,
@@ -194,6 +191,7 @@ def build_qa_tasks(
 
 def run_locomo_qa(
     tasks: list[dict[str, Any]],
+    agent_plugin,
     memory_client,
     llm,
     config: EvalConfig,
@@ -252,7 +250,7 @@ def run_locomo_qa(
         if not pending_tasks:
             results = []
         else:
-            results = get_agent_plugin(AGENT_PLUGIN).run_qa(
+            results = agent_plugin.run_qa(
                 pending_tasks,
                 memory_client,
                 llm,

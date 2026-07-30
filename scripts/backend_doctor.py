@@ -12,28 +12,33 @@ _PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
-from backends import available_backends
+from memories import available_memories
+
+
+_EXPECTED_BACKENDS = ["echomemory", "openviking", "none"]
+_CONTRACT_EXEMPT = {"none"}
 
 
 def build_report() -> dict:
-    rows = available_backends()
+    rows = available_memories()
     failed = [
         row["id"]
         for row in rows
-        if not bool((row.get("contract") or {}).get("ok"))
+        if row["id"] not in _CONTRACT_EXEMPT
+        and not bool((row.get("contract") or {}).get("ok"))
     ]
     registered = [str(row.get("id") or "") for row in rows]
     status = (
         "ok"
-        if registered == ["echomemory"] and not failed
+        if registered == _EXPECTED_BACKENDS and not failed
         else "fail"
     )
     return {
         "status": status,
-        "expected_backends": ["echomemory"],
+        "expected_backends": _EXPECTED_BACKENDS,
         "registered_backends": registered,
         "failed_backends": failed,
-        "backends": rows,
+        "memories": rows,
         "safe_to_share": True,
         "secrets_included": False,
     }
@@ -46,7 +51,7 @@ def render_text(report: dict) -> str:
         "Expected: echomemory",
         "Registered: " + ", ".join(report["registered_backends"]),
     ]
-    for row in report["backends"]:
+    for row in report["memories"]:
         contract = row.get("contract") or {}
         lines.append(
             f"- {row['id']}: contract={contract.get('status', 'unknown')} "

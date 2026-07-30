@@ -28,8 +28,8 @@ QA_CONTRACT_FILES = (
     "agents/vikingbot/answers.py",
     "benchmarks/locomo/qa.py",
     "benchmarks/locomo/memory_scope.py",
-    "backends/echomemory/client.py",
-    "backends/types.py",
+    "memories/echomemory/client.py",
+    "memories/base.py",
 )
 
 
@@ -57,6 +57,7 @@ def build_qa_resume_manifest(
     session_mode: str,
     config: EvalConfig,
     options: QAOptions,
+    memory_identity: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     project_root = Path(__file__).resolve().parents[2]
     contract_files: dict[str, str] = {}
@@ -110,11 +111,7 @@ def build_qa_resume_manifest(
         "dataset_path": str(Path(dataset_path).expanduser().resolve()),
         "sample_filter": sample_filter,
         "session_mode": session_mode,
-        "memory_identity": {
-            "account": config.account,
-            "user_id": config.user_id,
-            "agent_id": config.agent_id,
-        },
+        "memory_identity": memory_identity or {},
         "answer_model": {
             "base_url": config.llm_base_url.rstrip("/"),
             "model": config.llm_model,

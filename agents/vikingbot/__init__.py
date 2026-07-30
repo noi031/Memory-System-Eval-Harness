@@ -1,5 +1,5 @@
 """VikingBot agent plugin."""
 
-from .plugin import PLUGIN, VikingBotPlugin
+from .plugin import VikingBotPlugin
 
-__all__ = ["PLUGIN", "VikingBotPlugin"]
+__all__ = ["VikingBotPlugin"]

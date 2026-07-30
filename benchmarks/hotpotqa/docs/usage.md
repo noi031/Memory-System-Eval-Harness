@@ -52,10 +52,10 @@ python benchmarks/hotpotqa/run_eval.py \
 | `--questions` | `0` | 限制 QA 数量 (0=全部) |
 | `--question-ids` | (空) | 逗号分隔的 question/native/sample ID，在 `--questions` 前应用 |
 | `--import-mode` | `per_question` | 导入模式: `per_question` 或 `global` |
-| `--agent-plugin` | `baseline_mem` | QA 阶段使用的 agent 插件名，见 `agents/` 目录 |
+| `--agent-plugin` | `bare_llm` | QA 阶段使用的 agent 插件名，见 `agents/` 目录 |
 
 ### EchoMem / LLM / 评测参数
-默认使用 `baseline_mem` 插件, 参数与 LoCoMo 相同, 详见 `benchmarks/locomo/docs/usage.md` 中的参数表。切换 `--agent-plugin` 后可用参数会变化, 使用 `--help` 查看。
+默认使用 `bare_llm` 插件, 参数与 LoCoMo 相同, 详见 `benchmarks/locomo/docs/usage.md` 中的参数表。切换 `--agent-plugin` 后可用参数会变化, 使用 `--help` 查看。
 
 HotpotQA 不需要 Judge 参数。`--reuse-memory-account` 复用已配置身份并禁止
 open/add/commit；QA 结果保留 `retrieval_items_json`，用于从真实检索证据推导

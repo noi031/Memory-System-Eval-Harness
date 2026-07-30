@@ -25,11 +25,16 @@ _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
+from agents import load_agent_plugin
 from dynamic.artifacts import build_v2_quality_report as _build_v2_quality_report
-from dynamic.client import EchoAgentClient
 from dynamic.workflows import run_generate_mode, run_replay_mode
-from backends import create_backend_client
-from shared.eval_base import EvalConfig, EvalRun, add_echomem_args
+from memories import load_memory_plugin
+from shared.eval_base import (
+    EvalConfig,
+    EvalRun,
+    add_agent_plugin_args,
+    add_memory_plugin_args,
+)
 from shared.llm_client import LLMClient
 
 _CONFIGS_DIR = Path(__file__).resolve().parent / "configs"
@@ -42,13 +47,6 @@ _CONFIGS_DIR = Path(__file__).resolve().parent / "configs"
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="动态评测: 仿真 EchoAgent+EchoMem 线上效果")
     parser.add_argument("--check", action="store_true", help=argparse.SUPPRESS)
-    # EchoAgent
-    g = parser.add_argument_group("EchoAgent")
-    g.add_argument("--echoagent-url", default=os.environ.get("ECHOAGENT_URL", "http://127.0.0.1:31020"))
-    g.add_argument("--username", default=os.environ.get("ECHOAGENT_TEST_USERNAME", "test_user"))
-    g.add_argument("--password", default=os.environ.get("ECHOAGENT_TEST_PASSWORD", ""))
-    g.add_argument("--memory-engine-endpoint",
-                   default=os.environ.get("GLOBAL_MEMORY_ENGINE_ENDPOINT", "http://127.0.0.1:31030"))
 
     # 模式选择
     g = parser.add_argument_group("模式")
@@ -82,13 +80,9 @@ def build_parser() -> argparse.ArgumentParser:
     g.add_argument("--llm-model", default=os.environ.get("LLM_MODEL", "doubao-seed-2.0-pro"))
     g.add_argument("--llm-api-key", default=os.environ.get("LLM_API_KEY", ""))
 
-    # EchoMem 日志
-    add_echomem_args(parser, include_isolation=False)
-
-    # EchoMem 注入参数
-    g = parser.add_argument_group("EchoMem 注入")
-    g.add_argument("--commit-timeout-s", type=float, default=0.0, help="注入 commit 轮询超时 (秒)，0 表示无限等待")
-    g.add_argument("--commit-poll-interval-s", type=float, default=2.0, help="注入 commit 轮询间隔 (秒)")
+    # 记忆插件 + Agent 插件
+    add_memory_plugin_args(parser, default="echomemory")
+    add_agent_plugin_args(parser, default_plugin="echo_agent")
 
     # 输出
     g = parser.add_argument_group("输出")
@@ -165,57 +159,32 @@ def main() -> None:
     if errors:
         raise ValueError("; ".join(errors))
 
-    # 登录 EchoAgent (在创建 EvalRun 之前, 因为 auth_key 解析依赖登录)
-    client = EchoAgentClient(args.echoagent_url, args.username, args.password)
-    print(f"登录 EchoAgent ({args.echoagent_url})...")
+    # 加载 agent 插件 (EchoAgentPlugin.setup 内部完成登录、agent_id 设置、auth_key 解析)
     try:
-        client.login()
+        agent_plugin = load_agent_plugin(args.agent_plugin, vars(args))
     except Exception as e:
-        print(f"登录失败: {e}", file=sys.stderr)
+        print(f"agent plugin 加载失败: {e}", file=sys.stderr)
         sys.exit(1)
-
-    # 动态评测的 QA 经 EchoAgent -> echoagent 插件, 插件固定用 agent_id="echoagent"。
-    # 注入也需用相同的 agent_id, 否则 EchoMem 按 agent_id 过滤时召回不到注入的记忆。
-    if not args.agent_id or args.agent_id == "default":
-        args.agent_id = "echoagent"
-
-    # 注入直连 EchoMem, 必须用与召回相同的 auth_key。
-    # 通过 echoagent 插件 credential 接口解析, 保证身份一致。
-    if not args.echomem_auth_key:
-        try:
-            args.echomem_auth_key = client.get_memory_auth_key(args.memory_engine_endpoint)
-        except Exception as e:
-            raise RuntimeError(
-                f"could not resolve EchoMem identity from EchoAgent: {e}"
-            ) from e
+    client = agent_plugin.client
 
     if args.check:
-        echomem = create_backend_client(
-            "echomemory",
-            base_url=args.echomem_url,
-            api_key=args.echomem_auth_key,
-            account=args.account,
-            user_id=args.user_id,
-            agent_id="echoagent" if args.agent_id == "default" else args.agent_id,
-            workspace=args.workspace,
-            timeout_s=5.0,
-            max_retries=1,
-        )
-        echomem.health()
+        memory_plugin = load_memory_plugin(args.memory_plugin, vars(args))
+        memory_plugin.client.health()
         print(
             "[check] OK "
             f"benchmark=dynamic echoagent={args.echoagent_url} "
-            f"echomem={args.echomem_url} user={args.username} "
-            f"memory_identity={'resolved' if args.echomem_auth_key else 'default'}"
+            f"memory={args.memory_plugin} "
+            f"echomem={getattr(args, 'echomem_url', 'N/A')} "
+            f"user={args.username} "
+            f"memory_identity={'resolved' if getattr(args, 'echomem_auth_key', '') else 'default'}"
         )
+        memory_plugin.teardown()
         return
 
     # 创建评测运行 (在 auth_key 解析后, 确保保存的配置包含正确的 auth_key)
     results_root = Path(args.out_dir) if args.out_dir else Path(__file__).parent / "results"
     config = EvalConfig(
-        echomem_url=args.echomem_url,
-        echomem_auth_key=args.echomem_auth_key,
-        echomem_log_dir=args.echomem_log_dir,
+        memory_plugin=args.memory_plugin,
         llm_base_url=args.llm_base_url,
         llm_model=args.llm_model,
         llm_api_key=args.llm_api_key,
@@ -224,12 +193,16 @@ def main() -> None:
         benchmark_name="dynamic",
         results_root=results_root,
         config=config,
-        echomem_log_dir=args.echomem_log_dir,
+        echomem_log_dir=getattr(args, "echomem_log_dir", ""),
     )
     log = run.logger
 
-    log.info("登录成功 (user=%s, uuid=%s)", args.username, client.user_uuid)
-    log.info("agent_id=%s, auth_key=%s", args.agent_id, "已设置" if args.echomem_auth_key else "未设置")
+    log.info("agent plugin loaded: %s (client=%s)", args.agent_plugin, type(client).__name__)
+    log.info("agent_id=%s, auth_key=%s", getattr(args, "agent_id", ""), "已设置" if getattr(args, "echomem_auth_key", "") else "未设置")
+
+    # 加载记忆插件 (在 agent 插件之后, 确保读到 auth_key 回写)
+    memory_config = {**vars(args), "benchmark_name": "dynamic", "run_id": run.result_dir.name}
+    memory_plugin = load_memory_plugin(args.memory_plugin, memory_config)
 
     # 创建 LLM 客户端 (用于质量评估)
     llm = LLMClient(
@@ -242,10 +215,13 @@ def main() -> None:
     )
 
     # 选择模式
-    if args.dataset:
-        run_replay_mode(args, run, client, llm)
-    else:
-        run_generate_mode(args, run, client, llm)
+    try:
+        if args.dataset:
+            run_replay_mode(args, run, client, llm, memory_plugin)
+        else:
+            run_generate_mode(args, run, client, llm, memory_plugin)
+    finally:
+        memory_plugin.teardown()
 
 
 if __name__ == "__main__":

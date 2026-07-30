@@ -24,7 +24,8 @@ _PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
-from backends import create_backend_client
+from agents import load_agent_plugin
+from memories import load_memory_plugin
 from benchmarks.locomo.dataset import load_dataset
 from benchmarks.locomo.diagnosis import diagnose_run
 from benchmarks.locomo.blackbox import write_artifacts as write_blackbox_artifacts
@@ -40,7 +41,6 @@ from benchmarks.locomo.judge import (
 )
 from benchmarks.locomo.profiles import (
     LEGACY_77_PROFILE,
-    default_vikingbot_workspace,
     profile_settings,
     VIKINGBOAT_0411_PROFILE,
     VIKINGBOAT_0411_NATURAL_NO_TOOLS_PROFILE,
@@ -68,12 +68,11 @@ from benchmarks.locomo.selection import parse_question_ids, select_questions
 from shared.dataset_io import resolve_dataset_path
 from shared.eval_base import (
     EvalRun,
-    add_echomem_args,
+    add_agent_plugin_args,
+    add_memory_plugin_args,
     add_llm_args,
     add_eval_args,
-    apply_evaluation_identity,
     build_config_from_args,
-    isolate_evaluation_identity,
     results_root_for,
     validate_eval_config,
 )
@@ -133,10 +132,11 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     # 共享参数
-    add_echomem_args(parser)
+    add_memory_plugin_args(parser)
+    add_agent_plugin_args(parser, default_plugin="vikingbot")
     add_llm_args(parser)
     add_eval_args(parser)
-    qa = parser.add_argument_group("Historical VikingBot QA")
+    qa = parser.add_argument_group("LoCoMo QA")
     qa.add_argument(
         "--qa-profile",
         choices=[
@@ -152,57 +152,6 @@ def build_parser() -> argparse.ArgumentParser:
             "vikingboat0411-natural-no-tools keeps only complete initially "
             "retrieved memory excerpts"
         ),
-    )
-    qa.add_argument(
-        "--tool-search-limit",
-        type=int,
-        default=None,
-    )
-    qa.add_argument(
-        "--user-memory-budget-chars",
-        type=int,
-        default=None,
-    )
-    qa.add_argument(
-        "--agent-memory-budget-chars",
-        type=int,
-        default=None,
-    )
-    qa.add_argument(
-        "--max-iterations",
-        type=int,
-        default=None,
-    )
-    qa.add_argument("--initial-min-score", type=float, default=None)
-    qa.add_argument("--tool-min-score", type=float, default=None)
-    qa.add_argument(
-        "--tool-search-pool-multiplier",
-        type=int,
-        default=None,
-    )
-    qa.add_argument(
-        "--tool-set",
-        choices=[
-            "search_read",
-            "vikingbot_native_safe",
-            "vikingbot_echo_native",
-        ],
-        default=None,
-    )
-    qa.add_argument(
-        "--tools",
-        action=argparse.BooleanOptionalAction,
-        default=True,
-        help=(
-            "Expose the profile's memory tools to the answer model; "
-            "--no-tools keeps the same profile prompt and initial memory "
-            "injection but performs a single model turn"
-        ),
-    )
-    qa.add_argument(
-        "--vikingbot-workspace",
-        default=default_vikingbot_workspace(),
-        help="Workspace supplying the historical SOUL.md and TOOLS.md bootstrap",
     )
     qa.add_argument(
         "--qa-prompt-file",
@@ -276,11 +225,11 @@ def apply_locomo_cli_defaults(args) -> None:
             "vikingboat0411-natural-no-tools requires --no-tools"
         )
 
-    if args.inject_memory and args.reuse_memory_account:
+    if args.inject_memory and getattr(args, "reuse_memory_account", False):
         raise ValueError(
             "--inject-memory and --reuse-memory-account are mutually exclusive"
         )
-    if args.inject_memory or args.keep_memory_account:
+    if args.inject_memory or getattr(args, "keep_memory_account", False):
         args.reuse_memory_account = False
     else:
         args.reuse_memory_account = True
@@ -389,6 +338,7 @@ def main() -> None:
         benchmark_name="locomo",
         results_root=results_root_for(Path(__file__).parent, args.out_dir),
         config=config,
+        echomem_log_dir=getattr(args, "echomem_log_dir", ""),
     )
     log = run.logger
 
@@ -419,32 +369,24 @@ def main() -> None:
         })
         raise ValueError(message)
 
-    # 创建 EchoMem 客户端
-    echomem = create_backend_client(
-        "echomemory",
-        base_url=config.echomem_url,
-        api_key=config.echomem_auth_key,
-        account=config.account,
-        user_id=config.user_id,
-        agent_id=config.agent_id,
-        workspace=config.workspace,
-        timeout_s=60.0,
-        max_retries=3,
-    )
+    # 创建 memory 客户端
+    memory_config = {**vars(args), "benchmark_name": "locomo", "run_id": run.result_dir.name}
+    memory_plugin = load_memory_plugin(args.memory_plugin, memory_config)
+    echomem = memory_plugin.client
     echomem.health()
-    evaluation_identity = isolate_evaluation_identity(
-        echomem,
-        "locomo",
-        run.result_dir.name,
-        reuse=args.reuse_memory_account,
-        keep=args.keep_memory_account,
-    )
-    apply_evaluation_identity(config, run, echomem, evaluation_identity)
+    evaluation_identity = {
+        "mode": "reused" if args.reuse_memory_account else "isolated",
+        "retention": "existing" if args.reuse_memory_account else (
+            "kept" if getattr(args, "keep_memory_account", False) else "ephemeral"
+        ),
+        "tenant_id": echomem.account,
+        "user_id": echomem.user_id,
+    }
     log.info(
-        "EchoMem identity: %s tenant=%s user=%s",
-        evaluation_identity["mode"],
-        evaluation_identity["tenant_id"],
-        evaluation_identity["user_id"],
+        "Memory identity: %s tenant=%s user=%s",
+        evaluation_identity.get("mode", "none"),
+        evaluation_identity.get("tenant_id", ""),
+        evaluation_identity.get("user_id", ""),
     )
     if args.memory_session_prefix:
         echomem = SessionPrefixMemoryClient(
@@ -467,14 +409,17 @@ def main() -> None:
         max_retries=config.llm_retries,
     )
 
+    # 加载 agent 插件
+    agent_plugin = load_agent_plugin(args.agent_plugin, vars(args))
+
     # -- 阶段 1: 复用已有记忆或集中导入所有 session --
     log.info("=" * 60)
     reuse_existing_memory = args.reuse_memory_account
     if reuse_existing_memory:
         log.info(
             "阶段 1: 跳过导入，直接复用已有记忆 account=%s user=%s",
-            config.account,
-            config.user_id,
+            echomem.account,
+            echomem.user_id,
         )
     else:
         log.info("阶段 1: 导入记忆 (共 %d 个 sample)", len(plans))
@@ -633,6 +578,7 @@ def main() -> None:
         import_report.sample_to_session_ids,
         config,
         qa_options,
+        agent_id=echomem.agent_id,
     )
     qa_resume_manifest = build_qa_resume_manifest(
         dataset_path=dataset_path,
@@ -640,6 +586,11 @@ def main() -> None:
         session_mode=session_mode,
         config=config,
         options=qa_options,
+        memory_identity={
+            "account": echomem.account,
+            "user_id": echomem.user_id,
+            "agent_id": echomem.agent_id,
+        },
     )
     write_qa_resume_manifest(run.result_dir, qa_resume_manifest)
     qa_resume_state = None
@@ -662,6 +613,7 @@ def main() -> None:
         )
     qa_results = run_locomo_qa(
         qa_tasks,
+        agent_plugin,
         echomem,
         llm,
         config,
@@ -825,6 +777,7 @@ def main() -> None:
         judge_report.correct,
         len(judge_report.rows),
     )
+    memory_plugin.teardown()
 
 
 if __name__ == "__main__":

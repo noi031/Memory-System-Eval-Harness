@@ -1,47 +1,53 @@
-"""EchoAgent plugin: wraps EchoAgentClient + EchoMemClient into AgentPlugin.
+"""EchoAgent plugin: wraps EchoAgentClient for dynamic evaluation.
 
-Refactored from dynamic/run_eval.py. All agent-specific HTTP logic lives
-here; the evaluation flow calls only AgentPlugin methods.
+Design intent: this plugin owns every CLI argument and all HTTP logic
+related to the EchoAgent backend (login, session management, prefill
+simulation, SSE streaming). The dynamic evaluation flow calls only
+AgentPlugin methods; the benchmark flow accesses agent_plugin.client
+for low-level EchoAgentClient methods that don't fit the step-based
+interface.
+
+Memory injection is handled by the memory plugin's client directly
+(open_session / add_message / commit / poll_commit), not by this plugin.
+QA goes through the full EchoAgent pipeline (prefill + SSE streaming).
 """
 
 from __future__ import annotations
 
 import argparse
-import json
 import logging
+import os
 import time
 import uuid
 from typing import Any
 
-from tqdm import tqdm
-
 from agents.base import AgentPlugin, AgentResponse, TypingResult
 from agents.echo_agent.client import EchoAgentClient
-from shared.echomem_client import EchoMemClient
-from shared.eval_base import add_echomem_args
 
 logger = logging.getLogger("agent.echo_agent")
 
 
 class EchoAgentPlugin(AgentPlugin):
-    """EchoAgent + EchoMem plugin for dynamic evaluation.
+    """EchoAgent plugin for dynamic evaluation.
 
-    Memory injection goes directly to EchoMem (bypassing EchoAgent);
     QA goes through the full EchoAgent pipeline (prefill + SSE streaming).
+    Memory injection is handled by the memory plugin, not by this plugin.
     """
 
     @classmethod
     def add_arguments(cls, parser: argparse.ArgumentParser) -> None:
-        add_echomem_args(parser)
         g = parser.add_argument_group("EchoAgent")
-        g.add_argument("--echoagent-url", default="http://127.0.0.1:31020",
+        g.add_argument("--echoagent-url",
+                       default=os.environ.get("ECHOAGENT_URL", "http://127.0.0.1:31020"),
                        help="EchoAgent 后端地址")
-        g.add_argument("--username", default="test_user",
+        g.add_argument("--username",
+                       default=os.environ.get("ECHOAGENT_TEST_USERNAME", "test_user"),
                        help="EchoAgent 登录用户名")
-        g.add_argument("--password", default="",
+        g.add_argument("--password",
+                       default=os.environ.get("ECHOAGENT_TEST_PASSWORD", ""),
                        help="EchoAgent 登录密码")
         g.add_argument("--memory-engine-endpoint",
-                       default="http://127.0.0.1:31030",
+                       default=os.environ.get("GLOBAL_MEMORY_ENGINE_ENDPOINT", "http://127.0.0.1:31030"),
                        help="echoagent 插件地址 (31030)")
         g.add_argument("--commit-timeout-s", type=float, default=0.0,
                        help="注入 commit 轮询超时 (0=无限)")
@@ -70,6 +76,7 @@ class EchoAgentPlugin(AgentPlugin):
         self._agent_id = config.get("agent_id", "")
         if not self._agent_id or self._agent_id == "default":
             self._agent_id = "echoagent"
+        config["agent_id"] = self._agent_id
 
         # Resolve auth_key so injection uses the same identity as retrieval
         auth_key = config.get("echomem_auth_key", "")
@@ -83,65 +90,10 @@ class EchoAgentPlugin(AgentPlugin):
         config["echomem_auth_key"] = auth_key
         logger.info("agent_id=%s, auth_key=%s", self._agent_id, "已设置" if auth_key else "未设置")
 
-        # EchoMem client for direct memory injection
-        self._echomem = EchoMemClient(
-            base_url=config.get("echomem_url", "http://127.0.0.1:8010"),
-            auth_key=auth_key,
-            account=config.get("account", "default"),
-            user_id=config.get("user_id", "default"),
-            agent_id=self._agent_id,
-            workspace=config.get("workspace", ""),
-            timeout_s=60.0,
-            max_retries=3,
-        )
-
         # Typing state (reset per round)
         self._pending_turn_id = ""
         self._typing_committed = False
         self._typing_memory_items: list[dict] = []
-
-    def inject_memories(self, memories: list[dict], session_id: str = "") -> str:
-        """Inject background memories directly into EchoMem.
-
-        If session_id is provided and that session already has archives,
-        injection is skipped (replay optimization).
-        """
-        events = [m for m in memories if m.get("text")]
-        if not events:
-            logger.warning("无背景记忆, 跳过注入")
-            return session_id
-
-        # Skip if session already has archives
-        if session_id and self._echomem.has_archives(session_id):
-            logger.info("session %s 已有 archive, 跳过注入", session_id)
-            return session_id
-
-        title = f"inject-{session_id or uuid.uuid4().hex[:8]}"
-        inject_session = self._echomem.open_session(title=title, session_id=session_id)
-
-        for event in tqdm(events, desc="注入记忆", unit="mem", leave=False):
-            try:
-                self._echomem.add_message(inject_session, "user", event["text"])
-            except Exception as exc:
-                logger.warning("注入失败: %s", exc)
-
-        archive_id = self._echomem.commit_session(inject_session)
-        commit_result = self._echomem.poll_commit(
-            inject_session,
-            archive_id,
-            timeout_s=self._commit_timeout_s,
-            poll_interval_s=self._commit_poll_interval_s,
-        )
-        logger.info(
-            "注入完成: %s (%.1fs, %d polls)",
-            commit_result.status, commit_result.elapsed_s, commit_result.polls,
-        )
-        if commit_result.status not in ("completed",):
-            raise RuntimeError(
-                f"记忆注入失败: status={commit_result.status} "
-                f"error={commit_result.error} (session={inject_session})"
-            )
-        return inject_session
 
     def create_session(self, title: str = "") -> str:
         return self.client.create_session(title, self._memory_engine_endpoint)

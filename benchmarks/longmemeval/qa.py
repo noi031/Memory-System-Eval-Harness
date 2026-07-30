@@ -9,13 +9,13 @@ from pathlib import Path
 from tqdm import tqdm
 
 from shared.eval_base import EvalConfig
-from shared.qa import BASE_QA_FIELDS, QAResult, run_concurrent_qa
+from shared.qa import BASE_QA_FIELDS, QAResult
 
 
 QA_FIELDS = (*BASE_QA_FIELDS, "retrieval_items_json")
 
 
-def build_qa_tasks(jobs, question_to_session: dict[str, str], config: EvalConfig):
+def build_qa_tasks(jobs, question_to_session: dict[str, str], config: EvalConfig, agent_id: str = ""):
     return [{
         "question_id": job.question_id,
         "sample_id": job.sample_id,
@@ -25,13 +25,14 @@ def build_qa_tasks(jobs, question_to_session: dict[str, str], config: EvalConfig
         "top_k": config.top_k,
         "memory_budget_chars": config.memory_budget_chars,
         "session_id": question_to_session.get(job.question_id, ""),
-        "agent_id": config.agent_id,
+        "agent_id": agent_id,
         "question_time": job.query_time,
     } for job in jobs]
 
 
 def run_longmemeval_qa(
     tasks,
+    agent_plugin,
     memory_client,
     llm,
     config: EvalConfig,
@@ -45,7 +46,7 @@ def run_longmemeval_qa(
         log.info("  Q[%s] -> %s", result.question_id, result.response[:100])
 
     try:
-        results = run_concurrent_qa(
+        results = agent_plugin.run_qa(
             tasks,
             memory_client,
             llm,

@@ -6,7 +6,6 @@
 
 可用插件:
 - `echo_agent` (默认) -- EchoAgent + EchoMem 完整管线
-- `baseline_mem` -- EchoMem 检索 + LLM 生成 (基线 agent+记忆)
 - `bare_llm` -- 无记忆系统基线 (记忆拼入 system prompt)
 
 每个插件通过 `add_arguments` classmethod 声明自己的 CLI 参数, `--help` 只显示当前插件相关参数。详见 `agents/README.md`。
@@ -61,9 +60,8 @@ QA 阶段创建新 session 经 EchoAgent 发送 query, 测试完整管线 (含 p
 
 | 插件 | 说明 | 记忆注入 | 打字模拟 | 依赖 |
 |---|---|---|---|---|
-| `echo_agent` (默认) | EchoAgent + EchoMem 完整管线 | 直连 EchoMem (open/commit) | 支持 (prefetch tick/finalize) | EchoAgent 后端 + EchoMem |
-| `baseline_mem` | EchoMem 检索 + LLM 生成 (基线 agent+记忆) | 直连 EchoMem (open/commit) | 不支持 | EchoMem + LLM API |
-| `bare_llm` | 无记忆系统基线 | 记忆拼入 system prompt | 不支持 | 仅 LLM API |
+| `echo_agent` (默认) | EchoAgent + EchoMem 完整管线 | memory 插件直连 EchoMem | 支持 (prefetch tick/finalize) | EchoAgent 后端 + EchoMem |
+| `bare_llm` | 无记忆系统基线 | 无 | 不支持 | 仅 LLM API |
 
 ### 插件接口
 
@@ -72,7 +70,6 @@ class AgentPlugin(ABC):
     @classmethod
     def add_arguments(cls, parser: argparse.ArgumentParser) -> None: ...
     def setup(self, config: dict) -> None: ...
-    def inject_memories(self, memories: list[dict], session_id: str = "") -> str: ...
     def create_session(self, title: str = "") -> str: ...
     def send_message(self, session_id: str, message: str, context_path: str = "/") -> AgentResponse: ...
     @property
@@ -167,7 +164,7 @@ Generate 模式支持 `--user-simulator-config`, 默认加载 `dynamic/configs/u
 ### Agent 插件
 | 参数 | 默认值 | 说明 |
 |---|---|---|
-| `--agent-plugin` | `echo_agent` (env: `AGENT_PLUGIN`) | agent 插件名称 (`echo_agent` / `baseline_mem` / `bare_llm`) |
+| `--agent-plugin` | `echo_agent` (env: `AGENT_PLUGIN`) | agent 插件名称 (`echo_agent` / `bare_llm`) |
 
 ### 通用参数 (所有插件)
 | 参数 | 默认值 | 说明 |
@@ -227,21 +224,6 @@ Generate 模式支持 `--user-simulator-config`, 默认加载 `dynamic/configs/u
 | `--workspace` | (空) | EchoMem workspace 路径 |
 | `--commit-timeout-s` | `0` | 注入 commit 轮询超时 (秒)，0 表示无限等待 |
 | `--commit-poll-interval-s` | `2` | 注入 commit 轮询间隔 (秒) |
-
-### baseline_mem 插件参数
-| 参数 | 默认值 | 说明 |
-|---|---|---|
-| `--echomem-url` | `http://127.0.0.1:8010` | EchoMem 地址 |
-| `--echomem-auth-key` | (空) | EchoMem X-Auth-Key |
-| `--account` / `--user-id` / `--agent-id` | `default` | EchoMem 身份 |
-| `--workspace` | (空) | EchoMem workspace 路径 |
-| `--llm-base-url` / `--llm-api-key` / `--llm-model` | - | LLM 配置 (也用于 evaluator) |
-| `--llm-temperature` | `0.7` | 生成温度 |
-| `--llm-max-tokens` | `2048` | 最大生成 token |
-| `--top-k` | `10` | 检索条数 |
-| `--memory-budget-chars` | `8000` | 记忆注入 prompt 的字符上限 |
-| `--commit-timeout-s` | `0` | 注入 commit 轮询超时 |
-| `--commit-poll-interval-s` | `2.0` | 轮询间隔 |
 
 ### bare_llm 插件参数
 | 参数 | 默认值 | 说明 |

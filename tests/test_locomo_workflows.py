@@ -7,7 +7,6 @@ import csv
 import json
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
 
 from benchmarks.locomo.diagnosis import build_diagnosis
 from benchmarks.locomo.evaluate import load_qa_results
@@ -320,19 +319,16 @@ class LocomoQACheckpointTests(unittest.TestCase):
                 vikingbot_workspace="",
                 checkpoint_interval=1,
             )
-            with patch(
-                "benchmarks.locomo.qa.get_agent_plugin",
-                return_value=plugin,
-            ):
-                run_locomo_qa(
-                    tasks,
-                    object(),
-                    object(),
-                    EvalConfig(concurrency=2),
-                    options,
-                    result_dir,
-                    _Log(),
-                )
+            run_locomo_qa(
+                tasks,
+                plugin,
+                object(),
+                object(),
+                EvalConfig(concurrency=2),
+                options,
+                result_dir,
+                _Log(),
+            )
 
             self.assertEqual(["q2"], first_checkpoint_ids)
             self.assertTrue(plugin.assert_trace_written)
@@ -396,20 +392,17 @@ class LocomoQACheckpointTests(unittest.TestCase):
                 answer="one",
                 response="one",
             )
-            with patch(
-                "benchmarks.locomo.qa.get_agent_plugin",
-                return_value=plugin,
-            ):
-                results = run_locomo_qa(
-                    tasks,
-                    object(),
-                    object(),
-                    EvalConfig(concurrency=2),
-                    options,
-                    result_dir,
-                    _Log(),
-                    existing_results=[existing],
-                )
+            results = run_locomo_qa(
+                tasks,
+                plugin,
+                object(),
+                object(),
+                EvalConfig(concurrency=2),
+                options,
+                result_dir,
+                _Log(),
+                existing_results=[existing],
+            )
 
             self.assertEqual(["q2"], plugin.received_ids)
             self.assertEqual(["q1", "q2"], [
@@ -444,15 +437,10 @@ class LocomoQACheckpointTests(unittest.TestCase):
                 vikingbot_workspace="",
                 checkpoint_interval=10,
             )
-            with (
-                patch(
-                    "benchmarks.locomo.qa.get_agent_plugin",
-                    return_value=InterruptingPlugin(),
-                ),
-                self.assertRaises(KeyboardInterrupt),
-            ):
+            with self.assertRaises(KeyboardInterrupt):
                 run_locomo_qa(
                     tasks,
+                    InterruptingPlugin(),
                     object(),
                     object(),
                     EvalConfig(concurrency=2),
@@ -484,9 +472,6 @@ class LocomoQAResumeTests(unittest.TestCase):
 
     def _config(self) -> EvalConfig:
         return EvalConfig(
-            account="tenant",
-            user_id="user",
-            agent_id="agent",
             llm_base_url="https://model.test/v1",
             llm_model="model",
             llm_max_tokens=1024,

@@ -14,7 +14,7 @@ from benchmarks.locomo.memory_scope import (
     ExcludingMemoryFilesClient,
     SessionPrefixMemoryClient,
 )
-from backends.types import SearchResult
+from memories.base import SearchResult
 
 
 class _MemoryClient:

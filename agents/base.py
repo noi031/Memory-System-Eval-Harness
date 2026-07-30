@@ -1,7 +1,19 @@
-"""Agent plugin abstract interface for the evaluation harness.
+"""Agent plugin interface for the evaluation harness.
 
-Each agent under test implements AgentPlugin. The evaluation flow calls
-only these methods; it never touches agent-specific HTTP APIs directly.
+Each agent under test implements AgentPlugin. The harness supports two
+evaluation modes:
+
+- Benchmark QA: the harness calls run_qa() with a batch of tasks.
+- Dynamic simulation: the harness calls the step-based methods
+  (create_session -> simulate_typing -> send_message).
+
+Only setup() is required. Step-based methods and run_qa() raise
+NotImplementedError by default; each plugin overrides the ones it supports.
+
+Memory injection (writing background memories into a memory backend) is
+NOT an agent operation -- it is handled entirely by the memory plugin's
+client (open_session / add_message / commit / poll_commit). The agent
+plugin never participates in memory injection.
 """
 
 from __future__ import annotations
@@ -9,9 +21,9 @@ from __future__ import annotations
 import argparse
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import Any, Protocol
+from typing import Any
 
-from backends import MemoryClient
+from memories import MemoryClient
 from shared.llm_client import LLMClient
 from shared.qa import QAResult
 
@@ -50,7 +62,7 @@ class AgentResponse:
 
 @dataclass(frozen=True)
 class AgentDescriptor:
-    """Metadata for benchmark-native agent implementations."""
+    """Metadata describing an agent plugin's identity and capabilities."""
 
     id: str
     name: str
@@ -58,36 +70,23 @@ class AgentDescriptor:
     capabilities: tuple[str, ...] = field(default_factory=tuple)
 
 
-class BenchmarkAgentPlugin(Protocol):
-    """Agent contract used by dataset-owned benchmark QA workflows."""
-
-    descriptor: AgentDescriptor
-
-    def run_qa(
-        self,
-        tasks: list[dict[str, Any]],
-        echomem: MemoryClient,
-        llm: LLMClient,
-        *,
-        concurrency: int,
-        question_timeout_s: float,
-        progress_callback=None,
-    ) -> list[QAResult]:
-        """Run benchmark QA tasks with the agent."""
-
-
 class AgentPlugin(ABC):
     """Abstract agent interface for evaluation.
 
-    Each agent under test implements this interface. The evaluation flow
-    (generate / replay) calls only these methods:
+    Each agent under test implements this interface. The harness calls only
+    these methods; it never touches agent-specific HTTP APIs directly.
 
-    1. setup(config) -- initialize (login, resolve credentials, etc.)
-    2. inject_memories(memories) -- inject background memories
-    3. create_session(title) -- create a QA session
-    4. simulate_typing(...) -- optional typing simulation (prefill)
-    5. send_message(session_id, message) -- send query, receive response
-    6. teardown() -- cleanup
+    Benchmark QA flow:
+        setup(config) -> run_qa(tasks, memory_client, llm, ...)
+
+    Dynamic simulation flow:
+        setup(config) -> create_session ->
+        simulate_typing -> send_message -> teardown
+
+    Memory injection is NOT part of this interface. The harness injects
+    background memories directly through the memory plugin's client
+    (open_session / add_message / commit / poll_commit), bypassing the
+    agent entirely.
     """
 
     @abstractmethod
@@ -108,21 +107,27 @@ class AgentPlugin(ABC):
         plugin's args. The default implementation adds nothing.
         """
 
-    @abstractmethod
-    def inject_memories(self, memories: list[dict], session_id: str = "") -> str:
-        """Inject background memories into the agent's memory backend.
+    def run_qa(
+        self,
+        tasks: list[dict[str, Any]],
+        memory_client: MemoryClient,
+        llm: LLMClient,
+        *,
+        concurrency: int,
+        question_timeout_s: float,
+        progress_callback=None,
+    ) -> list[QAResult]:
+        """Run benchmark QA tasks with the agent.
 
-        memories: list of {"id": str, "text": str, "source_round"?: int}.
-        If session_id is provided, the plugin may reuse that session and
-        skip injection if it already contains data.
-        Returns an identifier for the injection context (e.g. session_id).
+        Default implementation raises NotImplementedError. Plugins that
+        support benchmark QA override this.
         """
+        raise NotImplementedError
 
-    @abstractmethod
     def create_session(self, title: str = "") -> str:
         """Create a QA session. Returns session_id."""
+        raise NotImplementedError
 
-    @abstractmethod
     def send_message(
         self, session_id: str, message: str, context_path: str = "/"
     ) -> AgentResponse:
@@ -132,6 +137,7 @@ class AgentPlugin(ABC):
         links the prefill to this message (the caller does not need to
         pass any prefill identifier).
         """
+        raise NotImplementedError
 
     @property
     def supports_typing_simulation(self) -> bool:

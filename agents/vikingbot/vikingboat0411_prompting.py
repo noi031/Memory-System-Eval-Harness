@@ -8,7 +8,7 @@ from datetime import datetime
 from pathlib import PurePosixPath
 from typing import Any
 
-from backends import SearchResult
+from memories import SearchResult
 
 from .prompting import build_question_prompt
 

@@ -4,7 +4,8 @@ import time
 import unittest
 
 from shared.llm_client import LLMResponse
-from shared.qa import QAResult, answer_one_question, build_qa_prompt
+from shared.qa import QAResult
+from agents.bare_llm.qa import answer_one_question, build_qa_prompt
 
 
 class _SlowEchoMem:

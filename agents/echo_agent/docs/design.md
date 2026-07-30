@@ -2,7 +2,7 @@
 
 ## 设计意图
 
-完整 EchoAgent + EchoMem 管线插件，是动态评测的默认插件。与 `baseline_mem` 的区别在于 QA 阶段走完整的 EchoAgent 后端流程（登录、创建会话、发消息、SSE 流式接收），而非直接调 LLM。
+完整 EchoAgent + EchoMem 管线插件，是动态评测的默认插件。QA 阶段走完整的 EchoAgent 后端流程（登录、创建会话、发消息、SSE 流式接收），而非直接调 LLM。
 
 它存在的意义是评测**真实 agent 的端到端效果**，包括：
 
@@ -13,13 +13,13 @@
 ## 架构
 
 ```
-inject_memories()  ----->  EchoMem (直连, 绕过 EchoAgent)
-send_message()     ----->  EchoAgent 后端  ----->  LLM
-                              ↕
-                        echoagent 插件 (31030)  ----->  EchoMem (检索)
+记忆注入 (memory plugin)  ----->  EchoMem (直连, 绕过 EchoAgent)
+send_message()             ----->  EchoAgent 后端  ----->  LLM
+                                  ↕
+                            echoagent 插件 (31030)  ----->  EchoMem (检索)
 ```
 
-**注入绕过 EchoAgent**：记忆直接写入 EchoMem（open/add/commit），因为注入只需要建索引，不需要 agent 参与。
+**注入不经 EchoAgent**：记忆注入由 memory 插件的 client 完成（open/add/commit/poll），直接写入 EchoMem，因为注入只需要建索引，不需要 agent 参与。
 
 **QA 走 EchoAgent**：消息发送到 EchoAgent 后端，后端组装上下文、决定是否召回记忆、调 LLM、通过 SSE 流式返回。这条路径上的 prefill 管线、召回时机决策、KV cache 预热都会真实发生。
 

@@ -21,7 +21,8 @@ _PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
-from backends import create_backend_client
+from agents import load_agent_plugin
+from memories import load_memory_plugin
 from benchmarks.longmemeval.dataset import load_dataset
 from benchmarks.longmemeval.evaluate import evaluate_longmemeval
 from benchmarks.longmemeval.import_memory import import_longmemeval_memory
@@ -35,12 +36,11 @@ from benchmarks.longmemeval.selection import (
 from shared.dataset_io import resolve_dataset_path
 from shared.eval_base import (
     EvalRun,
-    add_echomem_args,
+    add_agent_plugin_args,
+    add_memory_plugin_args,
     add_llm_args,
     add_eval_args,
-    apply_evaluation_identity,
     build_config_from_args,
-    isolate_evaluation_identity,
     results_root_for,
     validate_eval_config,
 )
@@ -79,7 +79,8 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Write the shard manifest without starting evaluation processes",
     )
-    add_echomem_args(parser)
+    add_memory_plugin_args(parser)
+    add_agent_plugin_args(parser)
     add_llm_args(parser)
     add_eval_args(parser)
     # judge 参数
@@ -153,6 +154,7 @@ def main() -> None:
         benchmark_name="longmemeval",
         results_root=results_root_for(Path(__file__).parent, args.out_dir),
         config=config,
+        echomem_log_dir=getattr(args, "echomem_log_dir", ""),
     )
     log = run.logger
 
@@ -186,31 +188,23 @@ def main() -> None:
         })
         raise ValueError(message)
 
-    echomem = create_backend_client(
-        "echomemory",
-        base_url=config.echomem_url,
-        api_key=config.echomem_auth_key,
-        account=config.account,
-        user_id=config.user_id,
-        agent_id=config.agent_id,
-        workspace=config.workspace,
-        timeout_s=60.0,
-        max_retries=3,
-    )
+    memory_config = {**vars(args), "benchmark_name": "longmemeval", "run_id": run.result_dir.name}
+    memory_plugin = load_memory_plugin(args.memory_plugin, memory_config)
+    echomem = memory_plugin.client
     echomem.health()
-    evaluation_identity = isolate_evaluation_identity(
-        echomem,
-        "longmemeval",
-        run.result_dir.name,
-        reuse=args.reuse_memory_account,
-        keep=args.keep_memory_account,
-    )
-    apply_evaluation_identity(config, run, echomem, evaluation_identity)
+    evaluation_identity = {
+        "mode": "reused" if getattr(args, "reuse_memory_account", True) else "isolated",
+        "retention": "existing" if getattr(args, "reuse_memory_account", True) else (
+            "kept" if getattr(args, "keep_memory_account", False) else "ephemeral"
+        ),
+        "tenant_id": echomem.account,
+        "user_id": echomem.user_id,
+    }
     log.info(
-        "EchoMem identity: %s tenant=%s user=%s",
-        evaluation_identity["mode"],
-        evaluation_identity["tenant_id"],
-        evaluation_identity["user_id"],
+        "Memory identity: %s tenant=%s user=%s",
+        evaluation_identity.get("mode", "none"),
+        evaluation_identity.get("tenant_id", ""),
+        evaluation_identity.get("user_id", ""),
     )
 
     llm = LLMClient(
@@ -223,9 +217,12 @@ def main() -> None:
         max_retries=config.llm_retries,
     )
 
+    # 加载 agent 插件
+    agent_plugin = load_agent_plugin(args.agent_plugin, vars(args))
+
     # -- 阶段 1: 逐题隔离导入或复用已有记忆 --
     log.info("=" * 60)
-    reuse_existing_memory = args.reuse_memory_account
+    reuse_existing_memory = getattr(args, "reuse_memory_account", True)
     if reuse_existing_memory:
         log.info("阶段 1: 跳过导入，复用 account-wide 已有记忆")
     else:
@@ -272,9 +269,11 @@ def main() -> None:
         jobs,
         import_report.question_to_session,
         config,
+        agent_id=echomem.agent_id,
     )
     qa_results = run_longmemeval_qa(
         qa_tasks,
+        agent_plugin,
         echomem,
         llm,
         config,
@@ -344,6 +343,7 @@ def main() -> None:
         evaluation_report.correct,
         evaluation_report.graded,
     )
+    memory_plugin.teardown()
 
 
 if __name__ == "__main__":

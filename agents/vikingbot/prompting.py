@@ -8,7 +8,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from backends import SearchResult
+from memories import SearchResult
 
 DEFAULT_BOOTSTRAP_FILES = ("SOUL.md", "TOOLS.md")
 

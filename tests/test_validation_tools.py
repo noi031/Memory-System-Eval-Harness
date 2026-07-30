@@ -3,7 +3,7 @@ from __future__ import annotations
 import unittest
 
 from scripts.backend_doctor import build_report
-from shared.evidence import validate_evidence_rows
+from scripts.validate_evidence import validate_evidence_rows
 
 
 class EvidenceValidationTests(unittest.TestCase):
@@ -54,11 +54,14 @@ class EvidenceValidationTests(unittest.TestCase):
 
 
 class BackendDoctorTests(unittest.TestCase):
-    def test_reports_only_echomemory_with_valid_contract(self) -> None:
+    def test_reports_all_backends_with_valid_contract(self) -> None:
         report = build_report()
 
         self.assertEqual("ok", report["status"])
-        self.assertEqual(["echomemory"], report["registered_backends"])
+        self.assertEqual(
+            ["echomemory", "openviking", "none"],
+            report["registered_backends"],
+        )
         self.assertEqual([], report["failed_backends"])
 
 

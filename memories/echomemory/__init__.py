@@ -1,10 +1,9 @@
 """EchoMemory backend."""
 
-from .client import CommitResult, EchoMemClient, SearchResult
+from .client import EchoMemClient, SearchResult
 from .plugin import PLUGIN, EchoMemoryPlugin
 
 __all__ = [
-    "CommitResult",
     "EchoMemClient",
     "EchoMemoryPlugin",
     "PLUGIN",

@@ -15,7 +15,7 @@ from shared.runtime_config import (
     prepare_runtime_environment,
     runtime_check,
 )
-from shared.eval_base import cleanup_pending_evaluation_identities
+from memories.echomemory.plugin import cleanup_pending_identities as cleanup_pending_evaluation_identities
 from shared.service_manager import start_echomem_service, stop_echomem_service
 
 

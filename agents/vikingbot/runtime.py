@@ -10,7 +10,7 @@ import urllib.request
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any
 
-from backends import MemoryClient, SearchResult
+from memories import MemoryClient, SearchResult
 from shared.llm_client import LLMClient
 from shared.qa import QAResult
 

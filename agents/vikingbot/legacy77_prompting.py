@@ -7,7 +7,7 @@ import time
 from datetime import datetime
 from typing import Any
 
-from backends import SearchResult
+from memories import SearchResult
 
 from .prompting import format_memory
 

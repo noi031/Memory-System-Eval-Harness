@@ -7,7 +7,7 @@ import re
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
-from backends import MemoryClient, SearchResult
+from memories import MemoryClient, SearchResult
 
 
 MEMORY_SEARCH_TOOL = "memory_search"
