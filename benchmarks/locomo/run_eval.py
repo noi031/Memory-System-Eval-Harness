@@ -40,7 +40,6 @@ from benchmarks.locomo.judge import (
 )
 from benchmarks.locomo.profiles import (
     LEGACY_77_PROFILE,
-    profile_settings,
     VIKINGBOAT_0411_PROFILE,
     VIKINGBOAT_0411_NATURAL_NO_TOOLS_PROFILE,
 )
@@ -75,6 +74,47 @@ from shared.eval_base import (
 )
 from shared.import_guard import require_complete_imports
 from shared.llm_client import LLMClient
+
+
+def _apply_resume_memory_identity(
+    client,
+    resume_source: str,
+    log,
+) -> None:
+    """Load account/user_id/auth_key from a prior run's QA resume manifest.
+
+    When resuming with --reuse-memory-account, the harness does not provision
+    a fresh identity.  If the prior run used --inject-memory --keep-memory-account,
+    the isolated tenant's credentials are needed to access its sessions.
+    """
+    source = Path(resume_source)
+    manifest_path = (
+        source / "qa_resume_manifest.json"
+        if source.is_dir()
+        else source.parent / "qa_resume_manifest.json"
+    )
+    if not manifest_path.is_file():
+        return
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return
+    identity = manifest.get("memory_identity") or {}
+    account = str(identity.get("account") or "").strip()
+    user_id = str(identity.get("user_id") or "").strip()
+    auth_key = str(identity.get("auth_key") or "").strip()
+    if account:
+        client.account = account
+    if user_id:
+        client.user_id = user_id
+    if auth_key:
+        client.auth_key = auth_key
+    if account or auth_key:
+        log.info(
+            "Resumed memory identity from prior run: account=%s user=%s",
+            client.account,
+            client.user_id,
+        )
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -170,13 +210,6 @@ def build_parser() -> argparse.ArgumentParser:
             "qa_results CSV; requires --reuse-memory-account"
         ),
     )
-    parser.set_defaults(
-        top_k=None,
-        memory_budget_chars=None,
-        question_timeout_s=None,
-        llm_max_tokens=None,
-        llm_retries=None,
-    )
     # judge 参数
     g = parser.add_argument_group("Judge")
     g.add_argument("--judge-model", default=os.getenv("JUDGE_MODEL", ""), help="Judge LLM 模型名 (默认同 --llm-model)")
@@ -206,20 +239,6 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def apply_locomo_cli_defaults(args) -> None:
-    if args.qa_profile is None:
-        args.qa_profile = (
-            VIKINGBOAT_0411_PROFILE
-            if args.tools
-            else VIKINGBOAT_0411_NATURAL_NO_TOOLS_PROFILE
-        )
-    if (
-        args.qa_profile == VIKINGBOAT_0411_NATURAL_NO_TOOLS_PROFILE
-        and args.tools
-    ):
-        raise ValueError(
-            "vikingboat0411-natural-no-tools requires --no-tools"
-        )
-
     if args.inject_memory and getattr(args, "reuse_memory_account", False):
         raise ValueError(
             "--inject-memory and --reuse-memory-account are mutually exclusive"
@@ -255,24 +274,6 @@ def load_qa_prompt_append(path_value: str) -> tuple[str, str, str]:
 def main() -> None:
     args = build_parser().parse_args()
     apply_locomo_cli_defaults(args)
-    selected_profile = profile_settings(args.qa_profile)
-    for name in (
-        "top_k",
-        "memory_budget_chars",
-        "question_timeout_s",
-        "llm_max_tokens",
-        "llm_retries",
-        "tool_search_limit",
-        "user_memory_budget_chars",
-        "agent_memory_budget_chars",
-        "max_iterations",
-        "initial_min_score",
-        "tool_min_score",
-        "tool_search_pool_multiplier",
-        "tool_set",
-    ):
-        if getattr(args, name) is None:
-            setattr(args, name, selected_profile[name])
     config = build_config_from_args(args)
     (
         system_prompt_append,
@@ -282,18 +283,8 @@ def main() -> None:
     config.sample_filter = args.sample
     config.question_limit = args.questions
     validate_eval_config(config)
-    if args.max_sessions < 0:
+    if getattr(args, "max_sessions", 0) < 0:
         raise ValueError("max sessions must be >= 0")
-    if args.tool_search_limit < 1:
-        raise ValueError("tool search limit must be >= 1")
-    if args.user_memory_budget_chars < 1 or args.agent_memory_budget_chars < 1:
-        raise ValueError("VikingBot memory budgets must be >= 1")
-    if args.max_iterations < 1:
-        raise ValueError("max iterations must be >= 1")
-    if args.initial_min_score < 0 or args.tool_min_score < 0:
-        raise ValueError("VikingBot score thresholds must be >= 0")
-    if args.tool_search_pool_multiplier < 1:
-        raise ValueError("tool search pool multiplier must be >= 1")
     if args.checkpoint_interval < 0:
         raise ValueError("checkpoint interval must be >= 0")
     if args.resume_qa and not args.reuse_memory_account:
@@ -369,6 +360,8 @@ def main() -> None:
     agent_plugin = load_agent_plugin(args.agent_plugin, agent_config)
     echomem = agent_plugin.memory_client
     echomem.health()
+    if args.resume_qa and args.reuse_memory_account:
+        _apply_resume_memory_identity(echomem, args.resume_qa, log)
     evaluation_identity = {
         "mode": "reused" if args.reuse_memory_account else "isolated",
         "retention": "existing" if args.reuse_memory_account else (
@@ -376,6 +369,7 @@ def main() -> None:
         ),
         "tenant_id": echomem.account,
         "user_id": echomem.user_id,
+        "auth_key": echomem.auth_key,
     }
     log.info(
         "Memory identity: %s tenant=%s user=%s",
@@ -512,44 +506,13 @@ def main() -> None:
     log.info("阶段 2: QA (共 %d 题, 并发=%d)", len(jobs), config.concurrency)
 
     qa_options = QAOptions(
-        profile=args.qa_profile,
-        tool_search_limit=args.tool_search_limit,
-        user_memory_budget_chars=args.user_memory_budget_chars,
-        agent_memory_budget_chars=args.agent_memory_budget_chars,
-        max_iterations=args.max_iterations,
-        vikingbot_workspace=args.vikingbot_workspace,
+        profile=agent_plugin.qa_profile,
         checkpoint_interval=args.checkpoint_interval,
-        initial_min_score=args.initial_min_score,
-        tool_min_score=args.tool_min_score,
-        tool_search_pool_multiplier=args.tool_search_pool_multiplier,
-        tool_set=args.tool_set,
         top_k=config.top_k,
         memory_budget_chars=config.memory_budget_chars,
-        answer_temperature=selected_profile.get(
-            "answer_temperature",
-            config.llm_temperature,
+        tools_enabled=bool(
+            getattr(args, "tools", getattr(args, "tool_calling", True))
         ),
-        omit_answer_temperature=selected_profile.get(
-            "omit_answer_temperature",
-            True,
-        ),
-        initial_retrieval_query_mode=selected_profile.get(
-            "initial_retrieval_query_mode",
-            "question_only",
-        ),
-        tool_query_dedup_scope=selected_profile.get(
-            "tool_query_dedup_scope",
-            "question",
-        ),
-        retrieval_uri_dedup=selected_profile.get(
-            "retrieval_uri_dedup",
-            True,
-        ),
-        search_tool_target_uri_schema=selected_profile.get(
-            "search_tool_target_uri_schema",
-            False,
-        ),
-        tools_enabled=args.tools,
         system_prompt_append=system_prompt_append,
         system_prompt_append_sha256=system_prompt_append_sha256,
         system_prompt_append_source=system_prompt_append_source,
@@ -571,6 +534,7 @@ def main() -> None:
             "account": echomem.account,
             "user_id": echomem.user_id,
             "agent_id": echomem.agent_id,
+            "auth_key": echomem.auth_key,
         },
     )
     write_qa_resume_manifest(run.result_dir, qa_resume_manifest)

@@ -74,8 +74,8 @@ class _FakeServices(BaseHTTPRequestHandler):
             self._json({
                 "entries": [{
                     "uri": (
-                        "echo://engine/echo0_plugin/sessions/"
-                        f"session_test/{filename}"
+                        "echo://sessions/session_test/current/"
+                        f"{filename}"
                     )
                 }]
             })

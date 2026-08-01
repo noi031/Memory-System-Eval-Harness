@@ -26,8 +26,7 @@ class _MemoryClient:
         return [
             {
                 "uri": (
-                    "echo://engine/echo0_plugin/sessions/"
-                    f"{session_id}/{filename}"
+                    f"echo://sessions/{session_id}/current/{filename}"
                 )
             }
             for session_id in self.session_ids

@@ -145,6 +145,15 @@ class AgentPlugin(ABC):
         raise NotImplementedError
 
     @property
+    def qa_profile(self) -> str:
+        """The QA profile this plugin uses (e.g. 'vikingboat0411').
+
+        Defaults to the plugin's id; plugins that resolve a specific
+        profile in setup() override this.
+        """
+        return self.descriptor.id
+
+    @property
     def supports_typing_simulation(self) -> bool:
         """Whether this agent supports typing simulation (prefill)."""
         return False

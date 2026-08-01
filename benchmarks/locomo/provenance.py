@@ -10,9 +10,6 @@ from typing import Any
 from benchmarks.locomo.import_memory import selected_session_batches
 
 
-ENGINE_SESSIONS_ROOT = "echo://engine/echo0_plugin/sessions"
-
-
 def expected_session_count(
     plans: list[dict[str, Any]],
     *,
@@ -46,8 +43,7 @@ def inspect_memory_provenance(
     )
     session_uris: set[str] = set()
     patterns = (
-        f"{ENGINE_SESSIONS_ROOT}/*/overview.md",
-        f"{ENGINE_SESSIONS_ROOT}/*/messages.jsonl",
+        "echo://sessions/*/current/messages.jsonl",
     )
     for pattern in patterns:
         for entry in memory_client.fs_glob(pattern, timeout_s=timeout_s):

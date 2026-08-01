@@ -70,7 +70,6 @@ class LocomoCliDefaultsTests(unittest.TestCase):
 
         apply_locomo_cli_defaults(args)
 
-        self.assertEqual("vikingboat0411", args.qa_profile)
         self.assertTrue(args.reuse_memory_account)
         self.assertEqual(
             "echomem-locomo-conv-30-",
@@ -86,10 +85,6 @@ class LocomoCliDefaultsTests(unittest.TestCase):
 
         apply_locomo_cli_defaults(args)
 
-        self.assertEqual(
-            "vikingboat0411-natural-no-tools",
-            args.qa_profile,
-        )
         self.assertTrue(args.reuse_memory_account)
 
     def test_explicit_profile_preserves_strict_no_tools_ablation(self):
@@ -296,11 +291,6 @@ class LocomoQACheckpointTests(unittest.TestCase):
             plugin = FakePlugin()
             options = QAOptions(
                 profile=VIKINGBOAT_0411_PROFILE,
-                tool_search_limit=25,
-                user_memory_budget_chars=4000,
-                agent_memory_budget_chars=2000,
-                max_iterations=50,
-                vikingbot_workspace="",
                 checkpoint_interval=1,
             )
             run_locomo_qa(
@@ -354,11 +344,6 @@ class LocomoQACheckpointTests(unittest.TestCase):
             plugin = FakePlugin()
             options = QAOptions(
                 profile=VIKINGBOAT_0411_PROFILE,
-                tool_search_limit=25,
-                user_memory_budget_chars=4000,
-                agent_memory_budget_chars=2000,
-                max_iterations=50,
-                vikingbot_workspace="",
                 checkpoint_interval=1,
             )
             existing = QAResult(
@@ -399,11 +384,6 @@ class LocomoQACheckpointTests(unittest.TestCase):
 
             options = QAOptions(
                 profile=VIKINGBOAT_0411_PROFILE,
-                tool_search_limit=25,
-                user_memory_budget_chars=4000,
-                agent_memory_budget_chars=2000,
-                max_iterations=50,
-                vikingbot_workspace="",
                 checkpoint_interval=10,
             )
             with self.assertRaises(KeyboardInterrupt):
@@ -429,11 +409,6 @@ class LocomoQAResumeTests(unittest.TestCase):
     def _options(self) -> QAOptions:
         return QAOptions(
             profile=VIKINGBOAT_0411_PROFILE,
-            tool_search_limit=25,
-            user_memory_budget_chars=4000,
-            agent_memory_budget_chars=2000,
-            max_iterations=50,
-            vikingbot_workspace="",
             checkpoint_interval=10,
         )
 
@@ -554,11 +529,11 @@ class LocomoQAResumeTests(unittest.TestCase):
             write_qa_resume_manifest(source, manifest)
             self._write_rows(source / "qa_results.csv", [])
             changed = json.loads(json.dumps(manifest))
-            changed["qa"]["max_iterations"] = 49
+            changed["qa"]["top_k"] = 999
 
             with self.assertRaisesRegex(
                 ValueError,
-                "qa.max_iterations",
+                "qa.top_k",
             ):
                 load_qa_resume_state(
                     source,

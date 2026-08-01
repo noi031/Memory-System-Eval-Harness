@@ -15,7 +15,8 @@ MEMORY_READ_TOOL = "memory_read_many"
 MEMORY_LIST_TOOL = "memory_list"
 MEMORY_GREP_TOOL = "memory_grep"
 MEMORY_GLOB_TOOL = "memory_glob"
-ENGINE_SESSIONS_ROOT = "echo://engine/echo0_plugin/sessions"
+SESSIONS_ROOT = "echo://sessions"
+SESSION_FILE = "current/messages.jsonl"
 
 
 def tool_definitions(
@@ -78,7 +79,7 @@ def tool_definitions(
                     if echo_native
                     else (
                         "Read full content for up to 20 EchoMemory URIs through HTTP /fs/read. "
-                        "For session URIs this resolves the corresponding overview.md when available. "
+                        "For session URIs this resolves the corresponding messages.jsonl when available. "
                         "Use this for relevant summary or session results that need more detail."
                     )
                 ),
@@ -145,7 +146,7 @@ def tool_definitions(
                     "Avoid duplicate calls with the same intent in the same turn."
                     if echo_native
                     else (
-                        "Search EchoMemory session overview and committed messages "
+                        "Search EchoMemory session messages and committed messages "
                         "using regex patterns. In HTTP mode this uses only public "
                         "read-only /fs/glob and /fs/read APIs."
                     )
@@ -332,33 +333,30 @@ def execute_tool(
                 parts = tail.split("/", 1)
                 session_id = parts[0]
                 if len(parts) == 2 and parts[1]:
-                    candidates = [
-                        (
-                            "echo://engine/echo0_plugin/sessions/"
-                            f"{session_id}/{parts[1]}"
-                        )
-                    ]
+                    file_path = parts[1]
+                    if file_path.startswith("current/"):
+                        candidates = [
+                            f"{SESSIONS_ROOT}/{session_id}/{file_path}"
+                        ]
+                    else:
+                        candidates = [
+                            f"{SESSIONS_ROOT}/{session_id}/current/{file_path}"
+                        ]
                 else:
-                    matches = _matching_session_overviews(
+                    matches = _matching_session_files(
                         echomem,
                         session_id + "*",
                         timeout_s=timeout_s,
                     )
-                    exact_overview = (
-                        f"{ENGINE_SESSIONS_ROOT}/{session_id}/overview.md"
+                    exact_file = (
+                        f"{SESSIONS_ROOT}/{session_id}/{SESSION_FILE}"
                     )
-                    if exact_overview in matches:
-                        candidates = [
-                            exact_overview,
-                            (
-                                f"{ENGINE_SESSIONS_ROOT}/{session_id}/"
-                                "abstract.md"
-                            ),
-                        ]
+                    if exact_file in matches:
+                        candidates = [exact_file]
                     elif matches:
                         result_lines.extend([
                             "A concrete EchoMemory session URI is required.",
-                            "Matching session overview URIs:",
+                            "Matching session URIs:",
                             *matches,
                         ])
                         result_lines.append(f"--- END OF {uri} ---")
@@ -366,7 +364,7 @@ def execute_tool(
                     else:
                         result_lines.append(
                             "ERROR: No concrete EchoMemory session matched "
-                            f"{ENGINE_SESSIONS_ROOT}/{session_id}*"
+                            f"{SESSIONS_ROOT}/{session_id}*"
                         )
                         result_lines.append(f"--- END OF {uri} ---")
                         return result_lines
@@ -410,12 +408,14 @@ def execute_tool(
         raw_uri = str(arguments.get("uri") or "").strip()
         session_tail = _session_uri_tail(raw_uri)
         if session_tail and "/" not in session_tail:
-            matches = _matching_session_overviews(
+            matches = _matching_session_files(
                 echomem,
                 session_tail + "*",
                 timeout_s=timeout_s,
             )
-            session_dirs = [uri.rsplit("/", 1)[0] for uri in matches]
+            session_dirs = [
+                uri.removesuffix(f"/{SESSION_FILE}") for uri in matches
+            ]
             if len(session_dirs) == 1:
                 uri = session_dirs[0]
             elif session_dirs:
@@ -456,7 +456,7 @@ def execute_tool(
         uri = str(arguments.get("uri") or "").strip()
         if uri:
             pattern = uri.rstrip("/") + "/" + pattern.lstrip("/")
-        target = _engine_uri(pattern, leaf_pattern="*/overview.md")
+        target = _engine_uri(pattern, leaf_pattern=f"*/{SESSION_FILE}")
         try:
             entries = echomem.fs_glob(target, timeout_s=timeout_s)
         except Exception as exc:
@@ -502,9 +502,9 @@ def _session_candidates_message(
 ) -> list[str]:
     if cached_content:
         return [cached_content]
-    pattern = f"{ENGINE_SESSIONS_ROOT}/{session_pattern}/overview.md"
+    pattern = f"{SESSIONS_ROOT}/{session_pattern}/{SESSION_FILE}"
     try:
-        matches = _matching_session_overviews(
+        matches = _matching_session_files(
             echomem,
             session_pattern,
             timeout_s=timeout_s,
@@ -517,22 +517,22 @@ def _session_candidates_message(
     if not matches:
         return [
             "ERROR: A concrete EchoMemory session or file URI is required.",
-            f"No session overview matched {pattern}",
+            f"No session file matched {pattern}",
         ]
     return [
         "A concrete EchoMemory session or file URI is required.",
-        "Matching session overview URIs:",
+        "Matching session URIs:",
         *matches,
     ]
 
 
-def _matching_session_overviews(
+def _matching_session_files(
     echomem: MemoryClient,
     session_pattern: str,
     *,
     timeout_s: float,
 ) -> list[str]:
-    pattern = f"{ENGINE_SESSIONS_ROOT}/{session_pattern}/overview.md"
+    pattern = f"{SESSIONS_ROOT}/{session_pattern}/{SESSION_FILE}"
     entries = echomem.fs_glob(pattern, timeout_s=timeout_s)
     return list(dict.fromkeys(
         str(entry.get("uri") or "")
@@ -543,7 +543,7 @@ def _matching_session_overviews(
 
 def _engine_uri(value: str, *, leaf_pattern: str = "") -> str:
     raw = str(value or "").strip()
-    engine_sessions = ENGINE_SESSIONS_ROOT
+    sessions_root = SESSIONS_ROOT
     if raw.startswith("echo://engine/"):
         if not leaf_pattern or raw.endswith((".md", ".jsonl", "*")):
             return raw
@@ -552,7 +552,7 @@ def _engine_uri(value: str, *, leaf_pattern: str = "") -> str:
         return raw.rstrip("/") + "/" + leaf_pattern.removeprefix("*/")
     if "/sessions" in raw:
         tail = raw.split("/sessions", 1)[1].strip("/")
-        mapped = engine_sessions + (f"/{tail}" if tail else "")
+        mapped = sessions_root + (f"/{tail}" if tail else "")
         if (
             not leaf_pattern
             or mapped.endswith((".md", ".jsonl", "*"))
@@ -564,14 +564,14 @@ def _engine_uri(value: str, *, leaf_pattern: str = "") -> str:
         return mapped.rstrip("/") + "/" + leaf_pattern.removeprefix("*/")
     if not raw:
         return (
-            engine_sessions + f"/{leaf_pattern.lstrip('/')}"
+            sessions_root + f"/{leaf_pattern.lstrip('/')}"
             if leaf_pattern
-            else engine_sessions
+            else sessions_root
         )
     return (
-        engine_sessions + f"/{leaf_pattern.lstrip('/')}"
+        sessions_root + f"/{leaf_pattern.lstrip('/')}"
         if leaf_pattern
-        else engine_sessions
+        else sessions_root
     )
 
 
@@ -596,8 +596,8 @@ def _grep_memory(
     flags = re.I if arguments.get("case_insensitive") else 0
     uri = str(arguments.get("uri") or "").strip()
     session_tail = _session_uri_tail(uri)
-    matched_overviews = (
-        _matching_session_overviews(
+    matched_files = (
+        _matching_session_files(
             echomem,
             session_tail + "*",
             timeout_s=timeout_s,
@@ -605,41 +605,26 @@ def _grep_memory(
         if session_tail and "/" not in session_tail
         else []
     )
-    if matched_overviews:
-        uris = list(dict.fromkeys(
-            item_uri
-            for overview_uri in matched_overviews
-            for item_uri in (
-                overview_uri,
-                overview_uri.removesuffix("/overview.md") + "/messages.jsonl",
-            )
-        ))
+    if matched_files:
+        uris = list(dict.fromkeys(matched_files))
     else:
-        overview_pattern = _engine_uri(uri, leaf_pattern="*/overview.md")
+        file_pattern = _engine_uri(uri, leaf_pattern=f"*/{SESSION_FILE}")
     if (
-        not matched_overviews
-        and overview_pattern.endswith("/overview.md")
-        and "*" not in overview_pattern
+        not matched_files
+        and file_pattern.endswith("/messages.jsonl")
+        and "*" not in file_pattern
     ):
-        uris = [
-            overview_pattern,
-            overview_pattern.removesuffix("/overview.md") + "/messages.jsonl",
-        ]
-    elif not matched_overviews:
-        if not overview_pattern.endswith((".md", "*")):
-            overview_pattern = overview_pattern.rstrip("/") + "/*/overview.md"
-        message_pattern = (
-            overview_pattern.removesuffix("/overview.md")
-            + "/messages.jsonl"
-        )
+        uris = [file_pattern]
+    elif not matched_files:
+        if not file_pattern.endswith((".jsonl", "*")):
+            file_pattern = file_pattern.rstrip("/") + f"/*/{SESSION_FILE}"
         entries: list[dict[str, Any]] = []
-        for pattern in (overview_pattern, message_pattern):
-            try:
-                entries.extend(
-                    echomem.fs_glob(pattern, timeout_s=timeout_s)
-                )
-            except Exception:
-                continue
+        try:
+            entries.extend(
+                echomem.fs_glob(file_pattern, timeout_s=timeout_s)
+            )
+        except Exception:
+            pass
         uris = list(dict.fromkeys(
             str(entry.get("uri") or "")
             for entry in entries

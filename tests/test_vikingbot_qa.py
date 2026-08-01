@@ -164,9 +164,9 @@ class VikingBotCoreTests(unittest.TestCase):
         class AuditedEchoMem(_FakeEchoMem):
             def fs_glob(self, _pattern, **_kwargs):
                 return [{
-                    "name": "overview.md",
-                    "size": 21,
-                    "uri": "echo://engine/echo0_plugin/sessions/s1/overview.md",
+                    "name": "messages.jsonl",
+                    "size": 42,
+                    "uri": "echo://sessions/s1/current/messages.jsonl",
                     "kind": "file",
                 }]
 
@@ -174,7 +174,7 @@ class VikingBotCoreTests(unittest.TestCase):
                 return [{
                     "name": "messages.jsonl",
                     "size": 42,
-                    "uri": "echo://engine/echo0_plugin/sessions/s1/messages.jsonl",
+                    "uri": "echo://sessions/s1/current/messages.jsonl",
                     "kind": "file",
                 }]
 
@@ -190,7 +190,7 @@ class VikingBotCoreTests(unittest.TestCase):
                         "function": {
                             "name": "memory_list",
                             "arguments": json.dumps({
-                                "uri": "echo://engine/echo0_plugin/sessions/s1",
+                                "uri": "echo://sessions/s1",
                                 "recursive": False,
                             }),
                         },
@@ -210,7 +210,7 @@ class VikingBotCoreTests(unittest.TestCase):
                             "name": "memory_read_many",
                             "arguments": json.dumps({
                                 "uris": [
-                                    "echo://engine/echo0_plugin/sessions/s1/messages.jsonl"
+                                    "echo://sessions/s1/current/messages.jsonl"
                                 ],
                             }),
                         },
@@ -241,7 +241,7 @@ class VikingBotCoreTests(unittest.TestCase):
             audit["tools_used"],
         )
         self.assertEqual(
-            ["echo://engine/echo0_plugin/sessions/s1/messages.jsonl"],
+            ["echo://sessions/s1/current/messages.jsonl"],
             [
                 row["uri"]
                 for row in audit["discovered_files"]
@@ -249,7 +249,7 @@ class VikingBotCoreTests(unittest.TestCase):
             ],
         )
         self.assertEqual(
-            ["echo://engine/echo0_plugin/sessions/s1/messages.jsonl"],
+            ["echo://sessions/s1/current/messages.jsonl"],
             [row["uri"] for row in audit["read_files"]],
         )
         self.assertEqual(
@@ -522,20 +522,17 @@ class VikingBotRuntimeTests(unittest.TestCase):
 
     def test_engine_uri_maps_tenant_and_file_paths(self):
         self.assertEqual(
-            (
-                "echo://engine/echo0_plugin/sessions/session-1/"
-                "messages.jsonl"
-            ),
+            "echo://sessions/session-1/messages.jsonl",
             _engine_uri(
                 "echo://tenant-a/sessions/session-1/messages.jsonl",
-                leaf_pattern="*/overview.md",
+                leaf_pattern="*/current/messages.jsonl",
             ),
         )
         self.assertEqual(
-            "echo://engine/echo0_plugin/sessions/*/overview.md",
+            "echo://sessions/*/current/messages.jsonl",
             _engine_uri(
                 "echo://tenant-a/memory/entities/Jon.md",
-                leaf_pattern="*/overview.md",
+                leaf_pattern="*/current/messages.jsonl",
             ),
         )
         for uri in (
@@ -544,8 +541,8 @@ class VikingBotRuntimeTests(unittest.TestCase):
         ):
             with self.subTest(uri=uri):
                 self.assertEqual(
-                    "echo://engine/echo0_plugin/sessions/*/overview.md",
-                    _engine_uri(uri, leaf_pattern="*/overview.md"),
+                    "echo://sessions/*/current/messages.jsonl",
+                    _engine_uri(uri, leaf_pattern="*/current/messages.jsonl"),
                 )
 
     def test_read_many_maps_exact_session_file(self):
@@ -577,10 +574,7 @@ class VikingBotRuntimeTests(unittest.TestCase):
 
         self.assertEqual(
             [
-                (
-                    "echo://engine/echo0_plugin/sessions/session-1/"
-                    "messages.jsonl"
-                )
+                "echo://sessions/session-1/current/messages.jsonl"
             ],
             echomem.read_uris,
         )
@@ -644,14 +638,14 @@ class VikingBotRuntimeTests(unittest.TestCase):
                 self.glob_patterns.append(pattern)
                 return [{
                     "uri": (
-                        "echo://engine/echo0_plugin/sessions/session-1/"
-                        "overview.md"
+                        "echo://sessions/session-1/"
+                        "current/messages.jsonl"
                     )
                 }]
 
         for uri in (
             "echo://tenant-a/sessions/",
-            "echo://engine/echo0_plugin/sessions",
+            "echo://sessions",
         ):
             with self.subTest(uri=uri):
                 echomem = ReadEchoMem()
@@ -668,13 +662,10 @@ class VikingBotRuntimeTests(unittest.TestCase):
                 )
 
                 self.assertIn("concrete EchoMemory session or file URI", text)
-                self.assertIn("session-1/overview.md", text)
+                self.assertIn("session-1/current/messages.jsonl", text)
                 self.assertEqual(
                     [
-                        (
-                            "echo://engine/echo0_plugin/sessions/*/"
-                            "overview.md"
-                        )
+                        "echo://sessions/*/current/messages.jsonl"
                     ],
                     echomem.glob_patterns,
                 )
@@ -692,8 +683,8 @@ class VikingBotRuntimeTests(unittest.TestCase):
                 self.glob_patterns.append(pattern)
                 return [{
                     "uri": (
-                        "echo://engine/echo0_plugin/sessions/"
-                        "echomem-locomo-conv-30-s1-c96138b0/overview.md"
+                        "echo://sessions/"
+                        "echomem-locomo-conv-30-s1-c96138b0/current/messages.jsonl"
                     )
                 }]
 
@@ -703,10 +694,7 @@ class VikingBotRuntimeTests(unittest.TestCase):
             "memory_read_many",
             {
                 "uris": [
-                    (
-                        "echo://engine/echo0_plugin/sessions/"
-                        "echomem-locomo-conv-30"
-                    )
+                    "echo://sessions/echomem-locomo-conv-30"
                 ]
             },
             {},
@@ -717,13 +705,13 @@ class VikingBotRuntimeTests(unittest.TestCase):
             timeout_s=30,
         )
 
-        self.assertIn("echomem-locomo-conv-30-s1-c96138b0/overview.md", text)
+        self.assertIn(
+            "echomem-locomo-conv-30-s1-c96138b0/current/messages.jsonl",
+            text,
+        )
         self.assertEqual(
             [
-                (
-                    "echo://engine/echo0_plugin/sessions/"
-                    "echomem-locomo-conv-30*/overview.md"
-                )
+                "echo://sessions/echomem-locomo-conv-30*/current/messages.jsonl"
             ],
             echomem.glob_patterns,
         )
@@ -737,8 +725,8 @@ class VikingBotRuntimeTests(unittest.TestCase):
             def fs_glob(self, _pattern, **_kwargs):
                 return [{
                     "uri": (
-                        "echo://engine/echo0_plugin/sessions/"
-                        "session-1-abc123/overview.md"
+                        "echo://sessions/"
+                        "session-1-abc123/current/messages.jsonl"
                     )
                 }]
 
@@ -760,12 +748,7 @@ class VikingBotRuntimeTests(unittest.TestCase):
         )
 
         self.assertEqual(
-            [
-                (
-                    "echo://engine/echo0_plugin/sessions/"
-                    "session-1-abc123"
-                )
-            ],
+            ["echo://sessions/session-1-abc123"],
             echomem.list_uris,
         )
 
@@ -778,8 +761,8 @@ class VikingBotRuntimeTests(unittest.TestCase):
             def fs_glob(self, _pattern, **_kwargs):
                 return [{
                     "uri": (
-                        "echo://engine/echo0_plugin/sessions/"
-                        "session-1-abc123/overview.md"
+                        "echo://sessions/"
+                        "session-1-abc123/current/messages.jsonl"
                     )
                 }]
 
@@ -806,14 +789,7 @@ class VikingBotRuntimeTests(unittest.TestCase):
         self.assertIn("Marley flooring", text)
         self.assertEqual(
             [
-                (
-                    "echo://engine/echo0_plugin/sessions/"
-                    "session-1-abc123/overview.md"
-                ),
-                (
-                    "echo://engine/echo0_plugin/sessions/"
-                    "session-1-abc123/messages.jsonl"
-                ),
+                "echo://sessions/session-1-abc123/current/messages.jsonl"
             ],
             echomem.read_uris,
         )

@@ -22,55 +22,21 @@ QA_FIELDS = (*BASE_QA_FIELDS, "retrieval_items_json")
 
 @dataclass(frozen=True)
 class QAOptions:
+    """Benchmark-level QA options shared across all agent plugins.
+
+    Agent-specific configuration (tool limits, memory budgets, iteration
+    caps, etc.) lives inside each plugin's setup(); this dataclass only
+    carries the benchmark-level fields the harness needs for checkpointing,
+    reporting, and prompt assembly.
+    """
     profile: str
-    tool_search_limit: int
-    user_memory_budget_chars: int
-    agent_memory_budget_chars: int
-    max_iterations: int
-    vikingbot_workspace: str
-    checkpoint_interval: int
-    initial_min_score: float = 0.0
-    tool_min_score: float = 0.0
-    tool_search_pool_multiplier: int = 4
-    tool_set: str = "search_read"
+    checkpoint_interval: int = 0
     top_k: int = 0
     memory_budget_chars: int = 0
-    answer_temperature: float = 0.7
-    omit_answer_temperature: bool = True
-    initial_retrieval_query_mode: str = "question_only"
-    tool_query_dedup_scope: str = "question"
-    retrieval_uri_dedup: bool = True
-    search_tool_target_uri_schema: bool = False
     tools_enabled: bool = True
     system_prompt_append: str = ""
     system_prompt_append_sha256: str = ""
     system_prompt_append_source: str = ""
-
-    def __post_init__(self) -> None:
-        if self.tool_search_limit < 1:
-            raise ValueError("tool_search_limit must be >= 1")
-        if self.user_memory_budget_chars < 1:
-            raise ValueError("user_memory_budget_chars must be >= 1")
-        if self.agent_memory_budget_chars < 1:
-            raise ValueError("agent_memory_budget_chars must be >= 1")
-        if self.max_iterations < 1:
-            raise ValueError("max_iterations must be >= 1")
-        if self.tool_search_pool_multiplier < 1:
-            raise ValueError("tool_search_pool_multiplier must be >= 1")
-        if self.initial_min_score < 0 or self.tool_min_score < 0:
-            raise ValueError("score thresholds must be >= 0")
-        if self.initial_retrieval_query_mode not in {
-            "question_only",
-            "vikingbot_prompt",
-        }:
-            raise ValueError(
-                "initial_retrieval_query_mode must be question_only or "
-                "vikingbot_prompt"
-            )
-        if self.tool_query_dedup_scope not in {"none", "turn", "question"}:
-            raise ValueError(
-                "tool_query_dedup_scope must be none, turn, or question"
-            )
 
 
 def _safe_question_id(question_id: str) -> str:
@@ -155,29 +121,8 @@ def build_qa_tasks(
             "session_id": session_ids[0] if len(session_ids) == 1 else "",
             "agent_id": agent_id,
             "question_time": job.query_time,
-            "tool_search_limit": options.tool_search_limit,
-            "user_memory_budget_chars": options.user_memory_budget_chars,
-            "agent_memory_budget_chars": options.agent_memory_budget_chars,
-            "max_iterations": options.max_iterations,
-            "vikingbot_workspace": options.vikingbot_workspace,
             "qa_profile": options.profile,
-            "initial_min_score": options.initial_min_score,
-            "tool_min_score": options.tool_min_score,
-            "tool_search_pool_multiplier": (
-                options.tool_search_pool_multiplier
-            ),
-            "tool_set": options.tool_set,
             "profile_source": profile_source(options.profile),
-            "answer_temperature": options.answer_temperature,
-            "omit_answer_temperature": options.omit_answer_temperature,
-            "initial_retrieval_query_mode": (
-                options.initial_retrieval_query_mode
-            ),
-            "tool_query_dedup_scope": options.tool_query_dedup_scope,
-            "retrieval_uri_dedup": options.retrieval_uri_dedup,
-            "search_tool_target_uri_schema": (
-                options.search_tool_target_uri_schema
-            ),
             "tools_enabled": options.tools_enabled,
             "system_prompt_append": options.system_prompt_append,
             "system_prompt_append_sha256": (

@@ -16,6 +16,12 @@ import os
 from pathlib import Path
 from typing import Any
 
+from benchmarks.locomo.profiles import (
+    profile_settings,
+    VIKINGBOAT_0411_PROFILE,
+    VIKINGBOAT_0411_NATURAL_NO_TOOLS_PROFILE,
+    LEGACY_77_PROFILE,
+)
 from plugins.base import AgentDescriptor, AgentResponse, AgentPlugin
 from backends.echomem.client import EchoMemClient, _PENDING_CLEANUPS
 from backends.openviking.client import OpenVikingClient
@@ -137,27 +143,55 @@ class VikingBotPlugin(AgentPlugin):
             max_retries=config.get("llm_retries", 3),
         )
 
-        # VikingBot-specific defaults (CLI args, may be None → function defaults)
-        self._top_k = config.get("top_k") or 25
-        self._tool_search_limit = config.get("tool_search_limit")
-        self._user_memory_budget_chars = config.get("user_memory_budget_chars")
-        self._agent_memory_budget_chars = config.get("agent_memory_budget_chars")
-        self._max_iterations = config.get("max_iterations")
-        self._initial_min_score = config.get("initial_min_score")
-        self._tool_min_score = config.get("tool_min_score")
-        self._tool_search_pool_multiplier = config.get("tool_search_pool_multiplier")
-        self._tool_set = config.get("tool_set")
+        # Resolve profile defaults: CLI args override profile settings.
+        qa_profile = config.get("qa_profile")
+        tools_enabled = config.get("tools", True)
+        if not qa_profile:
+            qa_profile = (
+                VIKINGBOAT_0411_PROFILE
+                if tools_enabled
+                else VIKINGBOAT_0411_NATURAL_NO_TOOLS_PROFILE
+            )
+        if qa_profile in (VIKINGBOAT_0411_PROFILE, VIKINGBOAT_0411_NATURAL_NO_TOOLS_PROFILE,
+                          LEGACY_77_PROFILE):
+            try:
+                defaults = profile_settings(qa_profile)
+            except ValueError:
+                defaults = {}
+        else:
+            defaults = {}
+
+        def _resolve(name, cast):
+            cli_val = config.get(name)
+            if cli_val is not None:
+                return cast(cli_val)
+            if name in defaults:
+                return cast(defaults[name])
+            return None
+
+        self._qa_profile = qa_profile
         self._tools_enabled = config.get("tools", True)
+        self._top_k = _resolve("top_k", int) or 25
+        self._tool_search_limit = _resolve("tool_search_limit", int)
+        self._user_memory_budget_chars = _resolve("user_memory_budget_chars", int)
+        self._agent_memory_budget_chars = _resolve("agent_memory_budget_chars", int)
+        self._max_iterations = _resolve("max_iterations", int)
+        self._initial_min_score = _resolve("initial_min_score", float)
+        self._tool_min_score = _resolve("tool_min_score", float)
+        self._tool_search_pool_multiplier = _resolve("tool_search_pool_multiplier", int)
+        self._tool_set = _resolve("tool_set", str)
         self._vikingbot_workspace = config.get("vikingbot_workspace", "")
-        self._question_timeout_s = float(config.get("question_timeout_s", 600.0))
-        self._qa_profile = config.get("qa_profile", "vikingbot")
-        # Params without CLI args (set by benchmark QA profiles in task dict)
-        self._answer_temperature = config.get("answer_temperature")
-        self._omit_answer_temperature = config.get("omit_answer_temperature")
-        self._initial_retrieval_query_mode = config.get("initial_retrieval_query_mode")
-        self._tool_query_dedup_scope = config.get("tool_query_dedup_scope")
-        self._retrieval_uri_dedup = config.get("retrieval_uri_dedup")
-        self._search_tool_target_uri_schema = config.get("search_tool_target_uri_schema")
+        self._question_timeout_s = float(config.get("question_timeout_s") or defaults.get("question_timeout_s", 600.0))
+        self._answer_temperature = _resolve("answer_temperature", float)
+        self._omit_answer_temperature = _resolve("omit_answer_temperature", bool)
+        self._initial_retrieval_query_mode = _resolve("initial_retrieval_query_mode", str)
+        self._tool_query_dedup_scope = _resolve("tool_query_dedup_scope", str)
+        self._retrieval_uri_dedup = _resolve("retrieval_uri_dedup", bool)
+        self._search_tool_target_uri_schema = _resolve("search_tool_target_uri_schema", bool)
+
+    @property
+    def qa_profile(self) -> str:
+        return self._qa_profile
 
     def inject_memories(
         self,
@@ -203,13 +237,13 @@ class VikingBotPlugin(AgentPlugin):
     ) -> AgentResponse:
         """Send a question and receive the agent's response.
 
-        For benchmark mode, *extra* carries the full task dict (built by
-        the benchmark's build_qa_tasks). For dynamic mode, *extra* is None
-        and the defaults stored in setup() are used.
+        *extra* carries benchmark context (question_id, question, answer,
+        question_time, sample_id, category, system_prompt_append).  All
+        agent-level configuration is read from instance attributes set
+        in setup().
         """
         extra = extra or {}
 
-        # Required fields
         kwargs: dict[str, Any] = dict(
             question_id=extra.get("question_id", ""),
             question=extra.get("question", message),
@@ -219,62 +253,34 @@ class VikingBotPlugin(AgentPlugin):
             category=extra.get("category", ""),
         )
 
-        # Optional fields: prefer extra (task dict), fall back to setup defaults.
-        # None values are omitted so answer_one_vikingbot_question's own
-        # defaults apply. profile_source is exempt because None is valid.
-        optional: dict[str, Any] = {
-            "top_k": extra.get("top_k", self._top_k),
-            "tool_search_limit": extra.get("tool_search_limit", self._tool_search_limit),
-            "tool_search_pool_multiplier": extra.get(
-                "tool_search_pool_multiplier", self._tool_search_pool_multiplier,
-            ),
-            "initial_min_score": extra.get("initial_min_score", self._initial_min_score),
-            "tool_min_score": extra.get("tool_min_score", self._tool_min_score),
-            "tool_set": extra.get("tool_set", self._tool_set),
-            "user_memory_budget_chars": extra.get(
-                "user_memory_budget_chars", self._user_memory_budget_chars,
-            ),
-            "agent_memory_budget_chars": extra.get(
-                "agent_memory_budget_chars", self._agent_memory_budget_chars,
-            ),
-            "max_iterations": extra.get("max_iterations", self._max_iterations),
-            "question_timeout_s": extra.get(
-                "question_timeout_s", self._question_timeout_s,
-            ),
-            "vikingbot_workspace": extra.get(
-                "vikingbot_workspace", self._vikingbot_workspace,
-            ),
-            "qa_profile": extra.get("qa_profile", self._qa_profile),
-            "answer_temperature": extra.get(
-                "answer_temperature", self._answer_temperature,
-            ),
-            "omit_answer_temperature": extra.get(
-                "omit_answer_temperature", self._omit_answer_temperature,
-            ),
-            "initial_retrieval_query_mode": extra.get(
-                "initial_retrieval_query_mode", self._initial_retrieval_query_mode,
-            ),
-            "tool_query_dedup_scope": extra.get(
-                "tool_query_dedup_scope", self._tool_query_dedup_scope,
-            ),
-            "retrieval_uri_dedup": extra.get(
-                "retrieval_uri_dedup", self._retrieval_uri_dedup,
-            ),
-            "search_tool_target_uri_schema": extra.get(
-                "search_tool_target_uri_schema", self._search_tool_target_uri_schema,
-            ),
-            "tools_enabled": extra.get("tools_enabled", self._tools_enabled),
+        # Agent configuration from setup(); None values omitted so the
+        # runtime's own defaults apply.
+        config_fields: dict[str, Any] = {
+            "top_k": self._top_k,
+            "tool_search_limit": self._tool_search_limit,
+            "tool_search_pool_multiplier": self._tool_search_pool_multiplier,
+            "initial_min_score": self._initial_min_score,
+            "tool_min_score": self._tool_min_score,
+            "tool_set": self._tool_set,
+            "user_memory_budget_chars": self._user_memory_budget_chars,
+            "agent_memory_budget_chars": self._agent_memory_budget_chars,
+            "max_iterations": self._max_iterations,
+            "question_timeout_s": self._question_timeout_s,
+            "vikingbot_workspace": self._vikingbot_workspace,
+            "qa_profile": self._qa_profile,
+            "answer_temperature": self._answer_temperature,
+            "omit_answer_temperature": self._omit_answer_temperature,
+            "initial_retrieval_query_mode": self._initial_retrieval_query_mode,
+            "tool_query_dedup_scope": self._tool_query_dedup_scope,
+            "retrieval_uri_dedup": self._retrieval_uri_dedup,
+            "search_tool_target_uri_schema": self._search_tool_target_uri_schema,
+            "tools_enabled": self._tools_enabled,
             "system_prompt_append": extra.get("system_prompt_append", ""),
-            "system_prompt_append_sha256": extra.get(
-                "system_prompt_append_sha256", "",
-            ),
-            "system_prompt_append_source": extra.get(
-                "system_prompt_append_source", "",
-            ),
-            "profile_source": extra.get("profile_source"),
+            "system_prompt_append_sha256": extra.get("system_prompt_append_sha256", ""),
+            "system_prompt_append_source": extra.get("system_prompt_append_source", ""),
         }
-        for key, val in optional.items():
-            if val is not None or key == "profile_source":
+        for key, val in config_fields.items():
+            if val is not None:
                 kwargs[key] = val
 
         qa = answer_one_vikingbot_question(self.memory_client, self._llm, **kwargs)

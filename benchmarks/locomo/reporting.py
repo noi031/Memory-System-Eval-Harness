@@ -101,26 +101,6 @@ def build_summary(
         ),
         "top_k": qa_options.top_k,
         "memory_budget_chars": qa_options.memory_budget_chars,
-        "tool_search_limit": qa_options.tool_search_limit,
-        "initial_min_score": qa_options.initial_min_score,
-        "tool_min_score": qa_options.tool_min_score,
-        "tool_search_pool_multiplier": (
-            qa_options.tool_search_pool_multiplier
-        ),
-        "tool_set": qa_options.tool_set,
-        "user_memory_budget_chars": qa_options.user_memory_budget_chars,
-        "agent_memory_budget_chars": qa_options.agent_memory_budget_chars,
-        "max_iterations": qa_options.max_iterations,
-        "answer_temperature": qa_options.answer_temperature,
-        "omit_answer_temperature": qa_options.omit_answer_temperature,
-        "initial_retrieval_query_mode": (
-            qa_options.initial_retrieval_query_mode
-        ),
-        "tool_query_dedup_scope": qa_options.tool_query_dedup_scope,
-        "retrieval_uri_dedup": qa_options.retrieval_uri_dedup,
-        "search_tool_target_uri_schema": (
-            qa_options.search_tool_target_uri_schema
-        ),
         "checkpoint_interval": qa_options.checkpoint_interval,
         "session_mode": session_mode,
         "retrieval_scope": "session" if session_mode == "single" else "account",

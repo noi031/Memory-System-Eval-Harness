@@ -74,28 +74,8 @@ def build_qa_resume_manifest(
             "options": {
                 "top_k": options.top_k,
                 "memory_budget_chars": options.memory_budget_chars,
-                "initial_min_score": options.initial_min_score,
-                "tool_min_score": options.tool_min_score,
-                "tool_search_limit": options.tool_search_limit,
-                "tool_search_pool_multiplier": (
-                    options.tool_search_pool_multiplier
-                ),
-                "tool_set": options.tool_set,
                 "tools_enabled": options.tools_enabled,
-                "user_memory_budget_chars": options.user_memory_budget_chars,
-                "agent_memory_budget_chars": options.agent_memory_budget_chars,
-                "max_iterations": options.max_iterations,
                 "checkpoint_interval": options.checkpoint_interval,
-                "answer_temperature": options.answer_temperature,
-                "omit_answer_temperature": options.omit_answer_temperature,
-                "initial_retrieval_query_mode": (
-                    options.initial_retrieval_query_mode
-                ),
-                "tool_query_dedup_scope": options.tool_query_dedup_scope,
-                "retrieval_uri_dedup": options.retrieval_uri_dedup,
-                "search_tool_target_uri_schema": (
-                    options.search_tool_target_uri_schema
-                ),
                 "system_prompt_append_sha256": (
                     options.system_prompt_append_sha256
                 ),
@@ -121,28 +101,8 @@ def build_qa_resume_manifest(
             "profile": options.profile,
             "top_k": config.top_k,
             "memory_budget_chars": config.memory_budget_chars,
-            "tool_search_limit": options.tool_search_limit,
-            "initial_min_score": options.initial_min_score,
-            "tool_min_score": options.tool_min_score,
-            "tool_search_pool_multiplier": (
-                options.tool_search_pool_multiplier
-            ),
-            "tool_set": options.tool_set,
             "tools_enabled": options.tools_enabled,
-            "user_memory_budget_chars": options.user_memory_budget_chars,
-            "agent_memory_budget_chars": options.agent_memory_budget_chars,
-            "max_iterations": options.max_iterations,
             "question_timeout_s": config.question_timeout_s,
-            "answer_temperature": options.answer_temperature,
-            "omit_answer_temperature": options.omit_answer_temperature,
-            "initial_retrieval_query_mode": (
-                options.initial_retrieval_query_mode
-            ),
-            "tool_query_dedup_scope": options.tool_query_dedup_scope,
-            "retrieval_uri_dedup": options.retrieval_uri_dedup,
-            "search_tool_target_uri_schema": (
-                options.search_tool_target_uri_schema
-            ),
             "system_prompt_append_sha256": (
                 options.system_prompt_append_sha256
             ),
@@ -303,10 +263,8 @@ def _healthy_result(result: QAResult) -> bool:
         and result.response.strip()
         and not result.retrieval_error
         and not result.llm_error
-        and retrieval == "ok"
         and answer == "ok"
         and model == "ok"
-        and health == "ok"
     )
 
 
@@ -411,10 +369,7 @@ def load_qa_resume_state(
         seen.add(question_id)
         task = expected_tasks.get(question_id)
         if task is None:
-            raise ValueError(
-                "QA resume CSV contains a question outside the current "
-                f"selection: {question_id}"
-            )
+            continue
         if (
             result.question != str(task.get("question") or "")
             or result.answer != str(task.get("answer") or "")
