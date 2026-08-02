@@ -10,6 +10,7 @@ from typing import Any
 from tqdm import tqdm
 
 from shared.eval_base import EvalConfig
+from shared.import_guard import SUCCESS_STATUSES
 
 
 IMPORT_FIELDS = (
@@ -29,8 +30,9 @@ IMPORT_FIELDS = (
 class ImportOptions:
     session_mode: str
     max_sessions: int
-    reuse_existing_memory: bool
+    resume_qa: bool
     sample_filter: str
+    prior_import_rows: list[dict] | None
 
 
 @dataclass
@@ -96,21 +98,21 @@ def import_locomo_memory(
     rows: list[dict[str, Any]] = []
     sample_to_session_ids: dict[str, list[str]] = {}
 
-    if options.reuse_existing_memory:
-        rows.append({
-            "sample_id": options.sample_filter,
-            "session_key": "existing-memory",
-            "session_id": "",
-            "archive_id": "",
-            "status": "reused",
-            "elapsed_s": 0,
-            "message_count": 0,
-            "submitted_messages": 0,
-            "error": "",
-        })
+    # Build a map of previously completed batches for resume-qa
+    completed_map: dict[tuple[str, str], str] = {}
+    if options.resume_qa and options.prior_import_rows:
+        for prior in options.prior_import_rows:
+            status = str(prior.get("status") or "").strip().lower()
+            if status in SUCCESS_STATUSES:
+                key = (
+                    str(prior.get("sample_id") or ""),
+                    str(prior.get("session_key") or ""),
+                )
+                session_id = str(prior.get("session_id") or "")
+                if session_id:
+                    completed_map[key] = session_id
 
-    plans_to_import = [] if options.reuse_existing_memory else plans
-    for plan in tqdm(plans_to_import, desc="导入记忆", unit="sample"):
+    for plan in tqdm(plans, desc="导入记忆", unit="sample"):
         sample_id = str(plan["sample_id"])
         batches = selected_session_batches(
             plan,
@@ -138,10 +140,36 @@ def import_locomo_memory(
             unit="session",
             leave=False,
         ):
+            session_key = str(batch.get("session_key") or "")
+            completed_key = (sample_id, session_key)
+
+            # Skip already-completed batches when resuming
+            if completed_key in completed_map:
+                prior_session_id = completed_map[completed_key]
+                sample_to_session_ids[sample_id].append(prior_session_id)
+                rows.append({
+                    "sample_id": sample_id,
+                    "session_key": session_key,
+                    "session_id": prior_session_id,
+                    "archive_id": "",
+                    "status": "reused",
+                    "elapsed_s": 0,
+                    "message_count": 0,
+                    "submitted_messages": 0,
+                    "error": "",
+                })
+                log.info(
+                    "  %s/%s: reused (prior session=%s)",
+                    sample_id,
+                    session_key,
+                    prior_session_id,
+                )
+                continue
+
+            # Normal injection
             session_id = ""
             archive_id = ""
             messages = list(batch.get("messages") or [])
-            session_key = str(batch.get("session_key") or "")
             submitted_messages = 0
             try:
                 session_id = memory_client.open_session(
@@ -213,18 +241,20 @@ def import_locomo_memory(
     _write_results(output_path, rows)
     log.info("导入结果已保存: %s", output_path)
 
-    formal_rows = [] if options.reuse_existing_memory else rows
-    completed = sum(1 for row in formal_rows if row["status"] == "completed")
+    completed = sum(
+        1 for row in rows
+        if str(row["status"]).strip().lower() in SUCCESS_STATUSES
+    )
     return ImportReport(
         rows=rows,
         sample_to_session_ids=sample_to_session_ids,
         completed=completed,
-        total=len(formal_rows),
-        incomplete=len(formal_rows) - completed,
+        total=len(rows),
+        incomplete=len(rows) - completed,
         expected_messages=sum(
-            int(row.get("message_count") or 0) for row in formal_rows
+            int(row.get("message_count") or 0) for row in rows
         ),
         submitted_messages=sum(
-            int(row.get("submitted_messages") or 0) for row in formal_rows
+            int(row.get("submitted_messages") or 0) for row in rows
         ),
     )

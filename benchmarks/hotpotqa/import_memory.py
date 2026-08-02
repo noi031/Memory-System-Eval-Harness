@@ -56,21 +56,10 @@ def import_hotpotqa_memory(
     log,
     *,
     import_mode: str,
-    reuse_existing_memory: bool,
 ) -> ImportReport:
     rows: list[dict[str, Any]] = []
     question_to_session: dict[str, str] = {}
-    if reuse_existing_memory:
-        for job in jobs:
-            rows.append({
-                "question_id": job.question_id,
-                "session_id": "",
-                "status": "reused",
-                "messages": 0,
-                "elapsed_s": 0,
-                "error": "",
-            })
-    elif import_mode == "global":
+    if import_mode == "global":
         session_id = ""
         try:
             session_id = memory_client.open_session(title="hotpotqa_global")
@@ -148,7 +137,7 @@ def import_hotpotqa_memory(
         writer = csv.DictWriter(handle, fieldnames=IMPORT_FIELDS)
         writer.writeheader()
         writer.writerows(rows)
-    formal_rows = [] if reuse_existing_memory else rows
+    formal_rows = rows
     completed = sum(1 for row in formal_rows if row["status"] == "completed")
     return ImportReport(
         rows=rows,

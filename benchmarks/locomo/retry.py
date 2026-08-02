@@ -76,6 +76,7 @@ def build_retry_command(
     sample: str,
     question_ids: list[str],
     round_dir: Path,
+    resume_source: Path,
     eval_args: list[str],
 ) -> list[str]:
     return [
@@ -88,7 +89,8 @@ def build_retry_command(
         sample,
         "--question-ids",
         ",".join(question_ids),
-        "--reuse-memory-account",
+        "--resume-qa",
+        str(resume_source),
         "--out-dir",
         str(round_dir),
         *eval_args,
@@ -144,6 +146,7 @@ def main() -> None:
         sample=args.sample,
         question_ids=question_ids,
         round_dir=round_dir,
+        resume_source=input_path,
         eval_args=eval_args,
     )
     summary: dict[str, Any] = {

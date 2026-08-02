@@ -26,11 +26,6 @@ class _Log:
         return None
 
 
-class _NoWriteClient:
-    def __getattr__(self, name):
-        raise AssertionError(f"reuse mode attempted backend call: {name}")
-
-
 class _RecordingClient:
     def __init__(self):
         self.opened = []
@@ -57,26 +52,6 @@ class _RecordingClient:
 
 
 class HotpotQAWorkflowTests(unittest.TestCase):
-    def test_reuse_mode_skips_all_backend_writes(self):
-        jobs = [SimpleNamespace(question_id="q1")]
-        plans = [{"events": [{"text": "fact"}]}]
-
-        with tempfile.TemporaryDirectory() as directory:
-            report = import_hotpotqa_memory(
-                jobs,
-                plans,
-                _NoWriteClient(),
-                EvalConfig(),
-                Path(directory),
-                _Log(),
-                import_mode="per_question",
-                reuse_existing_memory=True,
-            )
-
-            self.assertEqual(0, report.total)
-            self.assertEqual("reused", report.rows[0]["status"])
-            self.assertEqual({}, report.question_to_session)
-
     def test_global_mode_maps_every_question_to_shared_session(self):
         jobs = [
             SimpleNamespace(question_id="q1"),
@@ -97,7 +72,6 @@ class HotpotQAWorkflowTests(unittest.TestCase):
                 Path(directory),
                 _Log(),
                 import_mode="global",
-                reuse_existing_memory=False,
             )
 
             self.assertEqual(["hotpotqa_global"], client.opened)

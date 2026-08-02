@@ -73,7 +73,6 @@ def main() -> None:
             str(dataset_path),
             "--question-ids",
             ",".join(selected_ids),
-            "--reuse-memory-account",
         ],
     }
     if args.retry_qa:

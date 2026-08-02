@@ -83,9 +83,9 @@ def _apply_resume_memory_identity(
 ) -> None:
     """Load account/user_id/auth_key from a prior run's QA resume manifest.
 
-    When resuming with --reuse-memory-account, the harness does not provision
-    a fresh identity.  If the prior run used --inject-memory --keep-memory-account,
-    the isolated tenant's credentials are needed to access its sessions.
+    When resuming with --resume-qa, the harness does not provision a fresh
+    identity.  The prior run's tenant credentials are needed to access its
+    sessions.
     """
     source = Path(resume_source)
     manifest_path = (
@@ -144,22 +144,6 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
-        "--memory-session-prefix",
-        default="",
-        help=(
-            "In reuse mode, expose only session-backed memory whose session "
-            "id starts with this prefix"
-        ),
-    )
-    parser.add_argument(
-        "--inject-memory",
-        action="store_true",
-        help=(
-            "Import the selected LoCoMo conversations into a fresh isolated "
-            "identity instead of reusing existing memory"
-        ),
-    )
-    parser.add_argument(
         "--exclude-memory-file",
         action="append",
         default=[],
@@ -206,8 +190,8 @@ def build_parser() -> argparse.ArgumentParser:
         "--resume-qa",
         default="",
         help=(
-            "Resume healthy QA rows from a prior LoCoMo run directory or "
-            "qa_results CSV; requires --reuse-memory-account"
+            "Resume QA from a prior LoCoMo run directory or qa_results CSV; "
+            "reuses the prior identity and skips already-injected sessions"
         ),
     )
     # judge 参数
@@ -238,25 +222,6 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def apply_locomo_cli_defaults(args) -> None:
-    if args.inject_memory and getattr(args, "reuse_memory_account", False):
-        raise ValueError(
-            "--inject-memory and --reuse-memory-account are mutually exclusive"
-        )
-    if args.inject_memory or getattr(args, "keep_memory_account", False):
-        args.reuse_memory_account = False
-    else:
-        args.reuse_memory_account = True
-
-    sample = str(args.sample or "").strip()
-    if (
-        args.reuse_memory_account
-        and not args.memory_session_prefix
-        and re.fullmatch(r"conv-\d+", sample)
-    ):
-        args.memory_session_prefix = f"echomem-locomo-{sample}-"
-
-
 def load_qa_prompt_append(path_value: str) -> tuple[str, str, str]:
     value = str(path_value or "").strip()
     if not value:
@@ -271,9 +236,24 @@ def load_qa_prompt_append(path_value: str) -> tuple[str, str, str]:
     return prompt, digest, path.name
 
 
+def _load_prior_import_rows(resume_source: str) -> list[dict]:
+    """Load import_results.csv from a prior run directory for resume-qa."""
+    import csv
+
+    source = Path(resume_source)
+    csv_path = (
+        source / "import_results.csv"
+        if source.is_dir()
+        else source.parent / "import_results.csv"
+    )
+    if not csv_path.is_file():
+        return []
+    with csv_path.open("r", encoding="utf-8") as handle:
+        return list(csv.DictReader(handle))
+
+
 def main() -> None:
     args = build_parser().parse_args()
-    apply_locomo_cli_defaults(args)
     config = build_config_from_args(args)
     (
         system_prompt_append,
@@ -287,15 +267,6 @@ def main() -> None:
         raise ValueError("max sessions must be >= 0")
     if args.checkpoint_interval < 0:
         raise ValueError("checkpoint interval must be >= 0")
-    if args.resume_qa and not args.reuse_memory_account:
-        raise ValueError(
-            "--resume-qa requires --reuse-memory-account to prevent "
-            "duplicate memory injection"
-        )
-    if args.memory_session_prefix and not args.reuse_memory_account:
-        raise ValueError(
-            "--memory-session-prefix requires --reuse-memory-account"
-        )
     if args.judge_concurrency < 1:
         raise ValueError("judge concurrency must be >= 1")
     if args.judge_checkpoint_interval < 0:
@@ -360,13 +331,10 @@ def main() -> None:
     agent_plugin = load_agent_plugin(args.agent_plugin, agent_config)
     echomem = agent_plugin.memory_client
     echomem.health()
-    if args.resume_qa and args.reuse_memory_account:
+    if args.resume_qa:
         _apply_resume_memory_identity(echomem, args.resume_qa, log)
     evaluation_identity = {
-        "mode": "reused" if args.reuse_memory_account else "isolated",
-        "retention": "existing" if args.reuse_memory_account else (
-            "kept" if getattr(args, "keep_memory_account", False) else "ephemeral"
-        ),
+        "mode": "resumed" if args.resume_qa else "fresh",
         "tenant_id": echomem.account,
         "user_id": echomem.user_id,
         "auth_key": echomem.auth_key,
@@ -377,25 +345,26 @@ def main() -> None:
         evaluation_identity.get("tenant_id", ""),
         evaluation_identity.get("user_id", ""),
     )
-    if args.memory_session_prefix:
+    memory_session_prefix = ""
+    if args.resume_qa:
+        sample = str(args.sample or "").strip()
+        if re.fullmatch(r"conv-\d+", sample):
+            memory_session_prefix = f"echomem-locomo-{sample}-"
+    if memory_session_prefix:
         echomem = SessionPrefixMemoryClient(
             echomem,
-            args.memory_session_prefix,
+            memory_session_prefix,
         )
         log.info(
             "Memory session scope: prefix=%s",
-            args.memory_session_prefix,
+            memory_session_prefix,
         )
 
-    # -- 阶段 1: 复用已有记忆或集中导入所有 session --
+    # -- 阶段 1: 导入记忆 --
     log.info("=" * 60)
-    reuse_existing_memory = args.reuse_memory_account
-    if reuse_existing_memory:
-        log.info(
-            "阶段 1: 跳过导入，直接复用已有记忆 account=%s user=%s",
-            echomem.account,
-            echomem.user_id,
-        )
+    prior_import_rows = _load_prior_import_rows(args.resume_qa) if args.resume_qa else None
+    if prior_import_rows is not None:
+        log.info("阶段 1: 导入记忆 (resume-qa, 跳过已完成 batches)")
     else:
         log.info("阶段 1: 导入记忆 (共 %d 个 sample)", len(plans))
 
@@ -406,37 +375,35 @@ def main() -> None:
         ImportOptions(
             session_mode=session_mode,
             max_sessions=args.max_sessions,
-            reuse_existing_memory=reuse_existing_memory,
+            resume_qa=bool(args.resume_qa),
             sample_filter=args.sample,
+            prior_import_rows=prior_import_rows,
         ),
         run.result_dir,
         log,
     )
-    if reuse_existing_memory:
-        log.info("已有记忆复用模式：未执行任何写入或 commit")
-    else:
-        log.info(
-            "导入完成: %d/%d 成功",
-            import_report.completed,
-            import_report.total,
+    log.info(
+        "导入完成: %d/%d 成功",
+        import_report.completed,
+        import_report.total,
+    )
+    try:
+        require_complete_imports(
+            import_report.rows,
+            allow_incomplete=args.allow_incomplete_imports,
         )
-        try:
-            require_complete_imports(
-                import_report.rows,
-                allow_incomplete=args.allow_incomplete_imports,
-            )
-        except RuntimeError as exc:
-            run.save_summary({
-                "status": "failed",
-                "phase": "import",
-                "dataset": dataset_path,
-                "sample_filter": args.sample,
-                "import_ok": import_report.completed,
-                "import_total": import_report.total,
-                "error": str(exc),
-            })
-            log.error("%s", exc)
-            raise SystemExit(2) from exc
+    except RuntimeError as exc:
+        run.save_summary({
+            "status": "failed",
+            "phase": "import",
+            "dataset": dataset_path,
+            "sample_filter": args.sample,
+            "import_ok": import_report.completed,
+            "import_total": import_report.total,
+            "error": str(exc),
+        })
+        log.error("%s", exc)
+        raise SystemExit(2) from exc
 
     memory_provenance = inspect_memory_provenance(
         echomem,
@@ -445,7 +412,7 @@ def main() -> None:
         session_mode=session_mode,
         max_sessions=args.max_sessions,
     )
-    memory_provenance["session_prefix"] = args.memory_session_prefix
+    memory_provenance["session_prefix"] = memory_session_prefix
     provenance_path = write_memory_provenance(
         run.result_dir,
         memory_provenance,
@@ -643,7 +610,7 @@ def main() -> None:
         total_samples=len(plans),
         total_questions=len(jobs),
         import_report=import_report,
-        reuse_existing_memory=reuse_existing_memory,
+        resume_qa=bool(args.resume_qa),
         qa_results=qa_results,
         judge_report=judge_report,
         qa_options=qa_options,

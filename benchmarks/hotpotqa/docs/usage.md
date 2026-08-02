@@ -28,13 +28,6 @@ python benchmarks/hotpotqa/run_eval.py \
   --import-mode global \
   --concurrency 8 \
   --llm-api-key YOUR_API_KEY
-
-# 复用已有记忆，跳过所有 open/add/commit，只读执行指定题目
-./eval.sh hotpotqa \
-  --dataset /path/to/hotpotqa.json \
-  --question-ids q1,q2,q3 \
-  --reuse-memory-account \
-  --llm-api-key YOUR_API_KEY
 ```
 
 ## 参数说明
@@ -73,8 +66,8 @@ benchmark 只定义数据集参数、评测基础设施参数 (`--concurrency`�
 参数归属的完整设计说明见 `benchmarks/doc/设计意图.md`。
 参数明细表见 `benchmarks/locomo/docs/usage.md`（使用相同默认插件时参数一致）。
 
-HotpotQA 不需要 Judge 参数。`--reuse-memory-account` 复用已配置身份并禁止
-open/add/commit；QA 结果保留 `retrieval_items_json`，用于从真实检索证据推导
+HotpotQA 不需要 Judge 参数。每次运行创建独立身份并注入记忆，不自动删除
+身份。QA 结果保留 `retrieval_items_json`，用于从真实检索证据推导
 supporting-fact 和 joint 指标。每条证据同时保留 EchoMemory 返回的原始
 metadata；若存在显式 `hotpotqa_title` / `hotpotqa_sent_id`，评测优先使用，
 仅在缺失时从文本推断。
@@ -99,5 +92,5 @@ python benchmarks/hotpotqa/recovery.py \
   --out-dir /path/to/recovery
 ```
 
-工具会生成带 `--reuse-memory-account` 的只读重跑命令。已有 retry CSV 时可
+工具会生成带 `--resume-qa` 的重跑命令。已有 retry CSV 时可
 增加 `--retry-qa /path/to/retry/qa_results.csv`，仅用健康结果替换失败行。

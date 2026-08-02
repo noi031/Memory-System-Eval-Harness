@@ -127,13 +127,12 @@ class OpenVikingMCPPlugin(AgentPlugin):
         )
 
         # Identity isolation: OpenViking generates a unique account name
-        # (no server-side tenant creation). Skip when benchmark_name/run_id
-        # are absent or --reuse-memory-account is set.
+        # (no server-side tenant creation).
         benchmark_name = config.get("benchmark_name", "")
         run_id = config.get("run_id", "")
-        reuse = config.get("reuse_memory_account", False)
+        resume_qa = bool(config.get("resume_qa", ""))
 
-        if benchmark_name and run_id and not reuse:
+        if benchmark_name and run_id and not resume_qa:
             label = f"eval-{benchmark_name}-{run_id}"
             self.memory_client.provision_isolated_identity(label)
 

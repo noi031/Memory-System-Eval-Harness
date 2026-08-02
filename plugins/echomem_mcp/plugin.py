@@ -25,7 +25,7 @@ from typing import Any
 from plugins.base import AgentDescriptor, AgentPlugin, AgentResponse
 from plugins.echomem_mcp.mcp_client import McpClient
 from plugins.echomem_mcp.runtime import MCP_TOOLS, _SYSTEM_PROMPT
-from backends.echomem.client import EchoMemClient, _PENDING_CLEANUPS
+from backends.echomem.client import EchoMemClient
 from shared.eval_base import add_llm_args, add_qa_args
 from shared.llm_client import LLMClient
 from backends.memory_args import add_memory_backend_args
@@ -127,18 +127,14 @@ class EchoMemMCPPlugin(AgentPlugin):
             max_retries=int(config.get("max_retries", 3)),
         )
 
-        # Identity isolation: skip when benchmark_name/run_id are absent
-        # (test/validation scenarios) or when --reuse-memory-account is set.
+        # Identity isolation
         benchmark_name = config.get("benchmark_name", "")
         run_id = config.get("run_id", "")
-        reuse = config.get("reuse_memory_account", False)
-        keep = config.get("keep_memory_account", False)
+        resume_qa = bool(config.get("resume_qa", ""))
 
-        if benchmark_name and run_id and not reuse:
+        if benchmark_name and run_id and not resume_qa:
             label = f"eval-{benchmark_name}-{run_id}"[:120]
             self.memory_client.provision_isolated_identity(label)
-            if not keep:
-                _PENDING_CLEANUPS.append(self.memory_client)
 
     def inject_memories(
         self,

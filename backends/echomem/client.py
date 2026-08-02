@@ -1,14 +1,10 @@
 """EchoMemory HTTP backend client with commit polling, retrieval, and identity isolation.
 
 Moved from plugins/echomem_mcp/memory_client.py.
-The client logic is unchanged; identity isolation helpers (cleanup_pending_identities,
-atexit registration) are co-located here so plugins that use EchoMemClient
-can import both from one module.
 """
 
 from __future__ import annotations
 
-import atexit
 import logging
 from typing import Any
 
@@ -288,23 +284,3 @@ class EchoMemClient(BaseHTTPMemoryClient):
             if isinstance(item, dict)
         ]
 
-
-# ------------------------------------------------------------------ #
-#  Identity isolation helpers                                         #
-# ------------------------------------------------------------------ #
-
-# Ephemeral identities scheduled for deletion at exit or run completion.
-_PENDING_CLEANUPS: list[Any] = []
-
-
-def cleanup_pending_identities() -> None:
-    """Delete ephemeral benchmark tenants while their EchoMem service is online."""
-    while _PENDING_CLEANUPS:
-        client = _PENDING_CLEANUPS.pop()
-        try:
-            client.delete_current_identity()
-        except Exception as exc:
-            logger.warning("Failed to delete ephemeral EchoMem identity: %s", exc)
-
-
-atexit.register(cleanup_pending_identities)

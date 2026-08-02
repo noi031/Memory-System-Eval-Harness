@@ -15,7 +15,6 @@ from shared.runtime_config import (
     prepare_runtime_environment,
     runtime_check,
 )
-from backends.echomem.client import cleanup_pending_identities as cleanup_pending_evaluation_identities
 from shared.service_manager import start_echomem_service, stop_echomem_service
 
 
@@ -90,7 +89,6 @@ def main() -> None:
         print(f"[eval] ERROR: {exc}", file=sys.stderr)
         raise SystemExit(2) from None
     finally:
-        cleanup_pending_evaluation_identities()
         if managed_service is not None and not args.keep_echomem:
             stop_echomem_service(managed_service)
 

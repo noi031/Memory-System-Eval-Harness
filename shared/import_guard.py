@@ -6,7 +6,7 @@ from collections.abc import Iterable
 from typing import Any
 
 
-SUCCESS_STATUSES = {"completed", "done", "success", "succeeded", "ok"}
+SUCCESS_STATUSES = {"completed", "done", "success", "succeeded", "ok", "reused"}
 
 
 def incomplete_imports(rows: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:

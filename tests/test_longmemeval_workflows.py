@@ -29,11 +29,6 @@ class _Log:
         return None
 
 
-class _NoWriteClient:
-    def __getattr__(self, name):
-        raise AssertionError(f"reuse mode attempted backend call: {name}")
-
-
 class _JudgeLLM:
     def __init__(self, responses):
         self.responses = iter(responses)
@@ -43,25 +38,6 @@ class _JudgeLLM:
 
 
 class LongMemEvalWorkflowTests(unittest.TestCase):
-    def test_reuse_mode_skips_all_backend_writes(self):
-        jobs = [SimpleNamespace(question_id="q1")]
-        plans = [{"session_batches": [{"messages": [{"content": "fact"}]}]}]
-
-        with tempfile.TemporaryDirectory() as directory:
-            report = import_longmemeval_memory(
-                jobs,
-                plans,
-                _NoWriteClient(),
-                EvalConfig(),
-                Path(directory),
-                _Log(),
-                reuse_existing_memory=True,
-            )
-
-            self.assertEqual(0, report.total)
-            self.assertEqual("reused", report.rows[0]["status"])
-            self.assertEqual({}, report.question_to_session)
-
     def test_official_metrics_include_task_average_and_abstention(self):
         qa_results = [
             QAResult("q1", "Q1", "A1", "A1"),

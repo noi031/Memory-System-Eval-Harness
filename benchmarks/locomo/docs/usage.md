@@ -2,19 +2,17 @@
 
 ## 评测流程
 
-1. **记忆准备**: 默认复用已有记忆；使用 `--inject-memory` 时才执行 open -> add_messages -> commit -> poll_commit
+1. **记忆注入**: 总是新开用户身份并执行 open -> add_messages -> commit -> poll_commit；指定 `--resume-qa` 时复用已有身份，跳过已完成的 session 仅注入缺失部分
 2. **逐题 QA**: 默认使用历史 VikingBot prompt 和 `memory_search` / `memory_read_many` 多轮工具循环，仅检索不写入
 3. **LLM Judge**: 用 LLM 判定回答 CORRECT / WRONG
 
 ## 使用方法
 
-先在 `.env` 中将 `ECHOMEM_WORKSPACE` 指向已注入 `conv-30` 的 EchoMem
-workspace，并保留 `ECHOMEM_AUTO_START=1`。下面两条命令会直接对该目录中的
-已有记忆做只读 QA，不执行 open/add/commit。若目标端口已有 EchoMem 服务，
-该服务必须由同一个 workspace 启动。
+先在 `.env` 中将 `ECHOMEM_WORKSPACE` 指向 EchoMem
+workspace，并保留 `ECHOMEM_AUTO_START=1`。
 
 ```bash
-# 默认复用已有 conv-30 记忆，自动选择 VikingBoat 0.4.11 工具口径
+# 默认注入记忆并使用 VikingBoat 0.4.11 工具口径
 ./eval.sh locomo --sample conv-30 --tools
 
 # 自然无工具对照
@@ -26,19 +24,14 @@ workspace，并保留 `ECHOMEM_AUTO_START=1`。下面两条命令会直接对该
   --tools \
   --qa-prompt-file /path/to/local-prompt.txt
 
-# 重新注入到隔离身份
-./eval.sh locomo --sample conv-30 --inject-memory --tools
-
-# 从中断运行继续；只复用健康行，失败和缺失题会重新 QA
+# 从中断运行继续；复用已有身份，跳过已完成 session，只重新 QA 失败和缺失题
 ./eval.sh locomo \
   --sample conv-30 \
-  --reuse-memory-account \
   --resume-qa /path/to/interrupted-run
 
 # QA 已完成但 Judge 中断时，只复用问题、gold 和回答完全一致的判分
 ./eval.sh locomo \
   --sample conv-30 \
-  --reuse-memory-account \
   --resume-qa /path/to/interrupted-run \
   --resume-judge /path/to/interrupted-run
 
@@ -46,20 +39,17 @@ workspace，并保留 `ECHOMEM_AUTO_START=1`。下面两条命令会直接对该
 # 后端和模型可见工具均使用只读 EchoMemory memory_* 接口
 ./eval.sh locomo \
   --sample conv-30 \
-  --reuse-memory-account \
   --qa-profile vikingboat0411
 
 # 同一 VikingBoat 0.4.11 prompt 和初始记忆注入，但不暴露工具
 ./eval.sh locomo \
   --sample conv-30 \
-  --reuse-memory-account \
   --qa-profile vikingboat0411 \
   --no-tools
 
 # 自然无工具对照：只保留完整初始记忆正文，不保留工具指令或 URI-only 条目
 ./eval.sh locomo \
   --sample conv-30 \
-  --reuse-memory-account \
   --qa-profile vikingboat0411-natural-no-tools \
   --no-tools
 
@@ -131,8 +121,6 @@ EchoMem/OpenViking 连接和身份管理参数，由所选插件通过 `add_memo
 | `--echomem-log-dir` | (空) | 后端日志目录 (用于收集日志到评测结果) |
 | `--commit-timeout-s` | `0` | Commit 轮询超时 (秒)，0 表示无限等待 |
 | `--commit-poll-interval-s` | `2.0` | Commit 轮询间隔 (秒) |
-| `--reuse-memory-account` | true (LoCoMo) | 复用已配置身份中的现有记忆，跳过 open/add/commit。LoCoMo 默认为 true，除非指定 `--inject-memory` 或 `--keep-memory-account` |
-| `--keep-memory-account` | false | 评测结束后保留临时隔离身份，供 workspace 诊断 |
 
 ### LLM 参数 (通过插件声明)
 | 参数 | 默认值 | 说明 |
@@ -173,13 +161,11 @@ EchoMem/OpenViking 连接和身份管理参数，由所选插件通过 `add_memo
 | `--qa-profile` | 自动 | `--tools` 默认选择 `vikingboat0411`；`--no-tools` 默认选择 `vikingboat0411-natural-no-tools`。显式指定时可覆盖 |
 | `--qa-prompt-file` | (空) | 将本地 UTF-8 文件追加到所选 profile 的 system prompt；`summary.json` 和 resume manifest 仅记录文件名和 SHA-256 |
 | `--checkpoint-interval` | `10` | 每完成 N 题写一次 `qa_results.checkpoint.csv`；0 表示关闭 |
-| `--resume-qa` | (空) | 从先前运行目录或 QA CSV 恢复健康答案；严格校验数据集、身份、模型和 QA 参数，且必须使用 `--reuse-memory-account` |
+| `--resume-qa` | (空) | 从先前运行目录或 QA CSV 恢复健康答案；复用已有身份，跳过已完成的 session 仅注入缺失部分，并严格校验数据集、模型和 QA 参数 |
 | `--concurrency` | `4` | QA 并发数 |
 | `--out-dir` | `results` | 结果目录 |
 | `--allow-incomplete-imports` | false | 导入未完成仍继续，仅限诊断 |
 | `--allow-memory-provenance-mismatch` | false | session manifest 与数据集/session-mode 不一致时仍继续；仅限诊断 |
-| `--memory-session-prefix` | 按 sample 推导 | `conv-30` 自动推导为 `echomem-locomo-conv-30-`；显式指定时覆盖 |
-| `--inject-memory` | false | 显式切换为重新注入：创建隔离身份并执行 open/add/commit |
 | `--exclude-memory-file` | (空) | 隐藏并拒绝读取指定 EchoMemory 文件系统叶名；可多次指定 |
 
 ### Judge 参数

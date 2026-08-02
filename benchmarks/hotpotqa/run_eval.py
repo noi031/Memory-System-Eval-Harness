@@ -126,10 +126,7 @@ def main() -> None:
     echomem = agent_plugin.memory_client
     echomem.health()
     evaluation_identity = {
-        "mode": "reused" if getattr(args, "reuse_memory_account", True) else "isolated",
-        "retention": "existing" if getattr(args, "reuse_memory_account", True) else (
-            "kept" if getattr(args, "keep_memory_account", False) else "ephemeral"
-        ),
+        "mode": "fresh",
         "tenant_id": echomem.account,
         "user_id": echomem.user_id,
     }
@@ -140,13 +137,9 @@ def main() -> None:
         evaluation_identity.get("user_id", ""),
     )
 
-    # -- 阶段 1: 导入记忆或复用已有记忆 --
+    # -- 阶段 1: 导入记忆 --
     log.info("=" * 60)
-    reuse_existing_memory = getattr(args, "reuse_memory_account", True)
-    if reuse_existing_memory:
-        log.info("阶段 1: 跳过导入，复用 account-wide 已有记忆")
-    else:
-        log.info("阶段 1: 导入记忆 (模式=%s)", args.import_mode)
+    log.info("阶段 1: 导入记忆 (模式=%s)", args.import_mode)
     import_report = import_hotpotqa_memory(
         jobs,
         plans,
@@ -155,32 +148,28 @@ def main() -> None:
         run.result_dir,
         log,
         import_mode=args.import_mode,
-        reuse_existing_memory=reuse_existing_memory,
     )
-    if reuse_existing_memory:
-        log.info("已有记忆复用模式：未执行任何写入或 commit")
-    else:
-        log.info(
-            "导入完成: %d/%d 成功",
-            import_report.completed,
-            import_report.total,
+    log.info(
+        "导入完成: %d/%d 成功",
+        import_report.completed,
+        import_report.total,
+    )
+    try:
+        require_complete_imports(
+            import_report.rows,
+            allow_incomplete=args.allow_incomplete_imports,
         )
-        try:
-            require_complete_imports(
-                import_report.rows,
-                allow_incomplete=args.allow_incomplete_imports,
-            )
-        except RuntimeError as exc:
-            run.save_summary({
-                "status": "failed",
-                "phase": "import",
-                "dataset": dataset_path,
-                "import_ok": import_report.completed,
-                "import_total": import_report.total,
-                "error": str(exc),
-            })
-            log.error("%s", exc)
-            raise SystemExit(2) from exc
+    except RuntimeError as exc:
+        run.save_summary({
+            "status": "failed",
+            "phase": "import",
+            "dataset": dataset_path,
+            "import_ok": import_report.completed,
+            "import_total": import_report.total,
+            "error": str(exc),
+        })
+        log.error("%s", exc)
+        raise SystemExit(2) from exc
 
     # -- 阶段 2: 逐题 QA --
     log.info("=" * 60)
@@ -228,7 +217,6 @@ def main() -> None:
         import_mode=args.import_mode,
         jobs=jobs,
         import_report=import_report,
-        reuse_existing_memory=reuse_existing_memory,
         qa_results=qa_results,
         evaluation_report=evaluation_report,
         evaluation_identity=evaluation_identity,

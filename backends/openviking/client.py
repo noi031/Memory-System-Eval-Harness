@@ -98,6 +98,20 @@ class OpenVikingClient(BaseHTTPMemoryClient):
     def _commit_failed_statuses(self) -> tuple[str, ...]:
         return ("failed", "error", "cancelled", "canceled")
 
+    def _parse_commit_status(self, resp: dict[str, Any]) -> str:
+        result = resp.get("result") or {}
+        return str(
+            result.get("status")
+            or result.get("stage")
+            or result.get("state")
+            or resp.get("status")
+            or ""
+        ).lower()
+
+    def _extract_commit_error(self, resp: dict[str, Any], status: str) -> str:
+        result = resp.get("result") or {}
+        return str(result.get("error") or resp.get("error") or status)
+
     # -- session lifecycle -----------------------------------------------
 
     def health(self) -> dict[str, Any]:

@@ -238,8 +238,6 @@ EchoMem/OpenViking 连接和身份管理参数，由所选插件通过 `add_memo
 | `--echomem-log-dir` | (空) | 后端日志目录 (用于收集日志到评测结果) |
 | `--commit-timeout-s` | `0` | 注入 commit 轮询超时 (秒)，0 表示无限等待 |
 | `--commit-poll-interval-s` | `2.0` | 注入 commit 轮询间隔 (秒) |
-| `--reuse-memory-account` | false | 复用已配置身份中的现有记忆，跳过 open/add/commit |
-| `--keep-memory-account` | false | 评测结束后保留临时隔离身份，供诊断 |
 
 ### echo_agent 插件参数
 | 参数 | 默认值 | 说明 |

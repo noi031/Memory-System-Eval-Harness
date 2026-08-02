@@ -36,11 +36,7 @@ from benchmarks.locomo.resume import (
     write_judge_resume_manifest,
     write_qa_resume_manifest,
 )
-from benchmarks.locomo.run_eval import (
-    apply_locomo_cli_defaults,
-    build_parser as build_locomo_parser,
-    load_qa_prompt_append,
-)
+from benchmarks.locomo.run_eval import load_qa_prompt_append
 from shared.eval_base import EvalConfig
 from shared.qa import QAResult
 from plugins.base import AgentResponse
@@ -60,59 +56,6 @@ class LocomoCliDefaultsTests(unittest.TestCase):
             digest,
         )
         self.assertEqual("candidate.txt", source)
-
-    def test_tools_defaults_to_vikingboat_and_existing_memory(self):
-        args = build_locomo_parser().parse_args([
-            "--sample",
-            "conv-30",
-            "--tools",
-        ])
-
-        apply_locomo_cli_defaults(args)
-
-        self.assertTrue(args.reuse_memory_account)
-        self.assertEqual(
-            "echomem-locomo-conv-30-",
-            args.memory_session_prefix,
-        )
-
-    def test_no_tools_defaults_to_natural_prompt(self):
-        args = build_locomo_parser().parse_args([
-            "--sample",
-            "conv-30",
-            "--no-tools",
-        ])
-
-        apply_locomo_cli_defaults(args)
-
-        self.assertTrue(args.reuse_memory_account)
-
-    def test_explicit_profile_preserves_strict_no_tools_ablation(self):
-        args = build_locomo_parser().parse_args([
-            "--sample",
-            "conv-30",
-            "--qa-profile",
-            "vikingboat0411",
-            "--no-tools",
-        ])
-
-        apply_locomo_cli_defaults(args)
-
-        self.assertEqual("vikingboat0411", args.qa_profile)
-        self.assertTrue(args.reuse_memory_account)
-
-    def test_inject_memory_disables_reuse_and_prefix_inference(self):
-        args = build_locomo_parser().parse_args([
-            "--sample",
-            "conv-30",
-            "--inject-memory",
-            "--tools",
-        ])
-
-        apply_locomo_cli_defaults(args)
-
-        self.assertFalse(args.reuse_memory_account)
-        self.assertEqual("", args.memory_session_prefix)
 
     def test_vendored_locomo_dataset_has_expected_hash(self):
         dataset = (
@@ -235,7 +178,13 @@ class LocomoEvaluateCompatibilityTests(unittest.TestCase):
 
 
 class LocomoImportTests(unittest.TestCase):
-    def test_reuse_mode_never_calls_backend(self):
+    def test_resume_qa_skips_completed_batches(self):
+        prior_rows = [{
+            "sample_id": "conv-30",
+            "session_key": "",
+            "session_id": "prior-session-1",
+            "status": "completed",
+        }]
         with tempfile.TemporaryDirectory() as directory:
             report = import_locomo_memory(
                 [{"sample_id": "conv-30", "session_batches": [{"messages": []}]}],
@@ -244,15 +193,18 @@ class LocomoImportTests(unittest.TestCase):
                 ImportOptions(
                     session_mode="locomo",
                     max_sessions=0,
-                    reuse_existing_memory=True,
+                    resume_qa=True,
                     sample_filter="conv-30",
+                    prior_import_rows=prior_rows,
                 ),
                 Path(directory),
                 _Log(),
             )
 
-            self.assertEqual(0, report.total)
+            self.assertEqual(1, report.total)
+            self.assertEqual(1, report.completed)
             self.assertEqual("reused", report.rows[0]["status"])
+            self.assertEqual("prior-session-1", report.rows[0]["session_id"])
             self.assertTrue((Path(directory) / "import_results.csv").exists())
 
 

@@ -86,7 +86,7 @@ SDK, or enable an OpenViking workflow.
 
 ## Behavioral Guarantees
 
-1. `--reuse-memory-account` performs no session writes or commits.
+1. `--resume-qa` reuses the prior run's identity and skips already-injected sessions.
 2. Reused and newly injected memory use the same LoCoMo QA and Judge path.
 3. Historical references remain distinct: July 13 `head_clean` `63/81`
    and July 17 rejudged `61/81`.

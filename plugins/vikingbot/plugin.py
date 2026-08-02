@@ -23,7 +23,7 @@ from benchmarks.locomo.profiles import (
     LEGACY_77_PROFILE,
 )
 from plugins.base import AgentDescriptor, AgentResponse, AgentPlugin
-from backends.echomem.client import EchoMemClient, _PENDING_CLEANUPS
+from backends.echomem.client import EchoMemClient
 from backends.openviking.client import OpenVikingClient
 from backends.memory_args import add_memory_backend_args
 from shared.eval_base import add_llm_args, add_qa_args
@@ -123,14 +123,11 @@ class VikingBotPlugin(AgentPlugin):
         # Identity isolation
         benchmark_name = config.get("benchmark_name", "")
         run_id = config.get("run_id", "")
-        reuse = config.get("reuse_memory_account", False)
-        keep = config.get("keep_memory_account", False)
+        resume_qa = bool(config.get("resume_qa", ""))
 
-        if benchmark_name and run_id and not reuse:
+        if benchmark_name and run_id and not resume_qa:
             label = f"eval-{benchmark_name}-{run_id}"[:120]
             self.memory_client.provision_isolated_identity(label)
-            if not keep and self._memory_backend == "echomem":
-                _PENDING_CLEANUPS.append(self.memory_client)
 
         # LLM client for the tool-call loop
         self._llm = LLMClient(
@@ -181,7 +178,8 @@ class VikingBotPlugin(AgentPlugin):
         self._tool_search_pool_multiplier = _resolve("tool_search_pool_multiplier", int)
         self._tool_set = _resolve("tool_set", str)
         self._vikingbot_workspace = config.get("vikingbot_workspace", "")
-        self._question_timeout_s = float(config.get("question_timeout_s") or defaults.get("question_timeout_s", 600.0))
+        _qt = config.get("question_timeout_s")
+        self._question_timeout_s = float(_qt if _qt is not None else defaults.get("question_timeout_s", 600.0))
         self._answer_temperature = _resolve("answer_temperature", float)
         self._omit_answer_temperature = _resolve("omit_answer_temperature", bool)
         self._initial_retrieval_query_mode = _resolve("initial_retrieval_query_mode", str)

@@ -60,10 +60,9 @@ LoCoMo 数据集已经包含在
 `benchmarks/locomo/data/locomo10.json`，测试者不需要另外下载或指定
 `--dataset`。
 
-### 1. 配置已有记忆
+### 1. 配置
 
-`conv-30` 默认直接复用已经注入好的 EchoMem workspace，不会重新执行
-open/add/commit。先复制配置模板：
+`conv-30` 默认注入记忆到新创建的独立身份。先复制配置模板：
 
 ```bash
 cp .env.example .env
@@ -86,10 +85,9 @@ ANSWER_MODEL=deepseek-v4-flash
 ANSWER_TOKEN=YOUR_API_KEY
 ```
 
-`ECHOMEM_WORKSPACE` 必须指向包含 `conv-30` 已有记忆的目录，不能是新建空目录。
-保持 `ECHOMEM_AUTO_START=1` 时，`eval.sh` 会使用该目录启动 EchoMem，并在评测
-结束后关闭服务。若 `ECHOMEM_BASE_URL` 上已有服务，必须确认它也是由同一
-workspace 启动的。
+`ECHOMEM_WORKSPACE` 指向 EchoMem 的 workspace 目录。保持 `ECHOMEM_AUTO_START=1`
+时，`eval.sh` 会使用该目录启动 EchoMem，并在评测结束后关闭服务。若
+`ECHOMEM_BASE_URL` 上已有服务，必须确认它也是由同一 workspace 启动的。
 
 ### 2. 运行检查
 
@@ -135,8 +133,8 @@ SHA-256。
 
 | 命令 | 默认 QA profile | 记忆行为 |
 |---|---|---|
-| `--tools` | `vikingboat0411` | 初始检索，并允许只读 `memory_*` 工具循环 |
-| `--no-tools` | `vikingboat0411-natural-no-tools` | 只使用完整初始记忆正文，不暴露工具 schema |
+| `--tools` | `vikingboat0411` | 新开身份注入记忆，初始检索，并允许只读 `memory_*` 工具循环 |
+| `--no-tools` | `vikingboat0411-natural-no-tools` | 新开身份注入记忆，只使用完整初始记忆正文，不暴露工具 schema |
 
 结果写入 `results/<run-name>/<timestamp>/`，主要文件包括
 `qa_results.csv`、`judge_results.csv`、`summary.json` 和
@@ -150,15 +148,6 @@ SHA-256。
 ./eval.sh locomo --sample conv-30 --questions 1 --tools
 ```
 
-确实需要重新注入记忆时：
-
-```bash
-./eval.sh locomo --sample conv-30 --inject-memory --tools
-```
-
-`--inject-memory` 会使用隔离身份执行 open/add/commit，不属于默认的已有记忆
-复用测试。
-
 ## 其他用法
 
 使用根目录统一入口；首次运行会自动创建 `.venv` 并安装依赖。
@@ -170,10 +159,9 @@ SHA-256。
 # 保留自动启动的 EchoMem 服务
 ./eval.sh locomo --start-echomem --keep-echomem --sample conv-30
 
-# 从中断运行继续，健康 QA/Judge 行不会再次调用模型
+# 从中断运行继续，复用已有身份和已完成 session，健康 QA/Judge 行不会再次调用模型
 ./eval.sh locomo \
   --sample conv-30 \
-  --reuse-memory-account \
   --resume-qa /path/to/interrupted-run \
   --resume-judge /path/to/interrupted-run
 
@@ -185,15 +173,12 @@ SHA-256。
 默认情况下，只要任何记忆导入没有完成，评测会在 QA 前退出并生成失败
 `summary.json`。`--allow-incomplete-imports` 仅用于排障，不能用于正式分数。
 
-LoCoMo 默认直接使用已配置身份中的现有记忆并跳过 open/add/commit。
-这里的“现有记忆”来自 `.env` 中 `ECHOMEM_WORKSPACE` 指向的目录。若
-`ECHOMEM_BASE_URL` 上已经运行了 EchoMem，它必须也是用同一目录启动的；
-`--workspace` 不会在运行中的服务内动态切换存储目录。最稳妥的交付方式是保持
-`ECHOMEM_AUTO_START=1`，并确保该端口未被另一份 EchoMem workspace 占用。
-需要重新注入时增加 `--inject-memory`，评测会创建独立 tenant/user 并在结束时
-自动删除；需要保留该隔离记忆供 workspace 诊断时再增加
-`--keep-memory-account`。其他静态数据集仍保持原有隔离注入行为。运行结果会记录
-`memory_source=existing|injected` 和实际身份，但 auth key 只会以掩码形式保存。
+LoCoMo 不指定 `--resume-qa` 时，总是新开身份并从零注入全部记忆；
+指定 `--resume-qa` 时，复用原有身份，跳过已注入完成的 batch，只继续注入
+未完成部分，然后恢复 QA。所有身份均不会在评测结束时自动删除，需要清理时
+由用户在 EchoMem 侧手动操作。其他静态数据集（HotpotQA、LongMemEval）始终
+新开身份注入。运行结果会记录 `memory_source=existing|injected` 和实际身份，
+但 auth key 只会以掩码形式保存。
 LoCoMo 在进入 QA 前还会校验数据集 SHA-256 和实际 session manifest；session
 数量与当前 `session-mode` 不一致时默认拒绝运行，防止复用 tenant 被额外注入
 污染。`--allow-memory-provenance-mismatch` 仅用于诊断。

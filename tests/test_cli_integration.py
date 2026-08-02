@@ -130,7 +130,6 @@ class StaticCliIntegrationTests(unittest.TestCase):
         output: Path,
         *extra_args: str,
     ) -> dict:
-        deletes_before = _FakeServices.delete_requests
         command = [
             sys.executable,
             str(ROOT / "eval.py"),
@@ -155,7 +154,6 @@ class StaticCliIntegrationTests(unittest.TestCase):
             timeout=20,
         )
         self.assertEqual(0, completed.returncode, completed.stdout + completed.stderr)
-        self.assertEqual(deletes_before + 1, _FakeServices.delete_requests)
         summaries = list(output.glob("*/summary.json"))
         self.assertEqual(1, len(summaries))
         return json.loads(summaries[0].read_text(encoding="utf-8"))
@@ -189,8 +187,7 @@ class StaticCliIntegrationTests(unittest.TestCase):
 
             self.assertEqual("completed", summary["status"])
             self.assertEqual(1.0, summary["avg_f1"])
-            self.assertEqual("isolated", summary["memory_identity"]["mode"])
-            self.assertEqual("ephemeral", summary["memory_identity"]["retention"])
+            self.assertEqual("fresh", summary["memory_identity"]["mode"])
 
     def test_locomo_full_cli_flow(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -214,72 +211,12 @@ class StaticCliIntegrationTests(unittest.TestCase):
                 "locomo",
                 dataset,
                 root / "results",
-                "--inject-memory",
             )
 
             self.assertEqual("completed", summary["status"])
             self.assertEqual(1.0, summary["accuracy"])
             self.assertEqual(0, summary["judge_errors"])
             self.assertEqual("injected", summary["memory_source"])
-
-    def test_locomo_reuses_existing_memory_without_import(self):
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            dataset = root / "locomo.json"
-            dataset.write_text(json.dumps([{
-                "sample_id": "conv-test",
-                "conversation": {
-                    "speaker_a": "Alex",
-                    "speaker_b": "Sam",
-                    "session_1": [
-                        {"speaker": "Alex", "dia_id": "d1", "text": "The answer is answer."},
-                    ],
-                    "session_1_date_time": "9:00 AM on 2 January, 2023",
-                },
-                "qa": [{"question": "What is the answer?", "answer": "answer"}],
-            }]), encoding="utf-8")
-            output = root / "results"
-            opens_before = _FakeServices.session_open_requests
-            tenants_before = _FakeServices.tenant_create_requests
-            deletes_before = _FakeServices.delete_requests
-            command = [
-                sys.executable,
-                str(ROOT / "eval.py"),
-                "locomo",
-                "--env-file", str(root / "missing.env"),
-                "--dataset", str(dataset),
-                "--questions", "1",
-                "--memory-backend", "echomem",
-                "--echomem-url", self.base_url,
-                "--echomem-auth-key", "existing-key",
-                "--account", "existing-account",
-                "--user-id", "existing-user",
-                "--reuse-memory-account",
-                "--llm-base-url", f"{self.base_url}/v1",
-                "--llm-api-key", "test-key",
-                "--llm-model", "test-model",
-                "--out-dir", str(output),
-                "--concurrency", "1",
-            ]
-
-            completed = subprocess.run(
-                command,
-                cwd=ROOT,
-                text=True,
-                capture_output=True,
-                timeout=20,
-            )
-
-            self.assertEqual(0, completed.returncode, completed.stdout + completed.stderr)
-            self.assertEqual(opens_before, _FakeServices.session_open_requests)
-            self.assertEqual(tenants_before, _FakeServices.tenant_create_requests)
-            self.assertEqual(deletes_before, _FakeServices.delete_requests)
-            summaries = list(output.glob("*/summary.json"))
-            self.assertEqual(1, len(summaries))
-            summary = json.loads(summaries[0].read_text(encoding="utf-8"))
-            self.assertEqual("existing", summary["memory_source"])
-            self.assertEqual("reused", summary["memory_identity"]["mode"])
-            self.assertEqual(0, summary["import_total"])
 
     def test_locomo_resume_reuses_qa_and_judge_without_model_calls(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -314,7 +251,6 @@ class StaticCliIntegrationTests(unittest.TestCase):
                 "--echomem-auth-key", "existing-key",
                 "--account", "existing-account",
                 "--user-id", "existing-user",
-                "--reuse-memory-account",
                 "--llm-base-url", f"{self.base_url}/v1",
                 "--llm-api-key", "test-key",
                 "--llm-model", "test-model",

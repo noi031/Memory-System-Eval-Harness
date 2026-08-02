@@ -61,14 +61,4 @@ def add_memory_backend_args(parser: argparse.ArgumentParser, *, with_backend_cho
         default=2.0,
         help="Seconds between commit status polls",
     )
-    identity = g.add_mutually_exclusive_group()
-    identity.add_argument(
-        "--reuse-memory-account",
-        action="store_true",
-        help="Reuse the configured memory identity instead of isolating this evaluation run",
-    )
-    identity.add_argument(
-        "--keep-memory-account",
-        action="store_true",
-        help="Keep the isolated memory identity after evaluation for diagnostics",
-    )
+
