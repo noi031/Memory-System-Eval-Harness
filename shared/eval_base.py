@@ -18,8 +18,7 @@ and dynamic run_eval. It provides:
     benchmarks that use LLM-based judging. Called by benchmark run_eval.
   - resolve_llm_credentials: complementary fallback between two sets of
     LLM credentials (e.g. scenario LLM vs answer LLM in dynamic mode).
-  - EvalRun: manages the timestamped result directory, logging, and
-    optional EchoMem log collection.
+  - EvalRun: manages the timestamped result directory and logging.
 """
 
 from __future__ import annotations
@@ -28,7 +27,6 @@ import argparse
 import json
 import logging
 import os
-import shutil
 import sys
 import time
 from dataclasses import dataclass, field, asdict
@@ -95,7 +93,6 @@ class EvalRun:
             run.log
             results.csv
             summary.json
-            echomem_logs/   (copied from EchoMem log dir if provided)
     """
 
     def __init__(
@@ -103,11 +100,9 @@ class EvalRun:
         benchmark_name: str,
         results_root: str | Path = "results",
         config: EvalConfig | None = None,
-        echomem_log_dir: str = "",
     ):
         self.benchmark_name = benchmark_name
         self.config = config or EvalConfig()
-        self.echomem_log_dir = echomem_log_dir
         self.started_at = datetime.now(timezone.utc)
         self.started_monotonic = time.monotonic()
         ts = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
@@ -178,31 +173,6 @@ class EvalRun:
 
     def finished_at_iso(self) -> str:
         return datetime.now(timezone.utc).isoformat()
-
-    def collect_echomem_logs(self) -> None:
-        """Copy EchoMem log files into the result directory.
-
-        If ``echomem_log_dir`` is set and exists, copy commit/search related
-        log files into ``result_dir / echomem_logs/``.
-        """
-        if not self.echomem_log_dir:
-            return
-        src = Path(self.echomem_log_dir)
-        if not src.exists():
-            self.log(f"EchoMem log dir not found: {src}", logging.WARNING)
-            return
-
-        dest = self.result_dir / "echomem_logs"
-        dest.mkdir(exist_ok=True)
-        copied = 0
-        for f in src.iterdir():
-            if f.is_file() and (f.suffix in (".log", ".jsonl", ".json") or "commit" in f.name or "search" in f.name):
-                try:
-                    shutil.copy2(f, dest / f.name)
-                    copied += 1
-                except Exception as e:
-                    self.log(f"Failed to copy {f.name}: {e}", logging.WARNING)
-        self.log(f"Copied {copied} EchoMem log files to {dest}")
 
     def elapsed_str(self, start: float) -> str:
         return f"{time.monotonic() - start:.1f}s"

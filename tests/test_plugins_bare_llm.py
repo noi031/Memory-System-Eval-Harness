@@ -156,7 +156,6 @@ class BareLLMPluginAddArgumentsTests(unittest.TestCase):
             "user_id",
             "agent_id",
             "workspace",
-            "echomem_log_dir",
             "commit_timeout_s",
             "commit_poll_interval_s",
         ]

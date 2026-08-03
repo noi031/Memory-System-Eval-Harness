@@ -224,20 +224,32 @@ LLM 凭据和参数，由所选插件通过 `add_llm_args()` 声明。质量评�
 > **base_url / api_key 互补**: scenario 和 LLM 的 base_url / api_key, 一个有值另一个为空时, 空的自动复制有值的。两者都设置了则各自使用。
 
 ### 记忆后端参数 (通过插件声明)
-EchoMem/OpenViking 连接和身份管理参数，由所选插件通过 `add_memory_backend_args()` 声明。
+
+记忆后端连接和身份管理参数，由所选插件通过 `add_memory_backend_args()` 声明。
+动态评测默认使用 `echo_agent` 插件，也可切换为 `bare_llm`。完整设计说明见
+`benchmarks/doc/设计意图.md`。
+
+#### echo_agent 插件 (默认)
+支持 `--memory-backend` 选择 echomem 或 openviking。`--echomem-auth-key` 留空
+时自动从 echoagent 插件解析；`--agent-id` 为 `default` 时自动设为 `echoagent`。
+选择 openviking 时需指定 `--echomem-url http://127.0.0.1:19080`。
 
 | 参数 | 默认值 | 说明 |
 |---|---|---|
 | `--memory-backend` | `echomem` | 记忆后端: `echomem` 或 `openviking` |
-| `--echomem-url` | `http://127.0.0.1:8010` | 记忆后端 HTTP 地址 |
-| `--echomem-auth-key` | (空) | 后端 X-Auth-Key (echo_agent 留空时自动解析) |
+| `--echomem-url` | `http://127.0.0.1:8010` | 后端 HTTP 地址 |
+| `--echomem-auth-key` | (空) | 后端 X-Auth-Key (留空时自动解析) |
 | `--account` | `default` | 后端 account |
 | `--user-id` | `default` | 后端 user_id |
-| `--agent-id` | `default` | 后端 agent_id (echo_agent 默认自动设为 `echoagent`) |
+| `--agent-id` | `default` | 后端 agent_id (默认自动设为 `echoagent`) |
 | `--workspace` | (空) | 后端 workspace 路径 |
-| `--echomem-log-dir` | (空) | 后端日志目录 (用于收集日志到评测结果) |
 | `--commit-timeout-s` | `0` | 注入 commit 轮询超时 (秒)，0 表示无限等待 |
 | `--commit-poll-interval-s` | `2.0` | 注入 commit 轮询间隔 (秒) |
+| `--timeout-s` | `60.0` | 后端 HTTP 请求超时 (秒) |
+| `--max-retries` | `3` | 后端 HTTP 请求最大重试次数 |
+
+#### bare_llm 插件
+不声明任何记忆后端参数，适用于无记忆系统基线测试。
 
 ### echo_agent 插件参数
 | 参数 | 默认值 | 说明 |
@@ -259,7 +271,6 @@ EchoMem/OpenViking 连接和身份管理参数，由所选插件通过 `add_memo
 - `dynamic_results.csv` - CSV 格式结果
 - `quality_report.json` - v2 格式质量评估报告 (含 avg_quality_score/avg_dimension_scores/每条 result 的 quality_score/dimension_info/quality_reason/strengths/weaknesses 等)
 - `summary.json` - 汇总指标
-- `echomem_logs/` - EchoMem 日志
 
 ### dataset.json 格式 (参考 origin/v2 前端)
 

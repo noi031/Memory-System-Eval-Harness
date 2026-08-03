@@ -15,6 +15,7 @@ QA goes through the full EchoAgent pipeline (prefill + SSE streaming).
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import os
 import time
@@ -319,6 +320,12 @@ class EchoAgentPlugin(AgentPlugin):
                 f"memory injection failed: status={commit.status} error={commit.error}"
             )
         return session_id
+
+    def getlog(self) -> str:
+        """Fetch backend logs and return as JSON string."""
+        if self._memory_backend == "openviking":
+            return json.dumps(self.memory_client.fetch_console_logs(), ensure_ascii=False, indent=2)
+        return json.dumps({}, indent=2)
 
     def teardown(self) -> None:
         pass

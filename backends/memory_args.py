@@ -45,11 +45,6 @@ def add_memory_backend_args(parser: argparse.ArgumentParser, *, with_backend_cho
     g.add_argument("--agent-id", default=os.getenv("ECHOMEM_AGENT_ID", "default"))
     g.add_argument("--workspace", default=os.getenv("ECHOMEM_WORKSPACE", ""), help="Memory backend workspace path")
     g.add_argument(
-        "--echomem-log-dir",
-        default="",
-        help="Memory backend log directory for log collection",
-    )
-    g.add_argument(
         "--commit-timeout-s",
         type=float,
         default=0.0,

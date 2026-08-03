@@ -326,3 +326,28 @@ class OpenVikingClient(BaseHTTPMemoryClient):
         except (OSError, ValueError) as e:
             self._log.warning("fs_glob failed for %s: %s", pattern, e)
         return entries
+
+    # -- console logs ---------------------------------------------------
+
+    def fetch_console_logs(self) -> dict[str, Any]:
+        """Fetch all four console API endpoints and return a combined dict."""
+        today = datetime.now().strftime("%Y-%m-%d")
+        logs: dict[str, Any] = {}
+        endpoints: list[tuple[str, str, dict[str, Any] | None]] = [
+            ("dashboard_summary", "/api/v1/console/dashboard/summary", None),
+            ("tokens", "/api/v1/console/tokens", {
+                "start_date": today, "end_date": today, "bucket": "day",
+            }),
+            ("context_commits", "/api/v1/console/context-commits", {
+                "start_date": today, "end_date": today, "bucket": "hour",
+            }),
+            ("audit", "/api/v1/console/audit", {
+                "page": 1, "page_size": 100,
+            }),
+        ]
+        for name, path, query in endpoints:
+            try:
+                logs[name] = self._get(path, query)
+            except Exception as e:
+                logs[name] = {"error": str(e)}
+        return logs

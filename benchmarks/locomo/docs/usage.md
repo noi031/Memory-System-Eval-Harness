@@ -108,19 +108,83 @@ python benchmarks/locomo/run_eval.py \
 | `--max-sessions` | `0` | 每个 sample 最多导入多少个原始 session (0=全部) |
 
 ### 记忆后端参数 (通过插件声明)
-EchoMem/OpenViking 连接和身份管理参数，由所选插件通过 `add_memory_backend_args()` 声明。
+
+记忆后端连接和身份管理参数，由所选插件通过 `add_memory_backend_args()` 声明。
+不同插件暴露的参数不同：支持多后端的插件（vikingbot、echo_agent）额外暴露
+`--memory-backend`；不支持记忆注入的插件（bare_llm）不声明任何后端参数。
+完整设计说明见 `benchmarks/doc/设计意图.md`。
+
+#### vikingbot 插件 (默认)
+支持 `--memory-backend` 选择 echomem 或 openviking。选择 openviking 时需指定
+`--echomem-url http://127.0.0.1:19080`。
+
 | 参数 | 默认值 | 说明 |
 |---|---|---|
-| `--memory-backend` | `echomem` | 记忆后端选择: `echomem` 或 `openviking` (仅 vikingbot/echo_agent 插件) |
-| `--echomem-url` | `http://127.0.0.1:8010` | 记忆后端 HTTP 地址 |
+| `--memory-backend` | `echomem` | 记忆后端选择: `echomem` 或 `openviking` |
+| `--echomem-url` | `http://127.0.0.1:8010` | 后端 HTTP 地址 |
 | `--echomem-auth-key` | (空) | 后端 X-Auth-Key (也可通过 `ECHOMEM_AUTH_KEY` 设置) |
 | `--account` | `default` | 后端 account |
 | `--user-id` | `default` | 后端 user_id |
 | `--agent-id` | `default` | 后端 agent_id |
 | `--workspace` | (空) | 后端 workspace 路径 |
-| `--echomem-log-dir` | (空) | 后端日志目录 (用于收集日志到评测结果) |
 | `--commit-timeout-s` | `0` | Commit 轮询超时 (秒)，0 表示无限等待 |
 | `--commit-poll-interval-s` | `2.0` | Commit 轮询间隔 (秒) |
+| `--timeout-s` | `60.0` | 后端 HTTP 请求超时 (秒) |
+| `--max-retries` | `3` | 后端 HTTP 请求最大重试次数 |
+
+#### echomem_mcp 插件
+固定使用 EchoMem 后端，不暴露 `--memory-backend`。
+
+| 参数 | 默认值 | 说明 |
+|---|---|---|
+| `--echomem-url` | `http://127.0.0.1:8010` | EchoMem HTTP 地址 |
+| `--echomem-auth-key` | (空) | X-Auth-Key (也可通过 `ECHOMEM_AUTH_KEY` 设置) |
+| `--account` | `default` | 后端 account |
+| `--user-id` | `default` | 后端 user_id |
+| `--agent-id` | `default` | 后端 agent_id |
+| `--workspace` | (空) | 后端 workspace 路径 |
+| `--commit-timeout-s` | `0` | Commit 轮询超时 (秒)，0 表示无限等待 |
+| `--commit-poll-interval-s` | `2.0` | Commit 轮询间隔 (秒) |
+| `--timeout-s` | `60.0` | 后端 HTTP 请求超时 (秒) |
+| `--max-retries` | `3` | 后端 HTTP 请求最大重试次数 |
+
+#### openviking_mcp 插件
+固定使用 OpenViking 后端，不暴露 `--memory-backend`。使用时需指定
+`--echomem-url http://127.0.0.1:19080`。
+
+| 参数 | 默认值 | 说明 |
+|---|---|---|
+| `--echomem-url` | `http://127.0.0.1:8010` | OpenViking HTTP 地址 (实际使用时需改为 19080 端口) |
+| `--echomem-auth-key` | (空) | 后端 API Key |
+| `--account` | `default` | 后端 account |
+| `--user-id` | `default` | 后端 user_id |
+| `--agent-id` | `default` | 后端 agent_id |
+| `--workspace` | (空) | 后端 workspace 路径 |
+| `--commit-timeout-s` | `0` | Commit 轮询超时 (秒)，0 表示无限等待 |
+| `--commit-poll-interval-s` | `2.0` | Commit 轮询间隔 (秒) |
+| `--timeout-s` | `60.0` | 后端 HTTP 请求超时 (秒) |
+| `--max-retries` | `3` | 后端 HTTP 请求最大重试次数 |
+
+#### echo_agent 插件
+支持 `--memory-backend` 选择 echomem 或 openviking。`--echomem-auth-key` 留空
+时自动从 echoagent 插件解析；`--agent-id` 为 `default` 时自动设为 `echoagent`。
+
+| 参数 | 默认值 | 说明 |
+|---|---|---|
+| `--memory-backend` | `echomem` | 记忆后端选择: `echomem` 或 `openviking` |
+| `--echomem-url` | `http://127.0.0.1:8010` | 后端 HTTP 地址 |
+| `--echomem-auth-key` | (空) | 后端 X-Auth-Key (留空时自动解析) |
+| `--account` | `default` | 后端 account |
+| `--user-id` | `default` | 后端 user_id |
+| `--agent-id` | `default` | 后端 agent_id (默认自动设为 `echoagent`) |
+| `--workspace` | (空) | 后端 workspace 路径 |
+| `--commit-timeout-s` | `0` | Commit 轮询超时 (秒)，0 表示无限等待 |
+| `--commit-poll-interval-s` | `2.0` | Commit 轮询间隔 (秒) |
+| `--timeout-s` | `60.0` | 后端 HTTP 请求超时 (秒) |
+| `--max-retries` | `3` | 后端 HTTP 请求最大重试次数 |
+
+#### bare_llm 插件
+不声明任何记忆后端参数，适用于无记忆系统基线测试。
 
 ### LLM 参数 (通过插件声明)
 | 参数 | 默认值 | 说明 |
@@ -195,7 +259,6 @@ EchoMem/OpenViking 连接和身份管理参数，由所选插件通过 `add_memo
 - `summary.json` - 汇总指标，包含 memory_source、qa_profile、served model ids、tool protocol hash、tool_call_total、avg_iterations 和 diagnosis 摘要
 - `strict_blackbox_metrics.json` - 仅使用外部可观测状态、延迟、重试和 token usage 的指标
 - `strict_blackbox_report.md` - strict black-box Markdown 报告
-- `echomem_logs/` - EchoMem 日志 (如配置了 `--echomem-log-dir`)
 
 ## 独立分析与恢复
 

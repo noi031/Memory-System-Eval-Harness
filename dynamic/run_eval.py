@@ -186,7 +186,6 @@ def main() -> None:
         benchmark_name="dynamic",
         results_root=results_root,
         config=config,
-        echomem_log_dir=getattr(args, "echomem_log_dir", ""),
     )
     log = run.logger
 
@@ -210,6 +209,8 @@ def main() -> None:
         else:
             run_generate_mode(args, run, agent_plugin, llm)
     finally:
+        log_json = agent_plugin.getlog()
+        (run.result_dir / "backend_logs.json").write_text(log_json, encoding="utf-8")
         agent_plugin.teardown()
 
 

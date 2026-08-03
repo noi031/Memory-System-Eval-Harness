@@ -26,7 +26,6 @@ EXPECTED_DEFAULTS = {
     "user_id": "default",
     "agent_id": "default",
     "workspace": "",
-    "echomem_log_dir": "",
     "commit_timeout_s": 0.0,
     "commit_poll_interval_s": 2.0,
 }
@@ -125,12 +124,6 @@ class EnvFallbackTests(unittest.TestCase):
                     args = _new_parser().parse_args([])
                 self.assertEqual(value, getattr(args, dest))
 
-    def test_echomem_log_dir_has_no_env_fallback(self) -> None:
-        # --echomem-log-dir is always "" regardless of env; confirm isolation.
-        with _env_with(ECHOMEM_LOG_DIR="/should/not/be/used"):
-            args = _new_parser().parse_args([])
-        self.assertEqual("", args.echomem_log_dir)
-
 
 class ParsingTests(unittest.TestCase):
     """Explicit CLI values are parsed and stored correctly."""
@@ -145,7 +138,6 @@ class ParsingTests(unittest.TestCase):
                     "--user-id", "u",
                     "--agent-id", "g",
                     "--workspace", "/w",
-                    "--echomem-log-dir", "/logs",
                     "--commit-timeout-s", "30.5",
                     "--commit-poll-interval-s", "0.5",
                 ]
@@ -156,7 +148,6 @@ class ParsingTests(unittest.TestCase):
         self.assertEqual("u", args.user_id)
         self.assertEqual("g", args.agent_id)
         self.assertEqual("/w", args.workspace)
-        self.assertEqual("/logs", args.echomem_log_dir)
         self.assertEqual(30.5, args.commit_timeout_s)
         self.assertEqual(0.5, args.commit_poll_interval_s)
 

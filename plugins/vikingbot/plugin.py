@@ -12,6 +12,7 @@ that adapts the QAResult into an AgentResponse.
 from __future__ import annotations
 
 import argparse
+import json
 import os
 from pathlib import Path
 from typing import Any
@@ -300,3 +301,9 @@ class VikingBotPlugin(AgentPlugin):
                 "trace": qa.trace,
             },
         )
+
+    def getlog(self) -> str:
+        """Fetch backend logs and return as JSON string."""
+        if self._memory_backend == "openviking":
+            return json.dumps(self.memory_client.fetch_console_logs(), ensure_ascii=False, indent=2)
+        return json.dumps({}, indent=2)

@@ -302,7 +302,6 @@ def save_results(
         encoding="utf-8",
     )
     log.info("数据集已保存: %s", dataset_path)
-    run.collect_echomem_logs()
 
     quality_scores = [
         row["quality_score"]

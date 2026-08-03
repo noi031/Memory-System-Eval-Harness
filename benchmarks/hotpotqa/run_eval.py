@@ -89,7 +89,6 @@ def main() -> None:
         benchmark_name="hotpotqa",
         results_root=results_root_for(Path(__file__).parent, args.out_dir),
         config=config,
-        echomem_log_dir=getattr(args, "echomem_log_dir", ""),
     )
     log = run.logger
 
@@ -208,8 +207,9 @@ def main() -> None:
         evaluation_report.joint_em,
     )
 
-    # 收集 EchoMem 日志
-    run.collect_echomem_logs()
+    # 收集 agent/记忆后端日志
+    log_json = agent_plugin.getlog()
+    (run.result_dir / "backend_logs.json").write_text(log_json, encoding="utf-8")
 
     summary = build_summary(
         dataset_path=dataset_path,

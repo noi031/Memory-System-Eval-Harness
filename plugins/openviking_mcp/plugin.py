@@ -25,6 +25,7 @@ import argparse
 import json
 import logging
 import time
+from pathlib import Path
 from typing import Any
 
 from plugins.base import AgentDescriptor, AgentPlugin, AgentResponse
@@ -326,3 +327,9 @@ class OpenVikingMCPPlugin(AgentPlugin):
                 "llm_latency_s": elapsed,
             },
         )
+
+    def getlog(self) -> str:
+        """Fetch OpenViking console logs and return as JSON string."""
+        if isinstance(self.memory_client, OpenVikingClient):
+            return json.dumps(self.memory_client.fetch_console_logs(), ensure_ascii=False, indent=2)
+        return json.dumps({}, indent=2)

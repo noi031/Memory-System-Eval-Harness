@@ -46,6 +46,9 @@ class _MinimalPlugin(AgentPlugin):
     def setup(self, config: dict) -> None:
         self.config = config
 
+    def getlog(self) -> str:
+        return "{}"
+
 
 # ------------------------------------------------------------------ #
 #  AgentDescriptor                                                   #
@@ -357,6 +360,20 @@ class AgentPluginABCTests(unittest.TestCase):
         plugin = _MinimalPlugin()
         self.assertIsNone(plugin.teardown())
 
+    # -- getlog --------------------------------------------------------
+
+    def test_getlog_is_abstract(self):
+        self.assertIn("getlog", AgentPlugin.__abstractmethods__)
+
+    def test_getlog_minimal_plugin_is_noop(self):
+        plugin = _MinimalPlugin()
+        plugin.getlog()  # must not raise
+
+    def test_getlog_returns_str(self):
+        plugin = _MinimalPlugin()
+        result = plugin.getlog()
+        self.assertIsInstance(result, str)
+
     # -- qa_profile ----------------------------------------------------
 
     def test_qa_profile_returns_descriptor_id(self):
@@ -371,6 +388,9 @@ class AgentPluginABCTests(unittest.TestCase):
 
             def setup(self, config: dict) -> None:
                 pass
+
+            def getlog(self) -> str:
+                return "{}"
 
         self.assertEqual("other-id", _Other().qa_profile)
 

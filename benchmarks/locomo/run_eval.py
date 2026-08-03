@@ -275,7 +275,6 @@ def main() -> None:
         benchmark_name="locomo",
         results_root=results_root_for(Path(__file__).parent, args.out_dir),
         config=config,
-        echomem_log_dir=getattr(args, "echomem_log_dir", ""),
     )
     log = run.logger
 
@@ -557,8 +556,9 @@ def main() -> None:
         len(diagnosis["retryable_question_ids"]),
     )
 
-    # 收集 EchoMem 日志
-    run.collect_echomem_logs()
+    # 收集 agent/记忆后端日志
+    log_json = agent_plugin.getlog()
+    (run.result_dir / "backend_logs.json").write_text(log_json, encoding="utf-8")
 
     # 保存 summary
     summary = build_summary(

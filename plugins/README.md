@@ -8,6 +8,7 @@ Agent 插件让评测框架支持评测不同的 agent。评测流程只调用 `
 setup(config)
   -> inject_memories(memories, backend=...)
   -> (create_session -> [simulate_typing] -> send_message)*
+  -> getlog
   -> teardown
 ```
 
@@ -80,6 +81,7 @@ class AgentPlugin(ABC):
     @property
     def supports_typing_simulation(self) -> bool
     def simulate_typing(self, session_id, context_path, text, speed_ms, jitter_ms) -> TypingResult | None
+    def getlog(self) -> str
     def teardown(self) -> None
 ```
 
@@ -90,6 +92,7 @@ class AgentPlugin(ABC):
 - `send_message(session_id, message, context_path, *, extra)`: 发送消息, 返回 `AgentResponse`。`extra` dict 携带 benchmark 上下文 (question_time, question_id 等)，动态模式为 None。
 - `supports_typing_simulation` (property): 是否支持模拟打字。
 - `simulate_typing(...)`: 模拟打字触发 prefill。返回 `TypingResult` 或 `None`。
+- `getlog()`: 获取 agent/记忆后端日志, 返回 JSON 字符串。评测结束时由 runner 保存到结果目录。
 - `teardown()`: 释放资源。
 
 `AgentResponse` 字段: `text`, `ttft_ms`, `prompt_tokens`, `completion_tokens`, `cached_tokens`, `prefetch_committed`, `memory_items`, `error`, `extra`。
@@ -124,6 +127,8 @@ class MyAgentPlugin(AgentPlugin):
     def create_session(self, title=""):
         ...
     def send_message(self, session_id, message, context_path="/", *, extra=None):
+        ...
+    def getlog(self) -> str:
         ...
 ```
 

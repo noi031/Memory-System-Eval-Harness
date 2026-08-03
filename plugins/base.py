@@ -4,7 +4,7 @@ Each agent under test implements AgentPlugin. The harness calls the
 step-based methods for both benchmark and dynamic evaluation:
 
     setup(config) -> inject_memories(memories) ->
-    (create_session -> [simulate_typing] -> send_message)* -> teardown
+    (create_session -> [simulate_typing] -> send_message)* -> getlog -> teardown
 
 Only setup() is required. Other methods raise NotImplementedError by
 default; each plugin overrides the ones it supports.
@@ -72,7 +72,7 @@ class AgentPlugin(ABC):
 
     Evaluation lifecycle:
         setup(config) -> inject_memories(memories) ->
-        (create_session -> [simulate_typing] -> send_message)* -> teardown
+        (create_session -> [simulate_typing] -> send_message)* -> getlog -> teardown
 
     Memory injection is part of this interface. Plugins that support it
     override inject_memories(); the default is a no-op returning session_id.
@@ -172,6 +172,14 @@ class AgentPlugin(ABC):
         The default implementation always returns None.
         """
         return None
+
+    @abstractmethod
+    def getlog(self) -> str:
+        """Fetch agent/memory backend logs and return as a JSON string.
+
+        Called by the evaluation runner at the end of a run. The runner
+        saves the returned JSON string to the result directory.
+        """
 
     def teardown(self) -> None:
         """Release resources. Default: no-op."""

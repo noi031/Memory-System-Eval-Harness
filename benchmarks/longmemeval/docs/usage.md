@@ -118,7 +118,6 @@ benchmark 只定义数据集参数和评测基础设施参数 (`--concurrency`�
 - `qa_results.csv` 中的 `retrieval_items_json` - 原始检索证据及后端 metadata
 - `eval_results.csv` - Judge 结果 (question_id, question_type, correct)
 - `summary.json` - 汇总 (accuracy, per_type accuracy, token usage)
-- `echomem_logs/` - EchoMem 日志
 
 并行运行额外生成 `parallel_manifest.json`、每个 shard 的 `runner.log`、
 `parallel_summary.json`，以及 `merged/` 下去重合并后的 CSV 和

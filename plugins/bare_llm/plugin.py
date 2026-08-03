@@ -8,6 +8,7 @@ with a fixed system prompt.
 from __future__ import annotations
 
 import argparse
+import json
 import time
 
 from plugins.base import AgentDescriptor, AgentPlugin, AgentResponse
@@ -87,3 +88,7 @@ class BareLLMPlugin(AgentPlugin):
             error=resp.error or None,
             extra={"elapsed_s": elapsed_s},
         )
+
+    def getlog(self) -> str:
+        """No backend logs available; return empty JSON."""
+        return json.dumps({}, indent=2)

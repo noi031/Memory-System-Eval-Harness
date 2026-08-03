@@ -80,7 +80,6 @@ metadata；若存在显式 `hotpotqa_title` / `hotpotqa_sent_id`，评测优先�
 - `qa_results.csv` - QA 结果，包含 `retrieval_items_json`
 - `eval_results.csv` - answer/supporting-fact/joint precision、recall、F1、EM
 - `summary.json` - 汇总 answer/supporting-fact/joint 指标和 token usage
-- `echomem_logs/` - EchoMem 日志
 
 ## 失败与缺失题恢复
 

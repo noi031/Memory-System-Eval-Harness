@@ -20,6 +20,7 @@ import argparse
 import json
 import logging
 import time
+from pathlib import Path
 from typing import Any
 
 from plugins.base import AgentDescriptor, AgentPlugin, AgentResponse
@@ -338,3 +339,7 @@ class EchoMemMCPPlugin(AgentPlugin):
                 "llm_latency_s": elapsed,
             },
         )
+
+    def getlog(self) -> str:
+        """No backend logs available; return empty JSON."""
+        return json.dumps({}, indent=2)
