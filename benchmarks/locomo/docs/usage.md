@@ -87,7 +87,7 @@ python benchmarks/locomo/run_eval.py \
 ## 参数说明
 
 > **参数归属**: benchmark 只定义数据集参数、Judge 参数和评测基础设施参数
-> (`--concurrency`、`--out-dir`、`--allow-incomplete-imports`)。LLM 参数、
+> (`--concurrency`、`--out-dir`、`--allow-diagnostics`)。LLM 参数、
 > QA 检索参数、记忆后端参数和插件特有参数均由所选插件及其记忆后端声明，
 > 详见 `benchmarks/doc/设计意图.md`。切换 `--agent-plugin` 后可用参数会变化，
 > 使用 `--help` 查看。
@@ -164,9 +164,7 @@ EchoMem/OpenViking 连接和身份管理参数，由所选插件通过 `add_memo
 | `--resume-qa` | (空) | 从先前运行目录或 QA CSV 恢复健康答案；复用已有身份，跳过已完成的 session 仅注入缺失部分，并严格校验数据集、模型和 QA 参数 |
 | `--concurrency` | `4` | QA 并发数 |
 | `--out-dir` | `results` | 结果目录 |
-| `--allow-incomplete-imports` | false | 导入未完成仍继续，仅限诊断 |
-| `--allow-memory-provenance-mismatch` | false | session manifest 与数据集/session-mode 不一致时仍继续；仅限诊断 |
-| `--exclude-memory-file` | (空) | 隐藏并拒绝读取指定 EchoMemory 文件系统叶名；可多次指定 |
+| `--allow-diagnostics` | false | 导入未完成或 provenance 不一致仍继续；仅限诊断 |
 
 ### Judge 参数
 | 参数 | 默认值 | 说明 |

@@ -21,7 +21,7 @@ import time
 import uuid
 from typing import Any
 
-from plugins.base import AgentPlugin, AgentResponse, TypingResult
+from plugins.base import AgentPlugin, AgentResponse, AgentDescriptor, TypingResult
 from plugins.echo_agent.client import EchoAgentClient
 from backends.echomem.client import EchoMemClient
 from backends.openviking.client import OpenVikingClient
@@ -38,6 +38,18 @@ class EchoAgentPlugin(AgentPlugin):
     Memory injection supports both echomem and openviking backends, selected
     via --memory-backend (default: echomem).
     """
+
+    descriptor = AgentDescriptor(
+        id="echo_agent",
+        name="EchoAgent",
+        description="EchoAgent full pipeline (prefill + SSE streaming) for dynamic evaluation.",
+        capabilities=(
+            "typing_simulation",
+            "prefill_pipeline",
+            "sse_streaming",
+            "memory_injection",
+        ),
+    )
 
     @classmethod
     def add_arguments(cls, parser: argparse.ArgumentParser) -> None:
@@ -65,9 +77,6 @@ class EchoAgentPlugin(AgentPlugin):
             "memory_engine_endpoint",
             "http://127.0.0.1:31030",
         )
-        self._commit_timeout_s = config.get("commit_timeout_s", 0.0)
-        self._commit_poll_interval_s = config.get("commit_poll_interval_s", 2.0)
-
         # Login to EchoAgent
         self.client = EchoAgentClient(echoagent_url, username, password)
         print(f"登录 EchoAgent ({echoagent_url})...")

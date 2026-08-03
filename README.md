@@ -171,7 +171,7 @@ SHA-256。
 ```
 
 默认情况下，只要任何记忆导入没有完成，评测会在 QA 前退出并生成失败
-`summary.json`。`--allow-incomplete-imports` 仅用于排障，不能用于正式分数。
+`summary.json`。`--allow-diagnostics` 仅用于排障，不能用于正式分数。
 
 LoCoMo 不指定 `--resume-qa` 时，总是新开身份并从零注入全部记忆；
 指定 `--resume-qa` 时，复用原有身份，跳过已注入完成的 batch，只继续注入
@@ -181,7 +181,7 @@ LoCoMo 不指定 `--resume-qa` 时，总是新开身份并从零注入全部记�
 但 auth key 只会以掩码形式保存。
 LoCoMo 在进入 QA 前还会校验数据集 SHA-256 和实际 session manifest；session
 数量与当前 `session-mode` 不一致时默认拒绝运行，防止复用 tenant 被额外注入
-污染。`--allow-memory-provenance-mismatch` 仅用于诊断。
+污染。`--allow-diagnostics` 仅用于诊断。
 
 LoCoMo 未显式指定 profile 时，`--tools` 自动选择 `vikingboat0411`，
 `--no-tools` 自动选择 `vikingboat0411-natural-no-tools`。高级复现仍可通过

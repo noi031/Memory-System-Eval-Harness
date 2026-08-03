@@ -45,7 +45,6 @@ from shared.import_guard import require_complete_imports
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="HotpotQA benchmark evaluation")
-    parser.add_argument("--check", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--dataset", default="", help="HotpotQA JSON 数据集路径 (不指定则自动查找或下载)")
     parser.add_argument("--sample", default="all", help="筛选 sample (all 或 sample index/id)")
     parser.add_argument("--questions", type=int, default=0, help="限制 QA 数量 (0=all)")
@@ -157,7 +156,7 @@ def main() -> None:
     try:
         require_complete_imports(
             import_report.rows,
-            allow_incomplete=args.allow_incomplete_imports,
+            allow_incomplete=args.allow_diagnostics,
         )
     except RuntimeError as exc:
         run.save_summary({

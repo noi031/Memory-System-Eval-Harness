@@ -219,10 +219,10 @@ def run_replay_mode(
     evaluator_config = load_evaluator_config(args.evaluator_config)
     jobs, plans = load_dataset(
         args.dataset,
-        sample_filter=args.dataset_sample,
+        sample_filter=args.sample,
     )
-    if args.dataset_limit > 0:
-        jobs = jobs[:args.dataset_limit]
+    if args.questions > 0:
+        jobs = jobs[:args.questions]
     rounds: list[dict[str, Any]] = []
     facts: dict[str, str] = {}
     backend = getattr(args, "memory_backend", "echomem")
@@ -288,8 +288,8 @@ def run_replay_mode(
         {
             "mode": "replay",
             "dataset": args.dataset,
-            "dataset_sample": args.dataset_sample,
-            "dataset_limit": args.dataset_limit,
+            "sample": args.sample,
+            "questions": args.questions,
             "echoagent_url": args.echoagent_url,
             "echomem_url": args.echomem_url,
             "evaluator_config": args.evaluator_config,

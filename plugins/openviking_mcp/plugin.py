@@ -96,8 +96,8 @@ class OpenVikingMCPPlugin(AgentPlugin):
         self._tool_calling = config.get("tool_calling", True)
         self._search_in_tools = config.get("search_in_tools", True)
         self._manual_search = config.get("manual_search", True)
-        self._top_k = config.get("top_k", 25)
-        self._memory_budget_chars = config.get("memory_budget_chars", 0)
+        self._top_k = config.get("top_k", 10)
+        self._memory_budget_chars = config.get("memory_budget_chars", 8000)
         self._question_timeout_s = float(config.get("question_timeout_s", 120.0))
 
         # Create LLM client

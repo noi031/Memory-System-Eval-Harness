@@ -81,7 +81,7 @@ python benchmarks/longmemeval/run_eval.py \
 |---|---|---|
 | `--concurrency` | `4` | QA 并发数 |
 | `--out-dir` | `results` | 结果目录 |
-| `--allow-incomplete-imports` | false | 导入未完成仍继续，仅限诊断 |
+| `--allow-diagnostics` | false | 导入未完成仍继续，仅限诊断 |
 
 ### 并行参数
 | 参数 | 默认值 | 说明 |
@@ -103,7 +103,7 @@ LongMemEval 默认使用 `vikingbot` 插件。LLM 凭据、QA 检索行为、记
 连接和 VikingBot 特有参数均由插件声明，不由 benchmark `run_eval` 直接定义。
 
 benchmark 只定义数据集参数和评测基础设施参数 (`--concurrency`、`--out-dir`、
-`--allow-incomplete-imports`)。切换 `--agent-plugin` 后可用参数会变化，
+`--allow-diagnostics`)。切换 `--agent-plugin` 后可用参数会变化，
 使用 `--help` 查看。
 
 参数归属的完整设计说明见 `benchmarks/doc/设计意图.md`。

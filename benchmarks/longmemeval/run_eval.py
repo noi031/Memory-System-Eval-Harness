@@ -12,7 +12,6 @@
 from __future__ import annotations
 
 import argparse
-import os
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -37,6 +36,7 @@ from shared.eval_base import (
     EvalRun,
     add_agent_plugin_args,
     add_eval_args,
+    add_judge_args,
     build_config_from_args,
     results_root_for,
     validate_eval_config,
@@ -47,7 +47,6 @@ from shared.llm_client import LLMClient
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="LongMemEval benchmark evaluation")
-    parser.add_argument("--check", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--dataset", default="", help="LongMemEval JSON 数据集路径 (不指定则自动查找或下载)")
     parser.add_argument("--sample", default="all", help="筛选 sample (all 或 index/id)")
     parser.add_argument("--questions", type=int, default=0, help="限制 QA 数量 (0=all)")
@@ -78,11 +77,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     add_agent_plugin_args(parser, default_plugin="vikingbot")
     add_eval_args(parser)
-    # judge 参数
-    g = parser.add_argument_group("Judge")
-    g.add_argument("--judge-model", default=os.getenv("JUDGE_MODEL", ""), help="Judge LLM 模型名 (默认同 --llm-model)")
-    g.add_argument("--judge-api-key", default=os.getenv("JUDGE_TOKEN", ""), help="Judge API key (默认同 --llm-api-key)")
-    g.add_argument("--judge-base-url", default=os.getenv("JUDGE_BASE_URL", ""), help="Judge base URL (默认同 --llm-base-url)")
+    add_judge_args(parser)
     return parser
 
 
@@ -219,7 +214,7 @@ def main() -> None:
     try:
         require_complete_imports(
             import_report.rows,
-            allow_incomplete=args.allow_incomplete_imports,
+            allow_incomplete=args.allow_diagnostics,
         )
     except RuntimeError as exc:
         run.save_summary({

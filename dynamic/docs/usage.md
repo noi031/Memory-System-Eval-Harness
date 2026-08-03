@@ -48,7 +48,7 @@ QA 阶段创建新 session 经 EchoAgent 发送 query, 测试完整管线 (含 p
   --echoagent-url http://127.0.0.1:31020 \
   --username test_user --password YOUR_PASSWORD \
   --dataset /path/to/dataset.json \
-  --dataset-limit 10 \
+  --questions 10 \
   --llm-api-key YOUR_API_KEY
 ```
 
@@ -175,8 +175,8 @@ Generate 模式支持 `--user-simulator-config`, 默认加载 `dynamic/configs/u
 | 参数 | 默认值 | 说明 |
 |---|---|---|
 | `--dataset` | (空) | 数据集路径 (指定则进入 replay 模式; 不指定则 generate 模式) |
-| `--dataset-sample` | `all` | 筛选 sample |
-| `--dataset-limit` | `0` | Replay 模式: QA 数量上限 (0=全部) |
+| `--sample` | `all` | 筛选 sample |
+| `--questions` | `0` | Replay 模式: QA 数量上限 (0=全部) |
 
 #### 评测器配置
 | 参数 | 默认值 | 说明 |
@@ -205,7 +205,7 @@ Generate 模式支持 `--user-simulator-config`, 默认加载 `dynamic/configs/u
 |---|---|---|
 | `--concurrency` | `4` | 并发数 |
 | `--out-dir` | `results` | 结果目录 (默认 `dynamic/results/<timestamp>`) |
-| `--allow-incomplete-imports` | false | 导入未完成仍继续，仅限诊断 |
+| `--allow-diagnostics` | false | 导入未完成或 provenance 不一致仍继续，仅限诊断 |
 
 ### LLM 参数 (通过插件声明)
 LLM 凭据和参数，由所选插件通过 `add_llm_args()` 声明。质量评估 LLM 使用

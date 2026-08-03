@@ -1372,7 +1372,7 @@ class RunEvalParserTests(unittest.TestCase):
     def test_eval_infra_params(self):
         self.assertEqual(4, self.args.concurrency)
         self.assertEqual("results", self.args.out_dir)
-        self.assertFalse(self.args.allow_incomplete_imports)
+        self.assertFalse(self.args.allow_diagnostics)
 
     def test_qa_profile_params(self):
         self.assertIsNone(self.args.qa_profile)
@@ -1401,14 +1401,6 @@ class RunEvalParserTests(unittest.TestCase):
                     "--qa-profile", profile,
                 ])
                 self.assertEqual(profile, args.qa_profile)
-
-    def test_exclude_memory_file_append(self):
-        args = self.parser.parse_args([
-            "--llm-base-url", "x", "--llm-api-key", "k",
-            "--exclude-memory-file", "a.txt",
-            "--exclude-memory-file", "b.txt",
-        ])
-        self.assertEqual(["a.txt", "b.txt"], args.exclude_memory_file)
 
 
 # ------------------------------------------------------------------ #

@@ -33,6 +33,7 @@ from shared.eval_base import (
     EvalRun,
     add_agent_plugin_args,
     add_eval_args,
+    resolve_llm_credentials,
     results_root_for,
 )
 from shared.llm_client import LLMClient
@@ -46,13 +47,12 @@ _CONFIGS_DIR = Path(__file__).resolve().parent / "configs"
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="动态评测: 仿真 EchoAgent+EchoMem 线上效果")
-    parser.add_argument("--check", action="store_true", help=argparse.SUPPRESS)
 
     # 模式选择
     g = parser.add_argument_group("模式")
     g.add_argument("--dataset", default="", help="数据集路径 (指定则进入 replay 模式; 不指定则 generate 模式)")
-    g.add_argument("--dataset-sample", default="all")
-    g.add_argument("--dataset-limit", type=int, default=0)
+    g.add_argument("--sample", default="all")
+    g.add_argument("--questions", type=int, default=0)
 
     # 评测器配置 (两种模式共用)
     g = parser.add_argument_group("评测器配置")
@@ -82,7 +82,6 @@ def build_parser() -> argparse.ArgumentParser:
 
     # 评测基础设施参数
     add_eval_args(parser)
-    parser.set_defaults(out_dir="")
 
     return parser
 
@@ -133,8 +132,8 @@ def validate_dynamic_args(args: argparse.Namespace) -> list[str]:
         errors.append("commit timeout must be >= 0")
     if commit_interval <= 0:
         errors.append("commit poll interval must be > 0")
-    if args.dataset_limit < 0:
-        errors.append("dataset limit must be >= 0")
+    if args.questions < 0:
+        errors.append("questions must be >= 0")
     if args.num_memories < 1:
         errors.append("num memories must be >= 1")
     if args.num_queries < 1:
@@ -149,17 +148,7 @@ def validate_dynamic_args(args: argparse.Namespace) -> list[str]:
 def main() -> None:
     args = build_parser().parse_args()
 
-    # base_url 互补: 一个有另一个没有时, 没有的跟有的相同
-    if args.scenario_base_url and not args.llm_base_url:
-        args.llm_base_url = args.scenario_base_url
-    elif args.llm_base_url and not args.scenario_base_url:
-        args.scenario_base_url = args.llm_base_url
-
-    # api_key 互补
-    if args.scenario_api_key and not args.llm_api_key:
-        args.llm_api_key = args.scenario_api_key
-    elif args.llm_api_key and not args.scenario_api_key:
-        args.scenario_api_key = args.llm_api_key
+    resolve_llm_credentials(args)
 
     errors = validate_dynamic_args(args)
     if errors:

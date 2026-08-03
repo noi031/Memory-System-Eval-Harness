@@ -4,7 +4,7 @@ Covers every functional point in ``shared/eval_base.py`` that relates to
 benchmark parameters and configuration:
 
   - EvalConfig dataclass: fields, defaults, construction, to_dict masking
-  - add_eval_args: --concurrency, --out-dir, --allow-incomplete-imports
+  - add_eval_args: --concurrency, --out-dir, --check, --allow-diagnostics
   - add_llm_args: the seven LLM CLI parameters (incl. env-var defaults)
   - add_qa_args: the three QA CLI parameters
   - add_agent_plugin_args: pre-parses sys.argv, delegates to plugin
@@ -180,27 +180,28 @@ class EvalConfigToDictTests(unittest.TestCase):
 #  add_eval_args
 # --------------------------------------------------------------------------- #
 class AddEvalArgsTests(unittest.TestCase):
-    def test_declares_three_eval_args_with_defaults(self) -> None:
+    def test_declares_four_eval_args_with_defaults(self) -> None:
         parser = _make_parser()
         add_eval_args(parser)
         opts = _option_strings(parser)
-        for opt in ("--concurrency", "--out-dir", "--allow-incomplete-imports"):
+        for opt in ("--concurrency", "--out-dir", "--check", "--allow-diagnostics"):
             with self.subTest(opt=opt):
                 self.assertIn(opt, opts)
         ns = parser.parse_args([])
         self.assertEqual(ns.concurrency, 4)
         self.assertEqual(ns.out_dir, "results")
-        self.assertFalse(ns.allow_incomplete_imports)
+        self.assertFalse(ns.check)
+        self.assertFalse(ns.allow_diagnostics)
 
     def test_parses_explicit_values(self) -> None:
         parser = _make_parser()
         add_eval_args(parser)
         ns = parser.parse_args(
-            ["--concurrency", "8", "--out-dir", "/tmp/x", "--allow-incomplete-imports"]
+            ["--concurrency", "8", "--out-dir", "/tmp/x", "--allow-diagnostics"]
         )
         self.assertEqual(ns.concurrency, 8)
         self.assertEqual(ns.out_dir, "/tmp/x")
-        self.assertTrue(ns.allow_incomplete_imports)
+        self.assertTrue(ns.allow_diagnostics)
 
     def test_concurrency_is_int_typed(self) -> None:
         parser = _make_parser()
@@ -209,13 +210,13 @@ class AddEvalArgsTests(unittest.TestCase):
             with self.assertRaises(SystemExit):
                 parser.parse_args(["--concurrency", "not-an-int"])
 
-    def test_allow_incomplete_imports_is_store_true(self) -> None:
+    def test_allow_diagnostics_is_store_true(self) -> None:
         parser = _make_parser()
         add_eval_args(parser)
         # Absent -> False; present without value -> True
-        self.assertFalse(parser.parse_args([]).allow_incomplete_imports)
+        self.assertFalse(parser.parse_args([]).allow_diagnostics)
         self.assertTrue(
-            parser.parse_args(["--allow-incomplete-imports"]).allow_incomplete_imports
+            parser.parse_args(["--allow-diagnostics"]).allow_diagnostics
         )
 
 

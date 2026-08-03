@@ -48,7 +48,6 @@ from benchmarks.locomo.provenance import (
     write_memory_provenance,
 )
 from benchmarks.locomo.memory_scope import (
-    ExcludingMemoryFilesClient,
     SessionPrefixMemoryClient,
 )
 from benchmarks.locomo.qa import QAOptions, build_qa_tasks, run_locomo_qa
@@ -68,6 +67,7 @@ from shared.eval_base import (
     EvalRun,
     add_agent_plugin_args,
     add_eval_args,
+    add_judge_args,
     build_config_from_args,
     results_root_for,
     validate_eval_config,
@@ -119,7 +119,6 @@ def _apply_resume_memory_identity(
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="LoCoMo benchmark evaluation")
-    parser.add_argument("--check", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--dataset", default="", help="LoCoMo JSON 数据集路径 (不指定则自动查找或下载)")
     parser.add_argument("--sample", default="all", help="筛选 sample (all 或 sample_id)")
     parser.add_argument("--questions", type=int, default=0, help="限制 QA 数量 (0=all)")
@@ -135,23 +134,6 @@ def build_parser() -> argparse.ArgumentParser:
         help="auto=单 sample 按原始 session, 多 sample 各自合并; locomo=原始 session; single=合并",
     )
     parser.add_argument("--max-sessions", type=int, default=0, help="每个 sample 最多导入多少个原始 session (0=全部)")
-    parser.add_argument(
-        "--allow-memory-provenance-mismatch",
-        action="store_true",
-        help=(
-            "Continue when the reused EchoMemory session count does not match "
-            "the selected dataset/session mode (diagnostics only)"
-        ),
-    )
-    parser.add_argument(
-        "--exclude-memory-file",
-        action="append",
-        default=[],
-        help=(
-            "Hide and reject reads of an EchoMemory filesystem leaf name; "
-            "repeat for multiple names"
-        ),
-    )
     # 共享参数
     add_agent_plugin_args(parser, default_plugin="vikingbot")
     add_eval_args(parser)
@@ -194,11 +176,9 @@ def build_parser() -> argparse.ArgumentParser:
             "reuses the prior identity and skips already-injected sessions"
         ),
     )
-    # judge 参数
+    # judge 参数 (三个基础参数由共享 helper 声明, locomo 额外参数在此声明)
+    add_judge_args(parser)
     g = parser.add_argument_group("Judge")
-    g.add_argument("--judge-model", default=os.getenv("JUDGE_MODEL", ""), help="Judge LLM 模型名 (默认同 --llm-model)")
-    g.add_argument("--judge-api-key", default=os.getenv("JUDGE_TOKEN", ""), help="Judge API key (默认同 --llm-api-key)")
-    g.add_argument("--judge-base-url", default=os.getenv("JUDGE_BASE_URL", ""), help="Judge base URL (默认同 --llm-base-url)")
     g.add_argument(
         "--judge-concurrency",
         type=int,
@@ -390,7 +370,7 @@ def main() -> None:
     try:
         require_complete_imports(
             import_report.rows,
-            allow_incomplete=args.allow_incomplete_imports,
+            allow_incomplete=args.allow_diagnostics,
         )
     except RuntimeError as exc:
         run.save_summary({
@@ -426,13 +406,13 @@ def main() -> None:
     )
     if (
         memory_provenance["status"] != "matched"
-        and not args.allow_memory_provenance_mismatch
+        and not args.allow_diagnostics
     ):
         message = (
             "EchoMemory provenance mismatch: expected "
             f"{memory_provenance['expected_session_count']} sessions but found "
             f"{memory_provenance['actual_session_count']}; use "
-            "--allow-memory-provenance-mismatch only for diagnostics"
+            "--allow-diagnostics only for diagnostics"
         )
         run.save_summary({
             "status": "failed",
@@ -444,29 +424,6 @@ def main() -> None:
         })
         log.error("%s", message)
         raise SystemExit(2)
-
-    excluded_memory_files = list(dict.fromkeys(
-        str(filename or "").strip()
-        for filename in args.exclude_memory_file
-        if str(filename or "").strip()
-    ))
-    if excluded_memory_files:
-        echomem = ExcludingMemoryFilesClient(
-            echomem,
-            excluded_memory_files,
-        )
-        access_policy = {
-            "mode": "exclude_files",
-            "excluded_filenames": excluded_memory_files,
-        }
-        (run.result_dir / "memory_access_policy.json").write_text(
-            json.dumps(access_policy, ensure_ascii=False, indent=2) + "\n",
-            encoding="utf-8",
-        )
-        log.info(
-            "Memory access policy: excluded files=%s",
-            ",".join(excluded_memory_files),
-        )
 
     # -- 阶段 2: 逐题 QA --
     log.info("=" * 60)

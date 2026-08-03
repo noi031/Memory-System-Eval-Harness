@@ -382,7 +382,7 @@ class StaticCliIntegrationTests(unittest.TestCase):
                 "--llm-model", "test-model",
                 "--out-dir", str(output),
                 "--commit-poll-interval-s", "0.01",
-                "--allow-incomplete-imports",
+                "--allow-diagnostics",
             ]
             _FakeServices.commit_status = "failed"
             try:

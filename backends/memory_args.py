@@ -61,4 +61,16 @@ def add_memory_backend_args(parser: argparse.ArgumentParser, *, with_backend_cho
         default=2.0,
         help="Seconds between commit status polls",
     )
+    g.add_argument(
+        "--timeout-s",
+        type=float,
+        default=60.0,
+        help="HTTP request timeout for memory backend calls",
+    )
+    g.add_argument(
+        "--max-retries",
+        type=int,
+        default=3,
+        help="Maximum retries for memory backend HTTP calls",
+    )
 

@@ -37,5 +37,5 @@ def require_complete_imports(
         details += f", ... (+{len(failed) - 8})"
     raise RuntimeError(
         f"memory import incomplete for {len(failed)}/{len(rows)} records: {details}. "
-        "QA was not started. Use --allow-incomplete-imports only for diagnostics."
+        "QA was not started. Use --allow-diagnostics only for diagnostics."
     )

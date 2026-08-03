@@ -168,7 +168,7 @@ class VikingBotPlugin(AgentPlugin):
 
         self._qa_profile = qa_profile
         self._tools_enabled = config.get("tools", True)
-        self._top_k = _resolve("top_k", int) or 25
+        self._top_k = _resolve("top_k", int) or 10
         self._tool_search_limit = _resolve("tool_search_limit", int)
         self._user_memory_budget_chars = _resolve("user_memory_budget_chars", int)
         self._agent_memory_budget_chars = _resolve("agent_memory_budget_chars", int)
@@ -179,7 +179,7 @@ class VikingBotPlugin(AgentPlugin):
         self._tool_set = _resolve("tool_set", str)
         self._vikingbot_workspace = config.get("vikingbot_workspace", "")
         _qt = config.get("question_timeout_s")
-        self._question_timeout_s = float(_qt if _qt is not None else defaults.get("question_timeout_s", 600.0))
+        self._question_timeout_s = float(_qt if _qt is not None else defaults.get("question_timeout_s", 120.0))
         self._answer_temperature = _resolve("answer_temperature", float)
         self._omit_answer_temperature = _resolve("omit_answer_temperature", bool)
         self._initial_retrieval_query_mode = _resolve("initial_retrieval_query_mode", str)

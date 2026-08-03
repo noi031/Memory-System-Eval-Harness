@@ -1,7 +1,7 @@
 """Evaluation infrastructure: result directory, logging, config, plugin CLI.
 
 Design intent: this module is the shared backbone for every benchmark
-run_eval. It provides:
+and dynamic run_eval. It provides:
   - EvalConfig: a dataclass holding benchmark-generic config fields. The
     fields are populated from the unified argparse namespace by
     build_config_from_args(), regardless of which plugin declared each arg.
@@ -12,8 +12,12 @@ run_eval. It provides:
   - add_llm_args / add_qa_args: shared helpers that plugins call inside
     their add_arguments() to declare LLM and QA behavior params. Benchmark
     run_eval does NOT call these directly.
-  - add_eval_args: declares only benchmark-infra params (--concurrency,
-    --out-dir, --allow-incomplete-imports). Called by benchmark run_eval.
+  - add_eval_args: declares benchmark-infra params (--concurrency,
+    --out-dir, --check, --allow-diagnostics). Called by every run_eval.
+  - add_judge_args: declares the three judge-LLM params shared by all
+    benchmarks that use LLM-based judging. Called by benchmark run_eval.
+  - resolve_llm_credentials: complementary fallback between two sets of
+    LLM credentials (e.g. scenario LLM vs answer LLM in dynamic mode).
   - EvalRun: manages the timestamped result directory, logging, and
     optional EchoMem log collection.
 """
@@ -265,21 +269,52 @@ def add_qa_args(parser) -> None:
 
 
 def add_eval_args(parser) -> None:
-    """Add benchmark infrastructure args.
+    """Add benchmark infrastructure args shared by all run_eval scripts.
 
-    Only the params that belong to the benchmark itself: concurrency,
-    output directory, and import validation.  LLM, QA, and memory backend
-    params are declared by plugins via add_llm_args / add_qa_args /
-    add_memory_backend_args.
+    Declares --concurrency, --out-dir, --check (hidden preflight flag),
+    and --allow-diagnostics (continue past incomplete imports or memory
+    provenance mismatches for diagnostic runs).
     """
     g = parser.add_argument_group("Evaluation")
     g.add_argument("--concurrency", type=int, default=4, help="Number of concurrent QA tasks")
     g.add_argument("--out-dir", default="results", help="Results root directory")
+    g.add_argument("--check", action="store_true", help=argparse.SUPPRESS)
     g.add_argument(
-        "--allow-incomplete-imports",
+        "--allow-diagnostics",
         action="store_true",
-        help="Continue QA even when memory import did not complete (diagnostics only)",
+        help="Continue past incomplete memory imports or provenance mismatches (diagnostics only)",
     )
+
+
+def add_judge_args(parser) -> None:
+    """Add the three judge-LLM CLI args shared by all LLM-judged benchmarks.
+
+    Each falls back to the corresponding --llm-* value when left empty.
+    Benchmarks with additional judge params (e.g. --judge-concurrency)
+    declare those locally after calling this helper.
+    """
+    g = parser.add_argument_group("Judge")
+    g.add_argument("--judge-model", default=os.getenv("JUDGE_MODEL", ""), help="Judge LLM 模型名 (默认同 --llm-model)")
+    g.add_argument("--judge-api-key", default=os.getenv("JUDGE_TOKEN", ""), help="Judge API key (默认同 --llm-api-key)")
+    g.add_argument("--judge-base-url", default=os.getenv("JUDGE_BASE_URL", ""), help="Judge base URL (默认同 --llm-base-url)")
+
+
+def resolve_llm_credentials(args) -> None:
+    """Fill in missing LLM credentials by complementary fallback.
+
+    When two sets of LLM credentials are present (e.g. scenario LLM and
+    answer LLM in dynamic mode), if one side has a value the other lacks,
+    copy it over.  Mutates *args* in place.
+    """
+    if getattr(args, "scenario_base_url", "") and not getattr(args, "llm_base_url", ""):
+        args.llm_base_url = args.scenario_base_url
+    elif getattr(args, "llm_base_url", "") and not getattr(args, "scenario_base_url", ""):
+        args.scenario_base_url = args.llm_base_url
+
+    if getattr(args, "scenario_api_key", "") and not getattr(args, "llm_api_key", ""):
+        args.llm_api_key = args.scenario_api_key
+    elif getattr(args, "llm_api_key", "") and not getattr(args, "scenario_api_key", ""):
+        args.scenario_api_key = args.llm_api_key
 
 
 def build_config_from_args(args) -> EvalConfig:

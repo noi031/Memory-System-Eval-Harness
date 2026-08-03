@@ -508,7 +508,7 @@ class VikingBotSetupTests(unittest.TestCase):
             self.assertIsNone(plugin._tool_set)
             self.assertIsNone(plugin._max_iterations)
 
-    def test_top_k_defaults_to_25_when_unresolved(self):
+    def test_top_k_defaults_to_10_when_unresolved(self):
         with (
             patch("plugins.vikingbot.plugin.EchoMemClient"),
             patch("plugins.vikingbot.plugin.OpenVikingClient"),
@@ -520,7 +520,7 @@ class VikingBotSetupTests(unittest.TestCase):
                 "llm_api_key": "k",
                 "qa_profile": "custom-unknown",
             })
-            self.assertEqual(25, plugin._top_k)
+            self.assertEqual(10, plugin._top_k)
 
     def test_question_timeout_s_resolution(self):
         with (
@@ -547,7 +547,7 @@ class VikingBotSetupTests(unittest.TestCase):
             })
             self.assertEqual(42.0, plugin._question_timeout_s)
 
-    def test_question_timeout_s_default_600_for_unknown_profile(self):
+    def test_question_timeout_s_default_120_for_unknown_profile(self):
         with (
             patch("plugins.vikingbot.plugin.EchoMemClient"),
             patch("plugins.vikingbot.plugin.OpenVikingClient"),
@@ -559,7 +559,7 @@ class VikingBotSetupTests(unittest.TestCase):
                 "llm_api_key": "k",
                 "qa_profile": "custom-unknown",
             })
-            self.assertEqual(600.0, plugin._question_timeout_s)
+            self.assertEqual(120.0, plugin._question_timeout_s)
 
     def test_commit_timeout_config(self):
         with (
