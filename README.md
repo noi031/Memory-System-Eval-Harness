@@ -131,6 +131,64 @@ session_mode=locomo
 
 ### 3. 运行全量 81 题
 
+#### EchoMem MCP 三种对照模式
+
+下面三条命令都使用 `echomem_mcp`、同一个 `conv-30` 数据集和真实
+EchoMem 记忆注入。先设置 DashScope 兼容 API 环境变量；API key 只放在
+本地环境中，不要写入仓库：
+
+```bash
+export LLM_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1
+export LLM_MODEL=deepseek-v4-flash
+export LLM_API_KEY="$DASHSCOPE_API_KEY"
+```
+
+1. **不带 MCP 工具调用**：仍执行 EchoMem 记忆注入和手动召回，但回答阶段只
+   进行一次模型调用。
+
+   ```bash
+   ./eval.sh locomo \
+     --agent-plugin echomem_mcp \
+     --sample conv-30 \
+     --no-tool-calling \
+     --mcp-read-mode disabled
+   ```
+
+2. **带 MCP 工具调用，但不读取 `messages.jsonl`**：保留
+   `memory_query`、`list`、`glob`，从工具 schema 中移除 `read`；即使模型返回
+   未暴露的 `read`，harness 也会拒绝转发该调用。
+
+   ```bash
+   ./eval.sh locomo \
+     --agent-plugin echomem_mcp \
+     --sample conv-30 \
+     --tool-calling \
+     --mcp-read-mode disabled
+   ```
+
+3. **带 MCP 工具调用并读取 `messages.jsonl`**：保留全部 MCP 工具，并追加
+   transcript evidence prompt。模型每题先查询记忆，再在回答前对至少一个相关
+   session/URI 读取具体的 `current/messages.jsonl`；涉及精确日期、顺序、原话
+   或多个事件时，以完整 transcript 为准。
+
+   ```bash
+   ./eval.sh locomo \
+     --agent-plugin echomem_mcp \
+     --sample conv-30 \
+     --tool-calling \
+     --mcp-read-mode require
+   ```
+
+结果目录中的 `summary.json` 会额外记录：
+
+- `messages_jsonl_read_questions`：至少成功发起一次 transcript 读取的题数
+- `messages_jsonl_read_calls`：识别到的 `messages.jsonl` 读取调用数
+- `messages_jsonl_read_rate`：读取题数 / QA 题数
+- `tool_call_total`、`avg_iterations`、`accuracy`：工具使用和准确率对照指标
+
+`require` 是提高 transcript 调用率的评测 prompt 候选，不保证准确率必然达到
+85%；是否达到目标必须以同一批题、同一模型和 Judge 结果为准。
+
 带 VikingBoat 0.4.11 对齐工具调用：
 
 ```bash

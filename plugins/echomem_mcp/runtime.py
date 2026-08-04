@@ -49,8 +49,14 @@ MCP_TOOLS: list[dict[str, Any]] = [
                 "type": "object",
                 "properties": {
                     "uris": {
-                        "type": "string",
-                        "description": "An echo:// URI or comma-separated list of URIs.",
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": (
+                            "One or more exact echo:// URIs. Use this `uris` "
+                            "array field, never a singular `uri` field. For "
+                            "conversation evidence, pass the concrete "
+                            "`.../current/messages.jsonl` URI."
+                        ),
                     },
                 },
                 "required": ["uris"],
@@ -109,6 +115,14 @@ _SYSTEM_PROMPT = (
     "to read full content of specific memory items. "
     "Answer the user's question concisely based on what you find. "
     "If the memory does not contain the answer, say you don't know."
+)
+
+_NO_TOOLS_SYSTEM_PROMPT = (
+    "You are a helpful assistant answering a question from the memory excerpts "
+    "included in the conversation. Answer concisely and directly from those "
+    "excerpts. Do not emit tool calls, function-call markup, XML tool tags, "
+    "or a plan to search. If the supplied memory does not contain the answer, "
+    "say you don't know."
 )
 
 

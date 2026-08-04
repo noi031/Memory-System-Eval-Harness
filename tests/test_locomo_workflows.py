@@ -467,6 +467,10 @@ class LocomoQAResumeTests(unittest.TestCase):
             "plugins/vikingbot/tools.py",
             manifest["qa_contract"]["files"],
         )
+        self.assertIn(
+            "plugins/echomem_mcp/plugin.py",
+            manifest["qa_contract"]["files"],
+        )
 
     def test_rejects_configuration_mismatch(self):
         with tempfile.TemporaryDirectory() as directory:

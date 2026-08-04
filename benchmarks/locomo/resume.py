@@ -19,6 +19,8 @@ from shared.qa import QAResult
 MANIFEST_FILENAME = "qa_resume_manifest.json"
 JUDGE_MANIFEST_FILENAME = "judge_resume_manifest.json"
 QA_CONTRACT_FILES = (
+    "plugins/echomem_mcp/plugin.py",
+    "plugins/echomem_mcp/runtime.py",
     "plugins/vikingbot/runtime.py",
     "plugins/vikingbot/tools.py",
     "plugins/vikingbot/prompting.py",

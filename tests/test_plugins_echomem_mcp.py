@@ -23,7 +23,12 @@ from unittest.mock import MagicMock, patch
 from backends.memory_types import CommitResult, SearchResult
 from plugins.echomem_mcp.mcp_client import McpClient
 from plugins.echomem_mcp.plugin import EchoMemMCPPlugin
-from plugins.echomem_mcp.runtime import MCP_TOOLS, _SYSTEM_PROMPT
+from plugins.echomem_mcp.runtime import (
+    MCP_TOOLS,
+    _NO_TOOLS_SYSTEM_PROMPT,
+    _SYSTEM_PROMPT,
+    configured_tools,
+)
 from shared.llm_client import LLMResponse, LLMToolResponse
 
 
@@ -72,6 +77,7 @@ def _make_plugin(**overrides: Any) -> EchoMemMCPPlugin:
     p._tool_calling = overrides.get("tool_calling", True)
     p._search_in_tools = overrides.get("search_in_tools", True)
     p._manual_search = overrides.get("manual_search", False)
+    p._mcp_read_mode = overrides.get("mcp_read_mode", "allow")
     p._top_k = overrides.get("top_k", 25)
     p._memory_budget_chars = overrides.get("memory_budget_chars", 0)
     p._question_timeout_s = overrides.get("question_timeout_s", 120.0)
@@ -441,6 +447,25 @@ class RuntimeToolsTests(unittest.TestCase):
     def test_read_requires_uris(self) -> None:
         tool = next(t for t in MCP_TOOLS if t["function"]["name"] == "read")
         self.assertIn("uris", tool["function"]["parameters"]["required"])
+        props = tool["function"]["parameters"]["properties"]
+        self.assertEqual("array", props["uris"]["type"])
+        self.assertIn("never a singular `uri`", props["uris"]["description"])
+
+    def test_disabled_read_mode_removes_read_tool(self) -> None:
+        names = {
+            tool["function"]["name"]
+            for tool in configured_tools("disabled")
+        }
+        self.assertEqual({"memory_query", "list", "glob"}, names)
+
+    def test_allow_and_require_modes_include_read_tool(self) -> None:
+        for mode in ("allow", "require"):
+            with self.subTest(mode=mode):
+                names = {
+                    tool["function"]["name"]
+                    for tool in configured_tools(mode)
+                }
+                self.assertIn("read", names)
 
     def test_list_requires_uri(self) -> None:
         tool = next(t for t in MCP_TOOLS if t["function"]["name"] == "list")
@@ -462,6 +487,9 @@ class RuntimePromptTests(unittest.TestCase):
     def test_system_prompt_is_nonempty_string(self) -> None:
         self.assertIsInstance(_SYSTEM_PROMPT, str)
         self.assertTrue(_SYSTEM_PROMPT.strip())
+
+    def test_no_tools_prompt_forbids_function_markup(self) -> None:
+        self.assertIn("Do not emit tool calls", _NO_TOOLS_SYSTEM_PROMPT)
 
 
 # --------------------------------------------------------------------------- #
@@ -835,6 +863,44 @@ class PluginSendMessageTests(unittest.TestCase):
         p.send_message("s1", "q")
         p._llm.chat_with_tools.assert_not_called()
         p._llm.chat.assert_called_once()
+        system_prompt = p._llm.chat.call_args.args[0][0]["content"]
+        self.assertEqual(_NO_TOOLS_SYSTEM_PROMPT, system_prompt)
+
+    @patch(_MCP_CLIENT)
+    def test_disabled_read_mode_rejects_hallucinated_read_call(
+        self,
+        mock_cls: MagicMock,
+    ) -> None:
+        p = _make_plugin(
+            tool_calling=True,
+            manual_search=False,
+            mcp_read_mode="disabled",
+        )
+        mock_mcp = MagicMock()
+        mock_cls.return_value = mock_mcp
+        p._llm.chat_with_tools.side_effect = [
+            LLMToolResponse(
+                "",
+                [_tool_call(
+                    "read",
+                    {"uris": ["echo://x/current/messages.jsonl"]},
+                )],
+                5,
+                2,
+            ),
+            LLMToolResponse("answer", [], 5, 2),
+        ]
+
+        response = p.send_message("s1", "q")
+
+        first_tools = p._llm.chat_with_tools.call_args_list[0].args[1]
+        self.assertNotIn(
+            "read",
+            {tool["function"]["name"] for tool in first_tools},
+        )
+        mock_mcp.call_tool.assert_not_called()
+        audit = response.extra["trace"]["tool_audit"]
+        self.assertEqual("tool_not_exposed", audit["tool_calls"][0]["error"])
 
     # -- Phase C: tool-call loop ---------------------------------------------
 
@@ -994,12 +1060,12 @@ class PluginSendMessageTests(unittest.TestCase):
 
     # -- message building ----------------------------------------------------
 
-    def test_system_prompt_is_used(self) -> None:
+    def test_no_tool_calling_uses_no_tools_prompt(self) -> None:
         p = _make_plugin(tool_calling=False, manual_search=False)
         p._llm.chat.return_value = LLMResponse("ans", 5, 3, 0.1)
         p.send_message("s1", "q")
         messages = p._llm.chat.call_args.args[0]
-        self.assertEqual(_SYSTEM_PROMPT, messages[0]["content"])
+        self.assertEqual(_NO_TOOLS_SYSTEM_PROMPT, messages[0]["content"])
 
     def test_question_time_injected_into_user_message(self) -> None:
         p = _make_plugin(tool_calling=False, manual_search=False)

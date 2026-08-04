@@ -11,6 +11,56 @@
 先在 `.env` 中将 `ECHOMEM_WORKSPACE` 指向 EchoMem
 workspace，并保留 `ECHOMEM_AUTO_START=1`。
 
+### EchoMem MCP 三种对照模式
+
+使用 `echomem_mcp` 时，三种模式共享 LoCoMo `conv-30` 的记忆注入流程，
+区别只在回答阶段是否暴露 MCP 工具以及是否允许读取完整 transcript。模型
+配置通过环境变量提供：
+
+```bash
+export LLM_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1
+export LLM_MODEL=deepseek-v4-flash
+export LLM_API_KEY="$DASHSCOPE_API_KEY"
+```
+
+不带 MCP 工具调用：
+
+```bash
+./eval.sh locomo \
+  --agent-plugin echomem_mcp \
+  --sample conv-30 \
+  --no-tool-calling \
+  --mcp-read-mode disabled
+```
+
+带 MCP 工具调用但不读 `messages.jsonl`：
+
+```bash
+./eval.sh locomo \
+  --agent-plugin echomem_mcp \
+  --sample conv-30 \
+  --tool-calling \
+  --mcp-read-mode disabled
+```
+
+该模式会从工具 schema 中移除 `read`，并拒绝执行模型返回的未暴露 `read` 调用，
+因此不会把 transcript 请求转发给 MCP。
+
+带 MCP 工具调用并读 `messages.jsonl`：
+
+```bash
+./eval.sh locomo \
+  --agent-plugin echomem_mcp \
+  --sample conv-30 \
+  --tool-calling \
+  --mcp-read-mode require
+```
+
+`require` 模式追加的规则是：每题先调用 `memory_query`，回答前必须读取至少
+一个相关 URI 对应的 `current/messages.jsonl`；日期、顺序、原话和多事件问题
+以完整 transcript 为准。`summary.json` 的 `messages_jsonl_read_rate` 用于
+观察 prompt 是否真正推动了 transcript 读取，不能把调用率直接等同于准确率。
+
 ```bash
 # 默认注入记忆并使用 VikingBoat 0.4.11 工具口径
 ./eval.sh locomo --sample conv-30 --tools

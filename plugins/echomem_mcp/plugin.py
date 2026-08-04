@@ -25,7 +25,11 @@ from typing import Any
 
 from plugins.base import AgentDescriptor, AgentPlugin, AgentResponse
 from plugins.echomem_mcp.mcp_client import McpClient
-from plugins.echomem_mcp.runtime import _SYSTEM_PROMPT, configured_tools
+from plugins.echomem_mcp.runtime import (
+    _NO_TOOLS_SYSTEM_PROMPT,
+    _SYSTEM_PROMPT,
+    configured_tools,
+)
 from backends.echomem.client import EchoMemClient
 from shared.eval_base import add_llm_args, add_qa_args
 from shared.llm_client import LLMClient
@@ -203,20 +207,21 @@ class EchoMemMCPPlugin(AgentPlugin):
 
         # Build messages
         time_context = f"Current date: {question_time}.\n\n" if str(question_time).strip() else ""
-        system_prompt = _SYSTEM_PROMPT
+        system_prompt = _SYSTEM_PROMPT if self._tool_calling else _NO_TOOLS_SYSTEM_PROMPT
         if self._mcp_read_mode == "require":
             system_prompt += (
                 "\n\nTranscript evidence policy:\n"
-                "1. Use memory_query for the question.\n"
-                "2. When a result identifies a relevant session or URI, call "
-                "read on the concrete `current/messages.jsonl` URI before "
-                "answering details from that session.\n"
-                "3. Prefer the complete transcript over a short summary when "
-                "the question asks about exact wording, dates, order, or "
-                "multiple events. Batch relevant transcript URIs in one read "
-                "call when possible.\n"
-                "4. Do not claim that memory is missing until the search and "
-                "relevant transcript read have both been attempted."
+                "1. For every question, first call memory_query.\n"
+                "2. Before giving a final answer, call read on at least one "
+                "relevant concrete `current/messages.jsonl` URI returned or "
+                "identified by the search. This is mandatory even when the "
+                "search result looks sufficient.\n"
+                "3. Use the complete transcript as the source of truth for "
+                "exact wording, dates, order, and multiple events. Batch "
+                "relevant transcript URIs in one read call when possible.\n"
+                "4. Do not output tool-call syntax as the answer. Do not "
+                "claim memory is missing until both the search and transcript "
+                "read have been attempted."
             )
         prompt_append = str(extra.get("system_prompt_append") or "").strip()
         if prompt_append:
@@ -252,6 +257,10 @@ class EchoMemMCPPlugin(AgentPlugin):
                 ]
         else:
             tools = []
+        allowed_tool_names = {
+            str(tool["function"]["name"])
+            for tool in tools
+        }
 
         # Phase C: Tool-call loop or single call
         tool_call_count = 0
@@ -314,6 +323,28 @@ class EchoMemMCPPlugin(AgentPlugin):
                                 args = json.loads(func.get("arguments", "{}"))
                             except json.JSONDecodeError:
                                 args = {}
+
+                            if name not in allowed_tool_names:
+                                result_text = (
+                                    f"Tool '{name}' is not available in this "
+                                    "evaluation mode. Use only the tools in "
+                                    "the supplied schema."
+                                )
+                                logger.warning(
+                                    "Rejected unavailable tool call: %s", name
+                                )
+                                tool_audit["tool_calls"].append({
+                                    "name": name,
+                                    "arguments": args,
+                                    "is_messages_jsonl_read": False,
+                                    "error": "tool_not_exposed",
+                                })
+                                messages.append({
+                                    "role": "tool",
+                                    "tool_call_id": tc.get("id", ""),
+                                    "content": result_text,
+                                })
+                                continue
 
                             try:
                                 result_text = mcp.call_tool(name, args, timeout_s=remaining())
