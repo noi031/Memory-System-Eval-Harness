@@ -110,3 +110,17 @@ _SYSTEM_PROMPT = (
     "Answer the user's question concisely based on what you find. "
     "If the memory does not contain the answer, say you don't know."
 )
+
+
+def configured_tools(read_mode: str = "allow") -> list[dict[str, Any]]:
+    """Return the MCP tool contract for the requested transcript policy."""
+    mode = str(read_mode or "allow").strip().lower()
+    if mode not in {"disabled", "allow", "require"}:
+        raise ValueError(f"unsupported MCP read mode: {read_mode}")
+    if mode == "disabled":
+        return [
+            tool
+            for tool in MCP_TOOLS
+            if tool["function"]["name"] != "read"
+        ]
+    return list(MCP_TOOLS)

@@ -25,7 +25,7 @@ from typing import Any
 
 from plugins.base import AgentDescriptor, AgentPlugin, AgentResponse
 from plugins.echomem_mcp.mcp_client import McpClient
-from plugins.echomem_mcp.runtime import MCP_TOOLS, _SYSTEM_PROMPT
+from plugins.echomem_mcp.runtime import _SYSTEM_PROMPT, configured_tools
 from backends.echomem.client import EchoMemClient
 from shared.eval_base import add_llm_args, add_qa_args
 from shared.llm_client import LLMClient
@@ -90,6 +90,16 @@ class EchoMemMCPPlugin(AgentPlugin):
             default=True,
             help="Pre-fetch memory search before each LLM turn (default: enabled)",
         )
+        g.add_argument(
+            "--mcp-read-mode",
+            choices=["disabled", "allow", "require"],
+            default="allow",
+            help=(
+                "Transcript read policy: disabled removes read from MCP tools; "
+                "allow preserves normal tools; require adds a strict "
+                "messages.jsonl reading instruction"
+            ),
+        )
 
     def setup(self, config: dict) -> None:
         self._mcp_url = config.get("mcp_url", "http://127.0.0.1:8001")
@@ -98,6 +108,7 @@ class EchoMemMCPPlugin(AgentPlugin):
         self._tool_calling = config.get("tool_calling", True)
         self._search_in_tools = config.get("search_in_tools", True)
         self._manual_search = config.get("manual_search", True)
+        self._mcp_read_mode = config.get("mcp_read_mode", "allow")
         self._top_k = config.get("top_k", 10)
         self._memory_budget_chars = config.get("memory_budget_chars", 8000)
         self._question_timeout_s = float(config.get("question_timeout_s", 120.0))
@@ -192,8 +203,26 @@ class EchoMemMCPPlugin(AgentPlugin):
 
         # Build messages
         time_context = f"Current date: {question_time}.\n\n" if str(question_time).strip() else ""
+        system_prompt = _SYSTEM_PROMPT
+        if self._mcp_read_mode == "require":
+            system_prompt += (
+                "\n\nTranscript evidence policy:\n"
+                "1. Use memory_query for the question.\n"
+                "2. When a result identifies a relevant session or URI, call "
+                "read on the concrete `current/messages.jsonl` URI before "
+                "answering details from that session.\n"
+                "3. Prefer the complete transcript over a short summary when "
+                "the question asks about exact wording, dates, order, or "
+                "multiple events. Batch relevant transcript URIs in one read "
+                "call when possible.\n"
+                "4. Do not claim that memory is missing until the search and "
+                "relevant transcript read have both been attempted."
+            )
+        prompt_append = str(extra.get("system_prompt_append") or "").strip()
+        if prompt_append:
+            system_prompt += "\n\nAdditional evaluation instructions:\n" + prompt_append
         messages: list[dict[str, Any]] = [
-            {"role": "system", "content": _SYSTEM_PROMPT},
+            {"role": "system", "content": system_prompt},
             {"role": "user", "content": f"{time_context}{message}"},
         ]
 
@@ -215,10 +244,12 @@ class EchoMemMCPPlugin(AgentPlugin):
 
         # Phase B: Build tool list
         if self._tool_calling:
-            tools = [
-                t for t in MCP_TOOLS
-                if not (t["function"]["name"] == "memory_query" and not self._search_in_tools)
-            ]
+            tools = configured_tools(self._mcp_read_mode)
+            if not self._search_in_tools:
+                tools = [
+                    t for t in tools
+                    if t["function"]["name"] != "memory_query"
+                ]
         else:
             tools = []
 
@@ -229,11 +260,21 @@ class EchoMemMCPPlugin(AgentPlugin):
         total_completion = 0
         response_text = ""
         llm_error = ""
+        tool_audit: dict[str, Any] = {
+            "schema_version": 1,
+            "mcp_read_mode": self._mcp_read_mode,
+            "tools_used": [],
+            "tool_calls": [],
+            "messages_jsonl_reads": [],
+        }
 
         if tools:
             mcp: McpClient | None = None
             try:
-                mcp = McpClient(self._mcp_url, auth_key=self._auth_key)
+                mcp = McpClient(
+                    self._mcp_url,
+                    auth_key=self._auth_key or self.memory_client.auth_key,
+                )
                 mcp.initialize(timeout_s=remaining())
             except Exception as e:
                 logger.warning("MCP initialize failed: %s", e)
@@ -277,6 +318,26 @@ class EchoMemMCPPlugin(AgentPlugin):
                             try:
                                 result_text = mcp.call_tool(name, args, timeout_s=remaining())
                                 tool_call_count += 1
+                                is_messages_read = (
+                                    name == "read"
+                                    and (
+                                        "messages.jsonl" in str(args.get("uris") or "")
+                                        or "messages.jsonl" in result_text
+                                    )
+                                )
+                                tool_audit["tool_calls"].append({
+                                    "name": name,
+                                    "arguments": args,
+                                    "is_messages_jsonl_read": is_messages_read,
+                                    "result_preview": result_text[:500],
+                                })
+                                if name not in tool_audit["tools_used"]:
+                                    tool_audit["tools_used"].append(name)
+                                if is_messages_read:
+                                    tool_audit["messages_jsonl_reads"].append({
+                                        "uris": args.get("uris", ""),
+                                        "result_preview": result_text[:500],
+                                    })
                                 if name == "memory_query":
                                     retrieval_items.append({
                                         "tool": name,
@@ -286,6 +347,12 @@ class EchoMemMCPPlugin(AgentPlugin):
                             except Exception as e:
                                 result_text = f"Error calling {name}: {e}"
                                 logger.warning("Tool %s failed: %s", name, e)
+                                tool_audit["tool_calls"].append({
+                                    "name": name,
+                                    "arguments": args,
+                                    "is_messages_jsonl_read": False,
+                                    "error": str(e)[:500],
+                                })
 
                             messages.append({
                                 "role": "tool",
@@ -337,6 +404,14 @@ class EchoMemMCPPlugin(AgentPlugin):
                 "elapsed_s": elapsed,
                 "retrieval_latency_s": retrieval_latency_s,
                 "llm_latency_s": elapsed,
+                "trace": {
+                    "tool_audit": tool_audit,
+                    "mcp_read_mode": self._mcp_read_mode,
+                    "tools": [
+                        t["function"]["name"]
+                        for t in tools
+                    ],
+                },
             },
         )
 
