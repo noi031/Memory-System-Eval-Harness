@@ -201,37 +201,6 @@ export LLM_API_KEY="$DASHSCOPE_API_KEY"
 `require` 仍可作为兼容参数使用，但不再追加 transcript 强制 Prompt；是否读取
 `messages.jsonl` 由模型自行决定。
 
-带 VikingBoat 0.4.11 对齐工具调用：
-
-```bash
-./eval.sh locomo --sample conv-30 --tools
-```
-
-不暴露工具，仅使用初始注入的完整记忆正文：
-
-```bash
-./eval.sh locomo --sample conv-30 --no-tools
-```
-
-本地验证额外 prompt 时，通过文件参数追加到所选 profile 的 system prompt：
-
-```bash
-./eval.sh locomo \
-  --sample conv-30 \
-  --tools \
-  --qa-prompt-file /path/to/local-prompt.txt
-```
-
-prompt 文件不会进入代码仓；`summary.json` 和 resume manifest 仅记录文件名和
-SHA-256。
-
-两种模式使用相同的数据集和已有记忆：
-
-| 命令 | 默认 QA profile | 记忆行为 |
-|---|---|---|
-| `--tools` | `vikingboat0411` | 新开身份注入记忆，初始检索，并允许只读 `memory_*` 工具循环 |
-| `--no-tools` | `vikingboat0411-natural-no-tools` | 新开身份注入记忆，只使用完整初始记忆正文，不暴露工具 schema |
-
 结果写入 `results/<run-name>/<timestamp>/`，主要文件包括
 `qa_results.csv`、`judge_results.csv`、`summary.json` 和
 `agent_traces/`。
