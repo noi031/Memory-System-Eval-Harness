@@ -481,8 +481,8 @@ class RuntimeToolsTests(unittest.TestCase):
 
 class RuntimePromptTests(unittest.TestCase):
     def test_system_prompt_mentions_memory_tools(self) -> None:
-        self.assertIn("memory_query", _SYSTEM_PROMPT)
-        self.assertIn("read", _SYSTEM_PROMPT)
+        self.assertIn("EchoMem", _SYSTEM_PROMPT)
+        self.assertIn("MCP tools", _SYSTEM_PROMPT)
 
     def test_system_prompt_is_nonempty_string(self) -> None:
         self.assertIsInstance(_SYSTEM_PROMPT, str)
@@ -521,7 +521,7 @@ class PluginAddArgumentsTests(unittest.TestCase):
         args = self._parse()
         self.assertEqual("http://127.0.0.1:8001", args.mcp_url)
         self.assertEqual("", args.mcp_auth_key)
-        self.assertEqual(10, args.mcp_max_iterations)
+        self.assertEqual(50, args.mcp_max_iterations)
         self.assertTrue(args.tool_calling)
         self.assertTrue(args.search_in_tools)
         self.assertTrue(args.manual_search)
@@ -620,11 +620,11 @@ class PluginSetupTests(unittest.TestCase):
         p.setup({})
         self.assertEqual("http://127.0.0.1:8001", p._mcp_url)
         self.assertEqual("", p._auth_key)
-        self.assertEqual(10, p._max_iterations)
+        self.assertEqual(50, p._max_iterations)
         self.assertTrue(p._tool_calling)
         self.assertTrue(p._search_in_tools)
         self.assertTrue(p._manual_search)
-        self.assertEqual(10, p._top_k)
+        self.assertEqual(25, p._top_k)
         self.assertEqual(8000, p._memory_budget_chars)
         self.assertEqual(120.0, p._question_timeout_s)
         self.assertEqual(0.0, p._commit_timeout_s)
@@ -818,7 +818,7 @@ class PluginSendMessageTests(unittest.TestCase):
         messages = p._llm.chat.call_args.args[0]
         self.assertEqual(2, len(messages))  # system + user only
 
-    def test_manual_search_exception_is_swallowed(self) -> None:
+    def test_manual_search_exception_is_reported(self) -> None:
         p = _make_plugin(tool_calling=False, manual_search=True)
         p.memory_client.search.side_effect = RuntimeError("search down")
         p._llm.chat.return_value = LLMResponse("answer", 5, 3, 0.1)
@@ -826,6 +826,10 @@ class PluginSendMessageTests(unittest.TestCase):
         self.assertEqual("answer", resp.text)
         self.assertEqual([], resp.memory_items)
         self.assertEqual(0.0, resp.extra["retrieval_latency_s"])
+        self.assertEqual(
+            "RuntimeError: search down",
+            resp.extra["retrieval_error"],
+        )
 
     def test_manual_search_disabled_skips_search(self) -> None:
         p = _make_plugin(tool_calling=False, manual_search=False)
