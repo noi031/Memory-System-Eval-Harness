@@ -299,14 +299,14 @@ python benchmarks/locomo/run_eval.py \
 - `memory_provenance.json` - 数据集 SHA-256、预期/实际 session 数和实际 session URI manifest
 - `qa_results.csv` - QA 结果，包含 tool_call_count、iterations、qa_profile
 - `qa_results.checkpoint.csv` - 运行中定期更新的可恢复 QA 快照
-- `qa_resume_manifest.json` - 恢复兼容性所需的数据集、身份、模型、QA 参数和本地 prompt/tool/runtime contract hash
+- `qa_resume_manifest.json` - 恢复兼容性所需的数据集、身份、模型、QA 参数、agent_options 和本地 prompt/tool/runtime contract hash
 - `judge_results.csv` - Judge 结果 (question_id, verdict, reasoning)
 - `judge_results.checkpoint.csv` - 运行中定期更新的 Judge 快照
 - `judge_resume_manifest.json` - Judge 模型和 prompt 指纹，用于防止混合判分口径
 - `diagnosis.json` - 失败分类、检索覆盖率、可重试/缺失/重复题目 ID
 - `retrieval_traces.jsonl` - 每题检索内容和失败归因 trace
 - `agent_traces/*.json` - VikingBot 初始 prompt、逐轮模型消息、请求/响应模型身份、工具协议 hash、工具参数/结果、原始与清洗后答案
-- `summary.json` - 汇总指标，包含 memory_source、qa_profile、served model ids、tool protocol hash、tool_call_total、avg_iterations 和 diagnosis 摘要
+- `summary.json` - 汇总指标，包含 memory_source、qa_profile、agent_options、served model ids、tool protocol hash、tool_call_total、avg_iterations 和 diagnosis 摘要
 - `strict_blackbox_metrics.json` - 仅使用外部可观测状态、延迟、重试和 token usage 的指标
 - `strict_blackbox_report.md` - strict black-box Markdown 报告
 

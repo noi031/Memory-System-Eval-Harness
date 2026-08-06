@@ -81,6 +81,7 @@ def build_qa_resume_manifest(
                 "system_prompt_append_sha256": (
                     options.system_prompt_append_sha256
                 ),
+                "agent_options": options.agent_options,
             },
             "files": contract_files,
         },
@@ -111,6 +112,7 @@ def build_qa_resume_manifest(
             "system_prompt_append_source": (
                 options.system_prompt_append_source
             ),
+            "agent_options": options.agent_options,
         },
         "qa_contract": {
             "sha256": hashlib.sha256(contract_payload).hexdigest(),

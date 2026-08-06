@@ -18,11 +18,11 @@ import json
 import unittest
 import urllib.error
 from typing import Any
-from unittest.mock import MagicMock, patch
+from unittest.mock import ANY, MagicMock, patch
 
 from backends.memory_types import CommitResult, SearchResult
 from plugins.echomem_mcp.mcp_client import McpClient
-from plugins.echomem_mcp.plugin import EchoMemMCPPlugin
+from plugins.echomem_mcp.plugin import EchoMemMCPPlugin, format_split_memory_section
 from plugins.echomem_mcp.runtime import (
     MCP_TOOLS,
     _NO_TOOLS_SYSTEM_PROMPT,
@@ -67,8 +67,8 @@ def _make_plugin(**overrides: Any) -> EchoMemMCPPlugin:
     """Construct an EchoMemMCPPlugin with mocked LLM/memory clients.
 
     Internal config fields are set directly so send_message tests have full
-    control without going through setup().  ``manual_search`` defaults to False
-    so tool-call tests are not coupled to the pre-fetch path.
+    control without going through setup().  ``manual_search`` is an internal
+    test/config switch only; it is not exposed as an end-user CLI flag.
     """
     p = EchoMemMCPPlugin()
     p._mcp_url = overrides.get("mcp_url", "http://127.0.0.1:8001")
@@ -80,6 +80,8 @@ def _make_plugin(**overrides: Any) -> EchoMemMCPPlugin:
     p._mcp_read_mode = overrides.get("mcp_read_mode", "allow")
     p._top_k = overrides.get("top_k", 25)
     p._memory_budget_chars = overrides.get("memory_budget_chars", 0)
+    p._user_memory_budget_chars = overrides.get("user_memory_budget_chars", 4000)
+    p._agent_memory_budget_chars = overrides.get("agent_memory_budget_chars", 2000)
     p._question_timeout_s = overrides.get("question_timeout_s", 120.0)
     p._commit_timeout_s = overrides.get("commit_timeout_s", 0.0)
     p._commit_poll_interval_s = overrides.get("commit_poll_interval_s", 2.0)
@@ -524,7 +526,18 @@ class PluginAddArgumentsTests(unittest.TestCase):
         self.assertEqual(50, args.mcp_max_iterations)
         self.assertTrue(args.tool_calling)
         self.assertTrue(args.search_in_tools)
-        self.assertTrue(args.manual_search)
+        self.assertFalse(hasattr(args, "manual_search"))
+        self.assertFalse(hasattr(args, "mcp_initial_search"))
+        self.assertEqual(4000, args.user_memory_budget_chars)
+        self.assertEqual(2000, args.agent_memory_budget_chars)
+
+    def test_memory_budget_overrides_are_ints(self) -> None:
+        args = self._parse(
+            "--user-memory-budget-chars", "1234",
+            "--agent-memory-budget-chars", "567",
+        )
+        self.assertEqual(1234, args.user_memory_budget_chars)
+        self.assertEqual(567, args.agent_memory_budget_chars)
 
     def test_no_tool_calling_flag(self) -> None:
         self.assertFalse(self._parse("--no-tool-calling").tool_calling)
@@ -535,8 +548,11 @@ class PluginAddArgumentsTests(unittest.TestCase):
     def test_no_search_in_tools_flag(self) -> None:
         self.assertFalse(self._parse("--no-search-in-tools").search_in_tools)
 
-    def test_no_manual_search_flag(self) -> None:
-        self.assertFalse(self._parse("--no-manual-search").manual_search)
+    def test_manual_search_flag_removed(self) -> None:
+        with self.assertRaises(SystemExit):
+            self._parse("--manual-search")
+        with self.assertRaises(SystemExit):
+            self._parse("--no-manual-search")
 
     def test_mcp_max_iterations_is_int(self) -> None:
         self.assertEqual(5, self._parse("--mcp-max-iterations", "5").mcp_max_iterations)
@@ -576,6 +592,7 @@ class PluginSetupTests(unittest.TestCase):
             "mcp_url": "http://mcp", "mcp_auth_key": "mk", "mcp_max_iterations": 5,
             "tool_calling": False, "search_in_tools": False, "manual_search": False,
             "top_k": 15, "memory_budget_chars": 1000, "question_timeout_s": 60,
+            "user_memory_budget_chars": 4000, "agent_memory_budget_chars": 2000,
             "commit_timeout_s": 10, "commit_poll_interval_s": 1,
         }
         p = EchoMemMCPPlugin()
@@ -589,6 +606,8 @@ class PluginSetupTests(unittest.TestCase):
         self.assertFalse(p._manual_search)
         self.assertEqual(15, p._top_k)
         self.assertEqual(1000, p._memory_budget_chars)
+        self.assertEqual(4000, p._user_memory_budget_chars)
+        self.assertEqual(2000, p._agent_memory_budget_chars)
         self.assertEqual(60.0, p._question_timeout_s)
         self.assertEqual(10.0, p._commit_timeout_s)
         self.assertEqual(1.0, p._commit_poll_interval_s)
@@ -626,6 +645,8 @@ class PluginSetupTests(unittest.TestCase):
         self.assertTrue(p._manual_search)
         self.assertEqual(25, p._top_k)
         self.assertEqual(8000, p._memory_budget_chars)
+        self.assertEqual(4000, p._user_memory_budget_chars)
+        self.assertEqual(2000, p._agent_memory_budget_chars)
         self.assertEqual(120.0, p._question_timeout_s)
         self.assertEqual(0.0, p._commit_timeout_s)
         self.assertEqual(2.0, p._commit_poll_interval_s)
@@ -777,28 +798,45 @@ class PluginCreateSessionTests(unittest.TestCase):
 class PluginSendMessageTests(unittest.TestCase):
     # -- Phase A: manual pre-fetch -------------------------------------------
 
-    def test_manual_search_prefetch_populates_memory_items(self) -> None:
+    @patch(_MCP_CLIENT)
+    def test_manual_search_prefetch_populates_memory_items(self, mock_cls: MagicMock) -> None:
         p = _make_plugin(tool_calling=False, manual_search=True)
-        p.memory_client.search.return_value = [
-            SearchResult(uri="echo://a", score=0.9, content="memory A"),
-            SearchResult(uri="echo://b", score=0.5, content="memory B"),
-        ]
+        mock_mcp = MagicMock()
+        mock_mcp.call_tool.return_value = json.dumps({
+            "items": [
+                {"uri": "echo://a", "score": 0.9, "content": "memory A"},
+                {"uri": "echo://b", "score": 0.5, "content": "memory B"},
+            ]
+        })
+        mock_cls.return_value = mock_mcp
         p._llm.chat.return_value = LLMResponse(
             "answer", 10, 5, 0.1,
         )
         resp = p.send_message("s1", "What do you know?")
 
         self.assertEqual("answer", resp.text)
-        p.memory_client.search.assert_called_once()
+        p.memory_client.search.assert_not_called()
+        mock_mcp.call_tool.assert_called_once_with(
+            "memory_query",
+            {"query": "What do you know?", "limit": 25},
+            timeout_s=ANY,
+        )
         self.assertEqual(2, len(resp.memory_items))
         self.assertEqual("echo://a", resp.memory_items[0]["uri"])
         self.assertGreater(resp.extra["retrieval_latency_s"], 0.0)
+        self.assertTrue(resp.extra["initial_search_via_mcp"])
 
-    def test_manual_search_injects_memory_into_messages(self) -> None:
+    @patch(_MCP_CLIENT)
+    def test_manual_search_injects_memory_into_messages(self, mock_cls: MagicMock) -> None:
         p = _make_plugin(tool_calling=False, manual_search=True)
-        p.memory_client.search.return_value = [
-            SearchResult(uri="echo://a", score=0.9, content="memory A"),
-        ]
+        mock_mcp = MagicMock()
+        mock_mcp.call_tool.return_value = json.dumps({
+            "items": [
+                {"uri": "echo://a", "score": 0.9, "content": "memory A"},
+                {"uri": "echo://agent/a", "score": 0.8, "content": "agent memory"},
+            ]
+        })
+        mock_cls.return_value = mock_mcp
         p._llm.chat.return_value = LLMResponse("answer", 10, 5, 0.1)
         p.send_message("s1", "q")
         messages = p._llm.chat.call_args.args[0]
@@ -806,21 +844,48 @@ class PluginSendMessageTests(unittest.TestCase):
         self.assertEqual(3, len(messages))
         self.assertEqual("system", messages[0]["role"])
         self.assertEqual("user", messages[1]["role"])
-        self.assertIn("Retrieved memories", messages[1]["content"])
+        self.assertIn("### user memories", messages[1]["content"])
+        self.assertIn("memory A", messages[1]["content"])
+        self.assertIn("### agent memories", messages[1]["content"])
+        self.assertIn("agent memory", messages[1]["content"])
         self.assertEqual("user", messages[2]["role"])
 
-    def test_manual_search_empty_results_no_injection(self) -> None:
+    def test_split_memory_section_applies_user_and_agent_budgets(self) -> None:
+        text = format_split_memory_section(
+            [
+                SearchResult(uri="echo://user/1", score=0.9, content="user keep"),
+                SearchResult(uri="echo://user/2", score=0.8, content="user drop"),
+                SearchResult(uri="echo://agent/1", score=0.7, content="agent keep"),
+                SearchResult(uri="echo://agent/2", score=0.6, content="agent drop"),
+            ],
+            user_memory_budget_chars=60,
+            agent_memory_budget_chars=62,
+        )
+        self.assertIn("### user memories", text)
+        self.assertIn("user keep", text)
+        self.assertNotIn("user drop", text)
+        self.assertIn("### agent memories", text)
+        self.assertIn("agent keep", text)
+        self.assertNotIn("agent drop", text)
+
+    @patch(_MCP_CLIENT)
+    def test_manual_search_empty_results_no_injection(self, mock_cls: MagicMock) -> None:
         p = _make_plugin(tool_calling=False, manual_search=True)
-        p.memory_client.search.return_value = []
+        mock_mcp = MagicMock()
+        mock_mcp.call_tool.return_value = json.dumps({"items": []})
+        mock_cls.return_value = mock_mcp
         p._llm.chat.return_value = LLMResponse("answer", 5, 3, 0.1)
         resp = p.send_message("s1", "q")
         self.assertEqual([], resp.memory_items)
         messages = p._llm.chat.call_args.args[0]
         self.assertEqual(2, len(messages))  # system + user only
 
-    def test_manual_search_exception_is_reported(self) -> None:
+    @patch(_MCP_CLIENT)
+    def test_manual_search_exception_is_reported(self, mock_cls: MagicMock) -> None:
         p = _make_plugin(tool_calling=False, manual_search=True)
-        p.memory_client.search.side_effect = RuntimeError("search down")
+        mock_mcp = MagicMock()
+        mock_mcp.call_tool.side_effect = RuntimeError("search down")
+        mock_cls.return_value = mock_mcp
         p._llm.chat.return_value = LLMResponse("answer", 5, 3, 0.1)
         resp = p.send_message("s1", "q")
         self.assertEqual("answer", resp.text)
@@ -1129,12 +1194,16 @@ class PluginSendMessageTests(unittest.TestCase):
     @patch(_MCP_CLIENT)
     def test_combined_manual_search_and_tool_calling(self, mock_cls: MagicMock) -> None:
         p = _make_plugin(tool_calling=True, manual_search=True)
-        p.memory_client.search.return_value = [
-            SearchResult(uri="echo://pre", score=0.8, content="prefetched"),
-        ]
         mock_mcp = MagicMock()
         mock_cls.return_value = mock_mcp
-        mock_mcp.call_tool.return_value = "tool result"
+        mock_mcp.call_tool.side_effect = [
+            json.dumps({
+                "items": [
+                    {"uri": "echo://pre", "score": 0.8, "content": "prefetched"},
+                ]
+            }),
+            "tool result",
+        ]
         p._llm.chat_with_tools.side_effect = [
             LLMToolResponse("", [_tool_call("memory_query", {"query": "x"})], 5, 2),
             LLMToolResponse("ans", [], 10, 3),

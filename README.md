@@ -98,6 +98,9 @@ python scripts/build_echomem_eval_report.py
 报告输出到 `reports/echomem_develop_pr192_pr199_20260805/report.html`。
 报告会记录注入耗时、session commit 成功率、QA/Judge、MCP tool audit、
 `current/messages.jsonl` 读取情况，以及 EchoMem 的 timeout/commit failure。
+每次运行的 `summary.json`、`config.json` 和 `qa_resume_manifest.json` 还会写入
+`agent_options`，用于核对 `tool_calling`、`initial_retrieval_protocol=mcp`、
+`mcp_read_mode`、user/agent memory budget、QA/Judge 并发等实际跑法。
 
 同一份记忆的三模式对比报告生成：
 

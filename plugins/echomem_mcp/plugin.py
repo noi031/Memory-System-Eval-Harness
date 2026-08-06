@@ -5,10 +5,13 @@ OpenAI function-calling definitions.  It decides when to search memory and
 which URIs to read, mimicking how a real agent would interact with a
 memory system through the MCP protocol.
 
-Three configurable parameters control behavior:
+Two configurable parameters control behavior:
 - --tool-calling / --no-tool-calling: enable LLM tool calling via MCP
 - --search-in-tools / --no-search-in-tools: include memory_query in tool defs
-- --manual-search / --no-manual-search: pre-fetch memory before LLM turn
+
+Initial memory pre-fetch is always performed through EchoMem MCP
+``memory_query``.  The plugin intentionally does not call EchoMem's HTTP
+retrieval API for QA retrieval.
 
 Memory injection is handled before QA starts.  The MCP server must be running
 (EchoMem config ``mcp.enabled=true``).
@@ -31,6 +34,7 @@ from plugins.echomem_mcp.runtime import (
     configured_tools,
 )
 from backends.echomem.client import EchoMemClient
+from backends.memory_types import SearchResult
 from shared.eval_base import add_llm_args, add_qa_args
 from shared.llm_client import LLMClient
 from backends.memory_args import add_memory_backend_args
@@ -39,13 +43,61 @@ from backends.memory_format import format_memory_section
 logger = logging.getLogger("eval.echomem_mcp")
 
 
+def _is_agent_memory(item: SearchResult) -> bool:
+    uri = str(getattr(item, "uri", "") or "").lower()
+    memory_type = str(getattr(item, "memory_type", "") or "").lower()
+    return "/agent/" in uri or memory_type.startswith("agent")
+
+
+def _format_items(items: list[SearchResult], budget_chars: int) -> str:
+    sections: list[str] = []
+    total = 0
+    for i, item in enumerate(items, 1):
+        content = str(item.content or "")
+        block = f"[{i}] (score: {item.score:.2f}) uri: {item.uri}\n{content}"
+        if budget_chars > 0 and total + len(block) > budget_chars:
+            break
+        sections.append(block)
+        total += len(block)
+    return "\n\n".join(sections)
+
+
+def format_split_memory_section(
+    items: list[SearchResult],
+    *,
+    user_memory_budget_chars: int,
+    agent_memory_budget_chars: int,
+) -> str:
+    if not items:
+        return ""
+
+    user_items: list[SearchResult] = []
+    agent_items: list[SearchResult] = []
+    for item in items:
+        if _is_agent_memory(item):
+            agent_items.append(item)
+        else:
+            user_items.append(item)
+
+    sections: list[str] = []
+    user_memory = _format_items(user_items, user_memory_budget_chars)
+    agent_memory = _format_items(agent_items, agent_memory_budget_chars)
+    if user_memory:
+        sections.append(f"### user memories:\n\n{user_memory}")
+    if agent_memory:
+        sections.append(f"### agent memories:\n\n{agent_memory}")
+    return "\n\n".join(sections)
+
+
 class EchoMemMCPPlugin(AgentPlugin):
     """Agent that uses EchoMem MCP tools for memory retrieval.
 
-    Behavior is controlled by three flags (all default to True):
+    Behavior is controlled by two flags (both default to True):
     - tool_calling: whether to present tools to the LLM
     - search_in_tools: whether memory_query is in the tool list
-    - manual_search: whether to pre-fetch memories before the LLM turn
+
+    The platform-side pre-fetch before each LLM turn always uses MCP
+    memory_query.
     """
 
     descriptor = AgentDescriptor(
@@ -95,12 +147,6 @@ class EchoMemMCPPlugin(AgentPlugin):
             help="Include memory_query in tool definitions (default: enabled)",
         )
         g.add_argument(
-            "--manual-search",
-            action=argparse.BooleanOptionalAction,
-            default=True,
-            help="Pre-fetch memory search before each LLM turn (default: enabled)",
-        )
-        g.add_argument(
             "--mcp-read-mode",
             choices=["disabled", "allow", "require"],
             default="allow",
@@ -110,6 +156,18 @@ class EchoMemMCPPlugin(AgentPlugin):
                 "as a compatibility alias without extra prompt rules"
             ),
         )
+        g.add_argument(
+            "--user-memory-budget-chars",
+            type=int,
+            default=4000,
+            help="Max chars of retrieved user memories to inject (default: 4000)",
+        )
+        g.add_argument(
+            "--agent-memory-budget-chars",
+            type=int,
+            default=2000,
+            help="Max chars of retrieved agent memories to inject (default: 2000)",
+        )
 
     def setup(self, config: dict) -> None:
         self._mcp_url = config.get("mcp_url", "http://127.0.0.1:8001")
@@ -117,10 +175,16 @@ class EchoMemMCPPlugin(AgentPlugin):
         self._max_iterations = config.get("mcp_max_iterations", 50)
         self._tool_calling = config.get("tool_calling", True)
         self._search_in_tools = config.get("search_in_tools", True)
+        # Kept as an internal/backward-compatible config switch for unit tests
+        # and older config files. It is intentionally not exposed as a CLI
+        # option; QA retrieval should use MCP by default.
         self._manual_search = config.get("manual_search", True)
+        self._initial_search_via_mcp = True
         self._mcp_read_mode = config.get("mcp_read_mode", "allow")
         self._top_k = config.get("top_k", 25)
         self._memory_budget_chars = config.get("memory_budget_chars", 8000)
+        self._user_memory_budget_chars = config.get("user_memory_budget_chars", 4000)
+        self._agent_memory_budget_chars = config.get("agent_memory_budget_chars", 2000)
         self._question_timeout_s = float(config.get("question_timeout_s", 120.0))
 
         # Create LLM client
@@ -225,18 +289,50 @@ class EchoMemMCPPlugin(AgentPlugin):
         retrieval_items: list[dict[str, Any]] = []
         retrieval_latency_s = 0.0
         retrieval_error = ""
+        initial_search_via_mcp = False
+        mcp: McpClient | None = None
 
-        # Phase A: Manual pre-fetch search
+        initial_search_enabled = bool(getattr(self, "_initial_search_via_mcp", True))
+        if self._manual_search and initial_search_enabled:
+            try:
+                mcp = McpClient(
+                    self._mcp_url,
+                    auth_key=self._auth_key or self.memory_client.auth_key,
+                )
+                mcp.initialize(timeout_s=remaining())
+                initial_search_via_mcp = True
+            except Exception as e:
+                retrieval_error = f"{type(e).__name__}: {e}"
+                logger.warning("Initial MCP search initialize failed: %s", retrieval_error)
+                mcp = None
+
+        # Phase A: Platform pre-fetch search through MCP memory_query.
         if self._manual_search:
             try:
                 t0 = time.monotonic()
-                results = self.memory_client.search(
-                    message,
-                    top_k=self._top_k,
-                    timeout_s=remaining(),
-                )
+                if mcp is not None:
+                    raw = mcp.call_tool(
+                        "memory_query",
+                        {"query": message, "limit": self._top_k},
+                        timeout_s=remaining(),
+                    )
+                    payload = json.loads(raw) if raw else {}
+                    raw_items = payload.get("items", []) if isinstance(payload, dict) else []
+                    results = [
+                        SearchResult.from_dict(item)
+                        for item in raw_items
+                        if isinstance(item, dict)
+                    ]
+                else:
+                    results = []
                 retrieval_latency_s = time.monotonic() - t0
-                memory_text = format_memory_section(results, self._memory_budget_chars)
+                memory_text = format_split_memory_section(
+                    results,
+                    user_memory_budget_chars=self._user_memory_budget_chars,
+                    agent_memory_budget_chars=self._agent_memory_budget_chars,
+                )
+                if not memory_text:
+                    memory_text = format_memory_section(results, self._memory_budget_chars)
                 if memory_text:
                     messages.insert(1, {"role": "user", "content": memory_text})
                 retrieval_items = [r.to_dict() for r in results]
@@ -275,7 +371,6 @@ class EchoMemMCPPlugin(AgentPlugin):
         }
 
         if tools:
-            mcp: McpClient | None = None
             try:
                 mcp = McpClient(
                     self._mcp_url,
@@ -418,6 +513,9 @@ class EchoMemMCPPlugin(AgentPlugin):
             response_text = resp.content
             llm_error = resp.error or ""
 
+        if mcp is not None and not tools:
+            mcp.close()
+
         elapsed = time.monotonic() - start
         return AgentResponse(
             text=response_text,
@@ -433,9 +531,11 @@ class EchoMemMCPPlugin(AgentPlugin):
                 "retrieval_latency_s": retrieval_latency_s,
                 "llm_latency_s": elapsed,
                 "retrieval_error": retrieval_error,
+                "initial_search_via_mcp": initial_search_via_mcp,
                 "trace": {
                     "tool_audit": tool_audit,
                     "mcp_read_mode": self._mcp_read_mode,
+                    "initial_search_via_mcp": initial_search_via_mcp,
                     "tools": [
                         t["function"]["name"]
                         for t in tools

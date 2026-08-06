@@ -18,6 +18,7 @@ import os
 import re
 import sys
 from pathlib import Path
+from typing import Any
 
 # 确保能 import shared 包
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
@@ -74,6 +75,59 @@ from shared.eval_base import (
 )
 from shared.import_guard import require_complete_imports
 from shared.llm_client import LLMClient
+
+
+def _redact_secret(value: Any) -> str:
+    text = str(value or "")
+    if not text:
+        return ""
+    return text[:4] + "***" + text[-4:] if len(text) > 8 else "***"
+
+
+def _build_agent_options(args, config) -> dict[str, Any]:
+    """Capture run-affecting plugin options for reproducible QA reports."""
+    options: dict[str, Any] = {
+        "agent_plugin": getattr(args, "agent_plugin", ""),
+        "qa_profile": getattr(args, "qa_profile", None) or "",
+        "tool_calling": bool(
+            getattr(args, "tools", getattr(args, "tool_calling", True))
+        ),
+        "initial_retrieval_protocol": "mcp",
+        "search_in_tools": bool(getattr(args, "search_in_tools", False)),
+        "top_k": config.top_k,
+        "memory_budget_chars": config.memory_budget_chars,
+        "question_timeout_s": config.question_timeout_s,
+        "llm_temperature": config.llm_temperature,
+        "llm_timeout_s": config.llm_timeout_s,
+        "llm_retries": config.llm_retries,
+        "qa_concurrency": config.concurrency,
+        "judge_concurrency": getattr(args, "judge_concurrency", None),
+    }
+    for name in (
+        "mcp_url",
+        "mcp_max_iterations",
+        "mcp_read_mode",
+        "user_memory_budget_chars",
+        "agent_memory_budget_chars",
+    ):
+        if hasattr(args, name):
+            options[name] = getattr(args, name)
+    for name in ("mcp_auth_key", "echomem_auth_key"):
+        if hasattr(args, name):
+            value = getattr(args, name)
+            options[f"{name}_configured"] = bool(value)
+            options[f"{name}_redacted"] = _redact_secret(value)
+    return options
+
+
+def _write_agent_options_to_config(result_dir: Path, options: dict[str, Any]) -> None:
+    config_path = result_dir / "config.json"
+    payload = json.loads(config_path.read_text(encoding="utf-8"))
+    payload["agent_options"] = options
+    config_path.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
 
 
 def _apply_resume_memory_identity(
@@ -278,12 +332,15 @@ def main() -> None:
         )
         return
 
+    agent_options = _build_agent_options(args, config)
+
     # 创建评测运行
     run = EvalRun(
         benchmark_name="locomo",
         results_root=results_root_for(Path(__file__).parent, args.out_dir),
         config=config,
     )
+    _write_agent_options_to_config(run.result_dir, agent_options)
     log = run.logger
 
     # 加载数据集
@@ -316,6 +373,8 @@ def main() -> None:
     # 加载 agent 插件 (在记忆操作之前, setup 内部创建 memory_client)
     agent_config = {**vars(args), "benchmark_name": "locomo", "run_id": run.result_dir.name}
     agent_plugin = load_agent_plugin(args.agent_plugin, agent_config)
+    agent_options["qa_profile"] = agent_plugin.qa_profile
+    _write_agent_options_to_config(run.result_dir, agent_options)
     echomem = agent_plugin.memory_client
     echomem.health()
     memory_reuse_source = args.resume_qa or args.reuse_memory_from
@@ -458,6 +517,7 @@ def main() -> None:
         system_prompt_append=system_prompt_append,
         system_prompt_append_sha256=system_prompt_append_sha256,
         system_prompt_append_source=system_prompt_append_source,
+        agent_options=agent_options,
     )
     qa_tasks = build_qa_tasks(
         jobs,

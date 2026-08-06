@@ -63,7 +63,7 @@ from benchmarks.locomo.provenance import (
 from benchmarks.locomo.qa import QAOptions, build_qa_tasks
 from benchmarks.locomo.reporting import build_summary
 from benchmarks.locomo.retry import build_retry_command, latest_qa_csv
-from benchmarks.locomo.run_eval import build_parser
+from benchmarks.locomo.run_eval import _build_agent_options, build_parser
 from benchmarks.locomo.selection import parse_question_ids, select_questions
 from benchmarks.locomo.stats import summarize_judge_rows
 from benchmarks.locomo.blackbox import metric_stats, percentile
@@ -947,6 +947,32 @@ class BuildSummaryTests(unittest.TestCase):
         self.assertEqual("custom.txt", summary["qa_prompt_append"]["source"])
         self.assertEqual("deadbeef", summary["qa_prompt_append"]["sha256"])
 
+    def test_agent_options_included(self):
+        options = {
+            "agent_plugin": "echomem_mcp",
+            "initial_retrieval_protocol": "mcp",
+            "mcp_read_mode": "allow",
+            "user_memory_budget_chars": 4000,
+            "agent_memory_budget_chars": 2000,
+        }
+        summary = build_summary(
+            dataset_path="/data/locomo.json",
+            sample_filter="all",
+            total_samples=1,
+            total_questions=1,
+            import_report=self._import_report(completed=1, total=1),
+            resume_qa=False,
+            qa_results=[],
+            judge_report=self._judge_report(),
+            qa_options=QAOptions(
+                profile=VIKINGBOAT_0411_PROFILE,
+                agent_options=options,
+            ),
+            session_mode="locomo",
+            evaluation_identity={},
+        )
+        self.assertEqual(options, summary["agent_options"])
+
 
 # ------------------------------------------------------------------ #
 #  qa.py                                                             #
@@ -1431,7 +1457,17 @@ class ResumeManifestTests(unittest.TestCase):
             llm_model="model",
             llm_max_tokens=1024,
         )
-        options = QAOptions(profile=VIKINGBOAT_0411_PROFILE, top_k=25)
+        agent_options = {
+            "agent_plugin": "echomem_mcp",
+            "initial_retrieval_protocol": "mcp",
+            "user_memory_budget_chars": 4000,
+            "agent_memory_budget_chars": 2000,
+        }
+        options = QAOptions(
+            profile=VIKINGBOAT_0411_PROFILE,
+            top_k=25,
+            agent_options=agent_options,
+        )
         manifest = build_qa_resume_manifest(
             dataset_path="/data/locomo.json",
             sample_filter="conv-30",
@@ -1444,6 +1480,44 @@ class ResumeManifestTests(unittest.TestCase):
         self.assertEqual("u", manifest["memory_identity"]["user_id"])
         self.assertEqual("locomo", manifest["session_mode"])
         self.assertEqual("model", manifest["answer_model"]["model"])
+        self.assertEqual(agent_options, manifest["qa"]["agent_options"])
+
+    def test_build_agent_options_records_mcp_switches_and_redacts_keys(self):
+        args = SimpleNamespace(
+            agent_plugin="echomem_mcp",
+            qa_profile=None,
+            tool_calling=True,
+            search_in_tools=False,
+            mcp_url="http://127.0.0.1:8001",
+            mcp_auth_key="test-mcp-secret-123456",
+            mcp_max_iterations=50,
+            mcp_read_mode="disabled",
+            echomem_auth_key="test-echomem-secret-abcdef",
+            user_memory_budget_chars=4000,
+            agent_memory_budget_chars=2000,
+            judge_concurrency=10,
+        )
+        config = EvalConfig(
+            top_k=25,
+            memory_budget_chars=8000,
+            question_timeout_s=0,
+            llm_temperature=0.7,
+            llm_timeout_s=600,
+            llm_retries=3,
+            concurrency=10,
+        )
+        options = _build_agent_options(args, config)
+        self.assertEqual("echomem_mcp", options["agent_plugin"])
+        self.assertTrue(options["tool_calling"])
+        self.assertEqual("mcp", options["initial_retrieval_protocol"])
+        self.assertNotIn("manual_search", options)
+        self.assertNotIn("mcp_initial_search", options)
+        self.assertEqual("disabled", options["mcp_read_mode"])
+        self.assertEqual(4000, options["user_memory_budget_chars"])
+        self.assertEqual(2000, options["agent_memory_budget_chars"])
+        self.assertTrue(options["mcp_auth_key_configured"])
+        self.assertEqual("test***3456", options["mcp_auth_key_redacted"])
+        self.assertNotIn("test-mcp-secret-123456", json.dumps(options))
 
     def test_copy_resume_traces_filters_by_reusable_ids(self):
         from benchmarks.locomo.resume import (
