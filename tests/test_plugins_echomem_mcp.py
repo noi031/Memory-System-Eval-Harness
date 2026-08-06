@@ -868,6 +868,21 @@ class PluginSendMessageTests(unittest.TestCase):
         self.assertIn("agent keep", text)
         self.assertNotIn("agent drop", text)
 
+    def test_split_memory_section_keeps_uri_and_continues_after_long_item(self) -> None:
+        text = format_split_memory_section(
+            [
+                SearchResult(uri="echo://user/1", score=0.9, content="first"),
+                SearchResult(uri="echo://user/2", score=0.8, content="x" * 200),
+                SearchResult(uri="echo://user/3", score=0.7, content="later"),
+            ],
+            user_memory_budget_chars=150,
+            agent_memory_budget_chars=0,
+        )
+        self.assertIn("first", text)
+        self.assertIn("echo://user/2", text)
+        self.assertNotIn("x" * 200, text)
+        self.assertIn("later", text)
+
     @patch(_MCP_CLIENT)
     def test_manual_search_empty_results_no_injection(self, mock_cls: MagicMock) -> None:
         p = _make_plugin(tool_calling=False, manual_search=True)

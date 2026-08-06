@@ -54,11 +54,16 @@ def _format_items(items: list[SearchResult], budget_chars: int) -> str:
     total = 0
     for i, item in enumerate(items, 1):
         content = str(item.content or "")
-        block = f"[{i}] (score: {item.score:.2f}) uri: {item.uri}\n{content}"
-        if budget_chars > 0 and total + len(block) > budget_chars:
-            break
-        sections.append(block)
-        total += len(block)
+        full_block = f"[{i}] (score: {item.score:.2f}) uri: {item.uri}\n{content}"
+        uri_block = f"[{i}] (score: {item.score:.2f}) uri: {item.uri}"
+        separator = 2 if sections else 0
+        if not budget_chars or total + separator + len(full_block) <= budget_chars:
+            sections.append(full_block)
+            total += separator + len(full_block)
+            continue
+        if total + separator + len(uri_block) <= budget_chars:
+            sections.append(uri_block)
+            total += separator + len(uri_block)
     return "\n\n".join(sections)
 
 
