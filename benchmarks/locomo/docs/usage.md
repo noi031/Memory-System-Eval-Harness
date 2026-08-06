@@ -27,18 +27,32 @@ export LLM_API_KEY="$DASHSCOPE_API_KEY"
 模型暴露工具，只进行一次模型调用：
 
 ```bash
-./eval.sh locomo \
+./.venv/bin/python benchmarks/locomo/run_eval.py \
   --agent-plugin echomem_mcp \
+  --echomem-url http://127.0.0.1:8110 \
+  --mcp-url http://127.0.0.1:8111 \
+  --echomem-auth-key "$ECHOMEM_AUTH_KEY" \
+  --mcp-auth-key "$ECHOMEM_AUTH_KEY" \
   --sample conv-30 \
+  --llm-base-url "$LLM_BASE_URL" \
+  --llm-model "$LLM_MODEL" \
+  --llm-api-key "$LLM_API_KEY" \
   --no-tool-calling
 ```
 
 带 MCP 工具调用但不读 `messages.jsonl`：
 
 ```bash
-./eval.sh locomo \
+./.venv/bin/python benchmarks/locomo/run_eval.py \
   --agent-plugin echomem_mcp \
+  --echomem-url http://127.0.0.1:8110 \
+  --mcp-url http://127.0.0.1:8111 \
+  --echomem-auth-key "$ECHOMEM_AUTH_KEY" \
+  --mcp-auth-key "$ECHOMEM_AUTH_KEY" \
   --sample conv-30 \
+  --llm-base-url "$LLM_BASE_URL" \
+  --llm-model "$LLM_MODEL" \
+  --llm-api-key "$LLM_API_KEY" \
   --tool-calling \
   --mcp-read-mode disabled
 ```
@@ -49,9 +63,16 @@ export LLM_API_KEY="$DASHSCOPE_API_KEY"
 带 MCP 工具调用并允许读取 `messages.jsonl`：
 
 ```bash
-./eval.sh locomo \
+./.venv/bin/python benchmarks/locomo/run_eval.py \
   --agent-plugin echomem_mcp \
+  --echomem-url http://127.0.0.1:8110 \
+  --mcp-url http://127.0.0.1:8111 \
+  --echomem-auth-key "$ECHOMEM_AUTH_KEY" \
+  --mcp-auth-key "$ECHOMEM_AUTH_KEY" \
   --sample conv-30 \
+  --llm-base-url "$LLM_BASE_URL" \
+  --llm-model "$LLM_MODEL" \
+  --llm-api-key "$LLM_API_KEY" \
   --tool-calling \
   --mcp-read-mode allow
 ```

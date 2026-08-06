@@ -176,9 +176,16 @@ export LLM_API_KEY="$DASHSCOPE_API_KEY"
    `memory_query` 做初始召回；回答阶段不向模型暴露工具，只进行一次模型调用。
 
    ```bash
-   ./eval.sh locomo \
+   ./.venv/bin/python benchmarks/locomo/run_eval.py \
      --agent-plugin echomem_mcp \
+     --echomem-url http://127.0.0.1:8110 \
+     --mcp-url http://127.0.0.1:8111 \
+     --echomem-auth-key "$ECHOMEM_AUTH_KEY" \
+     --mcp-auth-key "$ECHOMEM_AUTH_KEY" \
      --sample conv-30 \
+     --llm-base-url "$LLM_BASE_URL" \
+     --llm-model "$LLM_MODEL" \
+     --llm-api-key "$LLM_API_KEY" \
      --no-tool-calling
    ```
 
@@ -188,9 +195,16 @@ export LLM_API_KEY="$DASHSCOPE_API_KEY"
    转发该调用。
 
    ```bash
-   ./eval.sh locomo \
+   ./.venv/bin/python benchmarks/locomo/run_eval.py \
      --agent-plugin echomem_mcp \
+     --echomem-url http://127.0.0.1:8110 \
+     --mcp-url http://127.0.0.1:8111 \
+     --echomem-auth-key "$ECHOMEM_AUTH_KEY" \
+     --mcp-auth-key "$ECHOMEM_AUTH_KEY" \
      --sample conv-30 \
+     --llm-base-url "$LLM_BASE_URL" \
+     --llm-model "$LLM_MODEL" \
+     --llm-api-key "$LLM_API_KEY" \
      --tool-calling \
      --mcp-read-mode disabled
    ```
@@ -200,9 +214,16 @@ export LLM_API_KEY="$DASHSCOPE_API_KEY"
    模型根据 MCP 工具描述和当前上下文自行决定。
 
    ```bash
-   ./eval.sh locomo \
+   ./.venv/bin/python benchmarks/locomo/run_eval.py \
      --agent-plugin echomem_mcp \
+     --echomem-url http://127.0.0.1:8110 \
+     --mcp-url http://127.0.0.1:8111 \
+     --echomem-auth-key "$ECHOMEM_AUTH_KEY" \
+     --mcp-auth-key "$ECHOMEM_AUTH_KEY" \
      --sample conv-30 \
+     --llm-base-url "$LLM_BASE_URL" \
+     --llm-model "$LLM_MODEL" \
+     --llm-api-key "$LLM_API_KEY" \
      --tool-calling \
      --mcp-read-mode allow
    ```
