@@ -18,7 +18,6 @@ from unittest.mock import MagicMock, patch
 
 from backends.memory_types import CommitResult, SearchResult
 from benchmarks.locomo.profiles import (
-    LEGACY_77_PROFILE,
     VIKINGBOAT_0411_NATURAL_NO_TOOLS_PROFILE,
     VIKINGBOAT_0411_PROFILE,
     VIKINGBOAT_0411_SETTINGS,
@@ -449,21 +448,6 @@ class VikingBotSetupTests(unittest.TestCase):
             plugin = VikingBotPlugin()
             plugin.setup({"llm_base_url": "u", "llm_api_key": "k", "tools": False})
             self.assertEqual(VIKINGBOAT_0411_NATURAL_NO_TOOLS_PROFILE, plugin._qa_profile)
-
-    def test_explicit_qa_profile_overrides_auto_select(self):
-        with (
-            patch("plugins.vikingbot.plugin.EchoMemClient"),
-            patch("plugins.vikingbot.plugin.OpenVikingClient"),
-            patch("plugins.vikingbot.plugin.LLMClient"),
-        ):
-            plugin = VikingBotPlugin()
-            plugin.setup({
-                "llm_base_url": "u",
-                "llm_api_key": "k",
-                "tools": True,
-                "qa_profile": LEGACY_77_PROFILE,
-            })
-            self.assertEqual(LEGACY_77_PROFILE, plugin._qa_profile)
 
     def test_resolve_cli_overrides_profile_default(self):
         with (
@@ -1474,20 +1458,6 @@ class AnswerOneVikingbotQuestionTests(unittest.TestCase):
         )
         self.assertEqual("**Bold answer**", result.response)
         self.assertFalse(result.trace["answer_sanitized"])
-
-    @patch("plugins.vikingbot.runtime.chat_with_tools")
-    def test_legacy_profile_sanitizes_answer(self, mock_chat):
-        mock_chat.return_value = (
-            {"role": "assistant", "content": "Based on the retrieved memories, 42"}, 10, 5,
-        )
-        result = answer_one_vikingbot_question(
-            _FakeEchoMem(), _FakeLLM(),
-            question_id="q1", question="Q", answer="42",
-            qa_profile=LEGACY_77_PROFILE,
-            tools_enabled=False,
-        )
-        self.assertEqual("42", result.response)
-        self.assertTrue(result.trace["answer_sanitized"])
 
     @patch("plugins.vikingbot.runtime.chat_with_tools")
     def test_model_usage_observed_tracking(self, mock_chat):

@@ -24,7 +24,6 @@ QA_CONTRACT_FILES = (
     "plugins/vikingbot/runtime.py",
     "plugins/vikingbot/tools.py",
     "plugins/vikingbot/prompting.py",
-    "plugins/vikingbot/legacy77_prompting.py",
     "plugins/vikingbot/vikingboat0411_prompting.py",
     "benchmarks/locomo/profiles/vikingboat0411_natural_no_tools.py",
     "plugins/vikingbot/answers.py",

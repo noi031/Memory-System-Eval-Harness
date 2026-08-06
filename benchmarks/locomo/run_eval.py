@@ -40,7 +40,6 @@ from benchmarks.locomo.judge import (
     judge_locomo_results,
 )
 from benchmarks.locomo.profiles import (
-    LEGACY_77_PROFILE,
     VIKINGBOAT_0411_PROFILE,
     VIKINGBOAT_0411_NATURAL_NO_TOOLS_PROFILE,
 )
@@ -195,14 +194,12 @@ def build_parser() -> argparse.ArgumentParser:
     qa.add_argument(
         "--qa-profile",
         choices=[
-            LEGACY_77_PROFILE,
             VIKINGBOAT_0411_PROFILE,
             VIKINGBOAT_0411_NATURAL_NO_TOOLS_PROFILE,
         ],
         default=None,
         help=(
-            "LoCoMo QA executor; legacy-77 preserves the actual July 13 "
-            "head_clean 63/81 run; vikingboat0411 adapts the v0.4.11 "
+            "LoCoMo QA executor; vikingboat0411 adapts the v0.4.11 "
             "VikingBot agent behavior to EchoMemory tools; "
             "vikingboat0411-natural-no-tools keeps only complete initially "
             "retrieved memory excerpts"

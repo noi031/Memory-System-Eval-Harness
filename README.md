@@ -335,8 +335,7 @@ LoCoMo 在进入 QA 前还会校验数据集 SHA-256 和实际 session manifest�
 污染。`--allow-diagnostics` 仅用于诊断。
 
 LoCoMo 未显式指定 profile 时，`--tools` 自动选择 `vikingboat0411`，
-`--no-tools` 自动选择 `vikingboat0411-natural-no-tools`。高级复现仍可通过
-`--qa-profile legacy-77` 显式选择 77% 历史复现口径。
+`--no-tools` 自动选择 `vikingboat0411-natural-no-tools`。
 prompt/loop 来源与 EchoMemory 适配边界见
 `docs/v2-source-provenance.md`，并会写入 `summary.json` 和逐题
 `agent_traces/*.json`。

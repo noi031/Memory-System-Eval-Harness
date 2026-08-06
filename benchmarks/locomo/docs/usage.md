@@ -271,18 +271,18 @@ python benchmarks/locomo/run_eval.py \
 ### QA 检索参数 (通过插件声明)
 | 参数 | 默认值 | 说明 |
 |---|---|---|
-| `--top-k` | profile 决定 | 三个保留 profile 均为 `25` |
+| `--top-k` | profile 决定 | 两个保留 profile 均为 `25` |
 | `--memory-budget-chars` | `6000` | 总记忆字符预算 |
-| `--question-timeout-s` | profile 决定 | 三个保留 profile 均为 `600` 秒；0 表示不增加总限制 |
+| `--question-timeout-s` | profile 决定 | 两个保留 profile 均为 `600` 秒；0 表示不增加总限制 |
 
 ### VikingBot 插件参数
 | 参数 | 默认值 | 说明 |
 |---|---|---|
-| `--tool-search-limit` | profile 决定 | 三个保留 profile 均为 `25` |
-| `--initial-min-score` | profile 决定 | `legacy-77=0`；VikingBoat 0.4.11 profiles=`0.1` |
-| `--tool-min-score` | profile 决定 | `legacy-77=0`；VikingBoat 0.4.11 profiles=`0.35` |
-| `--tool-search-pool-multiplier` | profile 决定 | 三个保留 profile 均为 `1` |
-| `--tool-set` | profile 决定 | `legacy-77=vikingbot_native_safe`；VikingBoat 0.4.11 profiles=`vikingbot_echo_native` |
+| `--tool-search-limit` | profile 决定 | 两个保留 profile 均为 `25` |
+| `--initial-min-score` | profile 决定 | VikingBoat 0.4.11 profiles=`0.1` |
+| `--tool-min-score` | profile 决定 | VikingBoat 0.4.11 profiles=`0.35` |
+| `--tool-search-pool-multiplier` | profile 决定 | 两个保留 profile 均为 `1` |
+| `--tool-set` | profile 决定 | VikingBoat 0.4.11 profiles=`vikingbot_echo_native` |
 | `--tools` / `--no-tools` | `--tools` | 是否向回答模型暴露 profile 的记忆工具；关闭后保留相同 prompt 和初始检索注入，只执行一次模型调用 |
 | `--user-memory-budget-chars` | `4000` | user memory prompt 预算 |
 | `--agent-memory-budget-chars` | `2000` | agent memory prompt 预算 |
