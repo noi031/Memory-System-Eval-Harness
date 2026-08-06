@@ -176,6 +176,14 @@ def build_parser() -> argparse.ArgumentParser:
             "reuses the prior identity and skips already-injected sessions"
         ),
     )
+    qa.add_argument(
+        "--reuse-memory-from",
+        default="",
+        help=(
+            "Reuse the identity and completed memory imports from a prior run, "
+            "but execute a fresh QA/Judge pass with the current MCP mode"
+        ),
+    )
     # judge 参数 (三个基础参数由共享 helper 声明, locomo 额外参数在此声明)
     add_judge_args(parser)
     g = parser.add_argument_group("Judge")
@@ -310,10 +318,17 @@ def main() -> None:
     agent_plugin = load_agent_plugin(args.agent_plugin, agent_config)
     echomem = agent_plugin.memory_client
     echomem.health()
-    if args.resume_qa:
-        _apply_resume_memory_identity(echomem, args.resume_qa, log)
+    memory_reuse_source = args.resume_qa or args.reuse_memory_from
+    if memory_reuse_source:
+        _apply_resume_memory_identity(echomem, memory_reuse_source, log)
     evaluation_identity = {
-        "mode": "resumed" if args.resume_qa else "fresh",
+        "mode": (
+            "resumed"
+            if args.resume_qa
+            else "reused"
+            if args.reuse_memory_from
+            else "fresh"
+        ),
         "tenant_id": echomem.account,
         "user_id": echomem.user_id,
         "auth_key": echomem.auth_key,
@@ -325,11 +340,11 @@ def main() -> None:
         evaluation_identity.get("user_id", ""),
     )
     memory_session_prefix = ""
-    if args.resume_qa:
+    if memory_reuse_source:
         sample = str(args.sample or "").strip()
         if re.fullmatch(r"conv-\d+", sample):
             memory_session_prefix = f"echomem-locomo-{sample}-"
-    if memory_session_prefix:
+    if memory_session_prefix and not args.reuse_memory_from:
         echomem = SessionPrefixMemoryClient(
             echomem,
             memory_session_prefix,
@@ -341,7 +356,11 @@ def main() -> None:
 
     # -- 阶段 1: 导入记忆 --
     log.info("=" * 60)
-    prior_import_rows = _load_prior_import_rows(args.resume_qa) if args.resume_qa else None
+    prior_import_rows = (
+        _load_prior_import_rows(memory_reuse_source)
+        if memory_reuse_source
+        else None
+    )
     if prior_import_rows is not None:
         log.info("阶段 1: 导入记忆 (resume-qa, 跳过已完成 batches)")
     else:
@@ -354,7 +373,7 @@ def main() -> None:
         ImportOptions(
             session_mode=session_mode,
             max_sessions=args.max_sessions,
-            resume_qa=bool(args.resume_qa),
+            resume_qa=bool(memory_reuse_source),
             sample_filter=args.sample,
             prior_import_rows=prior_import_rows,
         ),
@@ -567,7 +586,7 @@ def main() -> None:
         total_samples=len(plans),
         total_questions=len(jobs),
         import_report=import_report,
-        resume_qa=bool(args.resume_qa),
+        resume_qa=bool(args.resume_qa or args.reuse_memory_from),
         qa_results=qa_results,
         judge_report=judge_report,
         qa_options=qa_options,
@@ -596,6 +615,10 @@ def main() -> None:
             if qa_resume_state
             else []
         ),
+    }
+    summary["memory_reuse"] = {
+        "enabled": bool(args.reuse_memory_from),
+        "source": str(args.reuse_memory_from or ""),
     }
     summary["judge_parallelism"] = args.judge_concurrency
     summary["judge_checkpoint_interval"] = args.judge_checkpoint_interval

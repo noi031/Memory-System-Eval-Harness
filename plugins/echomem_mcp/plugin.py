@@ -58,6 +58,12 @@ class EchoMemMCPPlugin(AgentPlugin):
     def add_arguments(cls, parser: argparse.ArgumentParser) -> None:
         add_llm_args(parser)
         add_qa_args(parser)
+        # EchoMem MCP benefits from a wider initial candidate set than the
+        # shared QA default while leaving other plugins unchanged.
+        for action in parser._actions:
+            if "--top-k" in getattr(action, "option_strings", []):
+                action.default = 25
+                break
         add_memory_backend_args(parser)
         g = parser.add_argument_group("echomem-mcp")
         g.add_argument(
@@ -73,8 +79,8 @@ class EchoMemMCPPlugin(AgentPlugin):
         g.add_argument(
             "--mcp-max-iterations",
             type=int,
-            default=10,
-            help="Maximum tool-call iterations per question (default: 10)",
+            default=50,
+            help="Maximum tool-call iterations per question (default: 50)",
         )
         g.add_argument(
             "--tool-calling",
@@ -100,20 +106,20 @@ class EchoMemMCPPlugin(AgentPlugin):
             default="allow",
             help=(
                 "Transcript read policy: disabled removes read from MCP tools; "
-                "allow preserves normal tools; require adds a strict "
-                "messages.jsonl reading instruction"
+                "allow and require preserve the read tool; require is retained "
+                "as a compatibility alias without extra prompt rules"
             ),
         )
 
     def setup(self, config: dict) -> None:
         self._mcp_url = config.get("mcp_url", "http://127.0.0.1:8001")
         self._auth_key = config.get("mcp_auth_key", "") or config.get("echomem_auth_key", "")
-        self._max_iterations = config.get("mcp_max_iterations", 10)
+        self._max_iterations = config.get("mcp_max_iterations", 50)
         self._tool_calling = config.get("tool_calling", True)
         self._search_in_tools = config.get("search_in_tools", True)
         self._manual_search = config.get("manual_search", True)
         self._mcp_read_mode = config.get("mcp_read_mode", "allow")
-        self._top_k = config.get("top_k", 10)
+        self._top_k = config.get("top_k", 25)
         self._memory_budget_chars = config.get("memory_budget_chars", 8000)
         self._question_timeout_s = float(config.get("question_timeout_s", 120.0))
 
@@ -208,21 +214,6 @@ class EchoMemMCPPlugin(AgentPlugin):
         # Build messages
         time_context = f"Current date: {question_time}.\n\n" if str(question_time).strip() else ""
         system_prompt = _SYSTEM_PROMPT if self._tool_calling else _NO_TOOLS_SYSTEM_PROMPT
-        if self._mcp_read_mode == "require":
-            system_prompt += (
-                "\n\nTranscript evidence policy:\n"
-                "1. For every question, first call memory_query.\n"
-                "2. Before giving a final answer, call read on at least one "
-                "relevant concrete `current/messages.jsonl` URI returned or "
-                "identified by the search. This is mandatory even when the "
-                "search result looks sufficient.\n"
-                "3. Use the complete transcript as the source of truth for "
-                "exact wording, dates, order, and multiple events. Batch "
-                "relevant transcript URIs in one read call when possible.\n"
-                "4. Do not output tool-call syntax as the answer. Do not "
-                "claim memory is missing until both the search and transcript "
-                "read have been attempted."
-            )
         prompt_append = str(extra.get("system_prompt_append") or "").strip()
         if prompt_append:
             system_prompt += "\n\nAdditional evaluation instructions:\n" + prompt_append
@@ -233,19 +224,25 @@ class EchoMemMCPPlugin(AgentPlugin):
 
         retrieval_items: list[dict[str, Any]] = []
         retrieval_latency_s = 0.0
+        retrieval_error = ""
 
         # Phase A: Manual pre-fetch search
         if self._manual_search:
             try:
                 t0 = time.monotonic()
-                results = self.memory_client.search(message, top_k=self._top_k, timeout_s=remaining())
+                results = self.memory_client.search(
+                    message,
+                    top_k=self._top_k,
+                    timeout_s=remaining(),
+                )
                 retrieval_latency_s = time.monotonic() - t0
                 memory_text = format_memory_section(results, self._memory_budget_chars)
                 if memory_text:
                     messages.insert(1, {"role": "user", "content": memory_text})
                 retrieval_items = [r.to_dict() for r in results]
             except Exception as e:
-                logger.warning("Manual search failed: %s", e)
+                retrieval_error = f"{type(e).__name__}: {e}"
+                logger.warning("Manual search failed: %s", retrieval_error)
 
         # Phase B: Build tool list
         if self._tool_calling:
@@ -435,6 +432,7 @@ class EchoMemMCPPlugin(AgentPlugin):
                 "elapsed_s": elapsed,
                 "retrieval_latency_s": retrieval_latency_s,
                 "llm_latency_s": elapsed,
+                "retrieval_error": retrieval_error,
                 "trace": {
                     "tool_audit": tool_audit,
                     "mcp_read_mode": self._mcp_read_mode,

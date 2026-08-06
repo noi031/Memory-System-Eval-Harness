@@ -46,4 +46,4 @@
 |---|---|---|
 | `--mcp-url` | `http://127.0.0.1:8001` | MCP 服务器地址 |
 | `--mcp-auth-key` | `""` | X-Auth-Key，空则回退到 `--echomem-auth-key` |
-| `--mcp-max-iterations` | `10` | 每个问题的最大工具调用迭代数 |
+| `--mcp-max-iterations` | `50` | 每个问题的最大工具调用迭代数 |
