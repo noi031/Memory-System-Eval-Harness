@@ -176,17 +176,35 @@ export LLM_API_KEY="$DASHSCOPE_API_KEY"
    `memory_query` 做初始召回；回答阶段不向模型暴露工具，只进行一次模型调用。
 
    ```bash
+   # EchoMem HTTP=8110, MCP=8111；不使用 --reuse-memory-from，
+   # 因此会新建身份并重新注入 conv-30 的 19 个 session。
    ./.venv/bin/python benchmarks/locomo/run_eval.py \
      --agent-plugin echomem_mcp \
      --echomem-url http://127.0.0.1:8110 \
      --mcp-url http://127.0.0.1:8111 \
-     --echomem-auth-key "$ECHOMEM_AUTH_KEY" \
-     --mcp-auth-key "$ECHOMEM_AUTH_KEY" \
      --sample conv-30 \
+     --no-tool-calling \
+     --mcp-read-mode disabled \
+     --concurrency 4 \
+     --judge-concurrency 4 \
+     --top-k 25 \
+     --memory-budget-chars 8000 \
+     --user-memory-budget-chars 4000 \
+     --agent-memory-budget-chars 2000 \
      --llm-base-url "$LLM_BASE_URL" \
      --llm-model "$LLM_MODEL" \
      --llm-api-key "$LLM_API_KEY" \
-     --no-tool-calling
+     --llm-temperature 0.7 \
+     --question-timeout-s 600 \
+     --llm-timeout-s 600 \
+     --llm-retries 3
+   ```
+
+   如果 EchoMem MCP 开启了鉴权，再额外增加：
+
+   ```bash
+   --echomem-auth-key "$ECHOMEM_AUTH_KEY" \
+   --mcp-auth-key "$ECHOMEM_AUTH_KEY"
    ```
 
 2. **带 MCP 工具调用，但不读取 `messages.jsonl`**：平台仍会先通过 MCP
