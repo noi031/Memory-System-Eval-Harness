@@ -205,6 +205,26 @@ export LLM_API_KEY="$DASHSCOPE_API_KEY"
 `qa_results.csv`、`judge_results.csv`、`summary.json` 和
 `agent_traces/`。
 
+## 动态评测
+
+```bash
+# 先检查本地配置、EchoAgent 登录、credential 映射和 EchoMem 健康状态
+./eval.sh dynamic --check \
+  --username test_user --password YOUR_PASSWORD
+
+# Generate 模式
+./eval.sh dynamic \
+  --username test_user --password YOUR_PASSWORD \
+  --scenario-api-key YOUR_KEY \
+  --llm-api-key YOUR_KEY
+
+# Replay 模式
+./eval.sh dynamic \
+  --username test_user --password YOUR_PASSWORD \
+  --dataset /path/to/locomo.json \
+  --llm-api-key YOUR_KEY
+```
+
 ## 评测流程概述
 
 | Benchmark | 导入方式 | QA 方式 | 评测方式 |
