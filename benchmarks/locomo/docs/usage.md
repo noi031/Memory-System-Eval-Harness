@@ -23,14 +23,14 @@ export LLM_MODEL=deepseek-v4-flash
 export LLM_API_KEY="$DASHSCOPE_API_KEY"
 ```
 
-不带 MCP 工具调用：
+不带 MCP 工具调用。平台仍通过 MCP `memory_query` 做初始召回，但回答阶段不向
+模型暴露工具，只进行一次模型调用：
 
 ```bash
 ./eval.sh locomo \
   --agent-plugin echomem_mcp \
   --sample conv-30 \
-  --no-tool-calling \
-  --mcp-read-mode disabled
+  --no-tool-calling
 ```
 
 带 MCP 工具调用但不读 `messages.jsonl`：
@@ -46,20 +46,20 @@ export LLM_API_KEY="$DASHSCOPE_API_KEY"
 该模式会从工具 schema 中移除 `read`，并拒绝执行模型返回的未暴露 `read` 调用，
 因此不会把 transcript 请求转发给 MCP。
 
-带 MCP 工具调用并读 `messages.jsonl`：
+带 MCP 工具调用并允许读取 `messages.jsonl`：
 
 ```bash
 ./eval.sh locomo \
   --agent-plugin echomem_mcp \
   --sample conv-30 \
   --tool-calling \
-  --mcp-read-mode require
+  --mcp-read-mode allow
 ```
 
-`require` 模式追加的规则是：每题先调用 `memory_query`，回答前必须读取至少
-一个相关 URI 对应的 `current/messages.jsonl`；日期、顺序、原话和多事件问题
-以完整 transcript 为准。`summary.json` 的 `messages_jsonl_read_rate` 用于
-观察 prompt 是否真正推动了 transcript 读取，不能把调用率直接等同于准确率。
+平台侧初始召回始终使用 MCP `memory_query`。`allow` 保留 `read` 工具，但不强制
+模型调用；模型是否读取 `current/messages.jsonl` 由模型根据工具描述和上下文自行
+决定。`summary.json` 的 `messages_jsonl_read_rate` 用于观察实际读取情况，不能
+把调用率直接等同于准确率。
 
 ```bash
 # 默认注入记忆并使用 VikingBoat 0.4.11 工具口径

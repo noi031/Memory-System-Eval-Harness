@@ -172,20 +172,20 @@ export LLM_MODEL=deepseek-v4-flash
 export LLM_API_KEY="$DASHSCOPE_API_KEY"
 ```
 
-1. **不带 MCP 工具调用**：仍执行 EchoMem 记忆注入和手动召回，但回答阶段只
-   进行一次模型调用。
+1. **不带 MCP 工具调用**：仍执行 EchoMem 记忆注入，并由平台通过 MCP
+   `memory_query` 做初始召回；回答阶段不向模型暴露工具，只进行一次模型调用。
 
    ```bash
    ./eval.sh locomo \
      --agent-plugin echomem_mcp \
      --sample conv-30 \
-     --no-tool-calling \
-     --mcp-read-mode disabled
+     --no-tool-calling
    ```
 
-2. **带 MCP 工具调用，但不读取 `messages.jsonl`**：保留
-   `memory_query`、`list`、`glob`，从工具 schema 中移除 `read`；即使模型返回
-   未暴露的 `read`，harness 也会拒绝转发该调用。
+2. **带 MCP 工具调用，但不读取 `messages.jsonl`**：平台仍会先通过 MCP
+   `memory_query` 做初始召回；模型侧保留 `memory_query`、`list`、`glob`，
+   从工具 schema 中移除 `read`。即使模型返回未暴露的 `read`，harness 也会拒绝
+   转发该调用。
 
    ```bash
    ./eval.sh locomo \
@@ -195,8 +195,9 @@ export LLM_API_KEY="$DASHSCOPE_API_KEY"
      --mcp-read-mode disabled
    ```
 
-3. **带 MCP 工具调用并允许读取 `messages.jsonl`**：保留全部 MCP 工具。
-   模型是否调用 `read` 由模型根据 MCP 工具描述和当前上下文自行决定。
+3. **带 MCP 工具调用并允许读取 `messages.jsonl`**：平台仍会先通过 MCP
+   `memory_query` 做初始召回，并保留全部 MCP 工具。模型是否调用 `read` 由
+   模型根据 MCP 工具描述和当前上下文自行决定。
 
    ```bash
    ./eval.sh locomo \
