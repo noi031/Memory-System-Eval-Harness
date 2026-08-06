@@ -34,7 +34,6 @@ def main() -> None:
     )
     parser.add_argument("benchmark", nargs="?", choices=sorted(RUNNERS))
     parser.add_argument("--env-file", default=".env")
-    parser.add_argument("--check", action="store_true")
     parser.add_argument("--start-echomem", action="store_true")
     parser.add_argument("--keep-echomem", action="store_true")
     parser.add_argument("-h", "--help", action="store_true")
@@ -78,10 +77,6 @@ def main() -> None:
                 f"echomem={os.environ.get('ECHOMEM_BASE_URL', 'http://127.0.0.1:8010')} "
                 f"model={os.environ.get('LLM_MODEL', '')}"
             )
-            if args.check:
-                forwarded = [*forwarded, "--check"]
-        elif args.check:
-            forwarded = [*forwarded, "--check"]
 
         sys.argv = [str(RUNNERS[args.benchmark]), *forwarded]
         runpy.run_path(str(RUNNERS[args.benchmark]), run_name="__main__")

@@ -1746,16 +1746,9 @@ class RunEvalTests(unittest.TestCase):
             self.assertEqual(1, args.parallel_shards)
             self.assertEqual(2, args.parallel_workers)
             self.assertFalse(args.parallel_dry_run)
-            self.assertFalse(args.check)
             self.assertEqual("", args.judge_model)
             self.assertEqual("", args.judge_api_key)
             self.assertEqual("", args.judge_base_url)
-
-    def test_build_parser_check_flag(self):
-        with patch.object(sys, "argv", ["test"]):
-            parser = build_eval_parser()
-            args = parser.parse_args(["--check", "--llm-base-url", "u", "--llm-api-key", "k"])
-            self.assertTrue(args.check)
 
     def test_build_parser_judge_env_defaults(self):
         with patch.dict("os.environ", {

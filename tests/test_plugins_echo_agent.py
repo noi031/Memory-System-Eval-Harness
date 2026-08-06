@@ -150,6 +150,7 @@ class EchoAgentClientTests(unittest.TestCase):
     def test_init_stores_credentials_and_defaults(self):
         c = EchoAgentClient("http://srv", "user1", "pass1")
         self.assertEqual("http://srv", c.base_url)
+        self.assertEqual("/v1", c.api_prefix)
         self.assertEqual("user1", c.username)
         self.assertEqual("pass1", c.password)
         self.assertEqual("", c.token)
@@ -257,14 +258,18 @@ class EchoAgentClientTests(unittest.TestCase):
 
     def test_get_memory_auth_key_success(self):
         c = EchoAgentClient("http://srv", "u", "p")
+        c.user_uuid = "uuid-123"
         resp = json.dumps({"result": {"authKey": "ek-789"}}).encode()
         with patch("plugins.echo_agent.client.urlopen") as m:
             m.return_value = _FakeResponse(resp)
             key = c.get_memory_auth_key("http://ep:31030")
         self.assertEqual("ek-789", key)
+        sent_body = json.loads(m.call_args[0][0].data)
+        self.assertEqual("uuid-123", sent_body["userId"])
 
     def test_get_memory_auth_key_raises_without_authkey(self):
         c = EchoAgentClient("http://srv", "u", "p")
+        c.user_uuid = "uuid-123"
         resp = json.dumps({"result": {}}).encode()
         with patch("plugins.echo_agent.client.urlopen") as m:
             m.return_value = _FakeResponse(resp)
@@ -724,60 +729,21 @@ class EchoAgentPluginTests(unittest.TestCase):
     @patch("plugins.echo_agent.plugin.OpenVikingClient")
     @patch("plugins.echo_agent.plugin.EchoMemClient")
     @patch("plugins.echo_agent.plugin.EchoAgentClient")
-    def test_setup_provision_isolated_identity(
+    def test_setup_never_provisions_isolated_identity(
         self, mock_agent_cls, mock_echomem_cls, mock_ov_cls,
     ):
+        """EchoAgent plugin must not create an isolated tenant.
+
+        EchoAgent's backend resolves auth_key via the echoagent plugin
+        (31030) using the logged-in user's UUID as userId.  If injection
+        used a different tenant, retrieval would find nothing.  Therefore
+        the injection identity must always match the retrieval identity.
+        """
         mock_client = mock_agent_cls.return_value
         mock_client.get_memory_auth_key = MagicMock(return_value="ek")
         mock_mem = mock_echomem_cls.return_value
         plugin = EchoAgentPlugin()
         plugin.setup({"benchmark_name": "locomo", "run_id": "run-1"})
-        mock_mem.provision_isolated_identity.assert_called_once()
-        label = mock_mem.provision_isolated_identity.call_args.args[0]
-        self.assertIn("locomo", label)
-        self.assertIn("run-1", label)
-
-    @patch("plugins.echo_agent.plugin.OpenVikingClient")
-    @patch("plugins.echo_agent.plugin.EchoMemClient")
-    @patch("plugins.echo_agent.plugin.EchoAgentClient")
-    def test_setup_skips_isolation_when_resume_qa(
-        self, mock_agent_cls, mock_echomem_cls, mock_ov_cls,
-    ):
-        mock_client = mock_agent_cls.return_value
-        mock_client.get_memory_auth_key = MagicMock(return_value="ek")
-        mock_mem = mock_echomem_cls.return_value
-        plugin = EchoAgentPlugin()
-        plugin.setup({
-            "benchmark_name": "locomo",
-            "run_id": "run-1",
-            "resume_qa": "true",
-        })
-        mock_mem.provision_isolated_identity.assert_not_called()
-
-    @patch("plugins.echo_agent.plugin.OpenVikingClient")
-    @patch("plugins.echo_agent.plugin.EchoMemClient")
-    @patch("plugins.echo_agent.plugin.EchoAgentClient")
-    def test_setup_skips_isolation_when_no_benchmark_name(
-        self, mock_agent_cls, mock_echomem_cls, mock_ov_cls,
-    ):
-        mock_client = mock_agent_cls.return_value
-        mock_client.get_memory_auth_key = MagicMock(return_value="ek")
-        mock_mem = mock_echomem_cls.return_value
-        plugin = EchoAgentPlugin()
-        plugin.setup({"run_id": "run-1"})
-        mock_mem.provision_isolated_identity.assert_not_called()
-
-    @patch("plugins.echo_agent.plugin.OpenVikingClient")
-    @patch("plugins.echo_agent.plugin.EchoMemClient")
-    @patch("plugins.echo_agent.plugin.EchoAgentClient")
-    def test_setup_skips_isolation_when_no_run_id(
-        self, mock_agent_cls, mock_echomem_cls, mock_ov_cls,
-    ):
-        mock_client = mock_agent_cls.return_value
-        mock_client.get_memory_auth_key = MagicMock(return_value="ek")
-        mock_mem = mock_echomem_cls.return_value
-        plugin = EchoAgentPlugin()
-        plugin.setup({"benchmark_name": "locomo"})
         mock_mem.provision_isolated_identity.assert_not_called()
 
     @patch("plugins.echo_agent.plugin.OpenVikingClient")
@@ -1000,7 +966,28 @@ class EchoAgentPluginTests(unittest.TestCase):
         self.assertFalse(resp.prefetch_committed)
         self.assertEqual([], resp.memory_items)
         self.assertIsNone(resp.error)
+        self.assertEqual("echo_agent", resp.extra.get("qa_profile"))
         plugin.client.stream_reply.assert_called_once_with("s1", "/", 5)
+
+    def test_send_message_empty_session_creates_echoagent_session(self):
+        """When session_id is empty (benchmark mode), create a new EA session."""
+        plugin = _make_plugin()
+        plugin.client.create_session = MagicMock(return_value="ea-sess-1")
+        plugin.client.send_message = MagicMock(return_value={
+            "data": {"messages": [{"seq": 5, "status": "generating"}]},
+        })
+        plugin.client.stream_reply = MagicMock(return_value={
+            "reply": "hello", "ttft_ms": 10.0, "done_event": {},
+        })
+        resp = plugin.send_message("", "hi", "/", extra={"question_id": "q1"})
+        plugin.client.create_session.assert_called_once_with(
+            "qa-q1", "http://127.0.0.1:31030",
+        )
+        plugin.client.send_message.assert_called_once_with(
+            "ea-sess-1", "/", "hi", "",
+        )
+        plugin.client.stream_reply.assert_called_once_with("ea-sess-1", "/", 5)
+        self.assertEqual("hello", resp.text)
 
     def test_send_message_passes_pending_turn_id(self):
         plugin = _make_plugin()
@@ -1080,6 +1067,7 @@ class EchoAgentPluginTests(unittest.TestCase):
         self.assertIn("BAD", resp.error)
         self.assertIn("details", resp.error)
         self.assertEqual("", resp.text)
+        self.assertEqual("echo_agent", resp.extra.get("qa_profile"))
         plugin.client.stream_reply.assert_not_called()
 
     def test_send_message_exception_returns_error(self):
@@ -1090,6 +1078,7 @@ class EchoAgentPluginTests(unittest.TestCase):
         plugin.client.stream_reply = MagicMock()
         resp = plugin.send_message("s1", "hi", "/")
         self.assertEqual("boom", resp.error)
+        self.assertEqual("echo_agent", resp.extra.get("qa_profile"))
         plugin.client.stream_reply.assert_not_called()
 
     def test_send_message_snake_case_tokens(self):

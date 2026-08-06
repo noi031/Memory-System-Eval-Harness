@@ -73,6 +73,11 @@ def _ask_agent(
     except Exception as exc:
         return _failed_round(round_data, prefetch_committed, exc)
 
+    # If typing simulation didn't produce memory_items, fall back to
+    # response.memory_items (e.g. vikingbot, echomem_mcp, openviking_mcp)
+    if not memory_items:
+        memory_items = response.memory_items or []
+
     reply = {
         "reply": response.text,
         "ttft_ms": response.ttft_ms,
@@ -98,7 +103,6 @@ def run_generate_mode(
     log.info("模式: generate (LLM 生成场景)")
     evaluator_config_dict = load_evaluator_config(args.evaluator_config)
     evaluator_config = {
-        "mode": "dynamic",
         "num_memories": args.num_memories,
         "llm_config": {
             "model": args.scenario_model,
@@ -131,7 +135,11 @@ def run_generate_mode(
     log.info("theme=%s memories=%d", evaluator.theme, len(memories))
 
     backend = getattr(args, "memory_backend", "echomem")
+    inject_start = time.monotonic()
     inject_session_id = agent_plugin.inject_memories(memories, backend=backend)
+    inject_elapsed = time.monotonic() - inject_start
+    print(f"[inject] {len(memories)} memories injected in {inject_elapsed:.1f}s (session={inject_session_id})")
+    log.info("memory injection completed: %d memories in %.1fs", len(memories), inject_elapsed)
 
     rounds: list[dict[str, Any]] = []
     dataset_queries: list[dict[str, Any]] = []
@@ -195,7 +203,7 @@ def run_generate_mode(
             "mode": "generate",
             "num_memories": args.num_memories,
             "num_queries": args.num_queries,
-            "echoagent_url": args.echoagent_url,
+            "agent_plugin": args.agent_plugin,
             "evaluator_config": args.evaluator_config,
             "user_simulator_config": args.user_simulator_config,
         },
@@ -204,7 +212,7 @@ def run_generate_mode(
         background_memories=memories,
         dataset_queries=dataset_queries,
         inject_session_id=inject_session_id,
-        inject_user_id=args.user_id,
+        inject_user_id=getattr(args, "user_id", ""),
     )
 
 
@@ -235,6 +243,7 @@ def run_replay_mode(
         events = plan.get("events") or []
         if not events:
             continue
+        inject_start = time.monotonic()
         try:
             inject_session = agent_plugin.inject_memories(
                 events, backend=backend,
@@ -246,6 +255,9 @@ def run_replay_mode(
                 exc,
             )
             continue
+        inject_elapsed = time.monotonic() - inject_start
+        print(f"[inject] sample={sample_id} {len(events)} memories injected in {inject_elapsed:.1f}s (session={inject_session})")
+        log.info("memory injection completed: sample=%s %d memories in %.1fs", sample_id, len(events), inject_elapsed)
         qa_session = agent_plugin.create_session(
             title=f"replay-qa-{sample_id}",
         )
@@ -290,11 +302,10 @@ def run_replay_mode(
             "dataset": args.dataset,
             "sample": args.sample,
             "questions": args.questions,
-            "echoagent_url": args.echoagent_url,
-            "echomem_url": args.echomem_url,
+            "agent_plugin": args.agent_plugin,
             "evaluator_config": args.evaluator_config,
         },
         evaluator_config,
         theme="replay",
-        inject_user_id=args.user_id,
+        inject_user_id=getattr(args, "user_id", ""),
     )

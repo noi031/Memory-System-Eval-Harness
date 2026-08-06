@@ -1805,7 +1805,6 @@ class TestRunEvalBuildParser(unittest.TestCase):
         self.assertEqual("", args.question_ids)
         self.assertEqual(4, args.concurrency)
         self.assertEqual("results", args.out_dir)
-        self.assertFalse(args.check)
 
     def test_import_mode_choices(self):
         from benchmarks.hotpotqa.run_eval import build_parser
@@ -1818,15 +1817,6 @@ class TestRunEvalBuildParser(unittest.TestCase):
                     args = build_parser().parse_args(argv[1:])
                 self.assertEqual(mode, args.import_mode)
 
-    def test_check_flag(self):
-        from benchmarks.hotpotqa.run_eval import build_parser
-        argv = ["run_eval.py", "--agent-plugin", "bare_llm",
-                "--llm-api-key", "k", "--llm-base-url", "http://x",
-                "--llm-model", "m", "--check"]
-        with patch.object(sys, "argv", argv):
-            args = build_parser().parse_args(argv[1:])
-        self.assertTrue(args.check)
-
     def test_question_ids_arg(self):
         from benchmarks.hotpotqa.run_eval import build_parser
         argv = ["run_eval.py", "--agent-plugin", "bare_llm",
@@ -1835,53 +1825,6 @@ class TestRunEvalBuildParser(unittest.TestCase):
         with patch.object(sys, "argv", argv):
             args = build_parser().parse_args(argv[1:])
         self.assertEqual("a,b,c", args.question_ids)
-
-
-# ------------------------------------------------------------------ #
-#  run_eval.main (--check mode)                                      #
-# ------------------------------------------------------------------ #
-
-class TestRunEvalMainCheck(unittest.TestCase):
-    def test_check_success(self):
-        from benchmarks.hotpotqa import run_eval as mod
-
-        fake_job = SimpleNamespace(question_id="q1")
-        fake_plan = {"sample_id": "q1"}
-        argv = [
-            "run_eval.py", "--agent-plugin", "bare_llm",
-            "--llm-api-key", "k", "--llm-base-url", "http://x",
-            "--llm-model", "m", "--check",
-            "--dataset", "/fake/path.json",
-        ]
-        with patch.object(sys, "argv", argv), \
-             patch.object(mod, "validate_eval_config") as mock_val, \
-             patch.object(mod, "resolve_dataset_path", return_value="/fake/path.json"), \
-             patch.object(mod, "load_dataset", return_value=([fake_job], [fake_plan])), \
-             patch.object(mod, "select_jobs_and_plans", return_value=([fake_job], [fake_plan])), \
-             patch("builtins.print") as mock_print:
-            mod.main()
-        mock_val.assert_called_once()
-        printed = " ".join(str(c) for c in mock_print.call_args[0])
-        self.assertIn("[check] OK", printed)
-        self.assertIn("hotpotqa", printed)
-
-    def test_check_no_questions_raises(self):
-        from benchmarks.hotpotqa import run_eval as mod
-
-        argv = [
-            "run_eval.py", "--agent-plugin", "bare_llm",
-            "--llm-api-key", "k", "--llm-base-url", "http://x",
-            "--llm-model", "m", "--check",
-            "--dataset", "/fake/path.json",
-        ]
-        with patch.object(sys, "argv", argv), \
-             patch.object(mod, "validate_eval_config"), \
-             patch.object(mod, "resolve_dataset_path", return_value="/fake/path.json"), \
-             patch.object(mod, "load_dataset", return_value=([], [])), \
-             patch.object(mod, "select_jobs_and_plans", return_value=([], [])):
-            with self.assertRaises(ValueError) as ctx:
-                mod.main()
-        self.assertIn("no HotpotQA questions", str(ctx.exception))
 
 
 if __name__ == "__main__":

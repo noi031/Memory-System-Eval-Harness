@@ -183,7 +183,8 @@ python benchmarks/locomo/run_eval.py \
 | `--max-retries` | `3` | 后端 HTTP 请求最大重试次数 |
 
 #### echomem_mcp 插件
-固定使用 EchoMem 后端，不暴露 `--memory-backend`。
+固定使用 EchoMem 后端，不暴露 `--memory-backend`。声明 QA 检索参数（`--top-k`
+默认覆盖为 25）。
 
 | 参数 | 默认值 | 说明 |
 |---|---|---|
@@ -197,10 +198,17 @@ python benchmarks/locomo/run_eval.py \
 | `--commit-poll-interval-s` | `2.0` | Commit 轮询间隔 (秒) |
 | `--timeout-s` | `60.0` | 后端 HTTP 请求超时 (秒) |
 | `--max-retries` | `3` | 后端 HTTP 请求最大重试次数 |
+| `--mcp-url` | `http://127.0.0.1:8001` | EchoMem MCP server URL |
+| `--mcp-auth-key` | (空) | MCP server X-Auth-Key（留空时回退到 `--echomem-auth-key`） |
+| `--mcp-max-iterations` | `50` | 每个问题的最大工具调用迭代次数 |
+| `--tool-calling` / `--no-tool-calling` | `True` | 是否启用 LLM 工具调用 |
+| `--search-in-tools` / `--no-search-in-tools` | `True` | 是否将 `memory_query` 加入工具定义 |
+| `--manual-search` / `--no-manual-search` | `True` | 是否在每轮 LLM 前预取记忆 |
+| `--mcp-read-mode` | `allow` | 对话读取策略：`disabled`/`allow`/`require` |
 
 #### openviking_mcp 插件
 固定使用 OpenViking 后端，不暴露 `--memory-backend`。使用时需指定
-`--echomem-url http://127.0.0.1:19080`。
+`--echomem-url http://127.0.0.1:19080`。声明 QA 检索参数。
 
 | 参数 | 默认值 | 说明 |
 |---|---|---|
@@ -214,10 +222,16 @@ python benchmarks/locomo/run_eval.py \
 | `--commit-poll-interval-s` | `2.0` | Commit 轮询间隔 (秒) |
 | `--timeout-s` | `60.0` | 后端 HTTP 请求超时 (秒) |
 | `--max-retries` | `3` | 后端 HTTP 请求最大重试次数 |
+| `--ov-max-iterations` | `10` | 每个问题的最大工具调用迭代次数 |
+| `--ov-search-limit` | `8` | 每次 `memory_search` 返回的最大结果数 |
+| `--tool-calling` / `--no-tool-calling` | `True` | 是否启用 LLM 工具调用 |
+| `--search-in-tools` / `--no-search-in-tools` | `True` | 是否将 `memory_search` 加入工具定义 |
+| `--manual-search` / `--no-manual-search` | `True` | 是否在每轮 LLM 前预取记忆 |
 
 #### echo_agent 插件
 支持 `--memory-backend` 选择 echomem 或 openviking。`--echomem-auth-key` 留空
 时自动从 echoagent 插件解析；`--agent-id` 为 `default` 时自动设为 `echoagent`。
+不声明 QA 检索参数（QA 走 EchoAgent 管线）。
 
 | 参数 | 默认值 | 说明 |
 |---|---|---|
@@ -232,9 +246,37 @@ python benchmarks/locomo/run_eval.py \
 | `--commit-poll-interval-s` | `2.0` | Commit 轮询间隔 (秒) |
 | `--timeout-s` | `60.0` | 后端 HTTP 请求超时 (秒) |
 | `--max-retries` | `3` | 后端 HTTP 请求最大重试次数 |
+| `--echoagent-url` | `http://127.0.0.1:31020` | EchoAgent 后端地址 (环境变量 `ECHOAGENT_URL`) |
+| `--username` | `test_user` | EchoAgent 登录用户名 (环境变量 `ECHOAGENT_TEST_USERNAME`) |
+| `--password` | (空) | EchoAgent 登录密码 (环境变量 `ECHOAGENT_TEST_PASSWORD`) |
+| `--memory-engine-endpoint` | `http://127.0.0.1:31030` | echoagent 插件地址 (环境变量 `GLOBAL_MEMORY_ENGINE_ENDPOINT`) |
+
+#### echoagent_live 插件
+与 `echo_agent` 共享 `EchoAgentClient`，但不模拟打字、不触发 prefill 管线。
+默认地址指向外网部署。`--echomem-auth-key` 留空时自动从 echoagent 插件解析；
+`--agent-id` 为 `default` 时自动设为 `echoagent`。不声明 QA 检索参数。
+
+| 参数 | 默认值 | 说明 |
+|---|---|---|
+| `--memory-backend` | `echomem` | 记忆后端选择: `echomem` 或 `openviking` |
+| `--echomem-url` | `http://127.0.0.1:8010` | 后端 HTTP 地址 |
+| `--echomem-auth-key` | (空) | 后端 X-Auth-Key (留空时自动解析) |
+| `--account` | `default` | 后端 account |
+| `--user-id` | `default` | 后端 user_id |
+| `--agent-id` | `default` | 后端 agent_id (默认自动设为 `echoagent`) |
+| `--workspace` | (空) | 后端 workspace 路径 |
+| `--commit-timeout-s` | `0` | Commit 轮询超时 (秒)，0 表示无限等待 |
+| `--commit-poll-interval-s` | `2.0` | Commit 轮询间隔 (秒) |
+| `--timeout-s` | `60.0` | 后端 HTTP 请求超时 (秒) |
+| `--max-retries` | `3` | 后端 HTTP 请求最大重试次数 |
+| `--echoagent-url` | `https://echo-agent.online` | EchoAgent 后端地址 (环境变量 `ECHOAGENT_URL`) |
+| `--echoagent-api-prefix` | `/api` | API 路径前缀（外网反代 `/api` -> `/v1`；本地直连 `/v1`）(环境变量 `ECHOAGENT_API_PREFIX`) |
+| `--username` | `test_user` | EchoAgent 登录用户名 (环境变量 `ECHOAGENT_TEST_USERNAME`) |
+| `--password` | (空) | EchoAgent 登录密码 (环境变量 `ECHOAGENT_TEST_PASSWORD`) |
+| `--memory-engine-endpoint` | `http://8.134.127.8:31030` | echoagent 插件地址 (环境变量 `GLOBAL_MEMORY_ENGINE_ENDPOINT`) |
 
 #### bare_llm 插件
-不声明任何记忆后端参数，适用于无记忆系统基线测试。
+不声明任何记忆后端参数，适用于无记忆系统基线测试。声明 QA 检索参数。
 
 ### LLM 参数 (通过插件声明)
 | 参数 | 默认值 | 说明 |
@@ -248,6 +290,9 @@ python benchmarks/locomo/run_eval.py \
 | `--llm-retries` | `3` | LLM 请求重试次数 |
 
 ### QA 检索参数 (通过插件声明)
+> 由 `bare_llm`、`echomem_mcp`、`openviking_mcp`、`vikingbot` 声明；
+> `echo_agent` 和 `echoagent_live` 不声明（QA 走 EchoAgent 管线）。
+
 | 参数 | 默认值 | 说明 |
 |---|---|---|
 | `--top-k` | profile 决定 | 三个保留 profile 均为 `25` |
@@ -276,6 +321,7 @@ python benchmarks/locomo/run_eval.py \
 | `--qa-prompt-file` | (空) | 将本地 UTF-8 文件追加到所选 profile 的 system prompt；`summary.json` 和 resume manifest 仅记录文件名和 SHA-256 |
 | `--checkpoint-interval` | `10` | 每完成 N 题写一次 `qa_results.checkpoint.csv`；0 表示关闭 |
 | `--resume-qa` | (空) | 从先前运行目录或 QA CSV 恢复健康答案；复用已有身份，跳过已完成的 session 仅注入缺失部分，并严格校验数据集、模型和 QA 参数 |
+| `--reuse-memory-from` | (空) | 复用先前运行的身份和已完成记忆导入，但用当前参数重新执行完整 QA/Judge |
 | `--concurrency` | `4` | QA 并发数 |
 | `--out-dir` | `results` | 结果目录 |
 | `--allow-diagnostics` | false | 导入未完成或 provenance 不一致仍继续；仅限诊断 |
