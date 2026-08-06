@@ -56,61 +56,6 @@ scripts/
 
 ## LoCoMo 测试
 
-### EchoMem develop + PR192 + PR199 真实模型复测
-
-本次复测使用以下代码基线：
-
-- EchoMem `develop`：`684bfef61846745c5fd9094a8757fbfbd8d1714f`
-- PR192：`b91be9883f5177db79404777053849eff4c2655b`
-- PR199：`88573f7740681b2c202c0083e47452583a35e72c`
-- 合并测试 HEAD：`e6cdbfcc86f99eb25232bdc435ee916b2f8bf819`
-
-EchoMem 配置必须启用 `atomic_engine` 和 MCP，LLM 使用真实 DashScope
-`deepseek-v4-flash`，embedding 使用 `text-embedding-v3`，thinking 设置为
-`disabled`。API key 只通过环境变量提供，不要写进命令历史、README 或报告。
-
-分别执行以下两轮；每轮都会新建身份、重新注入 `conv-30` 的 19 个 session，
-然后执行 81 道 QA 和 Judge：
-
-```bash
-./eval.sh locomo --agent-plugin echomem_mcp --sample conv-30 \
-  --echomem-url http://127.0.0.1:8010 --mcp-url http://127.0.0.1:8001 \
-  --tool-calling --concurrency 4 \
-  --llm-base-url "$LLM_BASE_URL" --llm-model "$LLM_MODEL" --llm-api-key "$LLM_API_KEY" \
-  --out-dir results/echomem_develop_pr192_pr199_tools
-```
-
-无工具调用轮次将 `--tool-calling` 替换为 `--no-tool-calling`。压测过程中
-不要复用上一轮的 tenant/user 或 workspace 记忆，除非明确使用
-`--reuse-memory-from` 做同一记忆的 QA 模式对照。
-
-如果需要在**同一份已注入记忆**上比较不同 QA MCP 模式，先完成一次完整注入，
-后续轮次使用 `--reuse-memory-from /path/to/completed-run`。这个参数只复用
-身份和已完成的 memory import，不复用旧 QA 答案，因此可以安全切换
-`--no-tool-calling`、`--mcp-read-mode allow` 和 `--mcp-read-mode disabled`。
-
-生成 HTML 和脱敏日志附件：
-
-```bash
-python scripts/build_echomem_eval_report.py
-```
-
-报告输出到 `reports/echomem_develop_pr192_pr199_20260805/report.html`。
-报告会记录注入耗时、session commit 成功率、QA/Judge、MCP tool audit、
-`current/messages.jsonl` 读取情况，以及 EchoMem 的 timeout/commit failure。
-每次运行的 `summary.json`、`config.json` 和 `qa_resume_manifest.json` 还会写入
-`agent_options`，用于核对 `tool_calling`、`initial_retrieval_protocol=mcp`、
-`mcp_read_mode`、user/agent memory budget、QA/Judge 并发等实际跑法。
-
-同一份记忆的三模式对比报告生成：
-
-```bash
-python scripts/build_same_memory_qa_report.py
-```
-
-输出到 `reports/echomem_same_memory_qa_20260805/report.html`，用于比较不带工具、
-允许 `read/messages.jsonl`、禁止 `read/messages.jsonl` 三种 QA 模式。
-
 LoCoMo 数据集已经包含在
 `benchmarks/locomo/data/locomo10.json`，测试者不需要另外下载或指定
 `--dataset`。
