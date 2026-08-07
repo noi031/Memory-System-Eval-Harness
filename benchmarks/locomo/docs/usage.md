@@ -23,22 +23,36 @@ export LLM_MODEL=deepseek-v4-flash
 export LLM_API_KEY="$DASHSCOPE_API_KEY"
 ```
 
-不带 MCP 工具调用：
+不带 MCP 工具调用。平台仍通过 MCP `memory_query` 做初始召回，但回答阶段不向
+模型暴露工具，只进行一次模型调用：
 
 ```bash
-./eval.sh locomo \
+./.venv/bin/python benchmarks/locomo/run_eval.py \
   --agent-plugin echomem_mcp \
+  --echomem-url http://127.0.0.1:8110 \
+  --mcp-url http://127.0.0.1:8111 \
+  --echomem-auth-key "$ECHOMEM_AUTH_KEY" \
+  --mcp-auth-key "$ECHOMEM_AUTH_KEY" \
   --sample conv-30 \
-  --no-tool-calling \
-  --mcp-read-mode disabled
+  --llm-base-url "$LLM_BASE_URL" \
+  --llm-model "$LLM_MODEL" \
+  --llm-api-key "$LLM_API_KEY" \
+  --no-tool-calling
 ```
 
 带 MCP 工具调用但不读 `messages.jsonl`：
 
 ```bash
-./eval.sh locomo \
+./.venv/bin/python benchmarks/locomo/run_eval.py \
   --agent-plugin echomem_mcp \
+  --echomem-url http://127.0.0.1:8110 \
+  --mcp-url http://127.0.0.1:8111 \
+  --echomem-auth-key "$ECHOMEM_AUTH_KEY" \
+  --mcp-auth-key "$ECHOMEM_AUTH_KEY" \
   --sample conv-30 \
+  --llm-base-url "$LLM_BASE_URL" \
+  --llm-model "$LLM_MODEL" \
+  --llm-api-key "$LLM_API_KEY" \
   --tool-calling \
   --mcp-read-mode disabled
 ```
@@ -46,20 +60,27 @@ export LLM_API_KEY="$DASHSCOPE_API_KEY"
 该模式会从工具 schema 中移除 `read`，并拒绝执行模型返回的未暴露 `read` 调用，
 因此不会把 transcript 请求转发给 MCP。
 
-带 MCP 工具调用并读 `messages.jsonl`：
+带 MCP 工具调用并允许读取 `messages.jsonl`：
 
 ```bash
-./eval.sh locomo \
+./.venv/bin/python benchmarks/locomo/run_eval.py \
   --agent-plugin echomem_mcp \
+  --echomem-url http://127.0.0.1:8110 \
+  --mcp-url http://127.0.0.1:8111 \
+  --echomem-auth-key "$ECHOMEM_AUTH_KEY" \
+  --mcp-auth-key "$ECHOMEM_AUTH_KEY" \
   --sample conv-30 \
+  --llm-base-url "$LLM_BASE_URL" \
+  --llm-model "$LLM_MODEL" \
+  --llm-api-key "$LLM_API_KEY" \
   --tool-calling \
-  --mcp-read-mode require
+  --mcp-read-mode allow
 ```
 
-`require` 模式追加的规则是：每题先调用 `memory_query`，回答前必须读取至少
-一个相关 URI 对应的 `current/messages.jsonl`；日期、顺序、原话和多事件问题
-以完整 transcript 为准。`summary.json` 的 `messages_jsonl_read_rate` 用于
-观察 prompt 是否真正推动了 transcript 读取，不能把调用率直接等同于准确率。
+平台侧初始召回始终使用 MCP `memory_query`。`allow` 保留 `read` 工具，但不强制
+模型调用；模型是否读取 `current/messages.jsonl` 由模型根据工具描述和上下文自行
+决定。`summary.json` 的 `messages_jsonl_read_rate` 用于观察实际读取情况，不能
+把调用率直接等同于准确率。
 
 ```bash
 # 默认注入记忆并使用 VikingBoat 0.4.11 工具口径
@@ -295,18 +316,18 @@ python benchmarks/locomo/run_eval.py \
 
 | 参数 | 默认值 | 说明 |
 |---|---|---|
-| `--top-k` | profile 决定 | 三个保留 profile 均为 `25` |
+| `--top-k` | profile 决定 | 两个保留 profile 均为 `25` |
 | `--memory-budget-chars` | `6000` | 总记忆字符预算 |
-| `--question-timeout-s` | profile 决定 | 三个保留 profile 均为 `600` 秒；0 表示不增加总限制 |
+| `--question-timeout-s` | profile 决定 | 两个保留 profile 均为 `600` 秒；0 表示不增加总限制 |
 
 ### VikingBot 插件参数
 | 参数 | 默认值 | 说明 |
 |---|---|---|
-| `--tool-search-limit` | profile 决定 | 三个保留 profile 均为 `25` |
-| `--initial-min-score` | profile 决定 | `legacy-77=0`；VikingBoat 0.4.11 profiles=`0.1` |
-| `--tool-min-score` | profile 决定 | `legacy-77=0`；VikingBoat 0.4.11 profiles=`0.35` |
-| `--tool-search-pool-multiplier` | profile 决定 | 三个保留 profile 均为 `1` |
-| `--tool-set` | profile 决定 | `legacy-77=vikingbot_native_safe`；VikingBoat 0.4.11 profiles=`vikingbot_echo_native` |
+| `--tool-search-limit` | profile 决定 | 两个保留 profile 均为 `25` |
+| `--initial-min-score` | profile 决定 | VikingBoat 0.4.11 profiles=`0.1` |
+| `--tool-min-score` | profile 决定 | VikingBoat 0.4.11 profiles=`0.35` |
+| `--tool-search-pool-multiplier` | profile 决定 | 两个保留 profile 均为 `1` |
+| `--tool-set` | profile 决定 | VikingBoat 0.4.11 profiles=`vikingbot_echo_native` |
 | `--tools` / `--no-tools` | `--tools` | 是否向回答模型暴露 profile 的记忆工具；关闭后保留相同 prompt 和初始检索注入，只执行一次模型调用 |
 | `--user-memory-budget-chars` | `4000` | user memory prompt 预算 |
 | `--agent-memory-budget-chars` | `2000` | agent memory prompt 预算 |
@@ -345,14 +366,14 @@ python benchmarks/locomo/run_eval.py \
 - `memory_provenance.json` - 数据集 SHA-256、预期/实际 session 数和实际 session URI manifest
 - `qa_results.csv` - QA 结果，包含 tool_call_count、iterations、qa_profile
 - `qa_results.checkpoint.csv` - 运行中定期更新的可恢复 QA 快照
-- `qa_resume_manifest.json` - 恢复兼容性所需的数据集、身份、模型、QA 参数和本地 prompt/tool/runtime contract hash
+- `qa_resume_manifest.json` - 恢复兼容性所需的数据集、身份、模型、QA 参数、agent_options 和本地 prompt/tool/runtime contract hash
 - `judge_results.csv` - Judge 结果 (question_id, verdict, reasoning)
 - `judge_results.checkpoint.csv` - 运行中定期更新的 Judge 快照
 - `judge_resume_manifest.json` - Judge 模型和 prompt 指纹，用于防止混合判分口径
 - `diagnosis.json` - 失败分类、检索覆盖率、可重试/缺失/重复题目 ID
 - `retrieval_traces.jsonl` - 每题检索内容和失败归因 trace
 - `agent_traces/*.json` - VikingBot 初始 prompt、逐轮模型消息、请求/响应模型身份、工具协议 hash、工具参数/结果、原始与清洗后答案
-- `summary.json` - 汇总指标，包含 memory_source、qa_profile、served model ids、tool protocol hash、tool_call_total、avg_iterations 和 diagnosis 摘要
+- `summary.json` - 汇总指标，包含 memory_source、qa_profile、agent_options、served model ids、tool protocol hash、tool_call_total、avg_iterations 和 diagnosis 摘要
 - `strict_blackbox_metrics.json` - 仅使用外部可观测状态、延迟、重试和 token usage 的指标
 - `strict_blackbox_report.md` - strict black-box Markdown 报告
 

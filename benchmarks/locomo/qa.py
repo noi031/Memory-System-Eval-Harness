@@ -5,7 +5,7 @@ from __future__ import annotations
 import csv
 import json
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -37,6 +37,7 @@ class QAOptions:
     system_prompt_append: str = ""
     system_prompt_append_sha256: str = ""
     system_prompt_append_source: str = ""
+    agent_options: dict[str, Any] = field(default_factory=dict)
 
 
 def _safe_question_id(question_id: str) -> str:
@@ -131,6 +132,7 @@ def build_qa_tasks(
             "system_prompt_append_source": (
                 options.system_prompt_append_source
             ),
+            "agent_options": options.agent_options,
         })
     return tasks
 

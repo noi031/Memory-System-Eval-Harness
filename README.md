@@ -209,57 +209,72 @@ CLI 参数可直接传入，也可通过环境变量设默认值：
 
 无工具调用时，测试平台仍通过 EchoMem MCP 执行每题的初始 `memory_query`：
 
-<pre style="color: red;"><code class="language-bash">python benchmarks/locomo/run_eval.py \
+<pre style="color: red;"><code class="language-bash">./.venv/bin/python benchmarks/locomo/run_eval.py \
   --agent-plugin echomem_mcp \
   --echomem-url http://127.0.0.1:8010 \
   --mcp-url http://127.0.0.1:8001 \
   --sample conv-30 \
-  --questions 0 \
-  --llm-base-url https://dashscope.aliyuncs.com/compatible-mode/v1 \
-  --llm-model deepseek-v4-flash \
-  --llm-api-key YOUR_KEY \
   --no-tool-calling \
-  --manual-search \
-  --mcp-initial-search \
-  --commit-timeout-s 0 \
-  --question-timeout-s 0 \
-  --llm-timeout-s 600</code></pre>
+  --mcp-read-mode disabled \
+  --concurrency 4 \
+  --judge-concurrency 4 \
+  --top-k 25 \
+  --memory-budget-chars 8000 \
+  --user-memory-budget-chars 4000 \
+  --agent-memory-budget-chars 2000 \
+  --llm-base-url "$LLM_BASE_URL" \
+  --llm-model "$LLM_MODEL" \
+  --llm-api-key "$LLM_API_KEY" \
+  --llm-temperature 0.7 \
+  --question-timeout-s 600 \
+  --llm-timeout-s 600 \
+  --llm-retries 3</code></pre>
 
 允许模型通过 MCP 调用工具，但禁止读取 `messages.jsonl`：
 
-<pre style="color: red;"><code class="language-bash">python benchmarks/locomo/run_eval.py \
+<pre style="color: red;"><code class="language-bash">./.venv/bin/python benchmarks/locomo/run_eval.py \
   --agent-plugin echomem_mcp \
   --echomem-url http://127.0.0.1:8010 \
   --mcp-url http://127.0.0.1:8001 \
   --sample conv-30 \
-  --questions 0 \
-  --llm-base-url https://dashscope.aliyuncs.com/compatible-mode/v1 \
-  --llm-model deepseek-v4-flash \
-  --llm-api-key YOUR_KEY \
   --tool-calling \
-  --no-manual-search \
   --mcp-read-mode disabled \
-  --commit-timeout-s 0 \
-  --question-timeout-s 0 \
-  --llm-timeout-s 600</code></pre>
+  --concurrency 4 \
+  --judge-concurrency 4 \
+  --top-k 25 \
+  --memory-budget-chars 8000 \
+  --user-memory-budget-chars 4000 \
+  --agent-memory-budget-chars 2000 \
+  --llm-base-url "$LLM_BASE_URL" \
+  --llm-model "$LLM_MODEL" \
+  --llm-api-key "$LLM_API_KEY" \
+  --llm-temperature 0.7 \
+  --question-timeout-s 600 \
+  --llm-timeout-s 600 \
+  --llm-retries 3</code></pre>
 
 允许模型通过 MCP 调用工具，并允许读取 `messages.jsonl`：
 
-<pre style="color: red;"><code class="language-bash">python benchmarks/locomo/run_eval.py \
+<pre style="color: red;"><code class="language-bash">./.venv/bin/python benchmarks/locomo/run_eval.py \
   --agent-plugin echomem_mcp \
   --echomem-url http://127.0.0.1:8010 \
   --mcp-url http://127.0.0.1:8001 \
   --sample conv-30 \
-  --questions 0 \
-  --llm-base-url https://dashscope.aliyuncs.com/compatible-mode/v1 \
-  --llm-model deepseek-v4-flash \
-  --llm-api-key YOUR_KEY \
   --tool-calling \
-  --no-manual-search \
   --mcp-read-mode allow \
-  --commit-timeout-s 0 \
-  --question-timeout-s 0 \
-  --llm-timeout-s 600</code></pre>
+  --concurrency 4 \
+  --judge-concurrency 4 \
+  --top-k 25 \
+  --memory-budget-chars 8000 \
+  --user-memory-budget-chars 4000 \
+  --agent-memory-budget-chars 2000 \
+  --llm-base-url "$LLM_BASE_URL" \
+  --llm-model "$LLM_MODEL" \
+  --llm-api-key "$LLM_API_KEY" \
+  --llm-temperature 0.7 \
+  --question-timeout-s 600 \
+  --llm-timeout-s 600 \
+  --llm-retries 3</code></pre>
 
 </div>
 
@@ -284,18 +299,19 @@ python benchmarks/locomo/run_eval.py \
 #### 断点续跑
 
 ```bash
-python benchmarks/locomo/run_eval.py \
+./.venv/bin/python benchmarks/locomo/run_eval.py \
   --agent-plugin echomem_mcp \
   --echomem-url http://127.0.0.1:8010 \
+  --mcp-url http://127.0.0.1:8001 \
   --sample conv-30 \
-  --llm-base-url https://dashscope.aliyuncs.com/compatible-mode/v1 \
-  --llm-model deepseek-v4-flash \
-  --llm-api-key YOUR_KEY \
   --no-tool-calling \
   --resume-qa benchmarks/locomo/results/20260803_143943_618591 \
-  --commit-timeout-s 0 \
-  --question-timeout-s 0 \
-  --llm-timeout-s 600
+  --llm-base-url "$LLM_BASE_URL" \
+  --llm-model "$LLM_MODEL" \
+  --llm-api-key "$LLM_API_KEY" \
+  --question-timeout-s 600 \
+  --llm-timeout-s 600 \
+  --llm-retries 3
 ```
 
 #### 其他 benchmark

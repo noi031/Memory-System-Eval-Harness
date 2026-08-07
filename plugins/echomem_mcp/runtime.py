@@ -120,7 +120,10 @@ _SYSTEM_PROMPT = (
 _NO_TOOLS_SYSTEM_PROMPT = (
     "You are a helpful assistant answering a question from the memory excerpts "
     "included in the conversation. Answer concisely and directly from those "
-    "excerpts. Do not emit tool calls, function-call markup, XML tool tags, "
+    "excerpts. Prioritize the supplied EchoMem memory evidence over general "
+    "knowledge or unsupported inference. "
+    "Preserve exact names, dates, order, and values when the memory provides them. "
+    "Do not emit tool calls, function-call markup, XML tool tags, "
     "or a plan to search. Use the available memory to answer as helpfully as "
     "possible."
 )

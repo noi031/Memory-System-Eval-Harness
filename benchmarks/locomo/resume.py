@@ -24,7 +24,6 @@ QA_CONTRACT_FILES = (
     "plugins/vikingbot/runtime.py",
     "plugins/vikingbot/tools.py",
     "plugins/vikingbot/prompting.py",
-    "plugins/vikingbot/legacy77_prompting.py",
     "plugins/vikingbot/vikingboat0411_prompting.py",
     "benchmarks/locomo/profiles/vikingboat0411_natural_no_tools.py",
     "plugins/vikingbot/answers.py",
@@ -81,6 +80,7 @@ def build_qa_resume_manifest(
                 "system_prompt_append_sha256": (
                     options.system_prompt_append_sha256
                 ),
+                "agent_options": options.agent_options,
             },
             "files": contract_files,
         },
@@ -111,6 +111,7 @@ def build_qa_resume_manifest(
             "system_prompt_append_source": (
                 options.system_prompt_append_source
             ),
+            "agent_options": options.agent_options,
         },
         "qa_contract": {
             "sha256": hashlib.sha256(contract_payload).hexdigest(),

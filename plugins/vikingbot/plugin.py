@@ -21,7 +21,6 @@ from benchmarks.locomo.profiles import (
     profile_settings,
     VIKINGBOAT_0411_PROFILE,
     VIKINGBOAT_0411_NATURAL_NO_TOOLS_PROFILE,
-    LEGACY_77_PROFILE,
 )
 from plugins.base import AgentDescriptor, AgentResponse, AgentPlugin
 from backends.echomem.client import EchoMemClient
@@ -150,8 +149,10 @@ class VikingBotPlugin(AgentPlugin):
                 if tools_enabled
                 else VIKINGBOAT_0411_NATURAL_NO_TOOLS_PROFILE
             )
-        if qa_profile in (VIKINGBOAT_0411_PROFILE, VIKINGBOAT_0411_NATURAL_NO_TOOLS_PROFILE,
-                          LEGACY_77_PROFILE):
+        if qa_profile in (
+            VIKINGBOAT_0411_PROFILE,
+            VIKINGBOAT_0411_NATURAL_NO_TOOLS_PROFILE,
+        ):
             try:
                 defaults = profile_settings(qa_profile)
             except ValueError:

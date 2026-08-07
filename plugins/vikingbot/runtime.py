@@ -14,7 +14,6 @@ from backends.memory_types import MemoryClient, SearchResult
 from shared.llm_client import LLMClient
 from shared.qa import QAResult
 
-from .answers import sanitize_final_answer_text
 from .prompting import build_messages, build_question_prompt
 from .tools import (
     MEMORY_SEARCH_TOOL,
@@ -519,14 +518,7 @@ def answer_one_vikingbot_question(
             trace["iterations"].append(iteration_trace)
             if not tool_calls:
                 raw_response = str(message.get("content") or "").strip()
-                final_response = (
-                    raw_response
-                    if qa_profile in {
-                        "vikingboat0411",
-                        "vikingboat0411-natural-no-tools",
-                    }
-                    else sanitize_final_answer_text(raw_response)
-                )
+                final_response = raw_response
                 trace["raw_response"] = raw_response
                 trace["final_response"] = final_response
                 trace["answer_sanitized"] = final_response != raw_response
@@ -747,14 +739,7 @@ def answer_one_vikingbot_question(
         prompt_tokens += prompt_count
         completion_tokens += completion_count
         raw_response = str(message.get("content") or "").strip()
-        final_response = (
-            raw_response
-            if qa_profile in {
-                "vikingboat0411",
-                "vikingboat0411-natural-no-tools",
-            }
-            else sanitize_final_answer_text(raw_response)
-        )
+        final_response = raw_response
         trace["forced_final_answer"] = {
             "model_message": message,
             "prompt_tokens": prompt_count,
