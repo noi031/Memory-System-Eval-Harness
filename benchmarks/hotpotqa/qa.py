@@ -42,7 +42,8 @@ def run_hotpotqa_qa(
 
     def on_progress(_done: int, result: QAResult) -> None:
         progress.update(1)
-        log.info("  Q[%s] -> %s", result.question_id, result.response[:100])
+        preview = result.response[:100] if result.response else f"(no response) error={result.llm_error[:200]}"
+        log.info("  Q[%s] -> %s", result.question_id, preview)
 
     try:
         results = run_concurrent_qa(
