@@ -94,22 +94,6 @@ def main() -> None:
     dataset_path = resolve_dataset_path("longmemeval", args.dataset)
     config.dataset_path = dataset_path
     question_ids = parse_question_ids(args.question_ids)
-    if args.check:
-        jobs, plans = load_dataset(dataset_path, sample_filter=args.sample)
-        jobs, plans = select_jobs_and_plans(
-            jobs,
-            plans,
-            question_ids=question_ids,
-            limit=config.question_limit,
-            random_count=args.random_count,
-            random_seed=args.random_seed,
-        )
-        if not jobs or not plans:
-            raise ValueError("dataset/sample filter produced no LongMemEval questions")
-        print(
-            f"[check] OK benchmark=longmemeval dataset={dataset_path} questions={len(jobs)}"
-        )
-        return
     if args.parallel_shards > 1:
         jobs, plans = load_dataset(dataset_path, sample_filter=args.sample)
         jobs, plans = select_jobs_and_plans(

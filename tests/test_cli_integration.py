@@ -326,37 +326,6 @@ class StaticCliIntegrationTests(unittest.TestCase):
             self.assertEqual(1.0, summary["accuracy"])
             self.assertEqual(0, summary["judge_errors"])
 
-    def test_dynamic_check_only_runs_preflight(self):
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            command = [
-                sys.executable,
-                str(ROOT / "eval.py"),
-                "dynamic",
-                "--env-file", str(root / "missing.env"),
-                "--check",
-                "--echoagent-url", self.base_url,
-                "--memory-engine-endpoint", f"{self.base_url}/memory-engine",
-                "--memory-backend", "echomem",
-                "--echomem-url", self.base_url,
-                "--username", "test-user",
-                "--password", "password",
-                "--llm-base-url", f"{self.base_url}/v1",
-                "--llm-api-key", "test-key",
-                "--out-dir", str(root / "results"),
-            ]
-            completed = subprocess.run(
-                command,
-                cwd=ROOT,
-                text=True,
-                capture_output=True,
-                timeout=20,
-            )
-
-            self.assertEqual(0, completed.returncode, completed.stdout + completed.stderr)
-            self.assertIn("[check] OK benchmark=dynamic", completed.stdout)
-            self.assertFalse((root / "results").exists())
-
     def test_incomplete_import_diagnostic_is_not_a_formal_success(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

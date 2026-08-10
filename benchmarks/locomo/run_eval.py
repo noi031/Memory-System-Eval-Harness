@@ -313,21 +313,6 @@ def main() -> None:
     dataset_path = resolve_dataset_path("locomo", args.dataset)
     config.dataset_path = dataset_path
     question_ids = parse_question_ids(args.question_ids)
-    if args.check:
-        jobs, plans = load_dataset(dataset_path, sample_filter=args.sample)
-        session_mode = resolve_session_mode(args.session_mode, len(plans))
-        jobs = select_questions(
-            jobs,
-            question_ids=question_ids,
-            limit=config.question_limit,
-        )
-        if not plans or not jobs:
-            raise ValueError("dataset/sample filter produced no LoCoMo samples or questions")
-        print(
-            f"[check] OK benchmark=locomo dataset={dataset_path} "
-            f"samples={len(plans)} questions={len(jobs)} session_mode={session_mode}"
-        )
-        return
 
     agent_options = _build_agent_options(args, config)
 

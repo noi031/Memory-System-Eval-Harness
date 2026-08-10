@@ -70,20 +70,6 @@ def main() -> None:
     dataset_path = resolve_dataset_path("hotpotqa", args.dataset)
     config.dataset_path = dataset_path
     question_ids = parse_question_ids(args.question_ids)
-    if args.check:
-        jobs, plans = load_dataset(dataset_path, sample_filter=args.sample)
-        jobs, plans = select_jobs_and_plans(
-            jobs,
-            plans,
-            question_ids=question_ids,
-            limit=config.question_limit,
-        )
-        if not jobs or not plans:
-            raise ValueError("dataset/sample filter produced no HotpotQA questions")
-        print(
-            f"[check] OK benchmark=hotpotqa dataset={dataset_path} questions={len(jobs)}"
-        )
-        return
 
     run = EvalRun(
         benchmark_name="hotpotqa",

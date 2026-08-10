@@ -1,15 +1,9 @@
-"""EchoAgent plugin: wraps EchoAgentClient for dynamic evaluation.
+"""EchoAgent live plugin: test external EchoAgent deployment without typing simulation.
 
-Design intent: this plugin owns every CLI argument and all HTTP logic
-related to the EchoAgent backend (login, session management, prefill
-simulation, SSE streaming). The dynamic evaluation flow calls only
-AgentPlugin methods; the benchmark flow accesses agent_plugin.client
-for low-level EchoAgentClient methods that don't fit the step-based
-interface.
-
-Memory injection is handled by the memory plugin's client directly
-(open_session / add_message / commit / poll_commit), not by this plugin.
-QA goes through the full EchoAgent pipeline (prefill + SSE streaming).
+QA goes through the full EchoAgent pipeline (login, create session, send message,
+SSE streaming) but does NOT simulate typing or trigger the prefill pipeline.
+Memory injection is handled by the memory client directly (open_session /
+add_message / commit / poll_commit), identical to echo_agent.
 """
 
 from __future__ import annotations
@@ -18,35 +12,30 @@ import argparse
 import json
 import logging
 import os
-import time
-import uuid
 from typing import Any
 
-from plugins.base import AgentPlugin, AgentResponse, AgentDescriptor, TypingResult
+from plugins.base import AgentPlugin, AgentResponse, AgentDescriptor
 from plugins.echo_agent.client import EchoAgentClient
 from backends.echomem.client import EchoMemClient
 from backends.openviking.client import OpenVikingClient
 from backends.memory_args import add_memory_backend_args
 from shared.eval_base import add_llm_args
 
-logger = logging.getLogger("agent.echo_agent")
+logger = logging.getLogger("agent.echoagent_live")
 
 
-class EchoAgentPlugin(AgentPlugin):
-    """EchoAgent plugin for dynamic evaluation.
+class EchoAgentLivePlugin(AgentPlugin):
+    """EchoAgent live plugin for testing external deployments.
 
-    QA goes through the full EchoAgent pipeline (prefill + SSE streaming).
-    Memory injection supports both echomem and openviking backends, selected
-    via --memory-backend (default: echomem).
+    QA goes through the full EchoAgent pipeline (SSE streaming) without typing
+    simulation. Memory injection supports both echomem and openviking backends.
     """
 
     descriptor = AgentDescriptor(
-        id="echo_agent",
-        name="EchoAgent",
-        description="EchoAgent full pipeline (prefill + SSE streaming) for dynamic evaluation.",
+        id="echoagent_live",
+        name="EchoAgent Live",
+        description="EchoAgent 外网部署评测插件（无打字模拟）。",
         capabilities=(
-            "typing_simulation",
-            "prefill_pipeline",
             "sse_streaming",
             "memory_injection",
         ),
@@ -56,10 +45,13 @@ class EchoAgentPlugin(AgentPlugin):
     def add_arguments(cls, parser: argparse.ArgumentParser) -> None:
         add_llm_args(parser)
         add_memory_backend_args(parser, with_backend_choice=True)
-        g = parser.add_argument_group("EchoAgent")
+        g = parser.add_argument_group("EchoAgent Live")
         g.add_argument("--echoagent-url",
-                       default=os.environ.get("ECHOAGENT_URL", "http://127.0.0.1:31020"),
+                       default=os.environ.get("ECHOAGENT_URL", "https://echo-agent.online"),
                        help="EchoAgent 后端地址")
+        g.add_argument("--echoagent-api-prefix",
+                       default=os.environ.get("ECHOAGENT_API_PREFIX", "/api"),
+                       help="EchoAgent API 前缀（外网反代 /api -> /v1，本地直连 /v1）")
         g.add_argument("--username",
                        default=os.environ.get("ECHOAGENT_TEST_USERNAME", "test_user"),
                        help="EchoAgent 登录用户名")
@@ -67,19 +59,21 @@ class EchoAgentPlugin(AgentPlugin):
                        default=os.environ.get("ECHOAGENT_TEST_PASSWORD", ""),
                        help="EchoAgent 登录密码")
         g.add_argument("--memory-engine-endpoint",
-                       default=os.environ.get("GLOBAL_MEMORY_ENGINE_ENDPOINT", "http://127.0.0.1:31030"),
+                       default=os.environ.get("GLOBAL_MEMORY_ENGINE_ENDPOINT",
+                                              "http://8.134.127.8:31030"),
                        help="echoagent 插件地址 (31030)")
 
     def setup(self, config: dict) -> None:
-        echoagent_url = config.get("echoagent_url", "http://127.0.0.1:31020")
+        echoagent_url = config.get("echoagent_url", "https://echo-agent.online")
+        api_prefix = config.get("echoagent_api_prefix", "/api")
         username = config.get("username", "test_user")
         password = config.get("password", "")
         self._memory_engine_endpoint = config.get(
             "memory_engine_endpoint",
-            "http://127.0.0.1:31030",
+            "http://8.134.127.8:31030",
         )
         # Login to EchoAgent
-        self.client = EchoAgentClient(echoagent_url, username, password)
+        self.client = EchoAgentClient(echoagent_url, username, password, api_prefix=api_prefix)
         print(f"登录 EchoAgent ({echoagent_url})...")
         self.client.login()
         logger.info("登录成功 (user=%s, uuid=%s)", username, self.client.user_uuid)
@@ -97,7 +91,7 @@ class EchoAgentPlugin(AgentPlugin):
             try:
                 auth_key = self.client.get_memory_auth_key(self._memory_engine_endpoint)
             except Exception as e:
-                logger.warning("解析 auth_key 失败: %s — 注入将不携带身份", e)
+                logger.warning("解析 auth_key 失败: %s - 注入将不携带身份", e)
                 auth_key = ""
         self._auth_key = auth_key
         config["echomem_auth_key"] = auth_key
@@ -110,7 +104,7 @@ class EchoAgentPlugin(AgentPlugin):
 
         if self._memory_backend == "openviking":
             self.memory_client = OpenVikingClient(
-                base_url=config.get("echomem_url", "http://127.0.0.1:19080"),
+                base_url=config.get("echomem_url", "http://8.134.127.8:19080"),
                 api_key=auth_key,
                 account=config.get("account", "default"),
                 user_id=config.get("user_id", "default"),
@@ -121,7 +115,7 @@ class EchoAgentPlugin(AgentPlugin):
             )
         else:
             self.memory_client = EchoMemClient(
-                base_url=config.get("echomem_url", "http://127.0.0.1:8010"),
+                base_url=config.get("echomem_url", "http://8.134.127.8:8010"),
                 auth_key=auth_key,
                 account=config.get("account", "default"),
                 user_id=config.get("user_id", "default"),
@@ -131,109 +125,19 @@ class EchoAgentPlugin(AgentPlugin):
                 max_retries=int(config.get("max_retries", 3)),
             )
 
-        # Typing state (reset per round)
-        self._pending_turn_id = ""
-        self._typing_committed = False
-        self._typing_memory_items: list[dict] = []
-
     def create_session(self, title: str = "") -> str:
         return self.client.create_session(title, self._memory_engine_endpoint)
-
-    @property
-    def supports_typing_simulation(self) -> bool:
-        return True
-
-    def simulate_typing(
-        self,
-        session_id: str,
-        context_path: str,
-        text: str,
-        speed_ms: int = 200,
-        jitter_ms: int = 20,
-    ) -> TypingResult | None:
-        """Simulate typing to trigger prefill.
-
-        speed_ms < 50: fast mode -- single tick + finalize, no per-char delay.
-        """
-        import random
-
-        # Reset typing state for this round
-        self._pending_turn_id = ""
-        self._typing_committed = False
-        self._typing_memory_items = []
-
-        client_turn_id = uuid.uuid4().hex[:12]
-        committed = False
-
-        if speed_ms < 50:
-            tick_result = self.client.prefetch_tick(
-                session_id, context_path, client_turn_id, 1, text,
-            )
-            if tick_result is None:
-                return None
-            time.sleep(0.5)
-            finalize_result = self.client.prefetch_finalize(
-                session_id, context_path, client_turn_id, text,
-            )
-            if finalize_result is not None:
-                fin_data = finalize_result.get("data", finalize_result)
-                committed = bool(fin_data.get("accepted"))
-            # Store state for send_message
-            self._pending_turn_id = client_turn_id
-            self._typing_committed = committed
-            return TypingResult(committed=committed)
-
-        for i in range(1, len(text) + 1):
-            draft = text[:i]
-            tick_result = self.client.prefetch_tick(
-                session_id, context_path, client_turn_id, i, draft,
-            )
-            if tick_result is None:
-                return None
-            tick_data = tick_result.get("data", tick_result)
-            if not tick_data.get("accepted") and i == 1:
-                self._pending_turn_id = client_turn_id
-                self._typing_committed = False
-                return TypingResult(committed=False)
-            delay = speed_ms + random.randint(-jitter_ms, jitter_ms)
-            time.sleep(max(10, delay) / 1000.0)
-
-        finalize_result = self.client.prefetch_finalize(
-            session_id, context_path, client_turn_id, text,
-        )
-        memory_items: list[dict] = []
-        if finalize_result is not None:
-            fin_data = finalize_result.get("data", finalize_result)
-            committed = bool(fin_data.get("accepted"))
-            memory_items = fin_data.get("memoryItems") or []
-
-        # Store state for send_message
-        self._pending_turn_id = client_turn_id
-        self._typing_committed = committed
-        self._typing_memory_items = memory_items
-        return TypingResult(committed=committed, memory_items=memory_items)
 
     def send_message(
         self, session_id: str, message: str, context_path: str = "/",
         *, extra: dict | None = None,
     ) -> AgentResponse:
-        """Send message to EchoAgent and stream the reply.
-
-        Uses the prefill client_turn_id from the last simulate_typing call
-        (if any), then clears the typing state.
+        """Send message to EchoAgent and stream the reply (no prefill).
 
         In benchmark mode, session_id may be empty (the benchmark passes
         memory-session IDs, not EchoAgent session IDs). In that case, create
         a fresh EchoAgent session for each question so QA is independent.
         """
-        # Capture and clear typing state
-        pending_turn_id = self._pending_turn_id
-        committed = self._typing_committed
-        memory_items = list(self._typing_memory_items)
-        self._pending_turn_id = ""
-        self._typing_committed = False
-        self._typing_memory_items = []
-
         try:
             if not session_id:
                 session_id = self.client.create_session(
@@ -241,14 +145,12 @@ class EchoAgentPlugin(AgentPlugin):
                     self._memory_engine_endpoint,
                 )
             msg_result = self.client.send_message(
-                session_id, context_path, message, pending_turn_id,
+                session_id, context_path, message,
             )
             msg_data = msg_result.get("data", msg_result)
             if msg_data.get("error"):
                 return AgentResponse(
                     error=f"send failed: {msg_data.get('error')} {msg_data.get('message', '')}",
-                    prefetch_committed=committed,
-                    memory_items=memory_items,
                     extra={"qa_profile": self.qa_profile},
                 )
 
@@ -271,8 +173,6 @@ class EchoAgentPlugin(AgentPlugin):
             logger.error("发送/接收失败: %s", exc)
             return AgentResponse(
                 error=str(exc),
-                prefetch_committed=committed,
-                memory_items=memory_items,
                 extra={"qa_profile": self.qa_profile},
             )
 
@@ -288,8 +188,6 @@ class EchoAgentPlugin(AgentPlugin):
             prompt_tokens=prompt_tokens,
             completion_tokens=0,
             cached_tokens=cached_tokens,
-            prefetch_committed=committed,
-            memory_items=memory_items,
             error=reply_result.get("error"),
             extra={
                 "qa_profile": self.qa_profile,

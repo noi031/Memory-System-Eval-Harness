@@ -190,7 +190,8 @@ def run_locomo_qa(
                 len(tasks),
                 checkpoint_path,
             )
-        log.info("  Q[%s] -> %s", result.question_id, result.response[:100])
+        preview = result.response[:100] if result.response else f"(no response) error={result.llm_error[:200]}"
+        log.info("  Q[%s] -> %s", result.question_id, preview)
 
     try:
         if not pending_tasks:
