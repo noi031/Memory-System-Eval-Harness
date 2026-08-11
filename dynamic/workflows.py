@@ -33,7 +33,13 @@ def _failed_round(
         "ttft_ms": None,
         "cached_tokens": 0,
         "prompt_tokens": 0,
+        "completion_tokens": 0,
         "prefetch_committed": prefetch_committed,
+        "elapsed_s": None,
+        "retrieval_latency_s": None,
+        "llm_latency_s": None,
+        "tool_call_count": 0,
+        "iterations": 1,
         "is_new_session": bool(round_data.get("new_session")),
         "is_injection": False,
         "complexity": round_data.get("complexity", ""),
@@ -67,7 +73,6 @@ def _ask_agent(
             prefetch_committed = typing_result.committed
             memory_items = typing_result.memory_items
 
-    sent_at = time.monotonic()
     try:
         response = agent_plugin.send_message(session_id, query, context_path)
     except Exception as exc:
@@ -78,19 +83,7 @@ def _ask_agent(
     if not memory_items:
         memory_items = response.memory_items or []
 
-    reply = {
-        "reply": response.text,
-        "ttft_ms": response.ttft_ms,
-        "error": response.error,
-        "done_event": response.extra.get("done_event", {}),
-    }
-    return collect_round_metrics(
-        round_data,
-        reply,
-        sent_at,
-        prefetch_committed,
-        memory_items,
-    )
+    return collect_round_metrics(round_data, response, memory_items)
 
 
 def run_generate_mode(

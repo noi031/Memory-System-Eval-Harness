@@ -18,6 +18,7 @@ from benchmarks.longmemeval.recovery import (
 )
 from benchmarks.longmemeval.selection import select_jobs_and_plans
 from shared.eval_base import EvalConfig
+from shared.llm_client import LLMResponse
 from shared.qa import QAResult
 
 
@@ -30,11 +31,21 @@ class _Log:
 
 
 class _JudgeLLM:
-    def __init__(self, responses):
-        self.responses = iter(responses)
+    """Fake judge LLM; repeats the last response when exhausted."""
 
-    def judge(self, _system, _prompt):
-        return next(self.responses)
+    def __init__(self, responses):
+        self._responses = list(responses)
+        self._index = 0
+
+    def chat(self, _messages, *, temperature=None):
+        content = self._responses[min(self._index, len(self._responses) - 1)]
+        self._index += 1
+        return LLMResponse(
+            content=content,
+            prompt_tokens=0,
+            completion_tokens=0,
+            elapsed_s=0.0,
+        )
 
 
 class LongMemEvalWorkflowTests(unittest.TestCase):

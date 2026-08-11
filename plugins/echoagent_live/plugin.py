@@ -179,19 +179,37 @@ class EchoAgentLivePlugin(AgentPlugin):
         reply = reply_result.get("reply") or ""
         ttft = reply_result.get("ttft_ms")
         done = reply_result.get("done_event") or {}
-        cached_tokens = int(done.get("cachedTokens") or done.get("cached_tokens") or 0)
-        prompt_tokens = int(done.get("promptTokens") or done.get("prompt_tokens") or 0)
+        metrics = done.get("metrics", {})
+        done_memory_items = done.get("memoryItems") or []
 
         return AgentResponse(
             text=reply,
-            ttft_ms=round(ttft, 1) if ttft is not None else None,
-            prompt_tokens=prompt_tokens,
-            completion_tokens=0,
-            cached_tokens=cached_tokens,
+            ttft_ms=round(metrics.get("ttft_ms", ttft), 1)
+            if metrics.get("ttft_ms", ttft) is not None else None,
+            prompt_tokens=int(metrics.get("prompt_tokens") or 0)
+            or int(done.get("promptTokens") or done.get("prompt_tokens") or 0),
+            completion_tokens=int(metrics.get("completion_tokens") or 0),
+            cached_tokens=int(metrics.get("cached_tokens") or 0)
+            or int(done.get("cachedTokens") or done.get("cached_tokens") or 0),
+            prefetch_committed=False,  # echoagent_live 不支持 prefill
+            memory_items=done_memory_items,
             error=reply_result.get("error"),
             extra={
                 "qa_profile": self.qa_profile,
-                "retrieval_error": reply_result.get("error") or "",
+                "retrieval_error": metrics.get(
+                    "retrieval_error", reply_result.get("error") or ""
+                ),
+                "elapsed_s": metrics.get("elapsed_ms", 0) / 1000,
+                "retrieval_latency_s": metrics.get("retrieval_latency_ms", 0) / 1000,
+                "llm_latency_s": metrics.get("llm_latency_ms", 0) / 1000,
+                "tool_call_count": int(metrics.get("tool_call_count", 0)),
+                "iterations": int(metrics.get("turn_iterations", 1)),
+                "trace": {
+                    "metrics": metrics,
+                    "model": metrics.get("model_name"),
+                    "finish_reason": metrics.get("finish_reason"),
+                    "tool_audit": done.get("toolAudit"),
+                },
             },
         )
 

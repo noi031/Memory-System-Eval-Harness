@@ -8,7 +8,7 @@ import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Callable, TypeVar
 
 logger = logging.getLogger("llm_client")
 
@@ -72,11 +72,14 @@ class LLMClient:
         messages: list[dict[str, str]],
         *,
         timeout_s: float | None = None,
+        temperature: float | None = None,
     ) -> LLMResponse:
         """Call /v1/chat/completions and return the response.
 
         Args:
             messages: OpenAI-format message list ``[{role, content}, ...]``.
+            temperature: sampling temperature override; ``None`` uses the
+                client's configured value.
 
         Returns:
             LLMResponse with content, token usage, and timing.
@@ -85,7 +88,9 @@ class LLMClient:
         payload: dict[str, Any] = {
             "model": self.model,
             "messages": messages,
-            "temperature": self.temperature,
+            "temperature": (
+                self.temperature if temperature is None else temperature
+            ),
             "max_tokens": self.max_tokens,
         }
         data = json.dumps(payload).encode("utf-8")
@@ -107,12 +112,29 @@ class LLMClient:
                 with urllib.request.urlopen(req, timeout=min(self.timeout_s, remaining)) as resp:
                     raw = resp.read().decode("utf-8")
                     obj = json.loads(raw)
-                    content = (
-                        obj.get("choices", [{}])[0]
-                        .get("message", {})
-                        .get("content", "")
-                    )
+                    choice = obj.get("choices", [{}])[0]
+                    message = choice.get("message", {})
+                    content = message.get("content") or ""
                     usage = obj.get("usage", {})
+                    # An empty visible completion is not a success: it is a
+                    # safety-filtered output (finish_reason="content_filter")
+                    # or a thinking model that put its answer in
+                    # ``reasoning_content``.  Raise so the retry loop recovers
+                    # it instead of silently grading on nothing.
+                    if not content.strip():
+                        reasoning_content = message.get("reasoning_content") or ""
+                        if reasoning_content.strip():
+                            content = reasoning_content
+                        else:
+                            finish_reason = choice.get("finish_reason")
+                            raise RuntimeError(
+                                "empty completion"
+                                + (
+                                    f" (finish_reason={finish_reason!r})"
+                                    if finish_reason
+                                    else ""
+                                )
+                            )
                     elapsed = time.monotonic() - start
                     return LLMResponse(
                         content=content,
@@ -214,10 +236,31 @@ class LLMClient:
                 with urllib.request.urlopen(req, timeout=min(self.timeout_s, remaining)) as resp:
                     raw = resp.read().decode("utf-8")
                     obj = json.loads(raw)
-                    message = obj.get("choices", [{}])[0].get("message", {})
+                    choice = obj.get("choices", [{}])[0]
+                    message = choice.get("message", {})
                     content = message.get("content") or ""
                     tool_calls = message.get("tool_calls") or []
                     usage = obj.get("usage", {})
+                    # An empty completion with no tool call is not a success:
+                    # it is a safety-filtered output
+                    # (finish_reason="content_filter") or a thinking model
+                    # that put its answer in ``reasoning_content``.  Raise so
+                    # the retry loop recovers it instead of silently recording
+                    # an empty answer.
+                    if not content.strip() and not tool_calls:
+                        reasoning_content = message.get("reasoning_content") or ""
+                        if reasoning_content.strip():
+                            content = reasoning_content
+                        else:
+                            finish_reason = choice.get("finish_reason")
+                            raise RuntimeError(
+                                "empty completion"
+                                + (
+                                    f" (finish_reason={finish_reason!r})"
+                                    if finish_reason
+                                    else ""
+                                )
+                            )
                     elapsed = time.monotonic() - start
                     return LLMToolResponse(
                         content=content,
@@ -280,3 +323,57 @@ class LLMClient:
         if not resp.content.strip():
             raise RuntimeError("judge call returned an empty response")
         return resp.content
+
+
+_T = TypeVar("_T")
+
+
+def chat_with_repair(
+    llm,
+    system_prompt: str,
+    user_prompt: str,
+    *,
+    repair_prompt: str,
+    parse: Callable[[str], _T],
+    attempts: int = 3,
+    retry_temperature: float = 0.3,
+    retry_backoff_s: float = 1.0,
+) -> _T:
+    """Call ``llm.chat`` and parse the completion, retrying on bad output.
+
+    Small judge models intermittently return empty/filtered completions or
+    malformed text.  Instead of repeating the identical deterministic request
+    (temperature 0 reproduces the same failure), retries append
+    ``repair_prompt`` to the user message and raise the temperature above 0.
+
+    ``parse`` decides whether a completion is usable and must raise on
+    unusable output (empty, ambiguous, or malformed).  Returns the first
+    successful parse; raises the last transport/parse error after
+    ``attempts`` tries.
+    """
+    last_error: Exception | None = None
+    for attempt in range(1, attempts + 1):
+        response = llm.chat(
+            [
+                {"role": "system", "content": system_prompt},
+                {
+                    "role": "user",
+                    "content": (
+                        user_prompt if attempt == 1
+                        else user_prompt + repair_prompt
+                    ),
+                },
+            ],
+            temperature=(retry_temperature if attempt > 1 else None),
+        )
+        if response.error:
+            last_error = RuntimeError(response.error)
+        else:
+            try:
+                return parse(response.content)
+            except Exception as exc:
+                last_error = exc
+        if attempt < attempts:
+            time.sleep(min(retry_backoff_s * attempt, 4))
+    assert last_error is not None
+    raise last_error
