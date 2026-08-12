@@ -73,6 +73,9 @@ class LLMClient:
         *,
         timeout_s: float | None = None,
         temperature: float | None = None,
+        response_format: bool = False,
+        thinking_disabled: bool = False,
+        omit_max_tokens: bool = False,
     ) -> LLMResponse:
         """Call /v1/chat/completions and return the response.
 
@@ -80,6 +83,16 @@ class LLMClient:
             messages: OpenAI-format message list ``[{role, content}, ...]``.
             temperature: sampling temperature override; ``None`` uses the
                 client's configured value.
+            response_format: request JSON mode (``response_format``
+                ``{"type": "json_object"}``) when the provider supports it;
+                forces structured JSON output from the model.
+            thinking_disabled: request ``thinking: {"type": "disabled"}`` when
+                the provider supports it.  Reasoning models otherwise spend the
+                output budget on a chain-of-thought and truncate the answer.
+            omit_max_tokens: do not send ``max_tokens`` at all, leaving the
+                output budget to the provider's default.  Judge calls use this
+                so a reasoning model can finish a long verdict instead of
+                having it truncated by a small configured cap.
 
         Returns:
             LLMResponse with content, token usage, and timing.
@@ -91,8 +104,13 @@ class LLMClient:
             "temperature": (
                 self.temperature if temperature is None else temperature
             ),
-            "max_tokens": self.max_tokens,
         }
+        if not omit_max_tokens:
+            payload["max_tokens"] = self.max_tokens
+        if response_format:
+            payload["response_format"] = {"type": "json_object"}
+        if thinking_disabled:
+            payload["thinking"] = {"type": "disabled"}
         data = json.dumps(payload).encode("utf-8")
         headers = {
             "Content-Type": "application/json",
@@ -312,12 +330,33 @@ class LLMClient:
             retry_count=max(0, self.max_retries - 1),
         )
 
-    def judge(self, system_prompt: str, user_prompt: str) -> str:
-        """Convenience: send a system+user message, return content string."""
-        resp = self.chat([
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt},
-        ])
+    def judge(
+        self,
+        system_prompt: str,
+        user_prompt: str,
+        *,
+        thinking_disabled: bool = True,
+    ) -> str:
+        """Judge helper: force JSON, disable thinking, and cap no output.
+
+        Judge calls request ``response_format`` JSON mode and turn off
+        reasoning by default (``thinking: {"type": "disabled"}``) so the model
+        returns a parseable verdict instead of spending the budget on a
+        chain-of-thought.  ``max_tokens`` is deliberately not sent: a small
+        configured cap would truncate a long verdict.
+
+        ``thinking_disabled`` can be overridden by callers that want the
+        model to reason before judging.
+        """
+        resp = self.chat(
+            [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            response_format=True,
+            thinking_disabled=thinking_disabled,
+            omit_max_tokens=True,
+        )
         if resp.error:
             raise RuntimeError(f"judge call failed: {resp.error}")
         if not resp.content.strip():
@@ -338,6 +377,9 @@ def chat_with_repair(
     attempts: int = 3,
     retry_temperature: float = 0.3,
     retry_backoff_s: float = 1.0,
+    response_format: bool = True,
+    thinking_disabled: bool = True,
+    omit_max_tokens: bool = True,
 ) -> _T:
     """Call ``llm.chat`` and parse the completion, retrying on bad output.
 
@@ -350,6 +392,12 @@ def chat_with_repair(
     unusable output (empty, ambiguous, or malformed).  Returns the first
     successful parse; raises the last transport/parse error after
     ``attempts`` tries.
+
+    This is a judge helper, so by default it forces JSON mode
+    (``response_format``), disables reasoning (``thinking_disabled``), and
+    sends no ``max_tokens`` cap (``omit_max_tokens``) — see ``LLMClient.chat``.
+    Callers parsing plain non-JSON output (e.g. a yes/no verdict) pass
+    ``response_format=False``.
     """
     last_error: Exception | None = None
     for attempt in range(1, attempts + 1):
@@ -365,6 +413,9 @@ def chat_with_repair(
                 },
             ],
             temperature=(retry_temperature if attempt > 1 else None),
+            response_format=response_format,
+            thinking_disabled=thinking_disabled,
+            omit_max_tokens=omit_max_tokens,
         )
         if response.error:
             last_error = RuntimeError(response.error)

@@ -116,4 +116,7 @@ def judge_answer(
         repair_prompt=LONGMEMEVAL_REPAIR_PROMPT,
         parse=parse_yes_no,
         attempts=attempts,
+        # Yes/no verdict is a plain word, not JSON: keep response_format off
+        # (thinking stays disabled and max_tokens stays uncapped via defaults).
+        response_format=False,
     )

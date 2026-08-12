@@ -210,6 +210,9 @@ def judge_with_metrics(
             temperature=(
                 JUDGE_RETRY_TEMPERATURE if attempt > 1 else None
             ),
+            response_format=True,
+            thinking_disabled=True,
+            omit_max_tokens=True,
         )
         prompt_tokens += int(model_response.prompt_tokens or 0)
         completion_tokens += int(model_response.completion_tokens or 0)

@@ -6,6 +6,8 @@ Moved from plugins/echomem_mcp/memory_client.py.
 from __future__ import annotations
 
 import logging
+import urllib.parse
+import urllib.request
 from typing import Any
 
 from backends.memory_types import BaseHTTPMemoryClient, SearchResult
@@ -16,8 +18,9 @@ logger = logging.getLogger("echomem_client")
 class EchoMemClient(BaseHTTPMemoryClient):
     """Thin HTTP client for EchoMem's REST API.
 
-    Handles session open/message/commit/search with retry, logging, and
-    commit-status polling. Uses urllib so there are zero Third-party deps.
+    Handles session open/message/commit/search/log-query with retry,
+    logging, and commit-status polling. Uses urllib so there are zero
+    Third-party deps.
     """
 
     def __init__(
@@ -31,6 +34,7 @@ class EchoMemClient(BaseHTTPMemoryClient):
         timeout_s: float = 60.0,
         max_retries: int = 3,
         retry_backoff_s: float = 1.0,
+        log_access_key: str = "",
     ):
         super().__init__(
             base_url,
@@ -43,6 +47,7 @@ class EchoMemClient(BaseHTTPMemoryClient):
             retry_backoff_s=retry_backoff_s,
         )
         self.auth_key = auth_key
+        self.log_access_key = log_access_key
 
     # -- low-level HTTP -------------------------------------------------
 
@@ -217,6 +222,79 @@ class EchoMemClient(BaseHTTPMemoryClient):
         resp = self._post("/api/retrieval/search", body, timeout_s=timeout_s)
         items = resp.get("result", {}).get("items", []) if "result" in resp else resp.get("items", [])
         return [SearchResult.from_dict(item) for item in items]
+
+    def fetch_logs(
+        self,
+        *,
+        tenant_id: str = "",
+        user_id: str = "",
+        request_id: str = "",
+        event: str = "",
+        route: str = "",
+        since: str = "",
+        until: str = "",
+        limit: int = 200,
+        log_access_key: str = "",
+        max_pages: int = 25,
+    ) -> dict[str, Any]:
+        """Query EchoMem core logs, scoped to the run's tenant/user.
+
+        Calls ``GET /api/logs`` and pages through all matching records so
+        the result covers every log line for the requested identity (e.g.
+        injected memories plus QA of one eval run). Only non-empty filters
+        are sent; ``limit`` is capped at 200 (the API maximum) and
+        pagination stops on ``page.has_more`` or after *max_pages*.
+        """
+        if not tenant_id and not user_id and not request_id:
+            raise ValueError("fetch_logs requires at least one of tenant_id/user_id/request_id")
+        access_key = log_access_key or self.log_access_key
+        query: dict[str, Any] = {}
+        if tenant_id:
+            query["tenant_id"] = tenant_id
+        if user_id:
+            query["user_id"] = user_id
+        if request_id:
+            query["request_id"] = request_id
+        if event:
+            query["event"] = event
+        if route:
+            query["route"] = route
+        if since:
+            query["since"] = since
+        if until:
+            query["until"] = until
+        query["limit"] = min(int(limit or 200), 200)
+
+        items: list[dict[str, Any]] = []
+        page: dict[str, Any] = {}
+        diagnostics: dict[str, Any] = {}
+        offset = 0
+        for _ in range(max_pages):
+            query["offset"] = offset
+            url = f"{self.base_url}/api/logs?{urllib.parse.urlencode(query)}"
+            headers = self._headers()
+            if access_key:
+                headers["X-Log-Access-Key"] = access_key
+            req = urllib.request.Request(url, headers=headers, method="GET")
+            result = self._do_request(req)
+            result = result.get("result", result) if isinstance(result, dict) else {}
+            page_items = result.get("items", []) or []
+            items.extend(page_items)
+            page = result.get("page", {}) if isinstance(result, dict) else {}
+            if isinstance(result, dict) and "diagnostics" in result:
+                diagnostics = result.get("diagnostics") or {}
+            if not page.get("has_more"):
+                break
+            returned_this_page = len(page_items)
+            if returned_this_page <= 0:
+                break
+            offset += returned_this_page
+        return {
+            "query": query,
+            "items": items,
+            "page": page,
+            "diagnostics": diagnostics,
+        }
 
     def fs_read(self, uri: str, *, timeout_s: float | None = None) -> str:
         """Read a public EchoMem filesystem URI."""

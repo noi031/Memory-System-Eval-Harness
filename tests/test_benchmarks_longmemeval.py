@@ -100,8 +100,22 @@ class _JudgeLLM:
         self._index = 0
         self.calls = []
 
-    def chat(self, messages, *, temperature=None):
-        self.calls.append((messages, temperature))
+    def chat(
+        self,
+        messages,
+        *,
+        temperature=None,
+        response_format=False,
+        thinking_disabled=False,
+        omit_max_tokens=False,
+    ):
+        self.calls.append((
+            messages,
+            temperature,
+            response_format,
+            thinking_disabled,
+            omit_max_tokens,
+        ))
         content = self._responses[min(self._index, len(self._responses) - 1)]
         self._index += 1
         return LLMResponse(
@@ -627,8 +641,12 @@ class JudgeTests(unittest.TestCase):
         llm = _JudgeLLM(["yes"])
         judge_answer(llm, "multi-session", "Q", "A", "R", abstention=True)
         self.assertEqual(1, len(llm.calls))
-        messages, temperature = llm.calls[0]
+        messages, temperature, response_format, thinking_disabled, omit_max_tokens = llm.calls[0]
         self.assertIsNone(temperature)
+        # Yes/no verdict: JSON off, but thinking off and no max_tokens cap.
+        self.assertFalse(response_format)
+        self.assertTrue(thinking_disabled)
+        self.assertTrue(omit_max_tokens)
         self.assertIn("answer evaluation assistant", messages[0]["content"])
         self.assertIn("unanswerable", messages[1]["content"])
 
@@ -646,7 +664,7 @@ class JudgeTests(unittest.TestCase):
             result = judge_answer(llm, "single-session-user", "Q", "A", "R")
         self.assertTrue(result)
         self.assertEqual(2, len(llm.calls))
-        messages, temperature = llm.calls[1]
+        messages, temperature, *_ = llm.calls[1]
         self.assertEqual(0.3, temperature)
         self.assertIn("single word: yes or no", messages[1]["content"])
 

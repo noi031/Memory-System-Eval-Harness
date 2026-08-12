@@ -16,6 +16,8 @@ import unittest
 from unittest.mock import patch
 
 from dynamic.metrics import (
+    _parse_evaluation_json,
+    build_dynamic_repair_prompt,
     collect_round_metrics,
     compute_summary,
     evaluate_quality,
@@ -30,8 +32,22 @@ class _QualityLLM:
 
     def __init__(self, responses: list[str]):
         self.responses = iter(responses)
+        self.last_chat_kwargs = None
 
-    def chat(self, messages, *, temperature=None):
+    def chat(
+        self,
+        messages,
+        *,
+        temperature=None,
+        response_format=False,
+        thinking_disabled=False,
+        omit_max_tokens=False,
+    ):
+        self.last_chat_kwargs = {
+            "response_format": response_format,
+            "thinking_disabled": thinking_disabled,
+            "omit_max_tokens": omit_max_tokens,
+        }
         return LLMResponse(
             content=next(self.responses),
             prompt_tokens=0,
@@ -384,6 +400,78 @@ class EvaluateQualityTests(unittest.TestCase):
             result = evaluate_quality(llm, self._config(), "Q", "reply", [])
         self.assertIsNone(result["score"])
         self.assertNotEqual("", result["error"])
+
+    def test_parses_fenced_json_from_first_attempt(self) -> None:
+        llm = _QualityLLM([
+            '```json\n{"score": 95, "dimension_scores": '
+            '{"fact_coverage": 40, "coherence": 55}}\n```',
+        ])
+        result = evaluate_quality(llm, self._config(), "Q", "reply", [])
+        self.assertEqual(95, result["score"])
+        self.assertEqual("", result.get("error", ""))
+
+    def test_judge_uses_structured_judge_mode(self) -> None:
+        llm = _QualityLLM([
+            '{"score": 88, "dimension_scores": '
+            '{"fact_coverage": 40, "coherence": 48}}',
+        ])
+        result = evaluate_quality(llm, self._config(), "Q", "reply", [])
+        self.assertEqual(88, result["score"])
+        self.assertEqual("", result.get("error", ""))
+        # 评测走 judge 模式：强制 JSON、关闭思考、不传 max_tokens。
+        self.assertTrue(llm.last_chat_kwargs["response_format"])
+        self.assertTrue(llm.last_chat_kwargs["thinking_disabled"])
+        self.assertTrue(llm.last_chat_kwargs["omit_max_tokens"])
+
+
+class ParseEvaluationJsonTests(unittest.TestCase):
+    """_parse_evaluation_json tolerates common malformed evaluator output."""
+
+    def test_parses_plain_object(self) -> None:
+        self.assertEqual({"score": 80}, _parse_evaluation_json('{"score": 80}'))
+
+    def test_parses_code_fenced_json(self) -> None:
+        raw = '```json\n{"score": 90, "reason": "ok"}\n```'
+        self.assertEqual(90, _parse_evaluation_json(raw)["score"])
+
+    def test_parses_object_with_trailing_braced_prose(self) -> None:
+        # 贪婪正则会把尾注里多余的 '}' 一并吞入导致语法错误；
+        # 配平解析应只取第一个 JSON 对象。
+        raw = '{"score": 85} 备注：范围 0-100 }'
+        self.assertEqual(85, _parse_evaluation_json(raw)["score"])
+
+    def test_parses_nested_dimension_scores(self) -> None:
+        raw = (
+            '{"score": 88, "dimension_scores": {"a": {"x": 1, "y": 2}}, '
+            '"tags": ["t1", "t2"]}'
+        )
+        parsed = _parse_evaluation_json(raw)
+        self.assertEqual(88, parsed["score"])
+        self.assertEqual({"x": 1, "y": 2}, parsed["dimension_scores"]["a"])
+
+    def test_repairs_trailing_comma(self) -> None:
+        raw = '{"score": 70, "dimension_scores": {"a": 10,},}'
+        parsed = _parse_evaluation_json(raw)
+        self.assertEqual(70, parsed["score"])
+        self.assertEqual(10, parsed["dimension_scores"]["a"])
+
+    def test_raises_when_no_json_object(self) -> None:
+        with self.assertRaises(ValueError):
+            _parse_evaluation_json("该回复质量不错，无需评分 JSON。")
+
+
+class RepairPromptTests(unittest.TestCase):
+    """build_dynamic_repair_prompt spells out the full expected schema."""
+
+    def test_lists_dimension_names_and_max_scores(self) -> None:
+        prompt = build_dynamic_repair_prompt([
+            {"name": "fact_coverage", "max_score": 40},
+            {"name": "coherence", "max_score": 60},
+        ])
+        self.assertIn('"fact_coverage" (0-40)', prompt)
+        self.assertIn('"coherence" (0-60)', prompt)
+        self.assertIn('"score" (0-100)', prompt)
+        self.assertIn("markdown", prompt)
 
 
 if __name__ == "__main__":

@@ -129,6 +129,7 @@ class EchoAgentPlugin(AgentPlugin):
                 workspace=config.get("workspace", ""),
                 timeout_s=float(config.get("timeout_s", 60.0)),
                 max_retries=int(config.get("max_retries", 3)),
+                log_access_key=config.get("echomem_log_access_key", ""),
             )
 
         # Typing state (reset per round)
@@ -351,7 +352,15 @@ class EchoAgentPlugin(AgentPlugin):
         """Fetch backend logs and return as JSON string."""
         if self._memory_backend == "openviking":
             return json.dumps(self.memory_client.fetch_console_logs(), ensure_ascii=False, indent=2)
-        return json.dumps({}, indent=2)
+        # echomem: only logs of this run's tenant/user (injected memories + QA).
+        try:
+            logs = self.memory_client.fetch_logs(
+                tenant_id=self.memory_client.account,
+                user_id=self.memory_client.user_id,
+            )
+            return json.dumps(logs, ensure_ascii=False, indent=2)
+        except Exception as exc:
+            return json.dumps({"error": str(exc)}, ensure_ascii=False, indent=2)
 
     def teardown(self) -> None:
         pass

@@ -37,7 +37,15 @@ class _JudgeLLM:
         self._responses = list(responses)
         self._index = 0
 
-    def chat(self, _messages, *, temperature=None):
+    def chat(
+        self,
+        _messages,
+        *,
+        temperature=None,
+        response_format=False,
+        thinking_disabled=False,
+        omit_max_tokens=False,
+    ):
         content = self._responses[min(self._index, len(self._responses) - 1)]
         self._index += 1
         return LLMResponse(

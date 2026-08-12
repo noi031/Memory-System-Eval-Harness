@@ -723,11 +723,31 @@ class EchoAgentLivePluginTests(unittest.TestCase):
 
     # -- getlog ---------------------------------------------------------
 
-    def test_getlog_echomem_returns_empty(self):
+    def test_getlog_echomem_fetches_tenant_logs(self):
         plugin = _make_plugin()
         plugin._memory_backend = "echomem"
+        plugin.memory_client.account = "tenant-x"
+        plugin.memory_client.user_id = "user-x"
+        plugin.memory_client.fetch_logs = MagicMock(
+            return_value={"items": [{"ts": "a"}], "page": {}},
+        )
         result = plugin.getlog()
-        self.assertEqual("{}", result)
+        plugin.memory_client.fetch_logs.assert_called_once_with(
+            tenant_id="tenant-x",
+            user_id="user-x",
+        )
+        data = json.loads(result)
+        self.assertEqual([{"ts": "a"}], data["items"])
+
+    def test_getlog_echomem_returns_error_on_failure(self):
+        plugin = _make_plugin()
+        plugin._memory_backend = "echomem"
+        plugin.memory_client.account = "tenant-x"
+        plugin.memory_client.user_id = "user-x"
+        plugin.memory_client.fetch_logs = MagicMock(side_effect=RuntimeError("boom"))
+        result = plugin.getlog()
+        data = json.loads(result)
+        self.assertIn("error", data)
 
     def test_getlog_openviking_fetches_logs(self):
         plugin = _make_plugin()

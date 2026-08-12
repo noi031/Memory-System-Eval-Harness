@@ -188,6 +188,7 @@ def create_memory_client(config: dict) -> MemoryClient:
             workspace=workspace,
             timeout_s=timeout_s,
             max_retries=max_retries,
+            log_access_key=config.get("echomem_log_access_key", ""),
         )
     else:
         return NullMemoryClient()

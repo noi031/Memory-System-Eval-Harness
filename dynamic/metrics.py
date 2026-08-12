@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 import json
 import re
 from pathlib import Path
@@ -11,25 +12,66 @@ from plugins.base import AgentResponse
 from shared.llm_client import LLMClient, chat_with_repair
 
 
-# The evaluator LLM occasionally returns empty or malformed JSON.  On retry
-# we append a corrective instruction and raise temperature above 0 so the
-# model does not reproduce the identical bad output (temperature 0 is
-# deterministic).
-DYNAMIC_REPAIR_PROMPT = (
-    "\n\nYour previous response was empty or not valid JSON. "
-    'Output a JSON object with a "score" (0-100) and a "dimension_scores" '
-    "object."
-)
+# 评测 LLM 偶尔返回空/格式错误的输出。重试时追加修正提示并抬高温度，
+# 避免温度 0 的确定性请求复现同样的坏输出。提示会列出完整的期望 schema。
+def build_dynamic_repair_prompt(dimensions: list[dict[str, Any]]) -> str:
+    dimension_names = ", ".join(
+        f'"{dimension["name"]}" (0-{dimension.get("max_score", 0)})'
+        for dimension in dimensions
+    )
+    return (
+        "\n\nYour previous response was empty, not valid JSON, or did not match the "
+        "required schema. Output ONLY a single JSON object with exactly these fields: "
+        f'"score" (0-100), "dimension_scores" (an object with {dimension_names}), '
+        '"reason" (string), "strengths" (array of strings), '
+        '"weaknesses" (array of strings), "hallucination_detected" (bool), '
+        '"task_completed" (bool), "matched_facts" (int), "total_facts" (int), '
+        '"recall_helped" (bool). Do not wrap it in markdown code fences and do not '
+        "add any other text."
+    )
 
 
 def _parse_evaluation_json(content: str) -> dict[str, Any]:
-    match = re.search(r"\{[\s\S]*\}", content)
-    if not match:
-        raise ValueError("JSON object missing")
-    raw = json.loads(match.group())
+    raw = _loads_evaluator_json(content)
     if not isinstance(raw, dict):
         raise ValueError("evaluation JSON is not an object")
     return raw
+
+
+def _loads_evaluator_json(content: str) -> Any:
+    """宽松解析评测输出中的单个 JSON 对象。
+
+    评测 LLM 的输出可能带 markdown 围栏、JSON 后跟尾注、尾随逗号等，
+    逐级容错后仍失败才抛 ValueError，触发 repair 重试。
+    """
+    text = content.strip()
+    fenced = re.search(r"```(?:json)?\s*([\s\S]*?)```", text)
+    if fenced:
+        text = fenced.group(1).strip()
+    start = text.find("{")
+    if start == -1:
+        raise ValueError("JSON object missing")
+    candidate = text[start:]
+    try:
+        # 只解析第一个 JSON 值，不吞掉其后的尾注（贪婪正则的常见陷阱）。
+        value, _ = json.JSONDecoder().raw_decode(candidate)
+        return value
+    except json.JSONDecodeError:
+        pass
+    # 轻量修复：去除尾随逗号后重试。
+    repaired = re.sub(r",\s*([}\]])", r"\1", candidate)
+    try:
+        return json.loads(repaired)
+    except json.JSONDecodeError:
+        pass
+    # 退化为 Python 字面量解析（true/false/null 与 Python 关键字近似）。
+    literal = re.sub(r"\btrue\b", "True", repaired)
+    literal = re.sub(r"\bfalse\b", "False", literal)
+    literal = re.sub(r"\bnull\b", "None", literal)
+    try:
+        return ast.literal_eval(literal)
+    except (ValueError, SyntaxError):
+        raise ValueError("JSON object missing") from None
 
 
 def load_evaluator_config(path: str) -> dict[str, Any]:
@@ -181,7 +223,7 @@ def evaluate_quality(
             llm,
             "You are a response quality evaluator. Output only valid JSON.",
             prompt,
-            repair_prompt=DYNAMIC_REPAIR_PROMPT,
+            repair_prompt=build_dynamic_repair_prompt(dimensions),
             parse=_parse_evaluation_json,
         )
     except Exception as exc:

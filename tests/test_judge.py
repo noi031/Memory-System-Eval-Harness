@@ -89,8 +89,22 @@ class JudgeRepairRetryTests(unittest.TestCase):
         calls: list[tuple[list, object]] = []
 
         class FakeChat:
-            def chat(self, messages, *, temperature=None):
-                calls.append((messages, temperature))
+            def chat(
+                self,
+                messages,
+                *,
+                temperature=None,
+                response_format=False,
+                thinking_disabled=False,
+                omit_max_tokens=False,
+            ):
+                calls.append((
+                    messages,
+                    temperature,
+                    response_format,
+                    thinking_disabled,
+                    omit_max_tokens,
+                ))
                 if len(calls) == 1:
                     return SimpleNamespace(
                         content="",

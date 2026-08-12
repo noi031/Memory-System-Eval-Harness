@@ -10,7 +10,7 @@ from shared.llm_client import LLMClient, LLMResponse, chat_with_repair
 class JudgeFailureTests(unittest.TestCase):
     def test_judge_raises_on_transport_error(self) -> None:
         client = LLMClient("https://example.test/v1", "secret")
-        client.chat = lambda messages: LLMResponse("", 0, 0, 0, "timeout")  # type: ignore[method-assign]
+        client.chat = lambda messages, **kwargs: LLMResponse("", 0, 0, 0, "timeout")  # type: ignore[method-assign]
 
         with self.assertRaisesRegex(RuntimeError, "judge call failed"):
             client.judge("system", "user")
@@ -93,6 +93,123 @@ class ChatContentTests(unittest.TestCase):
         req = mock_open.call_args.args[0]
         payload = json.loads(req.data.decode("utf-8"))
         self.assertEqual(0.3, payload["temperature"])
+
+    def test_response_format_is_sent(self) -> None:
+        resp = self._response({
+            "choices": [{
+                "message": {"role": "assistant", "content": "ok"},
+                "finish_reason": "stop",
+            }],
+            "usage": {},
+        })
+        client = LLMClient("https://example.test/v1", "secret", max_retries=1)
+        with patch("urllib.request.urlopen", return_value=resp) as mock_open:
+            client.chat(
+                [{"role": "user", "content": "hi"}],
+                response_format=True,
+            )
+        req = mock_open.call_args.args[0]
+        payload = json.loads(req.data.decode("utf-8"))
+        self.assertEqual({"type": "json_object"}, payload["response_format"])
+
+    def test_response_format_omitted_when_disabled(self) -> None:
+        resp = self._response({
+            "choices": [{
+                "message": {"role": "assistant", "content": "ok"},
+                "finish_reason": "stop",
+            }],
+            "usage": {},
+        })
+        client = LLMClient("https://example.test/v1", "secret", max_retries=1)
+        with patch("urllib.request.urlopen", return_value=resp) as mock_open:
+            client.chat([{"role": "user", "content": "hi"}])
+        req = mock_open.call_args.args[0]
+        payload = json.loads(req.data.decode("utf-8"))
+        self.assertNotIn("response_format", payload)
+
+    def test_thinking_disabled_is_sent(self) -> None:
+        resp = self._response({
+            "choices": [{
+                "message": {"role": "assistant", "content": "ok"},
+                "finish_reason": "stop",
+            }],
+            "usage": {},
+        })
+        client = LLMClient("https://example.test/v1", "secret", max_retries=1)
+        with patch("urllib.request.urlopen", return_value=resp) as mock_open:
+            client.chat(
+                [{"role": "user", "content": "hi"}],
+                thinking_disabled=True,
+            )
+        req = mock_open.call_args.args[0]
+        payload = json.loads(req.data.decode("utf-8"))
+        self.assertEqual({"type": "disabled"}, payload["thinking"])
+
+    def test_thinking_omitted_when_enabled(self) -> None:
+        resp = self._response({
+            "choices": [{
+                "message": {"role": "assistant", "content": "ok"},
+                "finish_reason": "stop",
+            }],
+            "usage": {},
+        })
+        client = LLMClient("https://example.test/v1", "secret", max_retries=1)
+        with patch("urllib.request.urlopen", return_value=resp) as mock_open:
+            client.chat([{"role": "user", "content": "hi"}])
+        req = mock_open.call_args.args[0]
+        payload = json.loads(req.data.decode("utf-8"))
+        self.assertNotIn("thinking", payload)
+
+    def test_max_tokens_omitted_when_requested(self) -> None:
+        resp = self._response({
+            "choices": [{
+                "message": {"role": "assistant", "content": "ok"},
+                "finish_reason": "stop",
+            }],
+            "usage": {},
+        })
+        client = LLMClient("https://example.test/v1", "secret", max_retries=1)
+        with patch("urllib.request.urlopen", return_value=resp) as mock_open:
+            client.chat(
+                [{"role": "user", "content": "hi"}],
+                omit_max_tokens=True,
+            )
+        req = mock_open.call_args.args[0]
+        payload = json.loads(req.data.decode("utf-8"))
+        self.assertNotIn("max_tokens", payload)
+
+    def test_judge_uses_structured_judge_mode(self) -> None:
+        resp = self._response({
+            "choices": [{
+                "message": {"role": "assistant", "content": "ok"},
+                "finish_reason": "stop",
+            }],
+            "usage": {},
+        })
+        client = LLMClient("https://example.test/v1", "secret", max_retries=1)
+        with patch("urllib.request.urlopen", return_value=resp) as mock_open:
+            client.judge("sys", "user")
+        req = mock_open.call_args.args[0]
+        payload = json.loads(req.data.decode("utf-8"))
+        # Judge mode: force JSON, disable thinking, and send no max_tokens cap.
+        self.assertEqual({"type": "json_object"}, payload["response_format"])
+        self.assertEqual({"type": "disabled"}, payload["thinking"])
+        self.assertNotIn("max_tokens", payload)
+
+    def test_judge_can_re_enable_thinking(self) -> None:
+        resp = self._response({
+            "choices": [{
+                "message": {"role": "assistant", "content": "ok"},
+                "finish_reason": "stop",
+            }],
+            "usage": {},
+        })
+        client = LLMClient("https://example.test/v1", "secret", max_retries=1)
+        with patch("urllib.request.urlopen", return_value=resp) as mock_open:
+            client.judge("sys", "user", thinking_disabled=False)
+        req = mock_open.call_args.args[0]
+        payload = json.loads(req.data.decode("utf-8"))
+        self.assertNotIn("thinking", payload)
 
 
 class ChatWithToolsContentTests(unittest.TestCase):
@@ -189,8 +306,22 @@ class ChatWithRepairTests(unittest.TestCase):
                 self.responses = list(responses)
                 self.calls = []
 
-            def chat(self, messages, *, temperature=None):
-                self.calls.append((messages, temperature))
+            def chat(
+                self,
+                messages,
+                *,
+                temperature=None,
+                response_format=False,
+                thinking_disabled=False,
+                omit_max_tokens=False,
+            ):
+                self.calls.append((
+                    messages,
+                    temperature,
+                    response_format,
+                    thinking_disabled,
+                    omit_max_tokens,
+                ))
                 return self.responses.pop(0)
 
         return _FakeChat(responses)
@@ -220,6 +351,28 @@ class ChatWithRepairTests(unittest.TestCase):
         self.assertIsNone(llm.calls[0][1])
         self.assertEqual(0.3, llm.calls[1][1])
         self.assertIn("Answer yes/no only.", llm.calls[1][0][1]["content"])
+        # Judge-mode defaults apply on every attempt.
+        for call in llm.calls:
+            self.assertTrue(call[2])  # response_format
+            self.assertTrue(call[3])  # thinking_disabled
+            self.assertTrue(call[4])  # omit_max_tokens
+
+    def test_forwards_response_format_to_chat(self) -> None:
+        def _parse(value: str) -> bool:
+            return value == "yes"
+
+        llm = self._fake([LLMResponse("yes", 1, 1, 0.1)])
+        with patch("time.sleep"):
+            chat_with_repair(
+                llm,
+                "sys",
+                "user prompt",
+                repair_prompt=" Answer yes/no only.",
+                parse=_parse,
+                response_format=False,
+            )
+        self.assertEqual(1, len(llm.calls))
+        self.assertFalse(llm.calls[0][2])
 
     def test_raises_last_error_after_exhausting_attempts(self) -> None:
         def _parse(_value: str) -> bool:

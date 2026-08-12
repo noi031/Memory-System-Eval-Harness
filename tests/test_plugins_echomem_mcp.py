@@ -1229,6 +1229,32 @@ class PluginSendMessageTests(unittest.TestCase):
         self.assertEqual("echo://pre", resp.memory_items[0]["uri"])
         self.assertEqual("memory_query", resp.memory_items[1]["tool"])
 
+    # -- getlog ---------------------------------------------------------
+
+    def test_getlog_fetches_tenant_logs(self):
+        p = _make_plugin()
+        p.memory_client.account = "tenant-x"
+        p.memory_client.user_id = "user-x"
+        p.memory_client.fetch_logs = MagicMock(
+            return_value={"items": [{"ts": "a"}], "page": {}},
+        )
+        result = p.getlog()
+        p.memory_client.fetch_logs.assert_called_once_with(
+            tenant_id="tenant-x",
+            user_id="user-x",
+        )
+        data = json.loads(result)
+        self.assertEqual([{"ts": "a"}], data["items"])
+
+    def test_getlog_returns_error_on_failure(self):
+        p = _make_plugin()
+        p.memory_client.account = "tenant-x"
+        p.memory_client.user_id = "user-x"
+        p.memory_client.fetch_logs = MagicMock(side_effect=RuntimeError("boom"))
+        result = p.getlog()
+        data = json.loads(result)
+        self.assertIn("error", data)
+
 
 if __name__ == "__main__":
     unittest.main()
