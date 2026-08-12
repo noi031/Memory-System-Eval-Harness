@@ -97,7 +97,7 @@ class AgentPlugin(ABC):
 - `send_message(session_id, message, context_path, *, extra)`: 发送消息, 返回 `AgentResponse`。`extra` dict 携带 benchmark 上下文 (question_time, question_id 等)，动态模式为 None。
 - `supports_typing_simulation` (property): 是否支持模拟打字。
 - `simulate_typing(...)`: 模拟打字触发 prefill。返回 `TypingResult` 或 `None`。
-- `getlog()`: 获取 agent/记忆后端日志, 返回 JSON 字符串。评测结束时由 runner 保存到结果目录。
+- `getlog()`: 获取 agent/记忆后端日志, 返回 JSON 字符串。评测结束时由 runner 保存到结果目录。echomem 后端按本运行租户/user 拉取 EchoMem `GET /api/logs`（注入记忆的全部日志 + 本次评测 QA 日志），不拉全局；`auth.mode=x_auth_key` 时用 `--echomem-log-access-key` 提供专用日志访问密钥。
 - `teardown()`: 释放资源。
 
 `AgentResponse` 字段: `text`, `ttft_ms`, `prompt_tokens`, `completion_tokens`, `cached_tokens`, `prefetch_committed`, `memory_items`, `error`, `extra`。

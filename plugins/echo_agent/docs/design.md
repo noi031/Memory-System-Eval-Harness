@@ -41,6 +41,8 @@ send_message()             ----->  EchoAgent 后端  ----->  LLM
 
 `echo_agent` 的 `qa_profile` 继承自 `AgentPlugin.qa_profile` 属性，默认返回 `descriptor.id`（即 `"echo_agent"`）。`send_message` 在所有返回路径（成功、错误、异常）中都设置 `extra={"qa_profile": self.qa_profile}`。
 
+成功路径的 `AgentResponse` 还携带后端 SSE done 事件注入的指标。`extra` 中的 `elapsed_s`/`retrieval_latency_s`/`llm_latency_s`（ms→s，除以 1000）、`tool_call_count`/`iterations` 与 `trace`（含原始 `metrics` 快照、`model_name`、`finish_reason`、`tool_audit`）均来自 done 事件的 `metrics` 字段（`tool_audit` 来自 done 事件的 `toolAudit`，元素为 `{name, callId, arguments}`）。`memory_items` 优先级为 prefill（typing 模拟产生）> done 事件的 `memoryItems`。token 类字段（`prompt_tokens`/`completion_tokens`/`cached_tokens`/`ttft_ms`）优先取 `metrics` 中的 snake_case 值，回退到 done 事件顶层的 camelCase/snake_case。
+
 ## 会话管理
 
 **动态评测**：`run_eval` 先调 `create_session(title)` 创建 EchoAgent 会话，再将返回的 session_id 传给 `send_message`。

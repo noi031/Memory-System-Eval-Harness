@@ -317,6 +317,7 @@ class CreateMemoryClientTests(unittest.TestCase):
             workspace="/ws",
             timeout_s=30.0,
             max_retries=2,
+            log_access_key="",
         )
 
     @patch("backends.openviking.client.OpenVikingClient")

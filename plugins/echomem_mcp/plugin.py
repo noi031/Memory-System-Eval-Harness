@@ -216,6 +216,7 @@ class EchoMemMCPPlugin(AgentPlugin):
             workspace=config.get("workspace", ""),
             timeout_s=float(config.get("timeout_s", 60.0)),
             max_retries=int(config.get("max_retries", 3)),
+            log_access_key=config.get("echomem_log_access_key", ""),
         )
 
         # Identity isolation
@@ -550,5 +551,17 @@ class EchoMemMCPPlugin(AgentPlugin):
         )
 
     def getlog(self) -> str:
-        """No backend logs available; return empty JSON."""
-        return json.dumps({}, indent=2)
+        """Fetch EchoMem backend logs scoped to this run's tenant/user.
+
+        Returns the injected-memory logs plus the QA logs of this run
+        (both live under the run's tenant/user). Falls back to an error
+        object so log collection never breaks the evaluation run.
+        """
+        try:
+            logs = self.memory_client.fetch_logs(
+                tenant_id=self.memory_client.account,
+                user_id=self.memory_client.user_id,
+            )
+            return json.dumps(logs, ensure_ascii=False, indent=2)
+        except Exception as exc:
+            return json.dumps({"error": str(exc)}, ensure_ascii=False, indent=2)

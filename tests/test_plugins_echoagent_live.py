@@ -529,6 +529,100 @@ class EchoAgentLivePluginTests(unittest.TestCase):
         self.assertEqual("partial", resp.text)
         self.assertEqual("stream broke", resp.error)
 
+    def test_send_message_metrics_and_memory_items(self):
+        plugin = _make_plugin()
+        plugin.client.send_message = MagicMock(return_value={
+            "data": {"messages": [{"seq": 5, "status": "generating"}]},
+        })
+        plugin.client.stream_reply = MagicMock(return_value={
+            "reply": "hello",
+            "ttft_ms": 100.5,
+            "done_event": {
+                "stopReason": "stop",
+                "metrics": {
+                    "ttft_ms": 80.0,
+                    "prompt_tokens": 20,
+                    "completion_tokens": 15,
+                    "cached_tokens": 6,
+                    "elapsed_ms": 1200,
+                    "retrieval_latency_ms": 300,
+                    "llm_latency_ms": 700,
+                    "tool_call_count": 2,
+                    "turn_iterations": 3,
+                    "model_name": "doubao-seed-2.0-pro",
+                    "finish_reason": "stop",
+                },
+                "memoryItems": [{"text": "m1"}, {"text": "m2"}],
+                "toolAudit": [{"name": "ssh_execute", "callId": "c1", "arguments": "{}"}],
+            },
+        })
+        resp = plugin.send_message("s1", "hi", "/")
+        self.assertEqual("hello", resp.text)
+        self.assertEqual(80.0, resp.ttft_ms)
+        self.assertEqual(20, resp.prompt_tokens)
+        self.assertEqual(15, resp.completion_tokens)
+        self.assertEqual(6, resp.cached_tokens)
+        self.assertFalse(resp.prefetch_committed)
+        self.assertEqual([{"text": "m1"}, {"text": "m2"}], resp.memory_items)
+        self.assertIsNone(resp.error)
+        self.assertEqual("echoagent_live", resp.extra.get("qa_profile"))
+        self.assertEqual(1.2, resp.extra["elapsed_s"])
+        self.assertEqual(0.3, resp.extra["retrieval_latency_s"])
+        self.assertEqual(0.7, resp.extra["llm_latency_s"])
+        self.assertEqual(2, resp.extra["tool_call_count"])
+        self.assertEqual(3, resp.extra["iterations"])
+        self.assertEqual(
+            "doubao-seed-2.0-pro", resp.extra["trace"]["model"],
+        )
+        self.assertEqual("stop", resp.extra["trace"]["finish_reason"])
+        self.assertEqual(
+            [{"name": "ssh_execute", "callId": "c1", "arguments": "{}"}],
+            resp.extra["trace"]["tool_audit"],
+        )
+        self.assertEqual(
+            {
+                "ttft_ms": 80.0,
+                "prompt_tokens": 20,
+                "completion_tokens": 15,
+                "cached_tokens": 6,
+                "elapsed_ms": 1200,
+                "retrieval_latency_ms": 300,
+                "llm_latency_ms": 700,
+                "tool_call_count": 2,
+                "turn_iterations": 3,
+                "model_name": "doubao-seed-2.0-pro",
+                "finish_reason": "stop",
+            },
+            resp.extra["trace"]["metrics"],
+        )
+
+    def test_send_message_no_metrics_falls_back(self):
+        """done_event without metrics: fall back to legacy camelCase/0 values."""
+        plugin = _make_plugin()
+        plugin.client.send_message = MagicMock(return_value={
+            "data": {"messages": [{"seq": 1, "status": "completed"}]},
+        })
+        plugin.client.stream_reply = MagicMock(return_value={
+            "reply": "x",
+            "ttft_ms": 50.0,
+            "done_event": {"promptTokens": 7, "cachedTokens": 2},
+        })
+        resp = plugin.send_message("s1", "hi", "/")
+        self.assertEqual("x", resp.text)
+        self.assertEqual(50.0, resp.ttft_ms)
+        self.assertEqual(7, resp.prompt_tokens)
+        self.assertEqual(2, resp.cached_tokens)
+        self.assertEqual(0, resp.completion_tokens)
+        self.assertFalse(resp.prefetch_committed)
+        self.assertEqual([], resp.memory_items)
+        self.assertEqual(0.0, resp.extra["elapsed_s"])
+        self.assertEqual(0.0, resp.extra["retrieval_latency_s"])
+        self.assertEqual(0.0, resp.extra["llm_latency_s"])
+        self.assertEqual(0, resp.extra["tool_call_count"])
+        self.assertEqual(1, resp.extra["iterations"])
+        self.assertEqual({}, resp.extra["trace"]["metrics"])
+        self.assertIsNone(resp.extra["trace"]["tool_audit"])
+
     # -- inject_memories -----------------------------------------------
 
     def test_inject_memories_opens_session_when_no_id(self):
@@ -629,11 +723,31 @@ class EchoAgentLivePluginTests(unittest.TestCase):
 
     # -- getlog ---------------------------------------------------------
 
-    def test_getlog_echomem_returns_empty(self):
+    def test_getlog_echomem_fetches_tenant_logs(self):
         plugin = _make_plugin()
         plugin._memory_backend = "echomem"
+        plugin.memory_client.account = "tenant-x"
+        plugin.memory_client.user_id = "user-x"
+        plugin.memory_client.fetch_logs = MagicMock(
+            return_value={"items": [{"ts": "a"}], "page": {}},
+        )
         result = plugin.getlog()
-        self.assertEqual("{}", result)
+        plugin.memory_client.fetch_logs.assert_called_once_with(
+            tenant_id="tenant-x",
+            user_id="user-x",
+        )
+        data = json.loads(result)
+        self.assertEqual([{"ts": "a"}], data["items"])
+
+    def test_getlog_echomem_returns_error_on_failure(self):
+        plugin = _make_plugin()
+        plugin._memory_backend = "echomem"
+        plugin.memory_client.account = "tenant-x"
+        plugin.memory_client.user_id = "user-x"
+        plugin.memory_client.fetch_logs = MagicMock(side_effect=RuntimeError("boom"))
+        result = plugin.getlog()
+        data = json.loads(result)
+        self.assertIn("error", data)
 
     def test_getlog_openviking_fetches_logs(self):
         plugin = _make_plugin()

@@ -1110,6 +1110,92 @@ class EchoAgentPluginTests(unittest.TestCase):
         self.assertEqual("partial", resp.text)
         self.assertEqual("stream broke", resp.error)
 
+    def test_send_message_metrics_and_done_memory_items(self):
+        """done_event carries metrics + memoryItems and there is no prefill:
+        metrics read from the snake_case keys, memory_items from done."""
+        plugin = _make_plugin()
+        plugin.client.send_message = MagicMock(return_value={
+            "data": {"messages": [{"seq": 1, "status": "completed"}]},
+        })
+        plugin.client.stream_reply = MagicMock(return_value={
+            "reply": "hello",
+            "ttft_ms": 90.0,
+            "done_event": {
+                "metrics": {
+                    "ttft_ms": 70.0,
+                    "prompt_tokens": 20,
+                    "completion_tokens": 12,
+                    "cached_tokens": 5,
+                    "elapsed_ms": 1000,
+                    "retrieval_latency_ms": 200,
+                    "llm_latency_ms": 500,
+                    "tool_call_count": 1,
+                    "turn_iterations": 2,
+                    "model_name": "doubao-seed-2.0-pro",
+                    "finish_reason": "stop",
+                },
+                "memoryItems": [{"text": "m1"}],
+                "toolAudit": [{"name": "web_search", "callId": "c2", "arguments": "{}"}],
+            },
+        })
+        resp = plugin.send_message("s1", "hi", "/")
+        self.assertEqual("hello", resp.text)
+        self.assertEqual(70.0, resp.ttft_ms)
+        self.assertEqual(20, resp.prompt_tokens)
+        self.assertEqual(12, resp.completion_tokens)
+        self.assertEqual(5, resp.cached_tokens)
+        self.assertFalse(resp.prefetch_committed)
+        self.assertEqual([{"text": "m1"}], resp.memory_items)
+        self.assertEqual("echo_agent", resp.extra.get("qa_profile"))
+        self.assertEqual(1.0, resp.extra["elapsed_s"])
+        self.assertEqual(0.2, resp.extra["retrieval_latency_s"])
+        self.assertEqual(0.5, resp.extra["llm_latency_s"])
+        self.assertEqual(1, resp.extra["tool_call_count"])
+        self.assertEqual(2, resp.extra["iterations"])
+        self.assertEqual(
+            "doubao-seed-2.0-pro", resp.extra["trace"]["model"],
+        )
+        self.assertEqual("stop", resp.extra["trace"]["finish_reason"])
+        self.assertEqual(
+            [{"name": "web_search", "callId": "c2", "arguments": "{}"}],
+            resp.extra["trace"]["tool_audit"],
+        )
+
+    def test_send_message_prefill_memory_items_take_priority(self):
+        """prefill memory_items win over done-event memoryItems."""
+        plugin = _make_plugin()
+        plugin._typing_committed = True
+        plugin._typing_memory_items = [{"text": "prefill"}]
+        plugin.client.send_message = MagicMock(return_value={
+            "data": {"messages": [{"seq": 1, "status": "completed"}]},
+        })
+        plugin.client.stream_reply = MagicMock(return_value={
+            "reply": "x",
+            "ttft_ms": None,
+            "done_event": {"memoryItems": [{"text": "done"}]},
+        })
+        resp = plugin.send_message("s1", "hi", "/")
+        self.assertTrue(resp.prefetch_committed)
+        self.assertEqual([{"text": "prefill"}], resp.memory_items)
+        self.assertEqual("", plugin._pending_turn_id)
+        self.assertFalse(plugin._typing_committed)
+        self.assertEqual([], plugin._typing_memory_items)
+
+    def test_send_message_memory_items_fallback_to_done(self):
+        """empty prefill memory_items fall back to done-event memoryItems."""
+        plugin = _make_plugin()
+        plugin.client.send_message = MagicMock(return_value={
+            "data": {"messages": [{"seq": 1, "status": "completed"}]},
+        })
+        plugin.client.stream_reply = MagicMock(return_value={
+            "reply": "x",
+            "ttft_ms": None,
+            "done_event": {"memoryItems": [{"text": "done"}]},
+        })
+        resp = plugin.send_message("s1", "hi", "/")
+        self.assertFalse(resp.prefetch_committed)
+        self.assertEqual([{"text": "done"}], resp.memory_items)
+
     # -- inject_memories -----------------------------------------------
 
     def test_inject_memories_opens_session_when_no_id(self):
@@ -1213,6 +1299,44 @@ class EchoAgentPluginTests(unittest.TestCase):
     def test_teardown_is_noop(self):
         plugin = _make_plugin()
         plugin.teardown()
+
+    # -- getlog ---------------------------------------------------------
+
+    def test_getlog_echomem_fetches_tenant_logs(self):
+        plugin = _make_plugin()
+        plugin._memory_backend = "echomem"
+        plugin.memory_client.account = "tenant-x"
+        plugin.memory_client.user_id = "user-x"
+        plugin.memory_client.fetch_logs = MagicMock(
+            return_value={"items": [{"ts": "a"}], "page": {}},
+        )
+        result = plugin.getlog()
+        plugin.memory_client.fetch_logs.assert_called_once_with(
+            tenant_id="tenant-x",
+            user_id="user-x",
+        )
+        data = json.loads(result)
+        self.assertEqual([{"ts": "a"}], data["items"])
+
+    def test_getlog_echomem_returns_error_on_failure(self):
+        plugin = _make_plugin()
+        plugin._memory_backend = "echomem"
+        plugin.memory_client.account = "tenant-x"
+        plugin.memory_client.user_id = "user-x"
+        plugin.memory_client.fetch_logs = MagicMock(side_effect=RuntimeError("boom"))
+        result = plugin.getlog()
+        data = json.loads(result)
+        self.assertIn("error", data)
+
+    def test_getlog_openviking_fetches_console_logs(self):
+        plugin = _make_plugin()
+        plugin._memory_backend = "openviking"
+        plugin.memory_client.fetch_console_logs = MagicMock(
+            return_value={"events": []},
+        )
+        result = plugin.getlog()
+        data = json.loads(result)
+        self.assertIn("events", data)
 
 
 if __name__ == "__main__":
