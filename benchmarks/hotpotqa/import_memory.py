@@ -85,7 +85,11 @@ def build_document_corpus(
             key = hashlib.sha256(f"{title}\x00{text}".encode("utf-8")).hexdigest()
             if key in seen:
                 continue
-            path = f"hotpotqa/{sanitize_resource_id(title)}-{key[:8]}"
+            # ResourceEngine selects its parser from the resource suffix.
+            # Keep the title readable, but always use an explicit Markdown
+            # suffix so dots inside titles (for example "James P. Comer") do
+            # not get mistaken for an unsupported file extension.
+            path = f"hotpotqa/{sanitize_resource_id(title)}-{key[:8]}.md"
             seen[key] = path
             corpus[path] = {"title": title, "text": text}
     return [
