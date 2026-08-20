@@ -99,7 +99,21 @@ class EchoMemClient(BaseHTTPMemoryClient):
         if not tenant_id:
             raise RuntimeError(f"tenant provisioning returned no tenant id: {tenant_response}")
 
-        user_response = self._post(f"/api/auth/tenants/{tenant_id}/users", {})
+        # Newer local EchoMem servers issue a short-lived tenant bootstrap
+        # capability when the tenant is created. It is required for the
+        # follow-up user/key provisioning calls.
+        bootstrap_key = str(tenant_response.get("bootstrap_key") or "")
+        provisioning_headers = (
+            {"X-EchoMem-Bootstrap-Key": bootstrap_key}
+            if bootstrap_key
+            else None
+        )
+
+        user_response = self._post(
+            f"/api/auth/tenants/{tenant_id}/users",
+            {},
+            headers=provisioning_headers,
+        )
         user = user_response.get("user", {})
         user_id = str(user.get("user_id") or "") if isinstance(user, dict) else ""
         if not user_id:
@@ -108,6 +122,7 @@ class EchoMemClient(BaseHTTPMemoryClient):
         key_response = self._post(
             f"/api/auth/tenants/{tenant_id}/users/{user_id}/key",
             {},
+            headers=provisioning_headers,
         )
         auth_key = str(key_response.get("auth_key") or "")
         if not auth_key:
@@ -456,4 +471,3 @@ class EchoMemClient(BaseHTTPMemoryClient):
             for item in (entries or [])
             if isinstance(item, dict)
         ]
-
