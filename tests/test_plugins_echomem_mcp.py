@@ -24,13 +24,14 @@ from backends.memory_types import CommitResult, SearchResult
 from plugins.echomem_mcp.mcp_client import McpClient
 from plugins.echomem_mcp.plugin import EchoMemMCPPlugin, format_split_memory_section
 from plugins.echomem_mcp.runtime import (
-    MCP_TOOLS,
     _NO_TOOLS_SYSTEM_PROMPT,
+    _NO_TOOLS_SYSTEM_PROMPT_NATURAL,
     _SYSTEM_PROMPT,
+    _SYSTEM_PROMPT_NATURAL,
+    MCP_TOOLS,
     configured_tools,
 )
 from shared.llm_client import LLMResponse, LLMToolResponse
-
 
 # --------------------------------------------------------------------------- #
 #  Helpers                                                                     #
@@ -85,6 +86,7 @@ def _make_plugin(**overrides: Any) -> EchoMemMCPPlugin:
     p._question_timeout_s = overrides.get("question_timeout_s", 120.0)
     p._commit_timeout_s = overrides.get("commit_timeout_s", 0.0)
     p._commit_poll_interval_s = overrides.get("commit_poll_interval_s", 2.0)
+    p._answer_style = overrides.get("answer_style", "factoid")
     p._documents_mode = overrides.get("documents_mode", False)
     p.path_title_map = overrides.get("path_title_map", {})
     p._llm = MagicMock()
@@ -495,6 +497,17 @@ class RuntimePromptTests(unittest.TestCase):
     def test_no_tools_prompt_forbids_function_markup(self) -> None:
         self.assertIn("Do not emit tool calls", _NO_TOOLS_SYSTEM_PROMPT)
 
+    def test_natural_prompts_allow_full_answers(self) -> None:
+        # Conversational benchmarks (LoCoMo) restore the old system prompt:
+        # evidence-based natural language answers, no factoid short-answer rule.
+        self.assertIn("EchoMem", _SYSTEM_PROMPT_NATURAL)
+        self.assertIn("Answer the question directly.", _SYSTEM_PROMPT_NATURAL)
+        self.assertNotIn("single word or short phrase", _SYSTEM_PROMPT_NATURAL)
+        self.assertNotIn("single word or short phrase", _NO_TOOLS_SYSTEM_PROMPT_NATURAL)
+        self.assertIn("Do not emit tool calls", _NO_TOOLS_SYSTEM_PROMPT_NATURAL)
+        self.assertTrue(_SYSTEM_PROMPT_NATURAL.strip())
+        self.assertTrue(_NO_TOOLS_SYSTEM_PROMPT_NATURAL.strip())
+
 
 # --------------------------------------------------------------------------- #
 #  Plugin -- descriptor and qa_profile                                        #
@@ -649,6 +662,29 @@ class PluginSetupTests(unittest.TestCase):
         self.assertEqual(8000, p._memory_budget_chars)
         self.assertEqual(4000, p._user_memory_budget_chars)
         self.assertEqual(2000, p._agent_memory_budget_chars)
+
+    def test_setup_defaults_answer_style_to_factoid(self) -> None:
+        p = EchoMemMCPPlugin()
+        p.setup({})
+        self.assertEqual("factoid", p._answer_style)
+
+    def test_setup_infers_natural_for_locomo(self) -> None:
+        p = EchoMemMCPPlugin()
+        p.setup({"benchmark_name": "locomo"})
+        self.assertEqual("natural", p._answer_style)
+
+    def test_setup_keeps_factoid_for_hotpotqa(self) -> None:
+        p = EchoMemMCPPlugin()
+        p.setup({"benchmark_name": "hotpotqa"})
+        self.assertEqual("factoid", p._answer_style)
+
+    def test_setup_answer_style_overrides_benchmark_inference(self) -> None:
+        p = EchoMemMCPPlugin()
+        p.setup({"benchmark_name": "locomo", "answer_style": "factoid"})
+        self.assertEqual("factoid", p._answer_style)
+        p2 = EchoMemMCPPlugin()
+        p2.setup({"benchmark_name": "hotpotqa", "answer_style": "natural"})
+        self.assertEqual("natural", p2._answer_style)
         self.assertEqual(120.0, p._question_timeout_s)
         self.assertEqual(0.0, p._commit_timeout_s)
         self.assertEqual(2.0, p._commit_poll_interval_s)
@@ -800,45 +836,35 @@ class PluginCreateSessionTests(unittest.TestCase):
 class PluginSendMessageTests(unittest.TestCase):
     # -- Phase A: manual pre-fetch -------------------------------------------
 
-    @patch(_MCP_CLIENT)
-    def test_manual_search_prefetch_populates_memory_items(self, mock_cls: MagicMock) -> None:
+    def test_manual_search_prefetch_populates_memory_items(self) -> None:
         p = _make_plugin(tool_calling=False, manual_search=True)
-        mock_mcp = MagicMock()
-        mock_mcp.call_tool.return_value = json.dumps({
-            "items": [
-                {"uri": "echo://a", "score": 0.9, "content": "memory A"},
-                {"uri": "echo://b", "score": 0.5, "content": "memory B"},
-            ]
-        })
-        mock_cls.return_value = mock_mcp
+        p.memory_client.search.return_value = [
+            SearchResult(uri="echo://a", score=0.9, content="memory A"),
+            SearchResult(uri="echo://b", score=0.5, content="memory B"),
+        ]
         p._llm.chat.return_value = LLMResponse(
             "answer", 10, 5, 0.1,
         )
         resp = p.send_message("s1", "What do you know?")
 
         self.assertEqual("answer", resp.text)
-        p.memory_client.search.assert_not_called()
-        mock_mcp.call_tool.assert_called_once_with(
-            "memory_query",
-            {"query": "What do you know?", "limit": 25},
+        # No-tool-calling mode pre-fetches via EchoMem HTTP, never MCP.
+        p.memory_client.search.assert_called_once_with(
+            "What do you know?",
+            top_k=25,
             timeout_s=ANY,
         )
         self.assertEqual(2, len(resp.memory_items))
         self.assertEqual("echo://a", resp.memory_items[0]["uri"])
         self.assertGreater(resp.extra["retrieval_latency_s"], 0.0)
-        self.assertTrue(resp.extra["initial_search_via_mcp"])
+        self.assertFalse(resp.extra["initial_search_via_mcp"])
 
-    @patch(_MCP_CLIENT)
-    def test_manual_search_injects_memory_into_messages(self, mock_cls: MagicMock) -> None:
+    def test_manual_search_injects_memory_into_messages(self) -> None:
         p = _make_plugin(tool_calling=False, manual_search=True)
-        mock_mcp = MagicMock()
-        mock_mcp.call_tool.return_value = json.dumps({
-            "items": [
-                {"uri": "echo://a", "score": 0.9, "content": "memory A"},
-                {"uri": "echo://agent/a", "score": 0.8, "content": "agent memory"},
-            ]
-        })
-        mock_cls.return_value = mock_mcp
+        p.memory_client.search.return_value = [
+            SearchResult(uri="echo://a", score=0.9, content="memory A"),
+            SearchResult(uri="echo://agent/a", score=0.8, content="agent memory"),
+        ]
         p._llm.chat.return_value = LLMResponse("answer", 10, 5, 0.1)
         p.send_message("s1", "q")
         messages = p._llm.chat.call_args.args[0]
@@ -885,24 +911,18 @@ class PluginSendMessageTests(unittest.TestCase):
         self.assertNotIn("x" * 200, text)
         self.assertIn("later", text)
 
-    @patch(_MCP_CLIENT)
-    def test_manual_search_empty_results_no_injection(self, mock_cls: MagicMock) -> None:
+    def test_manual_search_empty_results_no_injection(self) -> None:
         p = _make_plugin(tool_calling=False, manual_search=True)
-        mock_mcp = MagicMock()
-        mock_mcp.call_tool.return_value = json.dumps({"items": []})
-        mock_cls.return_value = mock_mcp
+        p.memory_client.search.return_value = []
         p._llm.chat.return_value = LLMResponse("answer", 5, 3, 0.1)
         resp = p.send_message("s1", "q")
         self.assertEqual([], resp.memory_items)
         messages = p._llm.chat.call_args.args[0]
         self.assertEqual(2, len(messages))  # system + user only
 
-    @patch(_MCP_CLIENT)
-    def test_manual_search_exception_is_reported(self, mock_cls: MagicMock) -> None:
+    def test_manual_search_exception_is_reported(self) -> None:
         p = _make_plugin(tool_calling=False, manual_search=True)
-        mock_mcp = MagicMock()
-        mock_mcp.call_tool.side_effect = RuntimeError("search down")
-        mock_cls.return_value = mock_mcp
+        p.memory_client.search.side_effect = RuntimeError("search down")
         p._llm.chat.return_value = LLMResponse("answer", 5, 3, 0.1)
         resp = p.send_message("s1", "q")
         self.assertEqual("answer", resp.text)
@@ -1152,6 +1172,32 @@ class PluginSendMessageTests(unittest.TestCase):
         p.send_message("s1", "q")
         messages = p._llm.chat.call_args.args[0]
         self.assertEqual(_NO_TOOLS_SYSTEM_PROMPT, messages[0]["content"])
+
+    @patch(_MCP_CLIENT)
+    def test_natural_answer_style_uses_natural_prompts(self, mock_cls: MagicMock) -> None:
+        # tool_calling=False path
+        p = _make_plugin(answer_style="natural", tool_calling=False, manual_search=False)
+        p._llm.chat.return_value = LLMResponse("ans", 5, 3, 0.1)
+        p.send_message("s1", "q")
+        messages = p._llm.chat.call_args.args[0]
+        self.assertEqual(_NO_TOOLS_SYSTEM_PROMPT_NATURAL, messages[0]["content"])
+
+        # tool_calling=True path
+        mock_cls.return_value = MagicMock()
+        p2 = _make_plugin(answer_style="natural", tool_calling=True, manual_search=False)
+        p2._llm.chat_with_tools.return_value = LLMToolResponse("ans", [], 5, 3)
+        p2.send_message("s1", "q")
+        messages = p2._llm.chat_with_tools.call_args.args[0]
+        self.assertEqual(_SYSTEM_PROMPT_NATURAL, messages[0]["content"])
+
+    @patch(_MCP_CLIENT)
+    def test_factoid_answer_style_keeps_short_answer_prompts(self, mock_cls: MagicMock) -> None:
+        mock_cls.return_value = MagicMock()
+        p = _make_plugin(answer_style="factoid", tool_calling=True, manual_search=False)
+        p._llm.chat_with_tools.return_value = LLMToolResponse("ans", [], 5, 3)
+        p.send_message("s1", "q")
+        messages = p._llm.chat_with_tools.call_args.args[0]
+        self.assertEqual(_SYSTEM_PROMPT, messages[0]["content"])
 
     def test_question_time_injected_into_user_message(self) -> None:
         p = _make_plugin(tool_calling=False, manual_search=False)

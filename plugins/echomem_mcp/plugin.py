@@ -9,9 +9,10 @@ Two configurable parameters control behavior:
 - --tool-calling / --no-tool-calling: enable LLM tool calling via MCP
 - --search-in-tools / --no-search-in-tools: include memory_query in tool defs
 
-Initial memory pre-fetch is always performed through EchoMem MCP
-``memory_query``.  The plugin intentionally does not call EchoMem's HTTP
-retrieval API for QA retrieval.
+Initial memory pre-fetch is performed through EchoMem MCP ``memory_query``
+when tool calling is enabled.  In ``--no-tool-calling`` mode the pre-fetch
+goes through EchoMem's HTTP retrieval API instead, so the MCP server is not
+required at all in that mode.
 
 When the benchmark runs with ``--import-mode documents``, QA switches to
 the document mode: the shared document corpus is retrieved via
@@ -35,7 +36,9 @@ from plugins.base import AgentDescriptor, AgentPlugin, AgentResponse
 from plugins.echomem_mcp.mcp_client import McpClient
 from plugins.echomem_mcp.runtime import (
     _NO_TOOLS_SYSTEM_PROMPT,
+    _NO_TOOLS_SYSTEM_PROMPT_NATURAL,
     _SYSTEM_PROMPT,
+    _SYSTEM_PROMPT_NATURAL,
     configured_tools,
 )
 from shared.resource_rag import (
@@ -51,6 +54,12 @@ from backends.memory_args import add_memory_backend_args
 from backends.memory_format import format_memory_section
 
 logger = logging.getLogger("eval.echomem_mcp")
+
+# Benchmarks whose QA expects evidence-based natural-language answers rather
+# than a factoid single word/phrase. The plugin picks the natural-answer
+# system prompt for these; everything else keeps the factoid short-answer
+# prompt. Extend this set when a new conversational benchmark is added.
+_NATURAL_ANSWER_BENCHMARKS = {"locomo"}
 
 
 def _is_agent_memory(item: SearchResult) -> bool:
@@ -183,12 +192,34 @@ class EchoMemMCPPlugin(AgentPlugin):
             default=2000,
             help="Max chars of retrieved agent memories to inject (default: 2000)",
         )
+        g.add_argument(
+            "--answer-style",
+            choices=["factoid", "natural"],
+            default=None,
+            help=(
+                "System-prompt answer style: 'factoid' forces a single word or "
+                "short phrase; 'natural' allows evidence-based full answers. "
+                "When unset, inferred from --benchmark-name (locomo -> natural, "
+                "all others -> factoid)."
+            ),
+        )
 
     def setup(self, config: dict) -> None:
         self._mcp_url = config.get("mcp_url", "http://127.0.0.1:8001")
         self._auth_key = config.get("mcp_auth_key", "") or config.get("echomem_auth_key", "")
         self._max_iterations = config.get("mcp_max_iterations", 50)
         self._tool_calling = config.get("tool_calling", True)
+        # Answer-style awareness: factoid benchmarks (e.g. HotpotQA) keep the
+        # short-answer system prompt; conversational memory benchmarks
+        # (e.g. LoCoMo) use the natural-answer prompt. An explicit
+        # --answer-style overrides the benchmark_name inference.
+        answer_style = str(config.get("answer_style") or "").strip().lower()
+        if answer_style not in {"factoid", "natural"}:
+            benchmark = str(config.get("benchmark_name") or "").strip().lower()
+            answer_style = (
+                "natural" if benchmark in _NATURAL_ANSWER_BENCHMARKS else "factoid"
+            )
+        self._answer_style = answer_style
         self._search_in_tools = config.get("search_in_tools", True)
         # Kept as an internal/backward-compatible config switch for unit tests
         # and older config files. It is intentionally not exposed as a CLI
@@ -693,7 +724,14 @@ class EchoMemMCPPlugin(AgentPlugin):
 
         # Build messages
         time_context = f"Current date: {question_time}.\n\n" if str(question_time).strip() else ""
-        system_prompt = _SYSTEM_PROMPT if self._tool_calling else _NO_TOOLS_SYSTEM_PROMPT
+        if self._answer_style == "natural":
+            system_prompt = (
+                _SYSTEM_PROMPT_NATURAL
+                if self._tool_calling
+                else _NO_TOOLS_SYSTEM_PROMPT_NATURAL
+            )
+        else:
+            system_prompt = _SYSTEM_PROMPT if self._tool_calling else _NO_TOOLS_SYSTEM_PROMPT
         prompt_append = str(extra.get("system_prompt_append") or "").strip()
         if prompt_append:
             system_prompt += "\n\nAdditional evaluation instructions:\n" + prompt_append
@@ -709,7 +747,13 @@ class EchoMemMCPPlugin(AgentPlugin):
         mcp: McpClient | None = None
 
         initial_search_enabled = bool(getattr(self, "_initial_search_via_mcp", True))
-        if self._manual_search and initial_search_enabled:
+        # MCP is only touched when tool calling is enabled. In no-tool-calling
+        # mode the platform pre-fetch uses EchoMem's HTTP retrieval API
+        # instead, so the MCP server is not required at all.
+        use_mcp_prefetch = (
+            self._tool_calling and self._manual_search and initial_search_enabled
+        )
+        if use_mcp_prefetch:
             try:
                 mcp = McpClient(
                     self._mcp_url,
@@ -722,11 +766,12 @@ class EchoMemMCPPlugin(AgentPlugin):
                 logger.warning("Initial MCP search initialize failed: %s", retrieval_error)
                 mcp = None
 
-        # Phase A: Platform pre-fetch search through MCP memory_query.
+        # Phase A: Platform pre-fetch search (MCP memory_query when tool calling
+        # is enabled, EchoMem HTTP retrieval otherwise).
         if self._manual_search:
             try:
                 t0 = time.monotonic()
-                if mcp is not None:
+                if use_mcp_prefetch and mcp is not None:
                     raw = mcp.call_tool(
                         "memory_query",
                         {"query": message, "limit": self._top_k},
@@ -740,7 +785,12 @@ class EchoMemMCPPlugin(AgentPlugin):
                         if isinstance(item, dict)
                     ]
                 else:
-                    results = []
+                    # No-tool-calling mode: EchoMem HTTP retrieval (no MCP).
+                    results = self.memory_client.search(
+                        message,
+                        top_k=self._top_k,
+                        timeout_s=remaining(),
+                    )
                 retrieval_latency_s = time.monotonic() - t0
                 memory_text = format_split_memory_section(
                     results,
