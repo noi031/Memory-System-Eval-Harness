@@ -396,7 +396,45 @@ python dynamic/run_eval.py \
 ```
 
 结果写入 `dynamic/results/<timestamp>/`，主要文件：`dataset.json`、
-`rounds.csv`、`summary.json`、`quality_report.json`。
+`dynamic_results.csv`、`summary.json`、`quality_report.json`。
+
+#### 双后端对比（EchoMem vs OpenViking）
+
+同 agent 隔离口径下对比两个记忆后端：先 `generate` 一次产出场景
+`dataset.json`，再用 `replay` 把**同一份**数据集对两个后端各回放一遍
+（vikingbot 插件通过 `--memory-backend` 切换后端），最后生成自包含 HTML
+图表报告：
+
+```bash
+# 1) generate 一次：LLM 模拟用户生成背景记忆 + 查询
+python dynamic/run_eval.py --agent-plugin vikingbot --memory-backend echomem \
+  --echomem-url http://127.0.0.1:8010 --num-memories 20 --num-queries 50 \
+  --scenario-base-url ... --scenario-model ... --scenario-api-key ... \
+  --llm-base-url ... --llm-model ... --llm-api-key ... \
+  --out-dir dynamic/results/formal_gen
+
+# 2) replay 同一份 dataset.json 到 EchoMem
+python dynamic/run_eval.py --agent-plugin vikingbot --memory-backend echomem \
+  --echomem-url http://127.0.0.1:8010 --dataset <dataset.json> \
+  --llm-base-url ... --llm-model ... --llm-api-key ... --out-dir dynamic/results/formal_em
+
+# 3) replay 同一份 dataset.json 到 OpenViking
+python dynamic/run_eval.py --agent-plugin vikingbot --memory-backend openviking \
+  --echomem-url http://127.0.0.1:19080 --workspace D:/.openviking/data \
+  --dataset <dataset.json> --llm-base-url ... --llm-model ... --llm-api-key ... \
+  --out-dir dynamic/results/formal_ov
+
+# 4) 生成对比报告（token / 注入耗时 / 检索延迟 / 召回精度 / 答案质量）
+python scripts/compare_memory_backends.py \
+  --echomem-run dynamic/results/formal_em/<run> \
+  --openviking-run dynamic/results/formal_ov/<run> \
+  --dataset <dataset.json> --output reports/echomem_vs_openviking/index.html
+```
+
+`replay` 会自动识别 `generate` 产出的动态 v2 `dataset.json`
+（含 `background_memories` + `dataset_queries`），保留每轮 `ground_facts`
+的记忆 id，供召回精度计算；注入耗时记录在结果的 `config.inject_elapsed_s`。
+一键流程见 `START_BAT/compare_echomem_vs_openviking.bat`。
 
 ## 扩展指南
 
