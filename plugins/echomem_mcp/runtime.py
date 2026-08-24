@@ -134,6 +134,29 @@ _NO_TOOLS_SYSTEM_PROMPT = (
     "answer with exactly 'yes' or 'no'."
 )
 
+# Natural-answer variants for conversational memory benchmarks (e.g. LoCoMo).
+# They restore the pre-factoid system prompts: the model is allowed to answer
+# with evidence-based, paraphrased natural language instead of being forced
+# into a single word or short phrase.
+_SYSTEM_PROMPT_NATURAL = (
+    "You are a helpful assistant with access to EchoMem long-term memory "
+    "through the MCP tools provided in this request. "
+    "If context is insufficient, use the available EchoMem MCP tools or "
+    "memory context to find more information. "
+    "Answer the question directly."
+)
+
+_NO_TOOLS_SYSTEM_PROMPT_NATURAL = (
+    "You are a helpful assistant answering a question from the memory excerpts "
+    "included in the conversation. Answer concisely and directly from those "
+    "excerpts. Prioritize the supplied EchoMem memory evidence over general "
+    "knowledge or unsupported inference. "
+    "Preserve exact names, dates, order, and values when the memory provides them. "
+    "Do not emit tool calls, function-call markup, XML tool tags, "
+    "or a plan to search. Use the available memory to answer as helpfully as "
+    "possible."
+)
+
 
 def configured_tools(read_mode: str = "allow") -> list[dict[str, Any]]:
     """Return the MCP tool contract for the requested transcript policy."""
