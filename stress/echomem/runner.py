@@ -512,6 +512,7 @@ class ServerMetricSample:
     status_code: int | None
     metric_count: int
     metrics: dict[str, float] = field(default_factory=dict)
+    series: list[dict[str, Any]] = field(default_factory=list)
     error: str = ""
 
 
@@ -532,6 +533,86 @@ def parse_prometheus_metrics(raw: str) -> dict[str, float]:
         except ValueError:
             continue
     return values
+
+
+def parse_prometheus_series(raw: str) -> list[dict[str, Any]]:
+    """Keep metric labels for bounded PR421 lane/fan-out evidence.
+
+    The existing aggregate parser is useful for overall resource trends, but
+    summing away labels makes it impossible to tell whether the service
+    exposed the required ``lane`` and ``reason_code`` dimensions.
+    """
+    pattern = re.compile(
+        r"^([a-zA-Z_:][a-zA-Z0-9_:]*)"
+        r"(?:\{([^}]*)\})?\s+"
+        r"([-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?)$"
+    )
+    label_pattern = re.compile(r'([a-zA-Z_][a-zA-Z0-9_]*)="((?:\\.|[^"])*)"')
+    series: list[dict[str, Any]] = []
+    for line in raw.splitlines():
+        match = pattern.match(line.strip())
+        if not match:
+            continue
+        name, label_text, value_text = match.groups()
+        try:
+            value = float(value_text)
+        except ValueError:
+            continue
+        labels = {
+            key: bytes(value, "utf-8").decode("unicode_escape")
+            for key, value in label_pattern.findall(label_text or "")
+        }
+        series.append({"name": name, "labels": labels, "value": value})
+    return series
+
+
+def pr421_metric_coverage(samples: list[ServerMetricSample]) -> dict[str, Any]:
+    """Summarize whether PR421 B7 metrics are actually exposed by EchoMem."""
+    series = [item for sample in samples for item in sample.series]
+    names = {str(item.get("name") or "") for item in series}
+    required = {
+        "lane_queued": "echomem_lane_queued",
+        "lane_wait": "echomem_lane_wait_seconds",
+        "lane_exec": "echomem_lane_exec_seconds",
+        "lane_rejected": "echomem_lane_rejected_total",
+        "engine_exec": "echomem_engine_fanout_exec_seconds",
+        "engine_skipped": "echomem_engine_fanout_skipped_total",
+    }
+    present = {
+        key: any(name == metric or name.startswith(metric + "_") for name in names)
+        for key, metric in required.items()
+    }
+    lanes = sorted({
+        str(item["labels"]["lane"])
+        for item in series
+        if item.get("labels", {}).get("lane")
+    })
+    reasons = sorted({
+        str(item["labels"]["reason_code"])
+        for item in series
+        if item.get("labels", {}).get("reason_code")
+    })
+    engines = sorted({
+        str(item["labels"]["engine"])
+        for item in series
+        if item.get("labels", {}).get("engine")
+    })
+    return {
+        "samples": len(samples),
+        "series": len(series),
+        "required_families": required,
+        "present": present,
+        "missing": [key for key, value in present.items() if not value],
+        "lanes": lanes,
+        "reason_codes": reasons,
+        "engines": engines,
+        "status": PASS if all(present.values()) else INCONCLUSIVE,
+        "reason": (
+            "PR421 B7 lane/fan-out metric families and bounded labels are available"
+            if all(present.values())
+            else "missing PR421 B7 metric families; service-side scheduling evidence is incomplete"
+        ),
+    }
 
 
 class ServerMetricsSampler:
@@ -566,12 +647,14 @@ class ServerMetricsSampler:
             if isinstance(response.payload, dict):
                 raw = str(response.payload.get("raw") or "")
             metrics = parse_prometheus_metrics(raw)
+            series = parse_prometheus_series(raw)
             sample = ServerMetricSample(
                 elapsed_s=elapsed,
                 timestamp=now_iso(),
                 status_code=response.status_code,
                 metric_count=len(metrics),
                 metrics=metrics,
+                series=series,
                 error=response.error,
             )
             self.samples.append(sample)
@@ -2986,6 +3069,9 @@ def main() -> int:
         ),
         "server_metrics_csv": "server_metrics.csv",
         "server_metrics_raw": "server_metrics.jsonl",
+        "pr421_metric_coverage": pr421_metric_coverage(
+            server_sampler.samples if server_sampler else []
+        ),
     }
     observed_records = commit_records + search_records
     server_observation_complete = bool(observed_records) and all(

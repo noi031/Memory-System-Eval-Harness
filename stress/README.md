@@ -243,6 +243,41 @@ conclusion when EchoMem provides per-request `received_at`,
 `active_workers`. Without those fields, the report still shows client
 observations but marks server scheduling evidence as missing.
 
+## PR28 检视意见跟踪
+
+PR28 的逐条验收状态见
+[`REV5_REVIEW_GAP_MATRIX.md`](REV5_REVIEW_GAP_MATRIX.md)。当前已落地
+Commit barrier、Zipf 分布、429 Retry-After 重试、请求级重试审计和服务端
+观测边界；cursor 对账、真实重启恢复、故障注入、容量阶梯和 k6 工具链仍需
+后续实现，不应在报告中标记为已通过。
+
+PR421 的验收目标会写入 formal suite 的 `suite.json`，包括 Search P95
+隔离度 `≤1.20x`、Jain 公平指数 `≥0.90`、已接受 Commit 恢复率 `100%`、
+拒绝响应的 `Retry-After/reason_code`、B7 车道四元组和 fan-out 指标覆盖，
+以及 128 并发饱和场景的拒绝率和返回时延门槛。报告会区分“指标未暴露”
+与“指标暴露但未达标”，前者只能是 `INCONCLUSIVE`。
+
+这些阈值的样本口径和合理性复核见
+[`PR421_ACCEPTANCE_REVIEW.md`](PR421_ACCEPTANCE_REVIEW.md)。尤其要把成功请求
+延迟与超时率分开，把 202 后的 Commit 最终 drain 与轮询窗口分开，并将
+“目标已配置”和“目标已验证”分开显示。
+
+## 故障发现型压测补充
+
+PR28 的基础性能矩阵之外，正式故障发现建议按 S1 至 S4 分层执行。S1
+优先验证写后读一致性、Commit 幂等性、状态机和队列背压；S2 验证连续
+Commit 洪峰、Search 优先级和租户抗饥饿；S3 验证断连回收、重启恢复和长稳态；
+S4 才进行向量库、LLM、worker 或网络故障注入。
+
+详细的流程、输出字段和判定门槛见
+[`FAULT_DISCOVERY_PLAN.md`](FAULT_DISCOVERY_PLAN.md)。其中：
+
+- commit 完成后仍不可检索到 marker，直接判定 FAIL；
+- 轮询超时不能当作成功，必须经过 drain 或标记为 INCONCLUSIVE；
+- 幂等、状态机和恢复测试没有服务端接口支持时，标记
+  `NOT_IMPLEMENTED`，不使用 mock 结果代替；
+- 高并发场景同时报告成功请求延迟和超时率，避免超时样本污染 P95。
+
 ## Docker isolation
 
 The runner can be executed as a disposable container so each test gets a

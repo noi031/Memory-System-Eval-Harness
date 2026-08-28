@@ -25,6 +25,28 @@ from typing import Any
 # FIFO, priority, lane, or tenant-fair scheduling of its own.
 POLICIES = ("server-observe",)
 
+# Acceptance targets from EchoMem PR421. These are recorded in suite.json so
+# every result carries the intended gate instead of relying on report prose.
+PR421_ACCEPTANCE_TARGETS: dict[str, Any] = {
+    "search_p95_isolation_ratio_max": 1.20,
+    "tenant_fairness_jain_min": 0.90,
+    "accepted_commit_recovery_rate_min": 1.00,
+    "rejection_response_required": ["status_code", "retry_after", "reason_code"],
+    "lane_metric_families": [
+        "echomem_lane_queued",
+        "echomem_lane_wait_seconds",
+        "echomem_lane_exec_seconds",
+        "echomem_lane_rejected_total",
+    ],
+    "fanout_metric_families": [
+        "echomem_engine_fanout_exec_seconds",
+        "echomem_engine_fanout_skipped_total",
+    ],
+    "saturation_search_rejection_rate_max": 0.05,
+    "saturation_rejection_latency_max_s": 1.0,
+    "hot_tenant_bystander_median_ratio_max": 1.50,
+}
+
 SCENARIOS: dict[str, dict[str, Any]] = {
     "baseline": {
         "label": "单租户基线",
@@ -555,6 +577,7 @@ def main() -> int:
         "scenarios": scenario_names,
         "repeats": args.repeats,
         "policies": list(POLICIES),
+        "acceptance_targets": PR421_ACCEPTANCE_TARGETS,
         "reset_command": args.reset_command,
         "client_admission_enabled": False,
         "server_observation_mode": True,

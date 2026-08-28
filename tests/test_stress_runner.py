@@ -14,6 +14,7 @@ from stress.echomem.runner import (
     INCONCLUSIVE,
     PASS,
     ResourceSample,
+    ServerMetricSample,
     SearchRecord,
     _server_observability,
     build_report,
@@ -22,6 +23,8 @@ from stress.echomem.runner import (
     linear_slope_per_minute,
     workload_metrics,
     percentile,
+    parse_prometheus_series,
+    pr421_metric_coverage,
     scenario_status,
     scenario_search,
     isolation_probe_query,
@@ -30,6 +33,55 @@ from stress.echomem.audit_matrix_report import render as render_audit_matrix_rep
 
 
 class StressRunnerTests(unittest.TestCase):
+    def test_pr421_prometheus_series_preserves_bounded_labels(self) -> None:
+        raw = """
+        echomem_lane_queued{lane="interactive"} 2
+        echomem_lane_rejected_total{lane="interactive",reason_code="capacity"} 3
+        echomem_engine_fanout_exec_seconds_count{engine="atomic"} 4
+        """
+        series = parse_prometheus_series(raw)
+        self.assertEqual("interactive", series[0]["labels"]["lane"])
+        self.assertEqual("capacity", series[1]["labels"]["reason_code"])
+        self.assertEqual("atomic", series[2]["labels"]["engine"])
+
+    def test_pr421_metric_coverage_is_inconclusive_when_families_missing(self) -> None:
+        sample = ServerMetricSample(
+            elapsed_s=0.0,
+            timestamp="2026-08-28T00:00:00+00:00",
+            status_code=200,
+            metric_count=1,
+            series=parse_prometheus_series(
+                'echomem_lane_queued{lane="interactive"} 1'
+            ),
+        )
+        coverage = pr421_metric_coverage([sample])
+        self.assertEqual(INCONCLUSIVE, coverage["status"])
+        self.assertIn("lane_queued", coverage["present"])
+        self.assertEqual(["interactive"], coverage["lanes"])
+        self.assertIn("lane_wait", coverage["missing"])
+
+    def test_pr421_metric_coverage_passes_all_required_families(self) -> None:
+        raw = """
+        echomem_lane_queued{lane="interactive"} 1
+        echomem_lane_wait_seconds_count{lane="interactive"} 1
+        echomem_lane_exec_seconds_count{lane="interactive"} 1
+        echomem_lane_rejected_total{lane="interactive",reason_code="capacity"} 1
+        echomem_engine_fanout_exec_seconds_count{engine="atomic"} 1
+        echomem_engine_fanout_skipped_total{engine="base",reason_code="deadline"} 1
+        """
+        sample = ServerMetricSample(
+            elapsed_s=0.0,
+            timestamp="2026-08-28T00:00:00+00:00",
+            status_code=200,
+            metric_count=6,
+            series=parse_prometheus_series(raw),
+        )
+        coverage = pr421_metric_coverage([sample])
+        self.assertEqual(PASS, coverage["status"])
+        self.assertEqual([], coverage["missing"])
+        self.assertIn("capacity", coverage["reason_codes"])
+        self.assertIn("atomic", coverage["engines"])
+
     def test_server_observability_accepts_payload_and_headers(self) -> None:
         values = _server_observability(
             {

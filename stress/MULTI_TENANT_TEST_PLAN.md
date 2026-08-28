@@ -172,3 +172,13 @@ barrier、429 `Retry-After` 重试和请求级证据。LLM 故障注入、kill-9
 MySQL 游标对账、冷缓存 TTL、容量阶梯及 tracemalloc/GC 判据依赖 EchoMem 的
 部署和数据存储适配器，当前不会伪造这些结果；正式报告会将它们标记为
 `NOT_IMPLEMENTED` 或 `INCONCLUSIVE`，而不是标记为通过。
+
+## 故障发现型特性补充
+
+上线前还应补充数据正确性和恢复能力验证：写后读一致性、Commit 幂等性、
+Commit 状态机、队列背压与恢复、连续洪峰、租户抗饥饿、断连回收、重启恢复
+以及长时间 soak。具体流程和统一门槛见 `FAULT_DISCOVERY_PLAN.md`。
+
+这些特性不能全部由压测客户端单方面证明。没有 EchoMem 的最终状态、
+幂等键、任务数量、取消回收或故障注入接口时，测试平台必须输出
+`NOT_IMPLEMENTED`/`INCONCLUSIVE`，不得把客户端观察结果包装成服务端保证。
