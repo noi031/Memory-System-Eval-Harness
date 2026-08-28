@@ -8,6 +8,7 @@ from pathlib import Path
 from stress.echomem.acceptance import (
     INCONCLUSIVE,
     NOT_IMPLEMENTED,
+    PR28_REVIEW_RESOLUTION,
     build_model_analysis_input,
     evaluate_pr421_acceptance,
 )
@@ -71,6 +72,20 @@ class AcceptanceTests(unittest.TestCase):
             self.assertIn("PR421 验收矩阵", document)
             self.assertIn("需要游标对账", document)
             self.assertIn("INCONCLUSIVE", document)
+
+    def test_html_renders_review_resolution_when_present(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            acceptance = evaluate_pr421_acceptance({"runs": []})
+            manifest = {"runs": [], "acceptance": acceptance}
+            path = root / "suite.json"
+            path.write_text(json.dumps(manifest), encoding="utf-8")
+            output = root / "suite.html"
+            render(path, output)
+            document = output.read_text(encoding="utf-8")
+            self.assertIn("PR28 检视意见闭环", document)
+            self.assertIn("Commit barrier and tenant distributions", document)
+            self.assertIn("NOT_IMPLEMENTED", document)
 
     def test_saturation_without_rejections_does_not_claim_contract_pass(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -146,6 +161,20 @@ class AcceptanceTests(unittest.TestCase):
         )
         self.assertEqual("PASS", check["status"])
         self.assertEqual(1.0, check["observed"])
+
+    def test_review_resolution_is_explicit_and_model_visible(self):
+        acceptance = evaluate_pr421_acceptance({"runs": []})
+        statuses = {item["status"] for item in PR28_REVIEW_RESOLUTION}
+        self.assertTrue({"RESOLVED", "PARTIAL", "NOT_IMPLEMENTED"} <= statuses)
+        self.assertEqual(PR28_REVIEW_RESOLUTION, acceptance["pr28_review_resolution"])
+        model_input = build_model_analysis_input(
+            {"scenarios": [], "repeats": 0},
+            acceptance,
+        )
+        self.assertEqual(
+            PR28_REVIEW_RESOLUTION,
+            model_input["acceptance"]["pr28_review_resolution"],
+        )
 
 
 if __name__ == "__main__":

@@ -18,6 +18,66 @@ FAIL = "FAIL"
 INCONCLUSIVE = "INCONCLUSIVE"
 NOT_IMPLEMENTED = "NOT_IMPLEMENTED"
 
+# Review status is kept separate from measured PR421 gates. A harness item
+# can be resolved while the corresponding EchoMem capability is unavailable.
+PR28_REVIEW_RESOLUTION = [
+    {
+        "item": "Commit barrier and tenant distributions",
+        "status": "RESOLVED",
+        "evidence": "commit-barrier; uniform/zipf/explicit distributions",
+    },
+    {
+        "item": "Retry-After retry and retry audit",
+        "status": "RESOLVED",
+        "evidence": "commit_with_retry; commit_results.csv; summary.json",
+    },
+    {
+        "item": "Server-observe boundary and telemetry completeness",
+        "status": "RESOLVED",
+        "evidence": "server-observe; server_* fields; metric coverage",
+    },
+    {
+        "item": "Real multi-tenant isolation evidence",
+        "status": "RESOLVED",
+        "evidence": "independent tenant credentials; directed marker probes",
+    },
+    {
+        "item": "Commit final completion",
+        "status": "PARTIAL",
+        "evidence": "terminal-state polling is present; cursor/message-set reconciliation is absent",
+    },
+    {
+        "item": "Saturation discipline",
+        "status": "PARTIAL",
+        "evidence": "saturation and rejection contract are present; queue-full precondition and recovery check are absent",
+    },
+    {
+        "item": "Reproducible EchoMem environment",
+        "status": "PARTIAL",
+        "evidence": "runner environment is reproducible; target resource/profile/MySQL topology is not owned by the harness",
+    },
+    {
+        "item": "k6 toolchain",
+        "status": "NOT_IMPLEMENTED",
+        "evidence": "formal runner remains Python standard-library based",
+    },
+    {
+        "item": "Fault injection and restart recovery",
+        "status": "NOT_IMPLEMENTED",
+        "evidence": "no real LLM/vector fault injector or kill-9 deployment adapter",
+    },
+    {
+        "item": "Incident regression and full capacity ladder",
+        "status": "NOT_IMPLEMENTED",
+        "evidence": "S7-S10 and complete 2/4/8/16/32 resource profiles are unavailable",
+    },
+    {
+        "item": "Persistence reconciliation judge",
+        "status": "NOT_IMPLEMENTED",
+        "evidence": "cursor/message-set export adapter is unavailable",
+    },
+]
+
 
 def _number(value: Any) -> float | None:
     try:
@@ -383,6 +443,7 @@ def evaluate_pr421_acceptance(manifest: dict[str, Any]) -> dict[str, Any]:
         "version": "pr421-acceptance-v1",
         "overall": overall,
         "checks": all_checks,
+        "pr28_review_resolution": PR28_REVIEW_RESOLUTION,
         "review": {
             "reasonable_targets": [
                 "Search P95 隔离度应排除超时样本并单列错误率",

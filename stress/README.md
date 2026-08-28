@@ -233,9 +233,9 @@ client-side timing.
 The formal suite also writes three machine-readable review artifacts:
 
 - `acceptance.json`: PR421 gate-by-gate status, target, observed value, evidence,
-  and reason.
+  and reason, plus the structured PR28 review-resolution matrix.
 - `model_analysis_input.json`: bounded, secret-free context for an external LLM
-  to analyze failures and propose the next diagnostic action.
+  to analyze failures, review gaps, and propose the next diagnostic action.
 - `suite.json`: the original run manifest plus the acceptance result.
 
 The acceptance layer distinguishes `PASS`, `FAIL`, `INCONCLUSIVE`, and
@@ -269,6 +269,8 @@ PR28 的逐条验收状态见
 Commit barrier、Zipf 分布、429 Retry-After 重试、请求级重试审计和服务端
 观测边界；cursor 对账、真实重启恢复、故障注入、容量阶梯和 k6 工具链仍需
 后续实现，不应在报告中标记为已通过。
+`acceptance.json` 和 `suite.html` 还会逐条列出
+`RESOLVED/PARTIAL/NOT_IMPLEMENTED`，作为检视意见是否闭环的机器可读证据。
 
 PR421 的验收目标会写入 formal suite 的 `suite.json`，并额外生成
 `acceptance.json` 和 `model_analysis_input.json`，包括 Search P95

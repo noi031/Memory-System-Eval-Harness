@@ -172,6 +172,12 @@ def acceptance_block(manifest: dict[str, Any], root: Path) -> str:
         f"<li>{esc(item)}</li>"
         for item in review.get("missing_or_weak_targets") or []
     )
+    resolutions = "".join(
+        f"<tr><td>{esc(item.get('item'))}</td>"
+        f"<td>{status_badge(item.get('status'))}</td>"
+        f"<td>{esc(item.get('evidence'))}</td></tr>"
+        for item in acceptance.get("pr28_review_resolution") or []
+    )
     if not checks:
         return (
             "<section class='section'><h2>PR421 验收矩阵</h2>"
@@ -185,6 +191,7 @@ def acceptance_block(manifest: dict[str, Any], root: Path) -> str:
 <tbody>{rows}</tbody></table></div>
 <div class='review-grid'><div><h3>指标设计中合理的部分</h3><ul>{reasonable or '<li>未提供</li>'}</ul></div>
 <div><h3>仍需复核或补充的部分</h3><ul>{missing or '<li>未提供</li>'}</ul></div></div>
+{f"<h3>PR28 检视意见闭环</h3><div class='scroll'><table><thead><tr><th>检视项</th><th>状态</th><th>证据/说明</th></tr></thead><tbody>{resolutions}</tbody></table></div>" if resolutions else ""}
 <p class='links'>结构化诊断输入：<a href='model_analysis_input.json'>model_analysis_input.json</a>
  · 验收原始结果：<a href='acceptance.json'>acceptance.json</a></p></section>"""
 
