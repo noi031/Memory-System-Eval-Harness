@@ -44,7 +44,7 @@ PR28_REVIEW_RESOLUTION = [
     {
         "item": "Commit final completion",
         "status": "PARTIAL",
-        "evidence": "terminal-state polling is present; cursor/message-set reconciliation is absent",
+        "evidence": "terminal-state polling is present; cursor/message-set reconciliation is available when configured",
     },
     {
         "item": "Saturation discipline",
@@ -58,13 +58,13 @@ PR28_REVIEW_RESOLUTION = [
     },
     {
         "item": "k6 toolchain",
-        "status": "NOT_IMPLEMENTED",
-        "evidence": "formal runner remains Python standard-library based",
+        "status": "PARTIAL",
+        "evidence": "real k6 script and Python reconciliation entrypoint are available; installation is deployment-owned",
     },
     {
         "item": "Fault injection and restart recovery",
-        "status": "NOT_IMPLEMENTED",
-        "evidence": "no real LLM/vector fault injector or kill-9 deployment adapter",
+        "status": "PARTIAL",
+        "evidence": "real command/HTTP/Docker controls and PID/container SIGKILL recovery are available; deployment controls are required",
     },
     {
         "item": "Incident regression and full capacity ladder",
@@ -73,8 +73,8 @@ PR28_REVIEW_RESOLUTION = [
     },
     {
         "item": "Persistence reconciliation judge",
-        "status": "NOT_IMPLEMENTED",
-        "evidence": "cursor/message-set export adapter is unavailable",
+        "status": "PARTIAL",
+        "evidence": "cursor/message-set export adapter is available when EchoMem exposes the endpoint",
     },
 ]
 
@@ -432,18 +432,49 @@ def evaluate_pr421_acceptance(manifest: dict[str, Any]) -> dict[str, Any]:
         _rejection_gate(manifest),
         _hot_tenant_gate(manifest),
     ]
+    fault_suite = manifest.get("fault_suite") or {}
+    fault_summary = fault_suite.get("summary") or {}
+    fault_cases = fault_suite.get("cases") or []
+
+    def artifact_gate(name: str, case_kind: str, default_reason: str) -> dict[str, Any]:
+        matching = [
+            case for case in fault_cases
+            if case.get("kind") == case_kind
+        ]
+        result = (matching[0].get("execution") or {}).get("result") if matching else None
+        status = str((result or {}).get("status") or NOT_IMPLEMENTED)
+        return _result(
+            name,
+            status if status in {PASS, FAIL, INCONCLUSIVE, NOT_IMPLEMENTED} else INCONCLUSIVE,
+            evidence=fault_suite.get("path", "fault-suite.json"),
+            reason=(result or {}).get("reason") or default_reason,
+            observed=(result or {}).get("summary") or (result or {}).get("recovered"),
+        )
+
+    k6_result = manifest.get("k6_reconciliation") or {}
     unavailable = [
         _result(
-            name,
-            NOT_IMPLEMENTED,
-            reason=reason,
-        )
-        for name, reason in (
-            ("Cursor/message-set reconciliation", "EchoMem 未提供统一 cursor/消息集合导出接口"),
-            ("Kill-9 local/cluster recovery", "测试平台没有可控的被测进程/集群重启适配器"),
-            ("LLM/vector failure injection", "当前正式套件禁止用 mock 代替真实依赖故障"),
-            ("Capacity profile ladder", "被测服务资源 profile/限制尚未由平台统一装配"),
-        )
+            "k6 native load reconciliation",
+            str(k6_result.get("status") or NOT_IMPLEMENTED),
+            evidence=k6_result.get("path", "k6-reconciliation.json"),
+            reason=k6_result.get("reason") or "未提供 k6 summary 与 runner 证据",
+            observed=k6_result.get("runner_total_requests"),
+        ),
+        artifact_gate(
+            "Cursor/message-set reconciliation",
+            "cursor-reconciliation",
+            "未配置 cursor 对账计划或 EchoMem 未提供真实消息集合接口",
+        ),
+        artifact_gate(
+            "Kill-9 local/cluster recovery",
+            "kill-9-recovery",
+            "未配置真实 PID/container 和重启命令",
+        ),
+        artifact_gate(
+            "LLM/vector failure injection",
+            "llm-vector-faults",
+            "未配置真实依赖故障控制接口或命令",
+        ),
     ]
     all_checks = checks + unavailable
     statuses = {item["status"] for item in all_checks}

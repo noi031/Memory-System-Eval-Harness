@@ -267,8 +267,9 @@ observations but marks server scheduling evidence as missing.
 PR28 的逐条验收状态见
 [`REV5_REVIEW_GAP_MATRIX.md`](REV5_REVIEW_GAP_MATRIX.md)。当前已落地
 Commit barrier、Zipf 分布、429 Retry-After 重试、请求级重试审计和服务端
-观测边界；cursor 对账、真实重启恢复、故障注入、容量阶梯和 k6 工具链仍需
-后续实现，不应在报告中标记为已通过。
+观测边界；cursor 对账、真实重启恢复、故障注入和 k6 工具链已提供可执行
+入口，但必须配置真实的 EchoMem 控制接口、重启拓扑和 cursor API，缺少依赖
+时仍会保守标记为 `PARTIAL` 或 `NOT_IMPLEMENTED`。
 `acceptance.json` 和 `suite.html` 还会逐条列出
 `RESOLVED/PARTIAL/NOT_IMPLEMENTED`，作为检视意见是否闭环的机器可读证据。
 
@@ -299,6 +300,47 @@ S4 才进行向量库、LLM、worker 或网络故障注入。
 - 幂等、状态机和恢复测试没有服务端接口支持时，标记
   `NOT_IMPLEMENTED`，不使用 mock 结果代替；
 - 高并发场景同时报告成功请求延迟和超时率，避免超时样本污染 P95。
+
+### k6、故障注入与恢复
+
+PR28 现在提供 `stress/k6/echomem_stress.js`，它只发送真实 EchoMem
+HTTP 请求，并通过 `handleSummary` 输出 k6 原始结果。使用
+`stress/echomem/k6_reconcile.py` 可以把 k6 计数和 Python runner 的
+逐请求 CSV 对账；缺少任一证据或发现 `mock_model=true` 时不会判通过。
+
+真实故障由 `stress/echomem/fault_suite.py` 编排，计划文件见
+`stress/echomem/fault-plan.example.json`。每个故障必须配置一个真实的
+HTTP 控制接口、shell 控制命令或 Docker 容器；没有控制点时结果为
+`NOT_IMPLEMENTED`，不会伪造 500、超时或熔断。
+
+kill-9 恢复使用 `recovery.py`，支持真实 PID 或容器，记录杀进程前健康、
+恢复轮询时间线和恢复耗时。cursor 对账使用
+`cursor_reconcile.py --cursor-url-template`，按已完成 Commit 的
+`session_id`、`archive_id` 和 `message_ids` 对照服务端真实 message-set；
+服务端不提供接口时保持 `NOT_IMPLEMENTED`。
+
+将故障和恢复纳入正式验收时显式传入计划，默认不会主动执行破坏性操作：
+
+```bash
+python3 stress/echomem/formal_suite.py \
+  --base-url http://127.0.0.1:8010 \
+  --tenant-config stress/echomem/tenants.server.json \
+  --fault-plan stress/echomem/fault-plan.example.json \
+  --out-dir results/stress/formal_fault_$(date +%Y%m%d_%H%M%S)
+```
+
+已有 k6 结果可通过 `--k6-summary` 和 `--k6-runner-dir` 纳入同一份
+`suite.json` / `acceptance.json`。
+
+示例：
+
+```bash
+python3 stress/echomem/fault_suite.py \
+  --plan stress/echomem/fault-plan.example.json \
+  --out-dir results/stress/fault-suite-$(date +%Y%m%d_%H%M%S) \
+  --commit-csv results/stress/run-01/commit_results.csv \
+  --auth-key "$ECHOMEM_AUTH_KEY"
+```
 
 ## Docker isolation
 

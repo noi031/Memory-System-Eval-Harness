@@ -607,6 +607,11 @@ def main() -> int:
     parser.add_argument("--pid", type=int, default=0)
     parser.add_argument("--reset-command", default="", help="Optional command run before every case")
     parser.add_argument("--no-server-metrics", action="store_true")
+    parser.add_argument("--fault-plan", default="", help="Optional real fault/recovery/cursor plan")
+    parser.add_argument("--fault-out-dir", default="")
+    parser.add_argument("--fault-auth-key", default=os.getenv("ECHOMEM_AUTH_KEY", ""))
+    parser.add_argument("--k6-summary", default="")
+    parser.add_argument("--k6-runner-dir", default="")
     args = parser.parse_args()
 
     scenario_names = [item.strip() for item in args.scenarios.split(",") if item.strip()]
@@ -681,6 +686,54 @@ def main() -> int:
                     json.dumps(manifest, ensure_ascii=False, indent=2) + "\n",
                     encoding="utf-8",
                 )
+    if args.fault_plan:
+        fault_out = Path(args.fault_out_dir or (root / "fault-suite"))
+        fault_command = [
+            sys.executable,
+            str(Path(__file__).with_name("fault_suite.py")),
+            "--plan", str(Path(args.fault_plan).expanduser().resolve()),
+            "--out-dir", str(fault_out),
+            "--auth-key", args.fault_auth_key,
+            "--auth-header", args.auth_header,
+        ]
+        completed = subprocess.run(fault_command, capture_output=True, text=True, check=False)
+        fault_manifest = {
+            "path": str(fault_out / "fault-suite.json"),
+            "returncode": completed.returncode,
+            "stdout": completed.stdout[-4000:],
+            "stderr": completed.stderr[-4000:],
+        }
+        fault_path = fault_out / "fault-suite.json"
+        if fault_path.exists():
+            try:
+                fault_manifest.update(json.loads(fault_path.read_text(encoding="utf-8")))
+            except json.JSONDecodeError:
+                pass
+        manifest["fault_suite"] = fault_manifest
+
+    if args.k6_summary and args.k6_runner_dir:
+        k6_output = root / "k6-reconciliation.json"
+        k6_command = [
+            sys.executable,
+            str(Path(__file__).with_name("k6_reconcile.py")),
+            "--k6-summary", str(Path(args.k6_summary).expanduser().resolve()),
+            "--runner-dir", str(Path(args.k6_runner_dir).expanduser().resolve()),
+            "--out", str(k6_output),
+        ]
+        completed = subprocess.run(k6_command, capture_output=True, text=True, check=False)
+        k6_manifest = {
+            "path": str(k6_output),
+            "returncode": completed.returncode,
+            "stdout": completed.stdout[-4000:],
+            "stderr": completed.stderr[-4000:],
+        }
+        if k6_output.exists():
+            try:
+                k6_manifest.update(json.loads(k6_output.read_text(encoding="utf-8")))
+            except json.JSONDecodeError:
+                pass
+        manifest["k6_reconciliation"] = k6_manifest
+
     acceptance = evaluate_pr421_acceptance(manifest)
     manifest["acceptance"] = acceptance
     (root / "suite.json").write_text(

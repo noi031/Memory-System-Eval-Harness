@@ -22,7 +22,7 @@
 
 | 检视项 | 已完成部分 | 尚未完成 |
 | --- | --- | --- |
-| Commit 最终完成率 | 有异步轮询、retry 和结果统计 | 没有 rev5 所要求的 cursor/消息集合对账 |
+| Commit 最终完成率 | 有异步轮询、retry 和结果统计 | cursor/消息集合对账需 EchoMem 暴露真实接口 |
 | 429 验收 | 有 Retry-After 重试和最终状态记录 | 没有“先证明队列饱和，再验证 429”的前置检查 |
 | 环境可复现 | 有 runner Docker/compose 和 reset hook | 被测 EchoMem 的资源限制、固定镜像、配置哈希和 MySQL 拓扑没有统一落地 |
 | 资源观测 | 有 RSS/CPU/线程/FD/Swap 和原始 metrics | 没有 GC、tracemalloc 和后台任务数量判据 |
@@ -32,16 +32,16 @@
 
 | 检视项 | 缺失内容 | 当前报告状态 |
 | --- | --- | --- |
-| k6 工具链 | rev5 要求的 k6 负载脚本及 Python 对账入口 | `NOT_IMPLEMENTED` |
-| LLM 故障注入 | 50% 500、挂死、熔断、恢复、SIGTERM 排空 | `NOT_IMPLEMENTED` |
-| kill-9 重启恢复 | 本地和 cluster+MySQL 两种重启场景 | `NOT_IMPLEMENTED` |
+| k6 工具链 | 已提供真实 HTTP k6 脚本、summary 输出和 Python 对账入口；部署仍需安装 k6 | `PARTIAL` |
+| LLM 故障注入 | 已提供真实 command/HTTP/Docker 控制器和故障计划编排；必须由部署提供真实故障开关 | `PARTIAL` |
+| kill-9 重启恢复 | 已提供真实 PID/container SIGKILL、健康恢复时间线；cluster+MySQL 需部署提供重启拓扑 | `PARTIAL` |
 | 冷缓存 TTL | TTL 到期后的命中率和延迟对比 | `NOT_IMPLEMENTED` |
 | 原子写阻塞级联 | 原子写期间 Search/Commit 的级联影响 | `NOT_IMPLEMENTED` |
 | 版本冲突毒循环 | 冲突重试次数、上限和最终状态 | `NOT_IMPLEMENTED` |
 | 启动引擎隔离 | 单个引擎加载失败不拖垮其他引擎 | `NOT_IMPLEMENTED` |
 | 容量阶梯 | 已提供可执行的 16 租户容量点；2/4/8/32 和资源 profile 仍待补齐 | `capacity-16`；资源限制缺失时仍为 `INCONCLUSIVE` |
 | 租户自带 LLM Key | 不同租户 key、配额和泄漏检查 | `NOT_IMPLEMENTED` |
-| 游标对账 | 本地 cursor/MySQL 状态、消息 ID 集合和停滞判据 | `NOT_IMPLEMENTED` |
+| 游标对账 | 已提供可配置 cursor URL、Commit message-set 对账和缺失项证据；EchoMem 必须暴露真实接口 | `PARTIAL` |
 | 提交阈值扫描 | 不同 auto-commit threshold 的系统性对比 | `NOT_IMPLEMENTED` |
 
 ## 验收结论
@@ -60,8 +60,7 @@ PR28 当前不能验收为：
 
 下一阶段建议只实现最小闭环：
 
-1. 为 EchoMem 增加统一的 commit cursor/operation 查询和消息集合导出。
-2. 在压测平台增加 cursor 对账裁判，并把未知终态单独判为失败或
-   `INCONCLUSIVE`。
-3. 增加本地真实进程重启恢复场景，再扩展到 MySQL cluster。
-4. 增加容量阶梯和连续洪峰，不先引入 mock LLM。
+1. 为 EchoMem 暴露统一的 commit cursor/operation 查询和消息集合导出。
+2. 在部署中接入真实 LLM/vector 故障控制接口，再执行 `fault_suite.py`。
+3. 增加 cluster+MySQL 的真实重启控制脚本和恢复后的 cursor 对账。
+4. 在 CI/服务器安装 k6，并将 k6 summary 与 runner 请求证据绑定。
