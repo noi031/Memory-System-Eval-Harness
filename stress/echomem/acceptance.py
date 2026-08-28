@@ -144,6 +144,37 @@ def _search_success_gate(manifest: dict[str, Any]) -> dict[str, Any]:
     )
 
 
+def _search_isolation_gate(manifest: dict[str, Any]) -> dict[str, Any]:
+    baseline = _metric_values(
+        _runs_for(manifest, "baseline"),
+        ("metrics", "search", "latency", "p95_s"),
+    )
+    stressed = _metric_values(
+        _runs_for(manifest, "mixed") + _runs_for(manifest, "search-storm"),
+        ("metrics", "search", "latency", "p95_s"),
+    )
+    if not baseline or not stressed or min(baseline) <= 0:
+        return _result(
+            "Search P95 isolation ratio",
+            INCONCLUSIVE,
+            target=1.20,
+            evidence="baseline/mixed/search-storm metrics.search.latency.p95_s",
+            reason="缺少有效基线或压力场景的成功请求 P95",
+        )
+    ratio = max(stressed) / min(baseline)
+    return _result(
+        "Search P95 isolation ratio",
+        PASS if ratio <= 1.20 else FAIL,
+        target=1.20,
+        observed=ratio,
+        evidence={"baseline_p95_s": baseline, "stressed_p95_s": stressed},
+        reason=(
+            "当前按已记录轮次的最差压力 P95/最优基线 P95计算；"
+            "仅比较成功请求，超时率由 Search success rate 单独判定"
+        ),
+    )
+
+
 def _fairness_gate(manifest: dict[str, Any]) -> dict[str, Any]:
     runs = _runs_for(manifest, "tenant-skew") + _runs_for(manifest, "mixed")
     values: list[float] = []
@@ -227,10 +258,9 @@ def _rejection_gate(manifest: dict[str, Any]) -> dict[str, Any]:
                 latency = _number(row.get("end_to_end_s")) or _number(row.get("elapsed_s"))
                 if latency is not None:
                     rejected_latencies.append(latency)
-                # The runner currently records Retry-After but not a
-                # normalized reason_code column, so a rejection cannot pass
-                # the response-contract gate yet.
-                if not row.get("retry_after_s") or not row.get("error"):
+                # A rejection is only contract-complete when both the
+                # retry hint and the server-provided reason are present.
+                if not row.get("retry_after_s") or not row.get("reason_code"):
                     response_fields_complete = False
     if not total:
         return _result(
@@ -322,6 +352,7 @@ def evaluate_pr421_acceptance(manifest: dict[str, Any]) -> dict[str, Any]:
     """Evaluate measurable PR421 gates and list unavailable gates."""
     checks = [
         _target_coverage(manifest),
+        _search_isolation_gate(manifest),
         _search_success_gate(manifest),
         _fairness_gate(manifest),
         _commit_completion_gate(manifest),

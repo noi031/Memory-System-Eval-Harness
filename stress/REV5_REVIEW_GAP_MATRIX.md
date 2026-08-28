@@ -38,7 +38,7 @@
 | 原子写阻塞级联 | 原子写期间 Search/Commit 的级联影响 | `NOT_IMPLEMENTED` |
 | 版本冲突毒循环 | 冲突重试次数、上限和最终状态 | `NOT_IMPLEMENTED` |
 | 启动引擎隔离 | 单个引擎加载失败不拖垮其他引擎 | `NOT_IMPLEMENTED` |
-| 容量阶梯 | 2、4、8、16、32 热租户阶梯和拐点 | `NOT_IMPLEMENTED` |
+| 容量阶梯 | 已提供可执行的 16 租户容量点；2/4/8/32 和资源 profile 仍待补齐 | `capacity-16`；资源限制缺失时仍为 `INCONCLUSIVE` |
 | 租户自带 LLM Key | 不同租户 key、配额和泄漏检查 | `NOT_IMPLEMENTED` |
 | 游标对账 | 本地 cursor/MySQL 状态、消息 ID 集合和停滞判据 | `NOT_IMPLEMENTED` |
 | 提交阈值扫描 | 不同 auto-commit threshold 的系统性对比 | `NOT_IMPLEMENTED` |

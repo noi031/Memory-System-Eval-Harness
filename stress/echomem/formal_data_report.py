@@ -133,6 +133,7 @@ def scenario_label(value: str) -> str:
         "commit-barrier": "Commit 屏障风暴",
         "saturation": "128 并发入口饱和",
         "tenant-skew": "热租户 200 + 其他租户各 20",
+        "capacity-16": "16 租户容量阶梯",
         "search-storm": "Search 压力",
         "soak": "长稳态",
     }.get(value, value)

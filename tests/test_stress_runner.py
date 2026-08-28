@@ -89,6 +89,7 @@ class StressRunnerTests(unittest.TestCase):
                 "telemetry": {
                     "received_at": "2026-08-26T00:00:00Z",
                     "queue_depth": 4,
+                    "reason_code": "capacity",
                 }
             },
             {
@@ -99,6 +100,7 @@ class StressRunnerTests(unittest.TestCase):
         self.assertEqual("2026-08-26T00:00:00Z", values["server_received_at"])
         self.assertEqual(4, values["server_queue_depth"])
         self.assertEqual(2, values["server_active_workers"])
+        self.assertEqual("capacity", values["reason_code"])
 
     def test_tenant_config_uses_environment_key_without_exposing_value(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

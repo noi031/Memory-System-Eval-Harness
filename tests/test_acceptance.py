@@ -98,6 +98,55 @@ class AcceptanceTests(unittest.TestCase):
             )
             self.assertEqual(INCONCLUSIVE, check["status"])
 
+    def test_saturation_rejection_requires_reason_code(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            run_dir = root / "saturation" / "repeat-01" / "server-observe"
+            run_dir.mkdir(parents=True)
+            (run_dir / "search_results.csv").write_text(
+                "status_code,end_to_end_s,retry_after_s,reason_code\n"
+                "503,0.2,1,\n",
+                encoding="utf-8",
+            )
+            result = evaluate_pr421_acceptance(
+                {
+                    "runs": [{
+                        "scenario": "saturation",
+                        "output_dir": str(run_dir),
+                        "summary": {},
+                    }]
+                }
+            )
+            check = next(
+                item for item in result["checks"]
+                if item["name"] == "Saturation rejection rate"
+            )
+            self.assertEqual(INCONCLUSIVE, check["status"])
+
+    def test_fairness_uses_commit_completion_throughput(self):
+        result = evaluate_pr421_acceptance(
+            {
+                "runs": [{
+                    "scenario": "tenant-skew",
+                    "summary": {
+                        "metrics": {
+                            "fairness": {
+                                "commit_completed_per_tenant": {
+                                    "a": 10, "b": 10, "c": 10, "d": 10,
+                                }
+                            }
+                        }
+                    }
+                }]
+            }
+        )
+        check = next(
+            item for item in result["checks"]
+            if item["name"] == "Tenant fairness (Jain)"
+        )
+        self.assertEqual("PASS", check["status"])
+        self.assertEqual(1.0, check["observed"])
+
 
 if __name__ == "__main__":
     unittest.main()

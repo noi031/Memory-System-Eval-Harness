@@ -121,6 +121,15 @@ SCENARIOS: dict[str, dict[str, Any]] = {
         "sessions_per_tenant": 200,
         "messages_per_session": 3,
     },
+    "capacity-16": {
+        "label": "16 租户容量阶梯",
+        "tenants": 16,
+        "duration_s": 300,
+        "search_rps": 16.0,
+        "commit_rpm": 2.0,
+        "sessions_per_tenant": 2,
+        "messages_per_session": 3,
+    },
     "search-storm": {
         "label": "Search 压力",
         "tenants": 4,

@@ -94,6 +94,7 @@ class HttpResult:
     server_queue_depth: int | None = None
     server_active_workers: int | None = None
     server_terminal_status: str = ""
+    reason_code: str = ""
 
     @property
     def request_id(self) -> str:
@@ -153,6 +154,10 @@ def _server_observability(
         ),
         "server_terminal_status": (
             "terminal_status", "server_terminal_status", "terminalStatus",
+        ),
+        "reason_code": (
+            "reason_code", "reasonCode", "error_code", "errorCode",
+            "x-reason-code",
         ),
     }
     result: dict[str, Any] = {}
@@ -446,6 +451,7 @@ class CommitRecord:
     request_id: str = ""
     status_code: int | None = None
     retry_after_s: float | None = None
+    reason_code: str = ""
     server_received_at: str = ""
     server_queue_entered_at: str = ""
     server_execution_started_at: str = ""
@@ -482,6 +488,7 @@ class SearchRecord:
     admission_order: int = 0
     request_id: str = ""
     retry_after_s: float | None = None
+    reason_code: str = ""
     server_received_at: str = ""
     server_queue_entered_at: str = ""
     server_execution_started_at: str = ""
@@ -959,6 +966,7 @@ def run_isolation_probe(
             request_id=commit_result.request_id,
             status_code=commit_result.status_code,
             retry_after_s=commit_result.retry_after_s,
+            reason_code=commit_result.reason_code,
             server_received_at=commit_result.server_received_at,
             server_queue_entered_at=commit_result.server_queue_entered_at,
             server_execution_started_at=commit_result.server_execution_started_at,
@@ -1220,6 +1228,7 @@ def commit_with_retry(
                 "status_code": response.status_code,
                 "elapsed_s": response.elapsed_s,
                 "retry_after_s": response.retry_after_s,
+                "reason_code": response.reason_code,
                 "request_id": response.request_id,
                 "error": response.error,
             }
@@ -1344,6 +1353,7 @@ def scenario_search(
                     admission_order=response.admission_order,
                     request_id=response.request_id,
                     retry_after_s=response.retry_after_s,
+                    reason_code=response.reason_code,
                     server_received_at=response.server_received_at,
                     server_queue_entered_at=response.server_queue_entered_at,
                     server_execution_started_at=response.server_execution_started_at,
@@ -1528,6 +1538,7 @@ def run_parallel_workload(
                     request_id=response.request_id,
                     status_code=response.status_code,
                     retry_after_s=response.retry_after_s,
+                    reason_code=response.reason_code,
                     server_received_at=response.server_received_at,
                     server_queue_entered_at=response.server_queue_entered_at,
                     server_execution_started_at=response.server_execution_started_at,
@@ -1771,6 +1782,7 @@ def run_commit_stream(
                     request_id=response.request_id,
                     status_code=response.status_code,
                     retry_after_s=response.retry_after_s,
+                    reason_code=response.reason_code,
                     server_received_at=response.server_received_at,
                     server_queue_entered_at=response.server_queue_entered_at,
                     server_execution_started_at=response.server_execution_started_at,
@@ -2306,6 +2318,7 @@ def workload_metrics(
                     "status": record.status,
                     "status_code": record.status_code,
                     "retry_after_s": record.retry_after_s,
+                    "reason_code": record.reason_code,
                     "server_received_at": record.server_received_at,
                     "server_queue_entered_at": record.server_queue_entered_at,
                     "server_execution_started_at": record.server_execution_started_at,
@@ -2372,6 +2385,7 @@ def workload_metrics(
                     "request_id": record.request_id,
                     "status_code": record.status_code,
                     "retry_after_s": record.retry_after_s,
+                    "reason_code": record.reason_code,
                     "server_received_at": record.server_received_at,
                     "server_queue_entered_at": record.server_queue_entered_at,
                     "server_execution_started_at": record.server_execution_started_at,

@@ -196,6 +196,8 @@ short matrix run. It executes these cases:
   tenant load, used for the rev5 S2-style rate-limit regression
 - `saturation`: 128 concurrent arrivals for the PR421 entrance saturation gate
 - `tenant-skew`: explicit 200/20/20/20 Commit distribution for hot-tenant fairness
+- `capacity-16`: optional 16-tenant capacity point; select it explicitly and
+  provide at least 16 independently authenticated tenants
 
 Each case runs once per repetition with client-side admission disabled. The
 default is three repetitions per case. Every run retains `summary.json`,
