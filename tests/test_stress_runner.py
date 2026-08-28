@@ -25,6 +25,7 @@ from stress.echomem.runner import (
     percentile,
     parse_prometheus_series,
     pr421_metric_coverage,
+    run_commit_stream,
     scenario_status,
     scenario_search,
     isolation_probe_query,
@@ -120,6 +121,73 @@ class StressRunnerTests(unittest.TestCase):
         self.assertEqual(0, depth)
         self.assertEqual(1, order)
         gate.release("commit", "a")
+
+    def test_explicit_commit_distribution_requires_counts(self) -> None:
+        with self.assertRaisesRegex(ValueError, "requires --commit-tenant-counts"):
+            run_commit_stream(
+                {},
+                ["tenant-a", "tenant-b"],
+                duration_s=1,
+                commit_rpm=0,
+                messages_per_commit=1,
+                commit_timeout_s=1,
+                poll_interval_s=0.01,
+                workers=1,
+                commit_barrier=True,
+                commit_barrier_count=2,
+                commit_tenant_distribution="explicit",
+            )
+
+    def test_explicit_commit_distribution_validates_and_preserves_counts(self) -> None:
+        class FakeClient:
+            def __init__(self, tenant):
+                self.tenant = tenant
+
+            def open_session(self, tenant, _title):
+                return f"{tenant}-session", HttpResult("POST", "/session", 200, 0, {})
+
+            def add_message(self, session_id, message_id, _content):
+                return HttpResult("POST", "/message", 200, 0, {
+                    "session_id": session_id,
+                    "message_id": message_id,
+                })
+
+            def commit(self, session_id):
+                return HttpResult("POST", "/commit", 200, 0, {}, headers={
+                    "x-request-id": f"{self.tenant}-{session_id}",
+                })
+
+            def poll_commit(self, session_id, _request_id, timeout_s, poll_interval_s):
+                return HttpResult("GET", "/commit/status", 200, 0, {
+                    "status": "completed",
+                })
+
+        clients = {
+            tenant: FakeClient(tenant)
+            for tenant in ("tenant-a", "tenant-b", "tenant-c", "tenant-d")
+        }
+        records = run_commit_stream(
+            clients,
+            list(clients),
+            duration_s=1,
+            commit_rpm=0,
+            messages_per_commit=1,
+            commit_timeout_s=1,
+            poll_interval_s=0.01,
+            workers=4,
+            commit_barrier=True,
+            commit_barrier_count=5,
+            commit_tenant_distribution="explicit",
+            commit_tenant_counts=[2, 1, 1, 1],
+        )
+        self.assertEqual(5, len(records))
+        self.assertEqual(
+            {"tenant-a": 2, "tenant-b": 1, "tenant-c": 1, "tenant-d": 1},
+            {
+                tenant: sum(record.tenant == tenant for record in records)
+                for tenant in clients
+            },
+        )
 
     def test_search_priority_waits_for_capacity_but_jumps_queued_commit(self) -> None:
         gate = AdmissionController("search-priority", capacity=1)

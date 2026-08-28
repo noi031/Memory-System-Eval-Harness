@@ -122,6 +122,8 @@ python3 stress/echomem/runner.py \
 
 The barrier schedules all 160 initial Commit requests at one arrival instant
 and distributes them across tenants using the selected distribution. A
+`explicit` distribution requires `--commit-tenant-counts` and is useful for
+reproducing a fixed hot-tenant mix, such as `200,20,20,20`.
 `429` is retried only for the same session, after the server-provided
 `Retry-After`; if that header is absent, bounded exponential backoff is used.
 Every attempt, retry count, retry wait, final status and request ID is retained

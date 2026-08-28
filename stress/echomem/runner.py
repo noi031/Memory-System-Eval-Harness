@@ -1617,8 +1617,8 @@ def run_commit_stream(
     jobs: list[tuple[float, str, str, list[str]]] = []
     barrier_count = max(0, int(commit_barrier_count))
     distribution = str(commit_tenant_distribution or "uniform").lower()
-    if distribution not in {"uniform", "zipf"}:
-        raise ValueError("commit tenant distribution must be uniform or zipf")
+    if distribution not in {"uniform", "zipf", "explicit"}:
+        raise ValueError("commit tenant distribution must be uniform, zipf, or explicit")
     if commit_zipf_exponent <= 0:
         raise ValueError("commit zipf exponent must be positive")
     barrier_counts: list[int] = []
@@ -1631,6 +1631,10 @@ def run_commit_stream(
             if sum(commit_tenant_counts) != barrier_count:
                 raise ValueError("commit tenant counts must sum to barrier count")
             barrier_counts = [int(value) for value in commit_tenant_counts]
+        elif distribution == "explicit":
+            raise ValueError(
+                "explicit commit tenant distribution requires --commit-tenant-counts"
+            )
         elif distribution == "zipf":
             weights = [1.0 / ((index + 1) ** commit_zipf_exponent) for index in range(len(tenants))]
             raw = [barrier_count * weight / sum(weights) for weight in weights]
@@ -2704,9 +2708,9 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--commit-tenant-distribution",
-        choices=("uniform", "zipf"),
+        choices=("uniform", "zipf", "explicit"),
         default="uniform",
-        help="Tenant allocation for a Commit barrier.",
+        help="Tenant allocation for a Commit barrier; explicit uses --commit-tenant-counts.",
     )
     parser.add_argument(
         "--commit-zipf-exponent",

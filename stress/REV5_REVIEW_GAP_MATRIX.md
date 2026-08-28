@@ -8,7 +8,7 @@
 | 检视项 | 当前实现 | 验收证据 |
 | --- | --- | --- |
 | Commit barrier | 支持固定数量、同一到达时刻的 Commit | `runner.py --commit-barrier-count` |
-| Zipf 热租户 | 支持 `uniform` 和 `zipf` 分布 | `--commit-tenant-distribution zipf` |
+| 租户分布 | 支持 `uniform`、`zipf` 和显式计数分布 | `--commit-tenant-distribution explicit --commit-tenant-counts 200,20,20,20` |
 | 429 重试 | 仅重试 429，优先使用 Retry-After，否则指数退避 | `commit_with_retry()` |
 | 重试审计 | 保存每次尝试、状态码、请求 ID、退避时间 | `commit_results.csv` / `summary.json` |
 | 客户端调度边界 | 正式 suite 默认关闭客户端准入调度 | `server-observe` / `--no-client-admission` |
