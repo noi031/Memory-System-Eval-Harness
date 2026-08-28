@@ -585,6 +585,36 @@ def pr421_metric_coverage(samples: list[ServerMetricSample]) -> dict[str, Any]:
         "engine_exec": "echomem_engine_fanout_exec_seconds",
         "engine_skipped": "echomem_engine_fanout_skipped_total",
     }
+    allowed_lanes = {
+        "http_interactive",
+        "http_background",
+        "http_global",
+        "tenant_rate_limit",
+        "commit",
+    }
+    bounded_label_violations: list[dict[str, Any]] = []
+    for item in series:
+        labels = item.get("labels") or {}
+        lane = labels.get("lane")
+        if lane and lane not in allowed_lanes:
+            bounded_label_violations.append(
+                {"metric": item.get("name"), "label": "lane", "value": lane}
+            )
+        if "tenant_id" in labels or "tenant" in labels:
+            bounded_label_violations.append(
+                {
+                    "metric": item.get("name"),
+                    "label": "tenant_id",
+                    "value": labels.get("tenant_id", labels.get("tenant")),
+                }
+            )
+        if item.get("name") in {
+            "echomem_lane_rejected_total",
+            "echomem_engine_fanout_skipped_total",
+        } and not labels.get("reason_code"):
+            bounded_label_violations.append(
+                {"metric": item.get("name"), "label": "reason_code", "value": ""}
+            )
     present = {
         key: any(name == metric or name.startswith(metric + "_") for name in names)
         for key, metric in required.items()
@@ -613,11 +643,21 @@ def pr421_metric_coverage(samples: list[ServerMetricSample]) -> dict[str, Any]:
         "lanes": lanes,
         "reason_codes": reasons,
         "engines": engines,
-        "status": PASS if all(present.values()) else INCONCLUSIVE,
+        "bounded_label_violations": bounded_label_violations,
+        "allowed_lanes": sorted(allowed_lanes),
+        "status": (
+            PASS
+            if all(present.values()) and not bounded_label_violations
+            else INCONCLUSIVE
+        ),
         "reason": (
             "PR421 B7 lane/fan-out metric families and bounded labels are available"
-            if all(present.values())
-            else "missing PR421 B7 metric families; service-side scheduling evidence is incomplete"
+            if all(present.values()) and not bounded_label_violations
+            else (
+                "PR421 B7 metric labels violate the bounded-label contract"
+                if bounded_label_violations
+                else "missing PR421 B7 metric families; service-side scheduling evidence is incomplete"
+            )
         ),
     }
 

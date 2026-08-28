@@ -1,5 +1,8 @@
 # PR421 验收指标复核
 
+对齐版本：`tech-innovation-group/EchoMem#421`
+@`4bafa33b46487ec451498d114b9bf6c784462f3e`（2026-08-28 核验）。
+
 PR421 的 B0-B7 方案已经给出一组可量化目标。测试平台不能只复制阈值，
 还必须固定样本口径，否则同一个指标可能因为超时样本、租户负载不均或
 服务端指标缺失而得出错误结论。
@@ -46,7 +49,7 @@ tenant/profile/config hash，并按配对窗口计算比值。
 
 测试平台已经把 PR421 的目标写入 `formal_suite.py` 的 `suite.json`，
 并生成 `acceptance.json` 和无密钥的 `model_analysis_input.json`，同时采集
-B7 lane/fan-out 指标族及其有界标签。当前仍需 EchoMem 或部署环境
+B7 lane/fan-out 指标族、真实 lane 值及其有界标签。当前仍需 EchoMem 或部署环境
 提供以下能力，平台才能执行完整门禁：
 
 - cursor/消息集合导出，用于 Commit 持久化对账；
@@ -54,6 +57,12 @@ B7 lane/fan-out 指标族及其有界标签。当前仍需 EchoMem 或部署环�
 - 可控慢引擎/LLM 故障，用于熔断和级联抑制；
 - profile 资源限制和实际生效配置，用于四档容量阶梯；
 - 取消/断连后的后台任务和资源回收观测。
+
+PR421 的 Prometheus 标签契约也已纳入检查：lane 只能来自
+`http_interactive/http_background/http_global/tenant_rate_limit/commit`；
+禁止把 `tenant_id` 或 `tenant` 作为时序标签；拒绝计数必须带
+`reason_code`。发现违规时报告为 `INCONCLUSIVE`，不把指标族存在误认为
+指标契约完整。
 
 因此报告应把“目标已配置”与“目标已验证”分开显示。任一可测门禁失败
 才判 `FAIL`；证据不足或能力未实现判 `INCONCLUSIVE`，只有所有门禁均有

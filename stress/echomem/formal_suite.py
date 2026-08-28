@@ -36,6 +36,11 @@ POLICIES = ("server-observe",)
 # Acceptance targets from EchoMem PR421. These are recorded in suite.json so
 # every result carries the intended gate instead of relying on report prose.
 PR421_ACCEPTANCE_TARGETS: dict[str, Any] = {
+    "source": {
+        "repository": "tech-innovation-group/EchoMem",
+        "pull_request": 421,
+        "commit": "4bafa33b46487ec451498d114b9bf6c784462f3e",
+    },
     "search_p95_isolation_ratio_max": 1.20,
     "tenant_fairness_jain_min": 0.90,
     "accepted_commit_recovery_rate_min": 1.00,
@@ -46,6 +51,18 @@ PR421_ACCEPTANCE_TARGETS: dict[str, Any] = {
         "echomem_lane_exec_seconds",
         "echomem_lane_rejected_total",
     ],
+    "lane_values": [
+        "http_interactive",
+        "http_background",
+        "http_global",
+        "tenant_rate_limit",
+        "commit",
+    ],
+    "lane_label_contract": {
+        "allowed_labels": ["lane"],
+        "rejected_labels": ["tenant_id", "tenant"],
+        "rejection_reason_label": "reason_code",
+    },
     "fanout_metric_families": [
         "echomem_engine_fanout_exec_seconds",
         "echomem_engine_fanout_skipped_total",

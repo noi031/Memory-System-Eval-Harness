@@ -138,6 +138,39 @@ class AcceptanceTests(unittest.TestCase):
             )
             self.assertEqual(INCONCLUSIVE, check["status"])
 
+    def test_metric_label_violation_is_not_a_coverage_pass(self):
+        result = evaluate_pr421_acceptance(
+            {
+                "runs": [{
+                    "summary": {
+                        "details": {
+                            "pr421_metric_coverage": {
+                                "present": {
+                                    "lane_queued": True,
+                                    "lane_wait": True,
+                                    "lane_exec": True,
+                                    "lane_rejected": True,
+                                    "engine_exec": True,
+                                    "engine_skipped": True,
+                                },
+                                "missing": [],
+                                "bounded_label_violations": [{
+                                    "metric": "echomem_lane_queued",
+                                    "label": "tenant_id",
+                                    "value": "tenant-a",
+                                }],
+                            }
+                        }
+                    }
+                }]
+            }
+        )
+        check = next(
+            item for item in result["checks"]
+            if item["name"] == "B7 lane/fan-out metrics"
+        )
+        self.assertEqual(INCONCLUSIVE, check["status"])
+
     def test_fairness_uses_commit_completion_throughput(self):
         result = evaluate_pr421_acceptance(
             {

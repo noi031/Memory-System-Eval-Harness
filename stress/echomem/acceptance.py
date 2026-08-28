@@ -158,23 +158,36 @@ def _target_coverage(manifest: dict[str, Any]) -> dict[str, Any]:
         for item in coverages
         for key in (item.get("missing") or [])
     })
+    label_violations = [
+        violation
+        for item in coverages
+        for violation in (item.get("bounded_label_violations") or [])
+    ]
     present = sorted({
         str(key)
         for item in coverages
         for key, value in (item.get("present") or {}).items()
         if value
     })
-    status = PASS if not missing else INCONCLUSIVE
+    status = PASS if not missing and not label_violations else INCONCLUSIVE
     return _result(
         "B7 lane/fan-out metrics",
         status,
         target="6 metric families with bounded labels",
-        observed={"present": present, "missing": missing},
+        observed={
+            "present": present,
+            "missing": missing,
+            "bounded_label_violations": label_violations,
+        },
         evidence="details.pr421_metric_coverage",
         reason=(
             "全部指标族均有服务端证据"
             if status == PASS
-            else "指标族未完整暴露，不能证明服务端 lane/fan-out 行为"
+            else (
+                "指标标签不符合 bounded-label 契约，不能证明服务端 lane/fan-out 行为"
+                if label_violations and not missing
+                else "指标族未完整暴露，不能证明服务端 lane/fan-out 行为"
+            )
         ),
     )
 

@@ -13,6 +13,7 @@
 | 重试审计 | 保存每次尝试、状态码、请求 ID、退避时间 | `commit_results.csv` / `summary.json` |
 | 客户端调度边界 | 正式 suite 默认关闭客户端准入调度 | `server-observe` / `--no-client-admission` |
 | 服务端遥测边界 | 缺少服务端字段时不使用客户端时间冒充 | `server_*` 字段和覆盖率报告 |
+| PR421 B7 标签边界 | 校验真实 lane 集合、禁止 tenant label、拒绝计数要求 reason_code | `pr421_metric_coverage()` |
 | 多租户隔离 | 独立凭证、N×N marker 探针、共享凭证不判隔离通过 | isolation probe |
 | 长稳态基础场景 | formal suite 已包含 soak 场景和重复轮次 | `formal_suite.py` |
 | 可量化门禁判定 | `stress/echomem/acceptance.py` 按 PR421 指标逐项判定；缺证据输出 `INCONCLUSIVE`，不可执行项输出 `NOT_IMPLEMENTED` | `acceptance.json` / `suite.html` |
