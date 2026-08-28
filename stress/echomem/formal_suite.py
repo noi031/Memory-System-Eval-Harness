@@ -88,6 +88,31 @@ SCENARIOS: dict[str, dict[str, Any]] = {
         "sessions_per_tenant": 40,
         "messages_per_session": 3,
     },
+    "saturation": {
+        "label": "128 并发入口饱和",
+        "tenants": 4,
+        "duration_s": 60,
+        "search_rps": 32.0,
+        "commit_rpm": 0.0,
+        "commit_barrier": True,
+        "commit_barrier_count": 128,
+        "commit_tenant_distribution": "uniform",
+        "sessions_per_tenant": 32,
+        "messages_per_session": 3,
+    },
+    "tenant-skew": {
+        "label": "热租户 200 + 其他租户各 20",
+        "tenants": 4,
+        "duration_s": 120,
+        "search_rps": 8.0,
+        "commit_rpm": 0.0,
+        "commit_barrier": True,
+        "commit_barrier_count": 260,
+        "commit_tenant_distribution": "explicit",
+        "commit_tenant_counts": [200, 20, 20, 20],
+        "sessions_per_tenant": 200,
+        "messages_per_session": 3,
+    },
     "search-storm": {
         "label": "Search 压力",
         "tenants": 4,
@@ -188,6 +213,11 @@ def run_case(
             "--commit-zipf-exponent",
             str(case.get("commit_zipf_exponent", 2.0)),
         ]
+        if case.get("commit_tenant_counts"):
+            command += [
+                "--commit-tenant-counts",
+                ",".join(map(str, case["commit_tenant_counts"])),
+            ]
     if args.auth_header:
         command += ["--auth-header", args.auth_header]
     if args.pid:
@@ -531,7 +561,7 @@ def main() -> int:
     parser.add_argument("--out-dir", default="")
     parser.add_argument(
         "--scenarios",
-        default="baseline,mixed,commit-storm,commit-barrier,search-storm,soak",
+        default="baseline,mixed,commit-storm,commit-barrier,saturation,tenant-skew,search-storm,soak",
     )
     parser.add_argument("--repeats", type=int, default=3)
     parser.add_argument("--auth-header", default=os.getenv("ECHOMEM_AUTH_HEADER", "X-API-Key"))

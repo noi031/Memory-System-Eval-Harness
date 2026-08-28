@@ -1448,6 +1448,7 @@ def run_parallel_workload(
     commit_barrier_count: int = 0,
     commit_tenant_distribution: str = "uniform",
     commit_zipf_exponent: float = 2.0,
+    commit_tenant_counts: list[int] | None = None,
 ) -> tuple[list[CommitRecord], list[SearchRecord]]:
     """Run the write/commit and search lanes concurrently.
 
@@ -1569,6 +1570,7 @@ def run_parallel_workload(
             commit_barrier_count=commit_barrier_count,
             commit_tenant_distribution=commit_tenant_distribution,
             commit_zipf_exponent=commit_zipf_exponent,
+            commit_tenant_counts=commit_tenant_counts,
         )
 
     with ThreadPoolExecutor(max_workers=1) as executor:
@@ -1602,6 +1604,7 @@ def run_commit_stream(
     commit_barrier_count: int = 0,
     commit_tenant_distribution: str = "uniform",
     commit_zipf_exponent: float = 2.0,
+    commit_tenant_counts: list[int] | None = None,
 ) -> list[CommitRecord]:
     """Submit Commit requests at a fixed per-tenant arrival rate.
 
@@ -1620,7 +1623,15 @@ def run_commit_stream(
         raise ValueError("commit zipf exponent must be positive")
     barrier_counts: list[int] = []
     if barrier_count:
-        if distribution == "zipf":
+        if commit_tenant_counts is not None:
+            if len(commit_tenant_counts) != len(tenants):
+                raise ValueError("commit tenant counts must match tenant count")
+            if any(int(value) < 0 for value in commit_tenant_counts):
+                raise ValueError("commit tenant counts must not be negative")
+            if sum(commit_tenant_counts) != barrier_count:
+                raise ValueError("commit tenant counts must sum to barrier count")
+            barrier_counts = [int(value) for value in commit_tenant_counts]
+        elif distribution == "zipf":
             weights = [1.0 / ((index + 1) ** commit_zipf_exponent) for index in range(len(tenants))]
             raw = [barrier_count * weight / sum(weights) for weight in weights]
             barrier_counts = [int(value) for value in raw]
@@ -2703,6 +2714,11 @@ def parse_args() -> argparse.Namespace:
         default=2.0,
         help="Zipf exponent when --commit-tenant-distribution=zipf.",
     )
+    parser.add_argument(
+        "--commit-tenant-counts",
+        default="",
+        help="Explicit barrier counts per tenant, e.g. 200,20,20,20.",
+    )
     parser.add_argument("--search-timeout-s", type=float, default=40.0)
     parser.add_argument("--search-p95-limit-s", type=float, default=2.5)
     parser.add_argument("--search-degradation-factor", type=float, default=2.0)
@@ -2805,6 +2821,17 @@ def parse_args() -> argparse.Namespace:
         parser.error("--commit-barrier-count cannot be combined with --commit-rpm")
     if args.commit_zipf_exponent <= 0:
         parser.error("--commit-zipf-exponent must be positive")
+    if args.commit_tenant_counts:
+        try:
+            args.commit_tenant_counts = [
+                int(item.strip()) for item in args.commit_tenant_counts.split(",")
+            ]
+        except ValueError:
+            parser.error("--commit-tenant-counts must be comma-separated integers")
+        if any(item < 0 for item in args.commit_tenant_counts):
+            parser.error("--commit-tenant-counts must not contain negative values")
+    else:
+        args.commit_tenant_counts = None
     if not args.no_client_admission and args.scheduler_policy == "server-observe":
         parser.error("--client-admission requires a legacy --scheduler-policy")
     return args
@@ -2973,6 +3000,7 @@ def main() -> int:
                 args.commit_barrier_count,
                 args.commit_tenant_distribution,
                 args.commit_zipf_exponent,
+                args.commit_tenant_counts,
             )
         elif args.scenario == "fairness":
             search_records = scenario_search(
