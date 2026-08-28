@@ -15,6 +15,7 @@
 | 服务端遥测边界 | 缺少服务端字段时不使用客户端时间冒充 | `server_*` 字段和覆盖率报告 |
 | 多租户隔离 | 独立凭证、N×N marker 探针、共享凭证不判隔离通过 | isolation probe |
 | 长稳态基础场景 | formal suite 已包含 soak 场景和重复轮次 | `formal_suite.py` |
+| 可量化门禁判定 | `stress/echomem/acceptance.py` 按 PR421 指标逐项判定；缺证据输出 `INCONCLUSIVE`，不可执行项输出 `NOT_IMPLEMENTED` | `acceptance.json` / `suite.html` |
 
 ## 部分修复
 
@@ -47,11 +48,14 @@
 PR28 当前可以验收为：
 
 > 真实 HTTP 多租户隔离和服务端观测型压测套件，已补齐 Commit barrier、
-> Zipf 分布和 429 Retry-After 重试。
+> Zipf/显式租户分布、429 Retry-After 重试，以及 PR421 可量化指标的保守判定层。
 
 PR28 当前不能验收为：
 
 > rev5 完整 SaaS 压测方案，或具备完整故障注入、重启恢复和持久化对账能力。
+
+仍未完成的 PR28 检视项不会被隐藏，而是在验收矩阵中明确标记为
+`NOT_IMPLEMENTED`；因此 PR28 仍不能宣称为 rev5 全量事故回归方案。
 
 下一阶段建议只实现最小闭环：
 

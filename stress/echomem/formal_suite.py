@@ -20,6 +20,14 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+try:
+    from .acceptance import (
+        build_model_analysis_input,
+        evaluate_pr421_acceptance,
+    )
+except ImportError:
+    from acceptance import build_model_analysis_input, evaluate_pr421_acceptance
+
 
 # Formal runs reproduce online clients. The load generator does not impose
 # FIFO, priority, lane, or tenant-fair scheduling of its own.
@@ -647,6 +655,25 @@ def main() -> int:
                     json.dumps(manifest, ensure_ascii=False, indent=2) + "\n",
                     encoding="utf-8",
                 )
+    acceptance = evaluate_pr421_acceptance(manifest)
+    manifest["acceptance"] = acceptance
+    (root / "suite.json").write_text(
+        json.dumps(manifest, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    (root / "acceptance.json").write_text(
+        json.dumps(acceptance, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    (root / "model_analysis_input.json").write_text(
+        json.dumps(
+            build_model_analysis_input(manifest, acceptance),
+            ensure_ascii=False,
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
     report_path = root / "suite.html"
     try:
         from .formal_data_report import render as render_data_report
@@ -654,9 +681,9 @@ def main() -> int:
         from formal_data_report import render as render_data_report
     render_data_report(root / "suite.json", report_path)
     statuses = [str(run.get("status") or "NO_SUMMARY") for run in manifest["runs"]]
-    if any(status in {"ENVIRONMENT_ERROR", "RESET_FAILED", "NO_SUMMARY", "FAIL"} for status in statuses):
+    if any(status in {"ENVIRONMENT_ERROR", "RESET_FAILED", "NO_SUMMARY", "FAIL"} for status in statuses) or acceptance["overall"] == "FAIL":
         overall = "FAIL"
-    elif any(status == "INCONCLUSIVE" for status in statuses):
+    elif any(status == "INCONCLUSIVE" for status in statuses) or acceptance["overall"] in {"INCONCLUSIVE", "NOT_IMPLEMENTED"}:
         overall = "INCONCLUSIVE"
     else:
         overall = "PASS"
@@ -685,8 +712,12 @@ def main() -> int:
             ),
             "suite_report": "suite.html",
             "suite_manifest": "suite.json",
+            "acceptance_report": "acceptance.json",
+            "model_analysis_input": "model_analysis_input.json",
+            "acceptance_overall": acceptance["overall"],
         },
         "aggregates": aggregate_runs(manifest["runs"]),
+        "acceptance": acceptance,
     }
     (root / "summary.json").write_text(
         json.dumps(suite_summary, ensure_ascii=False, indent=2) + "\n",

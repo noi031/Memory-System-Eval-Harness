@@ -228,6 +228,19 @@ Expand a row to inspect every delayed request and the raw CSV files. Missing
 server timestamps are rendered as `-`; they are never replaced with
 client-side timing.
 
+The formal suite also writes three machine-readable review artifacts:
+
+- `acceptance.json`: PR421 gate-by-gate status, target, observed value, evidence,
+  and reason.
+- `model_analysis_input.json`: bounded, secret-free context for an external LLM
+  to analyze failures and propose the next diagnostic action.
+- `suite.json`: the original run manifest plus the acceptance result.
+
+The acceptance layer distinguishes `PASS`, `FAIL`, `INCONCLUSIVE`, and
+`NOT_IMPLEMENTED`. A configured target is not treated as verified merely
+because a scenario ran; missing server evidence and unavailable control-plane
+operations remain visible.
+
 For a service-side scheduling observation, the formal suite already disables
 the runner's admission controller:
 
@@ -255,7 +268,8 @@ Commit barrier、Zipf 分布、429 Retry-After 重试、请求级重试审计和
 观测边界；cursor 对账、真实重启恢复、故障注入、容量阶梯和 k6 工具链仍需
 后续实现，不应在报告中标记为已通过。
 
-PR421 的验收目标会写入 formal suite 的 `suite.json`，包括 Search P95
+PR421 的验收目标会写入 formal suite 的 `suite.json`，并额外生成
+`acceptance.json` 和 `model_analysis_input.json`，包括 Search P95
 隔离度 `≤1.20x`、Jain 公平指数 `≥0.90`、已接受 Commit 恢复率 `100%`、
 拒绝响应的 `Retry-After/reason_code`、B7 车道四元组和 fan-out 指标覆盖，
 以及 128 并发饱和场景的拒绝率和返回时延门槛。报告会区分“指标未暴露”

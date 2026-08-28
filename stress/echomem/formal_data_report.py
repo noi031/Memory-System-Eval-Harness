@@ -130,9 +130,62 @@ def scenario_label(value: str) -> str:
         "baseline": "单租户基线",
         "mixed": "均衡混合负载",
         "commit-storm": "Commit 压力",
+        "commit-barrier": "Commit 屏障风暴",
+        "saturation": "128 并发入口饱和",
+        "tenant-skew": "热租户 200 + 其他租户各 20",
         "search-storm": "Search 压力",
         "soak": "长稳态",
     }.get(value, value)
+
+
+def status_badge(value: Any) -> str:
+    text = esc(value)
+    css = str(value or "UNKNOWN").lower().replace("_", "-")
+    return f"<span class='badge {css}'>{text}</span>"
+
+
+def acceptance_block(manifest: dict[str, Any], root: Path) -> str:
+    acceptance = manifest.get("acceptance") or {}
+    checks = acceptance.get("checks") or []
+    if not checks:
+        acceptance_path = root / "acceptance.json"
+        if acceptance_path.is_file():
+            try:
+                acceptance = json.loads(acceptance_path.read_text(encoding="utf-8"))
+                checks = acceptance.get("checks") or []
+            except (OSError, json.JSONDecodeError):
+                checks = []
+    rows = "".join(
+        f"<tr><td>{esc(item.get('name'))}</td>"
+        f"<td>{status_badge(item.get('status'))}</td>"
+        f"<td>{esc(item.get('target'))}</td><td>{esc(item.get('observed'))}</td>"
+        f"<td>{esc(item.get('reason'))}</td><td><code>{esc(item.get('evidence'))}</code></td></tr>"
+        for item in checks
+    )
+    review = acceptance.get("review") or {}
+    reasonable = "".join(
+        f"<li>{esc(item)}</li>"
+        for item in review.get("reasonable_targets") or []
+    )
+    missing = "".join(
+        f"<li>{esc(item)}</li>"
+        for item in review.get("missing_or_weak_targets") or []
+    )
+    if not checks:
+        return (
+            "<section class='section'><h2>PR421 验收矩阵</h2>"
+            "<div class='notice'>当前结果没有结构化验收数据，不能宣称已对齐 PR421。</div></section>"
+        )
+    return f"""
+<section class='section'><h2>PR421 验收矩阵</h2>
+<div class='notice'><b>总判定：</b>{status_badge(acceptance.get('overall'))}
+ · 目标、证据和不可执行项分开记录；缺失服务端证据不会用客户端时间补齐。</div>
+<div class='scroll'><table><thead><tr><th>验收项</th><th>状态</th><th>目标</th><th>观测值</th><th>判定说明</th><th>证据</th></tr></thead>
+<tbody>{rows}</tbody></table></div>
+<div class='review-grid'><div><h3>指标设计中合理的部分</h3><ul>{reasonable or '<li>未提供</li>'}</ul></div>
+<div><h3>仍需复核或补充的部分</h3><ul>{missing or '<li>未提供</li>'}</ul></div></div>
+<p class='links'>结构化诊断输入：<a href='model_analysis_input.json'>model_analysis_input.json</a>
+ · 验收原始结果：<a href='acceptance.json'>acceptance.json</a></p></section>"""
 
 
 def normalize_row(row: dict[str, str], operation: str, summary: dict[str, Any]) -> dict[str, Any]:
@@ -520,6 +573,7 @@ def render(manifest_path: Path, output_path: Path) -> None:
         for group in groups
     )
     detail = "".join(detail_block(group, root) for group in groups)
+    acceptance_html = acceptance_block(manifest, root)
     icon = (
         "<svg class='logo' viewBox='0 0 56 56' role='img' aria-label='EchoMem 压测报告'>"
         "<rect x='3' y='3' width='50' height='50' rx='13' fill='#17324d'/>"
@@ -556,8 +610,9 @@ h1{{margin:0;font-size:25px;line-height:1.15}}h2{{font-size:18px;margin:0 0 12px
 .section{{padding:18px 19px;margin-top:12px}}.notice{{padding:11px 13px;background:var(--amber-bg);border-left:4px solid var(--amber);color:#6c5117;margin-bottom:12px}}
 .scroll{{overflow:auto}}table{{width:100%;border-collapse:collapse;font-size:12px;white-space:nowrap}}th,td{{padding:8px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}}th{{background:#fafbfc;color:var(--muted);font-weight:700}}
 .badge{{display:inline-block;padding:3px 8px;border-radius:999px;font-size:11px;font-weight:700;background:#eef1f3;color:var(--muted)}}.badge.pass{{background:#e8f6f0;color:var(--green)}}.badge.inconclusive{{background:var(--amber-bg);color:var(--amber)}}.badge.fail,.badge.environment_error{{background:#fff0ee;color:var(--red)}}
+.badge.not-implemented{{background:#f0eefb;color:#6651a8}}.review-grid{{display:grid;grid-template-columns:1fr 1fr;gap:18px}}li{{margin:5px 0}}
 details{{border-top:1px solid var(--line);padding:11px 0}}details:first-of-type{{border-top:0}}summary{{cursor:pointer;font-weight:700}}.detail-intro{{margin-top:10px;color:var(--muted)}}.metric-grid{{display:grid;grid-template-columns:repeat(6,1fr);gap:8px}}.metric-grid>div{{border:1px solid var(--line);padding:10px;border-radius:6px}}.metric-grid span,.metric-grid small{{display:block;color:var(--muted)}}.metric-grid b{{display:block;font-size:16px;margin:3px 0}}.links{{line-height:2}}a{{color:#286aa6}}code{{background:#eef2f4;padding:2px 5px;border-radius:4px;font-size:12px}}
-.footer{{margin-top:14px;color:var(--muted);font-size:12px}}@media(max-width:900px){{.hero{{display:block}}.hero-meta{{text-align:left;margin-top:10px}}.kpis{{grid-template-columns:repeat(2,1fr)}}.metric-grid{{grid-template-columns:repeat(2,1fr)}}}}
+.footer{{margin-top:14px;color:var(--muted);font-size:12px}}@media(max-width:900px){{.hero{{display:block}}.hero-meta{{text-align:left;margin-top:10px}}.kpis{{grid-template-columns:repeat(2,1fr)}}.metric-grid{{grid-template-columns:repeat(2,1fr)}}.review-grid{{grid-template-columns:1fr}}}}
 </style></head><body><main class='page'>
 <header class='top'>{icon}<div><h1>EchoMem 多租户压测数据报告</h1><small>真实 HTTP / 真实模型 · 生成于 {esc(datetime.now().astimezone().isoformat())}</small></div></header>
 <section class='hero {status_class}'><div><div class='label'>套件总判定</div><strong>{esc(overall)}</strong><div>{esc(evidence_note)}</div></div>
@@ -575,6 +630,7 @@ details{{border-top:1px solid var(--line);padding:11px 0}}details:first-of-type{
 <th>场景</th><th>策略</th><th>轮次</th><th>状态</th><th>Commit 提交/完成</th><th>Commit 平均</th><th>Commit P50</th><th>Commit P95</th><th>Commit P99</th><th>Commit 最大</th>
 <th>Search 提交/成功</th><th>Search 平均</th><th>Search P95</th><th>Search P99</th><th>Commit 客户端排队 P95</th><th>Search 客户端排队 P95</th><th>延迟事件</th><th>429</th><th>服务端时序覆盖</th></tr></thead>
 <tbody>{rows or '<tr><td colspan=19>没有运行数据</td></tr>'}</tbody></table></div></section>
+{acceptance_html}
 <section class='section'><h2>逐组详细数据</h2><p class='muted'>点击每一组展开：逐租户分位数、服务端排队/执行、延迟请求绝对时间、队列深度、状态和错误。</p>{detail or '<p>没有详细数据。</p>'}</section>
 <div class='footer'>数据源：<code>{esc(manifest_path)}</code> · 原始请求 CSV 和每轮报告位于同一目录。报告不把 INCONCLUSIVE 当作性能通过。</div>
 </main></body></html>"""

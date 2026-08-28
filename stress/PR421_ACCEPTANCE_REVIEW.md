@@ -18,9 +18,10 @@ PR421 的 B0-B7 方案已经给出一组可量化目标。测试平台不能只�
 | L5 公平 | 热租户 200 commit，其他租户各 20，后者中位延迟 `≤1.5x` | 使用相同消息大小和相同 profile，分别统计每租户完成率、P50/P95 和最大连续等待 | 合理；应增加 commit 未完成率和最长等待上限 |
 
 formal suite 已增加 `saturation`（128 并发）和 `tenant-skew`
-（200/20/20/20 显式 Commit 分布）两个场景。它们验证的是负载输入和黑盒
-结果；如果 EchoMem 未暴露入口拒绝原因、Retry-After、车道指标或服务端
-执行时间，相关服务端门禁仍为 `INCONCLUSIVE`。
+（200/20/20/20 显式 Commit 分布）两个场景，并由
+`stress/echomem/acceptance.py` 对可测指标执行逐项判定。它们验证的是负载
+输入和黑盒结果；如果 EchoMem 未暴露入口拒绝原因、Retry-After、车道指标
+或服务端执行时间，相关服务端门禁仍为 `INCONCLUSIVE`。
 
 ## 需要补充的统一口径
 
@@ -38,7 +39,8 @@ formal suite 已增加 `saturation`（128 并发）和 `tenant-skew`
 ## 当前 PR28 对齐情况
 
 测试平台已经把 PR421 的目标写入 `formal_suite.py` 的 `suite.json`，
-并采集 B7 lane/fan-out 指标族及其有界标签。当前仍需 EchoMem 或部署环境
+并生成 `acceptance.json` 和无密钥的 `model_analysis_input.json`，同时采集
+B7 lane/fan-out 指标族及其有界标签。当前仍需 EchoMem 或部署环境
 提供以下能力，平台才能执行完整门禁：
 
 - cursor/消息集合导出，用于 Commit 持久化对账；
@@ -47,4 +49,7 @@ formal suite 已增加 `saturation`（128 并发）和 `tenant-skew`
 - profile 资源限制和实际生效配置，用于四档容量阶梯；
 - 取消/断连后的后台任务和资源回收观测。
 
-因此报告应把“目标已配置”与“目标已验证”分开显示。
+因此报告应把“目标已配置”与“目标已验证”分开显示。任一可测门禁失败
+才判 `FAIL`；证据不足或能力未实现判 `INCONCLUSIVE`，只有所有门禁均有
+充分证据且通过时才允许 `PASS`。模型分析只能基于结构化证据，不能把
+`INCONCLUSIVE` 推断成通过。
