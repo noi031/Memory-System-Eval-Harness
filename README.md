@@ -100,6 +100,15 @@ dynamic/                     # 动态评测 (generate / replay)
   prompt_config.py           #   prompt 配置加载
   configs/                   #   evaluator / user_simulator YAML 配置
   results/                   #   运行结果
+performance/                 # 性能压测（多租户并发读写、注入/检索延迟、CPU/RSS）
+  run_stress.py              #   入口脚本
+  prepare.py                 #   租户准备 + 种子注入 + query 池
+  loadgen.py                 #   读写负载注入器 + 逐请求埋点
+  monitor.py                 #   /metrics 周期采样 + Prometheus 文本解析
+  scenarios.py               #   场景矩阵（A 纯读 / B 纯写 / C 混合 / D 洪峰）
+  metrics_calc.py            #   统计纯函数
+  report.py                  #   产物与自包含 HTML 报告
+  results/                   #   运行结果
 shared/                      # 共享基础设施
   eval_base.py               #   EvalConfig / EvalRun / CLI arg helpers
   llm_client.py              #   LLM 客户端 (OpenAI 兼容, urllib)
@@ -436,6 +445,82 @@ python scripts/compare_memory_backends.py \
 的记忆 id，供召回精度计算；注入耗时记录在结果的 `config.inject_elapsed_s`。
 一键流程见 `START_BAT/compare_echomem_vs_openviking.bat`。
 
+## 性能压测
+
+对运行中的 EchoMem 服务做多租户高并发**读写性能**压测（不需要 LLM）：检索
+吞吐/延迟（客户端 + 服务端 `/metrics` 双视角）、注入四段延迟（open / add /
+commit 提交 / commit 完成）、读写混合与「注入洪峰」下的劣化（**检出"注入阻塞
+检索"**）、进程 CPU/RSS/线程/commit 队列水位。设计见
+`docs/performance-stress-test-design.md`。
+
+压测同时验明 EchoMem 的**四项特性保证**（见 `summary.json` 的
+`signals` / `commit_durability` / `tenant_fairness` / `resources.rss_trend`）：
+
+1. **commit 异步与成功保证**：202 接受后最终必须 completed；提交失败不重试
+   （客户端 `max_retries=0`，失败分类输出）；commit 不阻塞检索——D 场景洪峰窗口
+   读 P95 劣化超过阈值（默认 2x）即报信号。
+2. **租户公平性**：按场景×租户分组读延迟，租户间 P95 max/min ≥ 3x 报不均衡信号。
+3. **无内存泄漏**：RSS 时间序列最小二乘斜率 ≥ 5 MB/min 或冷却后未回落显著，报
+   疑似泄漏信号。
+4. **资源利用率随时间变化**：`report.html` 以独立子图展示 CPU%/RSS/线程/commit
+   队列/inflight 的全过程曲线；`metrics_samples.csv` 含原始时序。
+
+运行结束后 `report.html` 顶部与终端摘要会给出**逐特性结论**（通过 / 不通过 /
+数据不足）与总体结论，判定依据含数据引用（见 `summary.json["feature_verdicts"]`）。
+
+除结论外，报告还给出**特性量化分析**（`report.html`「特性量化分析」小节、
+`summary.json["feature_verdicts"].features[*].measurements`、终端结论行内），
+把「是否满足」扩展为「满足到什么程度」：写洪峰时 search 的 P95 比基线高多少
+（绝对毫秒差 + 倍率）、最慢租户比最快租户多等的时长、RSS 增长率与每小时外推、
+CPU/内存的均值与峰值。
+
+```bash
+# 快速冒烟（并发档 1,16，时长 15s）
+python performance/run_stress.py --quick --tenants 4 --duration-s 60
+
+# 全矩阵（并发档 1,4,16,64 x A/B/C/D；C 场景读:写比 8:1,4:1,1:1）
+python performance/run_stress.py
+
+# 长期满负荷（检验泄漏/公平性，建议 --duration-s 300+）
+python performance/run_stress.py --duration-s 300 --scenarios A,B,D
+
+# 外网部署：任意 IP:端口 + 静态预置身份（不创建租户）+ metrics 不可达降级
+python performance/run_stress.py \
+  --echomem-url http://203.0.113.10:8010 \
+  --auth-mode static --auth-key XXX --tenant-id T1 --user-id U1 \
+  --tenants 1 --scenarios A,D --concurrency-steps 1,8 --duration-s 30
+
+# 只跑纯读基线 + 注入洪峰
+python performance/run_stress.py --scenarios A,D --concurrency-steps 1,16,64
+
+# 真实对话种子：locomo conv-30 复制灌入 8 个租户，压测结束后自动清理租户
+python performance/run_stress.py --tenants 8 --seed-source locomo \
+  --sample-filter conv-30 --cleanup-identities
+```
+
+场景说明：`A` 纯读基线（劣化对照）· `B` 纯写注入（四段延迟 + 写后读一致性 +
+commit 成功保证）· `C` 读写混合（多档 read:write）· `D` 注入洪峰（读持续 +
+突发 K 个 commit，检出 search-commit 干扰与读写数据倾斜）。
+
+结果写入 `performance/results/<ts>/`：`summary.json`（按场景×并发档分节的延迟/
+吞吐/错误/资源/劣化倍数）、`requests.csv`（逐请求）、`metrics_samples.csv`
+（服务端采样时序）、`report.html`（自包含报告）。
+
+| 参数 | 说明 | 默认 |
+|---|---|---|
+| `--echomem-url` | 目标服务地址（IP:端口可配，含外网） | `http://127.0.0.1:8010` |
+| `--auth-mode` | `provision` 自助创建租户 / `static` 预置身份 | `provision` |
+| `--tenants` × `--concurrency-steps` | 租户数 × 每租户并发阶梯 | 8 × `1,4,16,64` |
+| `--scenarios` | 场景过滤 | `A,B,C,D` |
+| `--mix-ratios` | C 场景读:写比档位 | `8:1,4:1,1:1` |
+| `--burst-commits` / `--burst-window-s` | D 场景洪峰事务数 / 窗口 | 32 / 10 |
+| `--duration-s` | 每场景每并发档时长 | 60 |
+| `--seed-source` | 种子数据源：`synthetic` 合成锚词消息 / `locomo` 真实对话 | `synthetic` |
+| `--dataset-path` | locomo 数据集路径（仅 `--seed-source locomo`） | `benchmarks/locomo/data/locomo10.json` |
+| `--sample-filter` | locomo 样本过滤器（单个 / 逗号分隔多个 / `all`） | `conv-30` |
+| `--no-metrics` / `--skip-health` | 外网降级：不抓 /metrics、跳过预检 | 关 |
+| `--cleanup-identities` | 压测结束后删除 provision 租户（身份 + 会话/记忆数据全清；static 模式拒绝） | 关 |
+
 ## 扩展指南
 
 ### 新增 Agent 插件
@@ -518,8 +603,10 @@ class MyBackendClient(BaseHTTPMemoryClient):
 
 > **指标变更同步约定**：如果任何一个 benchmark（locomo / hotpotqa / longmemeval）
 > 或 dynamic 的评估指标、产物字段（`summary.json` / `quality_report.json` /
-> `eval_results.csv` / `dynamic_results.json` 等）发生增删或含义改变，必须同步更新
-> `scripts/memory-eval-improve` skill 中对应的 benchmark/dynamic **特有字段描述**
+> `eval_results.csv` / `dynamic_results.json` 等），或 performance 压测的产物字段
+> （`summary.json` / `requests.csv` / `metrics_samples.csv` 等）发生增删或含义改变，
+> 必须同步更新 `scripts/memory-eval-improve` skill 中对应的 benchmark/dynamic/
+> performance **特有字段描述**
 > （`references/benchmark-specific-fields.md` 与 `references/analysis-dimensions.md`），
 > 避免分析报告基于过时的字段定义得出结论。
 

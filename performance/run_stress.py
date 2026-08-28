@@ -1,0 +1,817 @@
+#!/usr/bin/env python3
+"""Performance stress-test entry point for EchoMem.
+
+Measures multi-tenant concurrent read/write performance of a live EchoMem
+server: read throughput/latency, four-stage injection latency, mixed
+read/write degradation, injection-burst interference ("injection blocks
+retrieval"), and server CPU/RSS observed through its /metrics endpoint.
+
+The target address is fully configurable (--echomem-url), so internet
+deployments are supported; --auth-mode static covers pre-provisioned
+identities on servers that do not allow self-service tenant creation.
+
+用法:
+  python performance/run_stress.py --quick
+  python performance/run_stress.py --echomem-url http://192.168.1.10:8010
+      --auth-mode static --auth-key XXX --tenant-id T --user-id U
+      --tenants 1 --scenarios A,C,D --mix-ratios 8:1,4:1
+  python performance/run_stress.py --tenants 8 --seed-source locomo
+      --sample-filter conv-30 --cleanup-identities
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import logging
+import sys
+import time
+from datetime import datetime
+from pathlib import Path
+from typing import Any
+
+# 确保能 import backends/shared/performance 包
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent
+if str(_PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(_PROJECT_ROOT))
+
+from backends.echomem.client import EchoMemClient
+from performance.loadgen import LoadGenerator, SceneResult
+from performance.metrics_calc import (
+    FEATURE_LABELS,
+    RSS_LEAK_SLOPE_MB_PER_MIN,
+    commit_completion_latency,
+    commit_durability,
+    consistency_summary,
+    degradation_factor,
+    evaluate_features,
+    rss_trend_mb_per_min,
+    summarize_records,
+    tenant_fairness,
+)
+from performance.monitor import (
+    COMMIT_QUEUE_DEPTH,
+    CPU_SECONDS,
+    HTTP_INFLIGHT,
+    PROCESS_THREADS,
+    RECALL_ENGINE_CALLS,
+    RESIDENT_MEMORY,
+    MetricsMonitor,
+    scene_resource_summary,
+)
+from performance.prepare import (
+    TenantPreparer,
+    load_locomo_seed_batches,
+)
+from performance.report import (
+    build_html,
+    save_html,
+    write_config,
+    write_metrics_csv,
+    write_requests_csv,
+    write_summary,
+)
+from performance.scenarios import (
+    SCENARIO_NAMES,
+    SceneRun,
+    expand_matrix,
+    parse_concurrency_steps,
+    parse_mix_ratios,
+)
+
+logger = logging.getLogger("performance.run_stress")
+
+DEFAULT_MIX_RATIOS = "8:1,4:1,1:1"
+DEFAULT_CONCURRENCY_STEPS = "1,4,16,64"
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        description="EchoMem performance stress test (multi-tenant read/write)"
+    )
+    g = parser.add_argument_group("Target")
+    g.add_argument(
+        "--echomem-url",
+        default="http://127.0.0.1:8010",
+        help="EchoMem base URL, IP:port configurable (外网部署: http://<ip>:<port>)",
+    )
+    g.add_argument(
+        "--timeout-s",
+        type=float,
+        default=10.0,
+        help="Per-request timeout (外网 RTT 大可调大)",
+    )
+    g.add_argument(
+        "--top-k",
+        type=int,
+        default=5,
+        help="Search top-k used by read load",
+    )
+    g.add_argument(
+        "--commit-poll-timeout-s",
+        type=float,
+        default=120.0,
+        help="Timeout for poll-until-commit-completed",
+    )
+    g = parser.add_argument_group("Identity")
+    g.add_argument(
+        "--auth-mode",
+        choices=["provision", "static"],
+        default="provision",
+        help=(
+            "provision=自助创建隔离租户; static=复用预置身份 "
+            "(外网部署无自助创建权限时用 static)"
+        ),
+    )
+    g.add_argument("--auth-key", default="", help="static 模式: 预置鉴权 key")
+    g.add_argument("--tenant-id", default="", help="static 模式: 预置租户 id")
+    g.add_argument("--user-id", default="", help="static 模式: 预置用户 id")
+    g.add_argument("--agent-id", default="default", help="agent id")
+    g.add_argument("--tenants", type=int, default=8, help="租户数 (static 模式固定为 1)")
+    g = parser.add_argument_group("Data")
+    g.add_argument(
+        "--seed-source",
+        choices=["synthetic", "locomo"],
+        default="synthetic",
+        help="种子数据源: synthetic=合成锚词消息(默认); locomo=真实对话(按 --sample-filter 从数据集读取)",
+    )
+    g.add_argument(
+        "--dataset-path",
+        default="",
+        help="locomo 数据集路径 (默认 benchmarks/locomo/data/locomo10.json；仅 --seed-source locomo 生效)",
+    )
+    g.add_argument(
+        "--sample-filter",
+        default="conv-30",
+        help="locomo 样本过滤器: 单个 sample_id / 逗号分隔多个 / all (默认 conv-30)",
+    )
+    g.add_argument("--seed-sessions-per-tenant", type=int, default=5, help="每租户种子 session 数 (locomo 源时由数据集会话数决定)")
+    g.add_argument("--messages-per-session", type=int, default=10, help="每个 session 的消息条数 (写事务也用它)")
+    g = parser.add_argument_group("Load")
+    g.add_argument(
+        "--concurrency-steps",
+        default=DEFAULT_CONCURRENCY_STEPS,
+        help="每租户并发阶梯 (逗号分隔; 总并发=tenants*step)",
+    )
+    g.add_argument(
+        "--scenarios",
+        default="A,B,C,D",
+        help=(
+            "场景: A=纯读基线, B=纯写注入, C=读写混合, D=注入洪峰 "
+            "(逗号分隔, 可按需过滤如 A,D)"
+        ),
+    )
+    g.add_argument(
+        "--mix-ratios",
+        default=DEFAULT_MIX_RATIOS,
+        help="C 场景读:写比档位 (逗号分隔, READ:WRITE 格式)",
+    )
+    g.add_argument(
+        "--burst-commits",
+        type=int,
+        default=32,
+        help="D 场景洪峰写入的 commit 事务数",
+    )
+    g.add_argument(
+        "--burst-window-s",
+        type=float,
+        default=10.0,
+        help="D 场景洪峰目标窗口 (秒)",
+    )
+    g.add_argument(
+        "--duration-s",
+        type=float,
+        default=60.0,
+        help="每场景每并发档时长 (秒)",
+    )
+    g.add_argument(
+        "--mode",
+        choices=["max-throughput", "fixed-rps"],
+        default="max-throughput",
+        help="负载模式: 饱和打满 或 固定速率 (仅限读)",
+    )
+    g.add_argument("--rps", type=float, default=0.0, help="fixed-rps 模式的总读速率")
+    g = parser.add_argument_group("Observation")
+    g.add_argument("--metrics-interval-s", type=float, default=2.0, help="/metrics 采样间隔 (秒)")
+    g.add_argument("--cool-down-s", type=float, default=15.0, help="压测结束后的冷却采样时长 (秒)")
+    g.add_argument("--no-metrics", action="store_true", help="不抓取 /metrics (外网未暴露时)")
+    g.add_argument("--skip-health", action="store_true", help="跳过 /health 预检")
+    g.add_argument("--degradation-threshold", type=float, default=2.0, help="P95 劣化倍数判定阈值")
+    g = parser.add_argument_group("Run")
+    g.add_argument(
+        "--quick",
+        action="store_true",
+        help="快速模式: 并发档 1,16 + 时长减为 1/4 (最短 5s)",
+    )
+    g.add_argument("--cleanup-identities", action="store_true", help="压测结束后删除 provision 租户（仅 provision 模式；static 模式拒绝）")
+    g.add_argument("--out-dir", default="results", help="结果根目录")
+    g.add_argument("--verbose", action="store_true", help="DEBUG 日志")
+    return parser
+
+
+def _resolve_args(args: argparse.Namespace) -> dict[str, Any]:
+    """Normalize CLI args; apply --quick overrides and basic validation."""
+    scenarios = [part.strip().upper() for part in str(args.scenarios).split(",") if part.strip()]
+    known = {"A", "B", "C", "D"}
+    unknown = [sid for sid in scenarios if sid not in known]
+    if unknown:
+        raise ValueError(f"--scenarios 未知场景: {', '.join(unknown)} (可选 A,B,C,D)")
+    mix_ratios = parse_mix_ratios([part.strip() for part in str(args.mix_ratios).split(",")])
+    concurrency_steps = parse_concurrency_steps(args.concurrency_steps)
+    if args.quick:
+        concurrency_steps = [step for step in concurrency_steps if step in (1, 16)]
+        if not concurrency_steps:
+            concurrency_steps = [1, 16]
+        args.duration_s = max(5.0, args.duration_s / 4)
+    if args.tenants < 1:
+        raise ValueError("--tenants 必须 >= 1")
+    seed_dataset_path: str | None = None
+    if args.seed_source == "locomo":
+        dataset_path = (
+            Path(args.dataset_path)
+            if args.dataset_path
+            else _PROJECT_ROOT / "benchmarks" / "locomo" / "data" / "locomo10.json"
+        )
+        if not dataset_path.is_file():
+            raise ValueError(f"locomo 数据集不存在: {dataset_path}")
+        if not str(args.sample_filter or "").strip():
+            raise ValueError("--sample-filter 不能为空 (示例: conv-30 / conv-30,conv-41 / all)")
+        seed_dataset_path = str(dataset_path)
+    if args.auth_mode == "static" and args.cleanup_identities:
+        raise ValueError(
+            "--cleanup-identities 仅适用于 --auth-mode provision；"
+            "static 模式复用预置身份，删除会连同生产租户数据一起清掉"
+        )
+    if args.burst_commits < 1:
+        raise ValueError("--burst-commits 必须 >= 1")
+    if args.mode == "fixed-rps" and args.rps <= 0:
+        raise ValueError("--mode fixed-rps 需要 --rps > 0")
+    if args.rps > 0 and args.mode == "max-throughput":
+        raise ValueError("--rps 仅在 --mode fixed-rps 下生效")
+    return {
+        "scenario_ids": scenarios,
+        "concurrency_steps": concurrency_steps,
+        "mix_ratios": mix_ratios,
+        "rps": args.rps if args.mode == "fixed-rps" else None,
+        "seed_dataset_path": seed_dataset_path,
+    }
+
+
+def _probe_metrics(monitor: MetricsMonitor) -> dict[str, Any]:
+    """One /metrics probe; returns availability info."""
+    frame = monitor.sample()
+    if frame is None:
+        return {
+            "metrics_available": False,
+            "fetch_ok": monitor.fetch_ok,
+            "fetch_failures": monitor.fetch_failures,
+            "last_error": monitor.last_error,
+        }
+    return {
+        "metrics_available": True,
+        "fetch_ok": monitor.fetch_ok,
+        "fetch_failures": monitor.fetch_failures,
+        "series_count": len(frame.samples),
+        "last_error": "",
+    }
+
+
+def _scene_metrics(
+    scene: SceneRun,
+    monitor: MetricsMonitor,
+    t0: float,
+    t1: float,
+) -> dict[str, Any]:
+    entry = scene_resource_summary(logger, monitor, t0, t1)
+    return {**scene.to_dict(), "window_s": [round(t0, 3), round(t1, 3)], "resource": entry}
+
+
+def _run_all_scenes(
+    args: argparse.Namespace,
+    resolved: dict[str, Any],
+    generator: LoadGenerator,
+    tenants: list[Any],
+    monitor: MetricsMonitor,
+) -> dict[str, Any]:
+    """Execute the matrix; returns per-scene summaries + full records."""
+    runs = expand_matrix(
+        scenario_ids=resolved["scenario_ids"],
+        concurrency_steps=resolved["concurrency_steps"],
+        mix_ratios=resolved["mix_ratios"],
+        duration_s=args.duration_s,
+        burst_commits=args.burst_commits,
+        burst_window_s=args.burst_window_s,
+    )
+    if not runs:
+        raise ValueError("场景矩阵为空: --scenarios 过滤后没有可运行的场景")
+    logger.info("场景矩阵: %d 个运行单元", len(runs))
+
+    all_records: list[Any] = []
+    scenes: dict[str, Any] = {}
+    scene_read_stats: dict[str, dict[str, Any]] = {}
+    consistency = {"status": "skipped"}
+    first_t0: float | None = None
+    last_t1: float | None = None
+
+    for scene in runs:
+        name = SCENARIO_NAMES[scene.scene_id]
+        t0 = time.time()
+        if first_t0 is None:
+            first_t0 = t0
+        logger.info("===> 场景 %s (%s) 并发/租户=%d 时长=%.0fs", scene.key, name, scene.per_tenant_conc, scene.duration_s)
+        result: SceneResult = generator.run_scene(scene, tenants, args.messages_per_session)
+        t1 = time.time()
+        last_t1 = t1
+        wall = max(result.wall_s, 1e-6)
+        per_op = summarize_records(result.records, wall_s=wall)
+
+        entry = _scene_metrics(scene, monitor, t0, t1)
+        entry["ops"] = per_op
+        if result.burst_start_s is not None and result.burst_end_s is not None:
+            entry["burst_window_s"] = [round(result.burst_start_s, 3), round(result.burst_end_s, 3)]
+        scenes[scene.key] = entry
+        all_records.extend(result.records)
+
+        read = (per_op.get(scene.key) or {}).get("read") or {}
+        scene_read_stats[scene.key] = read
+        writes = sum(
+            ((per_op.get(scene.key) or {}).get(op) or {}).get("count", 0)
+            for op in ("open", "add", "commit_submit", "commit_done")
+        )
+        logger.info(
+            "    完成: 读=%d qps=%.1f p95=%.1fms 写op=%d 错误=%d",
+            read.get("count", 0),
+            read.get("qps", 0) or 0,
+            read.get("p95_ms", 0) or 0,
+            writes,
+            read.get("errors_total", 0),
+        )
+        # B 场景尾段立即做写后读一致性检查：write anchors 会被后续场景清空
+        if scene.scene_id == "B":
+            check_records = generator.run_consistency_checks(
+                tenants,
+                scene_key=scene.key,
+                step_conc=scene.per_tenant_conc,
+            )
+            all_records.extend(check_records)
+            consistency = consistency_summary(check_records)
+
+    return {
+        "records": all_records,
+        "scenes": scenes,
+        "scene_read_stats": scene_read_stats,
+        "consistency": consistency,
+        "window_first_t0": first_t0 if first_t0 is not None else time.time(),
+        "window_last_t1": last_t1 if last_t1 is not None else time.time(),
+    }
+
+
+def _build_degradation(
+    scenes: dict[str, Any],
+    scene_reads: dict[str, dict[str, Any]],
+) -> dict[str, Any]:
+    """Degradation of C/D read latency against the same-step A baseline."""
+    degradation: dict[str, Any] = {}
+    a_stats_by_conc: dict[str, dict[str, Any]] = {}
+    for key, stats in scene_reads.items():
+        if key.startswith("A@"):
+            a_stats_by_conc[key.split("@")[1]] = stats
+    fallback_baseline = next(iter(a_stats_by_conc.values()), None)
+    for key, stats in scene_reads.items():
+        if not key.startswith(("C:", "D@")):
+            continue
+        conc = key.rsplit("@", 1)[-1]
+        baseline = a_stats_by_conc.get(conc, fallback_baseline)
+        factors = degradation_factor(baseline, stats)
+        if any(value is not None for value in factors.values()):
+            degradation[f"{key}_vs_A@{conc}"] = factors
+    return degradation
+
+
+def _build_signals(
+    args: argparse.Namespace,
+    scenes: dict[str, Any],
+    scene_reads: dict[str, dict[str, Any]],
+    degradation: dict[str, Any],
+    monitor: MetricsMonitor,
+    durability: dict[str, Any],
+    fairness: dict[str, Any],
+    resources: dict[str, Any],
+) -> dict[str, Any]:
+    """Signal set for the four EchoMem feature guarantees."""
+    signals: list[str] = []
+    for scene_key, entry in scenes.items():
+        burst_window = entry.get("burst_window_s")
+        if entry.get("scene_id") != "D" or not burst_window:
+            continue
+        t0, t1 = burst_window
+        factor = (degradation.get(f"{scene_key}_vs_A@{entry['per_tenant_conc']}") or {}).get("p95")
+        if factor is not None and factor >= args.degradation_threshold:
+            signals.append(f"{scene_key}: 写洪峰窗口读 P95 劣化 {factor}x (阈值 {args.degradation_threshold}x)")
+        engine_delta = monitor.counter_delta(RECALL_ENGINE_CALLS, t0 - 1, t1 + 1)
+        if engine_delta is not None and engine_delta <= 0:
+            signals.append(f"{scene_key}: 洪峰窗口 engine_calls 增量≈0 而延迟变化 → 疑似锁/排他竞争")
+        elif engine_delta is not None:
+            signals.append(f"{scene_key}: 洪峰窗口 engine_calls 增量={int(engine_delta)} → 疑似资源竞争")
+        read = scene_reads.get(scene_key) or {}
+        if read.get("errors_total", 0) > 0:
+            signals.append(f"{scene_key}: 洪峰窗口读错误 {read['errors_total']} 次")
+        inflight = (entry.get("resource") or {}).get("http_inflight_max")
+        if inflight is not None and scene_key.startswith("D@"):
+            conc = int(scene_key.rsplit("@", 1)[-1])
+            total_workers = conc * args.tenants
+            if inflight >= total_workers * 0.9:
+                signals.append(f"{scene_key}: inflight 峰值 {int(inflight)} 接近总并发 {total_workers} → 请求堆积")
+
+    # 特性 1: commit 异步 + 成功保证 + 不阻塞检索（读劣化信号已在上方）
+    violations = durability.get("guarantee_violations", 0)
+    if violations > 0:
+        signals.append(
+            f"commit 成功保证被违反: 202 已接受但最终失败 {violations} 个事务 "
+            f"(accepted_done_failed={durability.get('accepted_done_failed')}, "
+            f"accepted_done_other={durability.get('accepted_done_other')})"
+        )
+    rejected = durability.get("submit_rejected_total", 0)
+    if rejected > 0:
+        rejected_detail = durability.get("submit_rejected_breakdown", {})
+        signals.append(f"commit 提交阶段被拒绝 {rejected} 次 (不重试, 分类={rejected_detail})")
+
+    # 特性 2: 租户公平性
+    for scene_key, fair in fairness.items():
+        if fair.get("balanced") is False:
+            signals.append(
+                f"{scene_key}: 租户间读 P95 最大/最小 {fair.get('p95_max_min_ratio')}x "
+                f"(≥3x) → 租户延迟不均衡，疑似单租户占满资源"
+            )
+
+    # 特性 3: 无内存泄漏（RSS 时间趋势）
+    slope = (resources.get("rss_trend") or {}).get("slope_mb_per_min")
+    if slope is not None and slope >= RSS_LEAK_SLOPE_MB_PER_MIN:
+        signals.append(
+            f"疑似内存泄漏: RSS 上升斜率 {slope} MB/min "
+            f"(阈值 {RSS_LEAK_SLOPE_MB_PER_MIN} MB/min)"
+        )
+    return {"signals_found": signals, "threshold": args.degradation_threshold}
+
+
+def _build_resource_totals(
+    monitor: MetricsMonitor,
+    t0: float,
+    t1: float,
+    settle_t: float,
+) -> dict[str, Any]:
+    """Whole-run CPU/RSS/queue resource summary (missing series -> None)."""
+    rss_series = monitor.gauge_series(RESIDENT_MEMORY, t0, t1)
+    baseline_frame = monitor._frame_at_or_before(t0)
+    settle_frame = monitor._frame_at_or_before(settle_t)
+    baseline = None
+    if baseline_frame is not None:
+        try:
+            baseline = max(value for _, value in baseline_frame.samples.get(RESIDENT_MEMORY, []))
+        except ValueError:
+            baseline = None
+    peak = max((value for _, value in rss_series), default=None)
+    settled = None
+    if settle_frame is not None:
+        try:
+            settled = max(value for _, value in settle_frame.samples.get(RESIDENT_MEMORY, []))
+        except ValueError:
+            settled = None
+
+    def mb(value: float | None) -> float | None:
+        return round(value / 1024 / 1024, 2) if value is not None else None
+
+    wall = t1 - t0
+    cpu_series = monitor.cpu_utilization_series(t0, t1)
+    cpu_delta = monitor.counter_delta(CPU_SECONDS, t0, t1)
+    cpu_mean = round(cpu_delta / wall * 100, 2) if cpu_delta is not None and wall > 0 else None
+    rss_peak = peak if peak is not None else baseline
+
+    return {
+        "cpu_util_mean_percent": cpu_mean,
+        "rss_baseline_mb": mb(baseline),
+        "rss_peak_mb": mb(rss_peak),
+        "rss_settled_mb": mb(settled),
+        "rss_unsettled_mb": (
+            mb(settled - baseline) if settled is not None and baseline is not None else None
+        ),
+        "rss_trend": rss_trend_mb_per_min(rss_series),
+        "threads_max": monitor.gauge_max(PROCESS_THREADS, t0, t1),
+        "commit_queue_max": monitor.gauge_max(COMMIT_QUEUE_DEPTH, t0, t1),
+        "http_inflight_max": monitor.gauge_max(HTTP_INFLIGHT, t0, t1),
+        "cpu_util_max_percent": (
+            round(max(value for _, value in cpu_series), 2) if cpu_series else None
+        ),
+        "metrics_frames": len(monitor.frames),
+    }
+
+
+def _verdict_measurement_summary(feature_key: str, meas: dict[str, Any]) -> str:
+    """终端一行提示：每特性结论背后的关键量化值。"""
+    if feature_key == "commit_guarantee":
+        dur = meas.get("durability") or {}
+        prec = meas.get("retrieval_precedence") or {}
+        parts = []
+        if dur.get("commit_success_rate") is not None:
+            parts.append(f"成功率 {dur['commit_success_rate']:.2%}")
+        latency = (dur.get("completion_latency_ms") or {}).get("p95_ms")
+        if latency is not None:
+            parts.append(f"commit 完成 P95 {latency}ms")
+        if prec.get("worst_p95_ratio") is not None:
+            parts.append(f"洪峰读 P95 劣化 {prec['worst_p95_ratio']}x")
+        return "，".join(parts)
+    if feature_key == "tenant_fairness":
+        if meas.get("slowest_tenant_p95_ms") is None:
+            return "单租户/无租户分组数据"
+        return (
+            f"最慢租户 P95 {meas['slowest_tenant_p95_ms']}ms，比最快多等 "
+            f"{meas.get('slowest_waits_extra_ms')}ms（max/min {meas.get('p95_max_min_ratio')}x）"
+        )
+    if feature_key == "memory_leak":
+        if meas.get("slope_mb_per_min") is None:
+            return "采样不足"
+        return (
+            f"RSS 斜率 {meas['slope_mb_per_min']} MB/min"
+            f"（预计每小时 {meas.get('projected_growth_mb_per_hour')} MB）"
+        )
+    if feature_key == "resource_timeline":
+        return (
+            f"CPU 均值 {meas.get('cpu_util_mean_percent')}% / 峰值 "
+            f"{meas.get('cpu_util_max_percent')}%，RSS 峰值 {meas.get('rss_peak_mb')}MB"
+        )
+    return ""
+
+
+def _print_terminal_summary(
+    scenes: dict[str, Any],
+    degradation: dict[str, Any],
+    signals: dict[str, Any],
+    resources: dict[str, Any],
+    durability: dict[str, Any],
+    fairness: dict[str, Any],
+    verdicts: dict[str, Any],
+) -> None:
+    print()
+    print("=" * 72)
+    print("性能压测摘要")
+    print("=" * 72)
+    for key in sorted(scenes):
+        ops = scenes[key].get("ops", {})
+        read = ((ops.get(key) or {}).get("read") or {})
+        commit = ((ops.get(key) or {}).get("commit_done") or {})
+        print(
+            f"  {key:<14} 读 {read.get('count', 0):>6} 次  "
+            f"QPS {read.get('qps', 0) or 0:>7.1f}  "
+            f"P50 {read.get('p50_ms') or 0:>7.1f}  "
+            f"P95 {read.get('p95_ms') or 0:>7.1f}  "
+            f"P99 {read.get('p99_ms') or 0:>7.1f} ms  "
+            f"错 {read.get('errors_total', 0)}  "
+            f"| 提交完成 {commit.get('count', 0)}  错误率 {commit.get('error_rate', 0) or 0:.2%}"
+        )
+    if degradation:
+        print("  劣化倍数 (相对同并发档 A 基线):")
+        for key, factors in degradation.items():
+            print(
+                f"    {key:<22} P50 {factors['p50']}  P95 {factors['p95']}  P99 {factors['p99']}"
+            )
+    print("  特性检查:")
+    print(
+        f"    [1] commit 持久性: 202 接受 {durability.get('submit_ok_total')} 个, "
+        f"最终完成 {durability.get('accepted_done_ok')} 个, "
+        f"接受后失败 {durability.get('guarantee_violations')} 个, "
+        f"提交阶段拒绝 {durability.get('submit_rejected_total')} 次 (不重试)"
+    )
+    unbalanced = [
+        (key, fair.get("p95_max_min_ratio"))
+        for key, fair in fairness.items()
+        if fair.get("balanced") is False
+    ]
+    if unbalanced:
+        detail = "; ".join(f"{key}={ratio}x" for key, ratio in unbalanced)
+        print(f"    [2] 租户公平性: 不均衡场景 {detail}")
+    else:
+        scene_with_ratio = next(
+            ((key, fair.get("p95_max_min_ratio")) for key, fair in fairness.items() if fair.get("p95_max_min_ratio") is not None),
+            (None, None),
+        )
+        ratio_text = f" (最大 max/min P95 {scene_with_ratio[1]}x)" if scene_with_ratio[1] is not None else ""
+        print(f"    [2] 租户公平性: 均衡{ratio_text}")
+    slope = (resources.get("rss_trend") or {}).get("slope_mb_per_min")
+    slope_text = f"{slope} MB/min" if slope is not None else "不可判定(采样不足)"
+    print(
+        f"    [3] 内存趋势: RSS 斜率 {slope_text}, "
+        f"峰值 {resources.get('rss_peak_mb')}MB, 冷却后未回落 {resources.get('rss_unsettled_mb')}MB"
+    )
+    print(
+        f"    [4] 资源时间线: CPU/RSS/线程/队列 → {_PROJECT_ROOT / 'performance' / 'results'} (report.html)"
+    )
+    print("  特性结论:")
+    verdict_labels = {"PASS": "通过", "FAIL": "不通过", "INCONCLUSIVE": "数据不足"}
+    for feature_key, label in FEATURE_LABELS.items():
+        entry = verdicts["features"].get(feature_key) or {}
+        detail = _verdict_measurement_summary(
+            feature_key, entry.get("measurements") or {}
+        )
+        suffix = f"  [{detail}]" if detail else ""
+        print(
+            f"    {label}: {verdict_labels.get(entry.get('verdict'), entry.get('verdict'))}{suffix}"
+        )
+    print(f"    总体结论: {verdict_labels.get(verdicts.get('overall'), verdicts.get('overall'))}")
+    if signals["signals_found"]:
+        print("  阻塞/干扰信号:")
+        for signal in signals["signals_found"]:
+            print(f"    - {signal}")
+    print(
+        f"  资源: CPU 均值 {resources.get('cpu_util_mean_percent')}%  "
+        f"RSS 基线 {resources.get('rss_baseline_mb')}MB "
+        f"峰值 {resources.get('rss_peak_mb')}MB "
+        f"未回落 {resources.get('rss_unsettled_mb')}MB"
+    )
+
+
+def main() -> None:
+    args = build_parser().parse_args()
+    logging.basicConfig(
+        level=logging.DEBUG if args.verbose else logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    )
+    resolved = _resolve_args(args)
+
+    out_root = Path(args.out_dir)
+    if not out_root.is_absolute():
+        out_root = _PROJECT_ROOT / "performance" / out_root
+    out_dir = out_root / datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+    out_dir.mkdir(parents=True, exist_ok=True)
+    logger.info("结果目录: %s", out_dir)
+
+    monitor = MetricsMonitor(
+        args.echomem_url,
+        interval_s=args.metrics_interval_s,
+        timeout_s=5.0,
+    )
+    server_info: dict[str, Any] = {
+        "base_url": args.echomem_url,
+        "metrics_requested": not args.no_metrics,
+    }
+    if not args.no_metrics:
+        monitor.start()
+
+    if not args.skip_health:
+        probe = EchoMemClient(args.echomem_url, timeout_s=args.timeout_s, max_retries=0)
+        health = probe.health()
+        logger.info("预检 /health: %s", health)
+    if not args.no_metrics:
+        server_info.update(_probe_metrics(monitor))
+
+    preparer = TenantPreparer(
+        args.echomem_url,
+        auth_mode=args.auth_mode,
+        auth_key=args.auth_key,
+        tenant_id=args.tenant_id,
+        user_id=args.user_id,
+        agent_id=args.agent_id,
+        tenants=args.tenants,
+        timeout_s=args.timeout_s,
+        label_prefix="perf",
+    )
+    try:
+        tenants = preparer.prepare(
+            args.seed_sessions_per_tenant,
+            args.messages_per_session,
+            args.commit_poll_timeout_s,
+            locomo_batches=(
+                load_locomo_seed_batches(
+                    resolved["seed_dataset_path"], args.sample_filter
+                )
+                if args.seed_source == "locomo"
+                else None
+            ),
+        )
+    except BaseException:
+        # prepare 阶段失败也要清掉已 provision 的租户（seed 中途失败时
+        # preparer 仍持有它们的 client）；清完再向上抛。
+        if args.cleanup_identities:
+            logger.info("prepare 失败，清理已 provision 的压测租户...")
+            preparer.cleanup()
+        raise
+    if not args.no_metrics:
+        monitor.sample()  # RSS baseline frame right after seeding
+
+    generator = LoadGenerator(
+        top_k=args.top_k,
+        timeout_s=args.timeout_s,
+        commit_poll_timeout_s=args.commit_poll_timeout_s,
+        rps=resolved["rps"] or None,
+    )
+
+    try:
+        try:
+            all_data = _run_all_scenes(args, resolved, generator, tenants, monitor)
+            cool_down_until = time.time() + args.cool_down_s
+            logger.info("冷却观测 %.0fs（观测内存回落与 commit 队列排空）", args.cool_down_s)
+            while time.time() < cool_down_until:
+                if not args.no_metrics:
+                    monitor.sample()
+                time.sleep(min(1.0, max(0.0, cool_down_until - time.time())))
+            settle_t = time.time()
+        finally:
+            if not args.no_metrics:
+                monitor.stop()
+
+        t_first = all_data["window_first_t0"]
+        t_last = all_data["window_last_t1"]
+        resources = _build_resource_totals(monitor, t_first, t_last, settle_t)
+        degradation = _build_degradation(all_data["scenes"], all_data["scene_read_stats"])
+        durability = commit_durability(all_data["records"])
+        fairness = tenant_fairness(all_data["records"])
+        signals = _build_signals(
+            args,
+            all_data["scenes"],
+            all_data["scene_read_stats"],
+            degradation,
+            monitor,
+            durability,
+            fairness,
+            resources,
+        )
+
+        def _redact(value: str) -> str:
+            return f"***configured*** ({len(value)} chars)" if value else ""
+
+        summary: dict[str, Any] = {
+            "generator": "performance/run_stress.py",
+            "status": "completed",
+            "started_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+            "finished_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+            "config": {
+                **vars(args),
+                "auth_key": _redact(args.auth_key),
+                "scenario_ids": resolved["scenario_ids"],
+                "concurrency_steps": resolved["concurrency_steps"],
+                "mix_ratios": [f"{r}:{w}" for r, w in resolved["mix_ratios"]],
+            },
+            "data_scale": {
+                "tenants": len(tenants),
+                "sessions_per_tenant": args.seed_sessions_per_tenant,
+                "messages_per_session": args.messages_per_session,
+                "queries_per_tenant": [len(tenant.queries) for tenant in tenants],
+                "tenant_details": [tenant.to_dict() for tenant in tenants],
+            },
+            "server": server_info,
+            "scenes": {
+                key: entry for key, entry in all_data["scenes"].items()
+            },
+            "degradation": degradation,
+            "signals": signals,
+            "consistency": all_data["consistency"],
+            "resources": resources,
+            "commit_durability": durability,
+            "tenant_fairness": fairness,
+            "commit_latency": commit_completion_latency(all_data["records"]),
+        }
+        summary["feature_verdicts"] = evaluate_features(summary)
+
+        write_config(out_dir, summary["config"])
+        write_requests_csv(out_dir, all_data["records"])
+        if not args.no_metrics:
+            write_metrics_csv(out_dir, monitor)
+        else:
+            write_metrics_csv(out_dir, MetricsMonitor(args.echomem_url))  # empty frames
+        write_summary(out_dir, summary)
+
+        chart_series = {
+            "rss_mb": [
+                (ts, round(value / 1024 / 1024, 2))
+                for ts, value in monitor.gauge_series(RESIDENT_MEMORY, t_first, t_last)
+            ],
+            "threads": monitor.gauge_series(PROCESS_THREADS, t_first, t_last),
+            "commit_queue": monitor.gauge_series(COMMIT_QUEUE_DEPTH, t_first, t_last),
+            "inflight": monitor.gauge_series(HTTP_INFLIGHT, t_first, t_last),
+            "cpu_percent": monitor.cpu_utilization_series(t_first, t_last),
+        }
+        save_html(out_dir, build_html(summary, chart_series))
+        _print_terminal_summary(
+            all_data["scenes"],
+            degradation,
+            signals,
+            resources,
+            durability,
+            fairness,
+            summary["feature_verdicts"],
+        )
+    finally:
+        # 压测租户清理：prepare/场景/报告任一阶段异常也执行
+        # （preparer 记录全部已 provision 的租户，seed 中途失败也会被清；
+        #  static 模式复用预置身份，组合已在参数校验拒绝）
+        if args.cleanup_identities:
+            logger.info("清理压测租户（--cleanup-identities）...")
+            preparer.cleanup()
+    logger.info("完成! 结果目录: %s", out_dir)
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except (ValueError, RuntimeError) as exc:
+        print(f"错误: {exc}", file=sys.stderr)
+        sys.exit(2)

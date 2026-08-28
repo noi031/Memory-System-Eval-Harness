@@ -1,0 +1,1161 @@
+"""Unit tests for the performance stress-test module.
+
+Covers: Prometheus text parsing, percentile math, record summarization,
+degradation factors, scenario-matrix expansion, loadgen write
+transactions against a fake client, error classification, and the
+external-deployment (static identity) guard. No real server is touched.
+
+运行:  cd Memory-System-Eval-Harness && python -m unittest tests.test_performance -v
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import re
+import tempfile
+import unittest
+import urllib.error
+from pathlib import Path
+
+from backends.memory_types import CommitResult
+from performance.loadgen import (
+    RequestRecord,
+    classify_error,
+    mix_token_sequence,
+    run_write_transaction,
+    split_threads,
+)
+from performance.metrics_calc import (
+    burst_summary,
+    commit_completion_latency,
+    commit_durability,
+    consistency_summary,
+    degradation_factor,
+    degradation_measurements,
+    evaluate_features,
+    fairness_measurements,
+    percentile,
+    percentiles,
+    read_records_in_window,
+    rss_trend_mb_per_min,
+    summarize_records,
+    tenant_fairness,
+)
+from performance.monitor import (
+    CPU_SECONDS,
+    MetricsFrame,
+    MetricsMonitor,
+    parse_prometheus_text,
+)
+from performance.prepare import (
+    TenantPreparer,
+    _query_fragments,
+    load_locomo_seed_batches,
+    seed_tenant_from_conversations,
+)
+from performance.report import (
+    _cpu_stats_from_csv,
+    _estimate_text_width,
+    _legend_html,
+    build_html,
+    chart_series_from_metrics_csv,
+    regenerate_report,
+)
+from performance.run_stress import _resolve_args
+from performance.scenarios import (
+    expand_matrix,
+    parse_concurrency_steps,
+    parse_mix_ratio,
+)
+
+PROMETHEUS_SAMPLE = """\
+# HELP a_counter Total counter.
+# TYPE a_counter counter
+a_counter 3
+a_counter 5
+# TYPE b_gauge gauge
+b_gauge{label="x",other="y"} 1.5
+m_bucket{le="0.1"} 2
+m_bucket{le="0.5"} 4
+m_bucket{le="+Inf"} 4
+m_sum 1.2
+m_count 4
+# EOF
+"""
+
+
+class PrometheusParseTests(unittest.TestCase):
+    def test_parse_basic(self) -> None:
+        parsed = parse_prometheus_text(PROMETHEUS_SAMPLE)
+        self.assertIn("a_counter", parsed)
+        # 同 name+labels 的后续样本覆盖前者
+        self.assertEqual([value for _, value in parsed["a_counter"]], [5.0])
+        self.assertEqual(
+            parsed["b_gauge"][0][0],
+            {"label": "x", "other": "y"},
+        )
+        self.assertEqual(parsed["b_gauge"][0][1], 1.5)
+
+    def test_parse_histogram_keeps_buckets_and_aggregates(self) -> None:
+        parsed = parse_prometheus_text(PROMETHEUS_SAMPLE)
+        buckets = {labels.get("le"): value for labels, value in parsed["m_bucket"]}
+        self.assertEqual(buckets, {"0.1": 2.0, "0.5": 4.0, "+Inf": 4.0})
+        self.assertEqual(parsed["m_count"][0][1], 4.0)
+        self.assertEqual(parsed["m_sum"][0][1], 1.2)
+
+
+class PercentileTests(unittest.TestCase):
+    def test_percentile_linear_interpolation(self) -> None:
+        values = sorted([10.0, 20.0, 30.0, 40.0])
+        self.assertEqual(percentile(values, 0.5), 25.0)
+        self.assertEqual(percentile(values, 0.0), 10.0)
+        self.assertEqual(percentile(values, 1.0), 40.0)
+
+    def test_percentile_empty(self) -> None:
+        self.assertIsNone(percentile([], 0.5))
+
+    def test_percentiles_labels(self) -> None:
+        result = percentiles([1.0, 2.0, 3.0, 4.0], (0.5, 0.95, 0.99))
+        self.assertEqual(result["p50"], 2.5)
+        self.assertIn("p95", result)
+        self.assertIn("p99", result)
+
+
+class SummarizeTests(unittest.TestCase):
+    @staticmethod
+    def _record(op, stage, status="ok", error="", scene="A@1", conc=1, tenant=0, ts=0.0):
+        return RequestRecord(
+            scene_key=scene,
+            step_conc=conc,
+            tenant_idx=tenant,
+            op=op,
+            stage_ms=stage,
+            status=status,
+            error_type=error,
+            ts_ms=ts,
+        )
+
+    def test_summarize_reads_and_errors(self) -> None:
+        records = [
+            self._record("read", 10.0),
+            self._record("read", 20.0),
+            self._record("read", 30.0, "error", "timeout"),
+            self._record("open", 5.0, "error", "http_5xx"),
+        ]
+        summary = summarize_records(records, wall_s=1.0)
+        read = summary["A@1"]["read"]
+        self.assertEqual(read["count"], 3)
+        self.assertEqual(read["qps"], 3.0)
+        self.assertEqual(read["p50_ms"], 20.0)
+        self.assertEqual(read["errors_total"], 1)
+        self.assertEqual(read["error_breakdown"], {"timeout": 1})
+        self.assertAlmostEqual(read["error_rate"], 1 / 3, places=5)
+        self.assertEqual(summary["A@1"]["open"]["errors_total"], 1)
+
+    def test_degradation_factor(self) -> None:
+        baseline = {"p50_ms": 10.0, "p95_ms": 40.0, "p99_ms": 100.0}
+        target = {"p50_ms": 20.0, "p95_ms": 80.0, "p99_ms": 300.0}
+        factors = degradation_factor(baseline, target)
+        self.assertEqual(factors["p50"], 2.0)
+        self.assertEqual(factors["p95"], 2.0)
+        self.assertEqual(factors["p99"], 3.0)
+
+    def test_degradation_missing_side_is_none(self) -> None:
+        factors = degradation_factor(None, {"p50_ms": 1.0})
+        self.assertEqual(factors, {"p50": None, "p95": None, "p99": None})
+
+    def test_window_slice(self) -> None:
+        records = [
+            self._record("read", 1.0, ts=1.0),
+            self._record("read", 2.0, ts=2.0),
+            self._record("open", 3.0, ts=3.0),
+        ]
+        in_window = read_records_in_window(records, 0.0, 1.5)
+        self.assertEqual(len(in_window), 1)
+        self.assertEqual(in_window[0].stage_ms, 1.0)
+
+    def test_consistency_summary(self) -> None:
+        records = [
+            self._record("consistent_check", 500.0),
+            self._record("consistent_check", 1500.0),
+            self._record("consistent_check", 30000.0, "error", "consistency_timeout"),
+        ]
+        summary = consistency_summary(records)
+        self.assertEqual(summary["count"], 3)
+        self.assertEqual(summary["p50_ms"], 1500.0)
+        self.assertEqual(summary["timeouts"], 1)
+
+    def test_burst_summary(self) -> None:
+        burst = [self._record("read", 50.0), self._record("read", 90.0)]
+        baseline = [self._record("read", 10.0), self._record("read", 30.0)]
+        result = burst_summary(burst, baseline)
+        self.assertEqual(result["count"], 2)
+        self.assertEqual(result["degradation"]["p50"], 3.5)  # 70/20
+
+    def test_commit_completion_latency(self) -> None:
+        records = [
+            self._record("commit_done", 100.0),
+            self._record("commit_done", 200.0),
+            self._record("commit_done", 300.0),
+            self._record("commit_done", 900.0, "error", "commit_timeout"),
+            self._record("read", 10.0),
+        ]
+        stats = commit_completion_latency(records)
+        self.assertEqual(stats["count"], 3)
+        self.assertEqual(stats["p50_ms"], 200.0)
+        self.assertEqual(stats["p95_ms"], 290.0)
+        self.assertEqual(stats["max_ms"], 300.0)
+
+    def test_degradation_measurements(self) -> None:
+        summary = {
+            "scenes": {
+                "A@4": {"ops": {"read": {"p50_ms": 20.0, "p95_ms": 40.0, "p99_ms": 100.0}}},
+                "D@4": {"ops": {"read": {"p50_ms": 60.0, "p95_ms": 120.0, "p99_ms": 400.0}}},
+            },
+            "degradation": {"D@4_vs_A@4": {"p50": 3.0, "p95": 3.0, "p99": 4.0}},
+        }
+        result = degradation_measurements(summary)
+        case = result["D@4_vs_A@4"]
+        self.assertEqual(case["ratio_p95"], 3.0)
+        self.assertEqual(case["baseline_p95_ms"], 40.0)
+        self.assertEqual(case["flood_p95_ms"], 120.0)
+        self.assertEqual(case["delta_p95_ms"], 80.0)
+
+    def test_fairness_measurements(self) -> None:
+        fairness = {
+            "A@4": {
+                "tenants": [
+                    {"tenant_idx": 0, "count": 10, "p95_ms": 20.0, "p99_ms": 30.0},
+                    {"tenant_idx": 1, "count": 10, "p95_ms": 200.0, "p99_ms": 400.0},
+                ],
+                "p95_max_min_ratio": 10.0,
+                "p95_cv": 0.8,
+                "balanced": False,
+            }
+        }
+        result = fairness_measurements(fairness)
+        self.assertEqual(result["worst_scene"], "A@4")
+        self.assertEqual(result["slowest_tenant_idx"], 1)
+        self.assertEqual(result["slowest_tenant_p95_ms"], 200.0)
+        self.assertEqual(result["slowest_tenant_p99_ms"], 400.0)
+        self.assertEqual(result["slowest_waits_extra_ms"], 180.0)
+
+
+class ScenarioMatrixTests(unittest.TestCase):
+    def test_parse_mix_ratio(self) -> None:
+        self.assertEqual(parse_mix_ratio("8:1"), (8, 1))
+        with self.assertRaises(ValueError):
+            parse_mix_ratio("0:0")
+
+    def test_parse_concurrency_steps(self) -> None:
+        self.assertEqual(parse_concurrency_steps("1,4,16"), [1, 4, 16])
+        with self.assertRaises(ValueError):
+            parse_concurrency_steps("1,0")
+
+    def test_expand_matrix_counts(self) -> None:
+        runs = expand_matrix(
+            scenario_ids=["A", "B"],
+            concurrency_steps=[1, 4],
+            mix_ratios=[(8, 1)],
+            duration_s=60.0,
+            burst_commits=32,
+            burst_window_s=10.0,
+        )
+        keys = [run.key for run in runs]
+        self.assertEqual(keys, ["A@1", "A@4", "B@1", "B@4"])
+
+    def test_expand_matrix_c_and_d(self) -> None:
+        runs = expand_matrix(
+            scenario_ids=["C", "D"],
+            concurrency_steps=[4],
+            mix_ratios=[(8, 1), (4, 1)],
+            duration_s=60.0,
+            burst_commits=16,
+            burst_window_s=5.0,
+        )
+        self.assertEqual(runs[0].key, "C:8:1@4")
+        self.assertEqual(runs[1].key, "C:4:1@4")
+        self.assertEqual(runs[2].key, "D@4")
+        self.assertEqual(runs[2].burst_commits, 16)
+
+    def test_expand_matrix_unknown_scenario(self) -> None:
+        with self.assertRaises(ValueError):
+            expand_matrix(
+                scenario_ids=["Z"],
+                concurrency_steps=[1],
+                mix_ratios=[],
+                duration_s=10.0,
+                burst_commits=1,
+                burst_window_s=1.0,
+            )
+
+
+class LoadgenTests(unittest.TestCase):
+    def test_mix_token_sequence(self) -> None:
+        self.assertEqual(
+            mix_token_sequence(2, 1, 7),
+            ["read", "read", "write", "read", "read", "write", "read"],
+        )
+
+    def test_split_threads(self) -> None:
+        self.assertEqual(split_threads(8, (8, 1)), (7, 1))
+        self.assertEqual(split_threads(8, (1, 1)), (4, 4))
+
+    def test_classify_error(self) -> None:
+        self.assertEqual(classify_error(TimeoutError("slow")), "timeout")
+        self.assertEqual(
+            classify_error(urllib.error.HTTPError("http://x", 503, "boom", None, None)),
+            "http_5xx",
+        )
+        self.assertEqual(
+            classify_error(urllib.error.HTTPError("http://x", 429, "full", None, None)),
+            "http_4xx",
+        )
+        self.assertEqual(classify_error(urllib.error.URLError("refused")), "connection")
+        self.assertEqual(classify_error(ValueError("weird")), "other")
+
+
+class FakeMemClient:
+    """Records calls; can be armed to fail at a given step."""
+
+    def __init__(self) -> None:
+        self.open_calls = 0
+        self.add_calls = 0
+        self.commit_calls = 0
+        self.delete_calls = 0
+        self.messages: list[str] = []
+        self.poll_status = "completed"
+        self.poll_elapsed_s = 1.5
+        self.poll_failures_left = 0
+        self.fail_step = ""
+        self.account = "fake-tenant"
+        self.user_id = "fake-user"
+        self.auth_key = "fake-key"
+
+    def delete_current_identity(self) -> None:
+        if self.fail_step == "delete":
+            raise RuntimeError("delete refused")
+        self.delete_calls += 1
+
+    def open_session(self, title: str = ""):
+        if self.fail_step == "open":
+            raise urllib.error.URLError("refused")
+        self.open_calls += 1
+        return "session-1"
+
+    def add_message(self, session_id: str, role: str, content: str):
+        if self.fail_step == "add":
+            raise TimeoutError("slow")
+        self.add_calls += 1
+        self.messages.append(content)
+        return {}
+
+    def commit_session(self, session_id: str):
+        if self.fail_step == "commit":
+            raise urllib.error.HTTPError("http://x", 503, "busy", None, None)
+        self.commit_calls += 1
+        return "archive-1"
+
+    def poll_commit(self, session_id: str, archive_id: str, timeout_s=0.0, poll_interval_s=0.0):
+        if self.fail_step == "poll":
+            raise TimeoutError("poll slow")
+        if self.poll_failures_left > 0:
+            self.poll_failures_left -= 1
+            return CommitResult(session_id, archive_id, "failed", self.poll_elapsed_s, 2)
+        return CommitResult(session_id, archive_id, self.poll_status, self.poll_elapsed_s, 2)
+
+
+class WriteTransactionTests(unittest.TestCase):
+    def _run(self, fail_step: str = ""):
+        client = FakeMemClient()
+        client.fail_step = fail_step
+        result = run_write_transaction(
+            client,
+            scene_key="B@1",
+            step_conc=1,
+            tenant_idx=0,
+            seq=7,
+            messages_per_session=10,
+            commit_poll_timeout_s=30.0,
+        )
+        return client, result
+
+    def test_full_transaction_timing(self) -> None:
+        client, result = self._run()
+        self.assertTrue(result.ok)
+        self.assertEqual(client.open_calls, 1)
+        self.assertEqual(client.add_calls, 10)
+        self.assertEqual(client.commit_calls, 1)
+        ops = [rec.op for rec in result.records]
+        self.assertEqual(ops, ["open"] + ["add"] * 10 + ["commit_submit", "commit_done"])
+        self.assertEqual(result.anchor, "PERFTAIL-0-7")
+        self.assertTrue(
+            result.records[-1].stage_ms >= 1500.0
+        )  # poll_commit elapsed 1.5s
+
+    def test_open_failure_stops_transaction(self) -> None:
+        _, result = self._run("open")
+        self.assertFalse(result.ok)
+        self.assertEqual(len(result.records), 1)
+        self.assertEqual(result.records[0].op, "open")
+        self.assertEqual(result.records[0].error_type, "connection")
+
+    def test_add_failure_classified_timeout(self) -> None:
+        _, result = self._run("add")
+        self.assertEqual(result.records[0].error_type, "")
+        self.assertEqual(result.records[-1].error_type, "timeout")
+        self.assertEqual(result.records[-1].op, "add")
+
+    def test_commit_submit_5xx(self) -> None:
+        _, result = self._run("commit")
+        self.assertEqual(result.records[-1].op, "commit_submit")
+        self.assertEqual(result.records[-1].error_type, "http_5xx")
+
+    def test_poll_timeout(self) -> None:
+        _, result = self._run("poll")
+        self.assertEqual(result.records[-1].op, "commit_done")
+        self.assertEqual(result.records[-1].error_type, "timeout")
+
+
+class MonitorAnalyticsTests(unittest.TestCase):
+    def _monitor_with_frames(self, frames: list[MetricsFrame]) -> MetricsMonitor:
+        monitor = MetricsMonitor("http://test", interval_s=1.0)
+        monitor.frames = frames
+        return monitor
+
+    def _cpu_frame(self, ts: float, user: float, system: float, rss: float) -> MetricsFrame:
+        return MetricsFrame(
+            ts=ts,
+            samples={
+                CPU_SECONDS: [
+                    ({"mode": "user"}, user),
+                    ({"mode": "system"}, system),
+                ],
+                "echomem_process_resident_memory_bytes": [({}, rss)],
+            },
+        )
+
+    def test_counter_delta(self) -> None:
+        monitor = self._monitor_with_frames(
+            [
+                self._cpu_frame(1.0, 8.0, 2.0, 100.0),
+                self._cpu_frame(2.0, 12.0, 3.0, 130.0),
+            ]
+        )
+        # 帧 t=1 的 cpu = user(8) + system(2) = 10，t=2 的 cpu = 12 + 3 = 15
+        self.assertEqual(monitor.counter_delta(CPU_SECONDS, 0.0, 3.0), 5.0)
+        self.assertAlmostEqual(monitor.cpu_utilization(0.0, 3.0), 5.0 / 3.0, places=4)
+        self.assertEqual(monitor.gauge_max("echomem_process_resident_memory_bytes", 0.0, 3.0), 130.0)
+
+    def test_histogram_percentiles(self) -> None:
+        frame = MetricsFrame(
+            ts=1.0,
+            samples={
+                "m_bucket": [
+                    ({"le": "0.1", "status": "ok"}, 10.0),
+                    ({"le": "0.5", "status": "ok"}, 30.0),
+                    ({"le": "1.0", "status": "ok"}, 40.0),
+                    ({"le": "+Inf", "status": "ok"}, 40.0),
+                ],
+                "m_sum": [({"status": "ok"}, 12.0)],
+                "m_count": [({"status": "ok"}, 40.0)],
+            },
+        )
+        monitor = self._monitor_with_frames([frame])
+        result = monitor.histogram_percentiles("m", 0.0, 2.0)
+        self.assertAlmostEqual(result["p50"], 0.3, places=6)
+        self.assertAlmostEqual(result["p95"], 0.9, places=6)
+        self.assertAlmostEqual(result["p99"], 0.98, places=6)
+
+    def test_histogram_missing_window(self) -> None:
+        monitor = self._monitor_with_frames([])
+        result = monitor.histogram_percentiles("m", 0.0, 2.0)
+        self.assertEqual(result, {"p50": None, "p95": None, "p99": None})
+
+
+class PrepareTests(unittest.TestCase):
+    def test_query_fragments_split_on_chinese_separator(self) -> None:
+        fragments = _query_fragments(
+            ["本周项目进展顺利，核心模块完成联调。计划下周发布。"]
+        )
+        self.assertEqual(fragments, ["本周项目进展顺利，核心模块完成联调"])
+
+    def test_query_fragments_split_on_english_separator(self) -> None:
+        fragments = _query_fragments(
+            ["First message of conv30. With more detail.", "Any updates?"]
+        )
+        self.assertEqual(fragments, ["First message of conv30", "Any updates"])
+
+    @staticmethod
+    def _write_locomo_json(tmp: Path) -> Path:
+        samples = [
+            {
+                "sample_id": "conv-30",
+                "conversation": {
+                    "speaker_a": "Gina",
+                    "speaker_b": "Jon",
+                    "session_1_date_time": "10:00 AM on 1 January, 2023",
+                    "session_1": [
+                        {"speaker": "Gina", "text": "First message of conv30. With detail."},
+                        {"speaker": "Jon", "text": "Second message."},
+                    ],
+                    "session_2_date_time": "11:00 AM on 2 January, 2023",
+                    "session_2": [{"speaker": "Gina", "text": "Third message."}],
+                },
+                "qa": [],
+            },
+            {
+                "sample_id": "conv-41",
+                "conversation": {
+                    "speaker_a": "Amy",
+                    "speaker_b": "Bob",
+                    "session_1_date_time": "9:00 AM on 3 January, 2023",
+                    "session_1": [{"speaker": "Amy", "text": "Other sample message."}],
+                },
+                "qa": [],
+            },
+        ]
+        path = tmp / "locomo.json"
+        path.write_text(json.dumps(samples, ensure_ascii=False), encoding="utf-8")
+        return path
+
+    def test_locomo_seed_batches_single_filter(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = self._write_locomo_json(Path(tmp))
+            batches = load_locomo_seed_batches(path, "conv-30")
+        self.assertEqual(len(batches), 2)  # conv-30 有两个会话
+        self.assertEqual(batches[0][0]["role"], "user")
+        self.assertEqual(batches[0][0]["content"], "First message of conv30. With detail.")
+        self.assertEqual(batches[0][1]["role"], "assistant")
+
+    def test_locomo_seed_batches_all_and_multi(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = self._write_locomo_json(Path(tmp))
+            all_batches = load_locomo_seed_batches(path, "all")
+            multi_batches = load_locomo_seed_batches(path, "conv-30,conv-41")
+        self.assertEqual(len(all_batches), 3)
+        self.assertEqual(len(multi_batches), 3)
+
+    def test_locomo_seed_batches_unknown_filter_raises(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = self._write_locomo_json(Path(tmp))
+            with self.assertRaises(ValueError):
+                load_locomo_seed_batches(path, "conv-99")
+            with self.assertRaises(ValueError):
+                load_locomo_seed_batches(path, "")
+
+    def test_seed_tenant_from_conversations(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = self._write_locomo_json(Path(tmp))
+            batches = load_locomo_seed_batches(path, "conv-30")
+        client = FakeMemClient()
+        tenant = seed_tenant_from_conversations(client, 0, batches, 30.0)
+        self.assertEqual(client.open_calls, 2)
+        self.assertEqual(client.add_calls, 3)
+        self.assertEqual(tenant.seed_sessions, 2)
+        self.assertEqual(tenant.seed_messages, 3)
+        # query 池只含用户消息的分句片段
+        self.assertEqual(tenant.queries, ["First message of conv30", "Third message"])
+
+    def test_seed_session_flow_retries_once(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = self._write_locomo_json(Path(tmp))
+            batches = load_locomo_seed_batches(path, "conv-30")
+        client = FakeMemClient()
+        client.poll_failures_left = 1  # 第一个会话第一次 commit 失败
+        tenant = seed_tenant_from_conversations(client, 0, batches, 30.0)
+        # 首个会话重灌一次：open 2 次；两个会话消息共 3 条灌 2 遍 + 1 遍
+        self.assertEqual(client.open_calls, 3)
+        self.assertEqual(client.add_calls, 5)
+        self.assertEqual(tenant.seed_sessions, 2)
+        self.assertEqual(tenant.queries, ["First message of conv30", "Third message"])
+
+    def test_seed_session_flow_fails_after_two_attempts(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = self._write_locomo_json(Path(tmp))
+            batches = load_locomo_seed_batches(path, "conv-41")  # 单会话
+        client = FakeMemClient()
+        client.poll_failures_left = 2  # 两次都失败 -> 中止
+        with self.assertRaises(RuntimeError):
+            seed_tenant_from_conversations(client, 0, batches, 30.0)
+        self.assertEqual(client.open_calls, 2)
+
+    def test_static_mode_rejects_multi_tenant(self) -> None:
+        with self.assertRaises(ValueError):
+            TenantPreparer("http://127.0.0.1:8010", auth_mode="static", tenants=2)
+        # 单租户被接受
+        preparer = TenantPreparer(
+            "http://127.0.0.1:8010",
+            auth_mode="static",
+            auth_key="k",
+            tenant_id="t",
+            user_id="u",
+            tenants=1,
+        )
+        self.assertEqual(preparer.tenants, 1)
+
+    def test_preparer_cleanup_deletes_provisioned(self) -> None:
+        preparer = TenantPreparer("http://127.0.0.1:8010", tenants=8)
+        # 直接注入"已 provision"记录：seed 中途失败时入口 finally 也会清理它们
+        first = FakeMemClient()
+        second = FakeMemClient()
+        preparer._provisioned = [(0, first), (1, second)]
+        preparer.cleanup()
+        self.assertEqual(first.delete_calls, 1)
+        self.assertEqual(second.delete_calls, 1)
+
+    def test_preparer_cleanup_tolerates_failures(self) -> None:
+        preparer = TenantPreparer("http://127.0.0.1:8010", tenants=8)
+        broken = FakeMemClient()
+        broken.fail_step = "delete"
+        healthy = FakeMemClient()
+        preparer._provisioned = [(0, broken), (1, healthy)]
+        preparer.cleanup()  # 单租户删除失败不阻断其余租户
+        self.assertEqual(healthy.delete_calls, 1)
+
+
+class RunStressArgsTests(unittest.TestCase):
+    """run_stress 参数校验：--cleanup-identities 与 auth-mode 的组合约束。"""
+
+    @staticmethod
+    def _args(**overrides) -> argparse.Namespace:
+        base = dict(
+            scenarios="A,D",
+            mix_ratios="8:1",
+            concurrency_steps="1,4",
+            quick=False,
+            duration_s=60.0,
+            tenants=1,
+            burst_commits=8,
+            mode="max-throughput",
+            rps=0.0,
+            auth_mode="provision",
+            cleanup_identities=False,
+            seed_source="synthetic",
+            dataset_path="",
+            sample_filter="conv-30",
+        )
+        base.update(overrides)
+        return argparse.Namespace(**base)
+
+    def test_static_mode_rejects_cleanup(self) -> None:
+        args = self._args(auth_mode="static", cleanup_identities=True)
+        with self.assertRaises(ValueError):
+            _resolve_args(args)
+
+    def test_provision_accepts_cleanup(self) -> None:
+        args = self._args(auth_mode="provision", cleanup_identities=True)
+        resolved = _resolve_args(args)
+        self.assertEqual(resolved["scenario_ids"], ["A", "D"])
+
+    def test_static_without_cleanup_is_ok(self) -> None:
+        args = self._args(auth_mode="static", cleanup_identities=False)
+        _resolve_args(args)  # 不抛错即可
+
+    def test_locomo_seed_missing_dataset_raises(self) -> None:
+        args = self._args(seed_source="locomo", dataset_path="no-such-file.json")
+        with self.assertRaises(ValueError):
+            _resolve_args(args)
+
+    def test_locomo_seed_empty_filter_raises(self) -> None:
+        args = self._args(seed_source="locomo", sample_filter="")
+        with self.assertRaises(ValueError):
+            _resolve_args(args)
+
+    def test_locomo_seed_default_dataset_resolves(self) -> None:
+        args = self._args(seed_source="locomo")
+        resolved = _resolve_args(args)
+        path = Path(resolved["seed_dataset_path"])
+        self.assertTrue(path.is_file(), f"默认数据集应存在: {path}")
+        self.assertEqual(path.name, "locomo10.json")
+
+
+class FeatureGuaranteeTests(unittest.TestCase):
+    """unit tests for the four EchoMem feature guarantees."""
+
+    @staticmethod
+    def _rec(op, session_id, status="ok", error="", stage=1.0, idx=0, scene="B@1"):
+        return RequestRecord(
+            scene_key=scene,
+            step_conc=1,
+            tenant_idx=idx,
+            op=op,
+            stage_ms=stage,
+            status=status,
+            error_type=error,
+            ts_ms=0.0,
+            session_id=session_id,
+            extra="burst" if scene == "D@1" else "",
+        )
+
+    def test_commit_durability_full(self) -> None:
+        records = [
+            self._rec("commit_submit", "s1"),
+            self._rec("commit_done", "s1"),
+            self._rec("commit_submit", "s2"),
+            self._rec("commit_done", "s2", "error", "commit_failed"),
+            self._rec("commit_submit", "s3"),
+            self._rec("commit_done", "s3", "error", "commit_timeout"),
+            self._rec("commit_submit", "s4", "error", "http_5xx"),
+        ]
+        result = commit_durability(records)
+        self.assertEqual(result["submit_ok_total"], 3)
+        self.assertEqual(result["submit_rejected_total"], 1)
+        self.assertEqual(result["submit_rejected_breakdown"], {"http_5xx": 1})
+        self.assertEqual(result["accepted_done_ok"], 1)
+        self.assertEqual(result["accepted_done_failed"], 1)
+        self.assertEqual(result["accepted_done_poll_timeout"], 1)
+        self.assertEqual(result["guarantee_violations"], 1)
+        self.assertAlmostEqual(result["commit_success_rate"], 1 / 3, places=5)
+
+    def test_commit_durability_all_ok(self) -> None:
+        records = [
+            self._rec("commit_submit", "s1"),
+            self._rec("commit_done", "s1"),
+            self._rec("commit_submit", "s2"),
+            self._rec("commit_done", "s2"),
+        ]
+        result = commit_durability(records)
+        self.assertEqual(result["guarantee_violations"], 0)
+        self.assertEqual(result["commit_success_rate"], 1.0)
+
+    def test_tenant_fairness_unbalanced(self) -> None:
+        records = [
+            self._rec("read", f"r-{i}", stage=10.0, idx=0, scene="A@1")
+            for i in range(50)
+        ] + [
+            self._rec("read", f"r2-{i}", stage=100.0, idx=1, scene="A@1")
+            for i in range(50)
+        ]
+        result = tenant_fairness(records)
+        fair = result["A@1"]
+        self.assertEqual(fair["p95_max_min_ratio"], 10.0)
+        self.assertFalse(fair["balanced"])
+        self.assertEqual(len(fair["tenants"]), 2)
+
+    def test_tenant_fairness_balanced(self) -> None:
+        records = [
+            self._rec("read", f"r-{i}", stage=10.0 + i % 3, idx=0, scene="A@1")
+            for i in range(30)
+        ] + [
+            self._rec("read", f"r2-{i}", stage=11.0 + i % 3, idx=1, scene="A@1")
+            for i in range(30)
+        ]
+        result = tenant_fairness(records)
+        fair = result["A@1"]
+        self.assertLess(fair["p95_max_min_ratio"], 3.0)
+        self.assertTrue(fair["balanced"])
+
+    def test_rss_trend_slope(self) -> None:
+        # 每秒 +1MB：斜率 = 60 MB/min
+        series = [
+            (float(i), (100 + i) * 1024 * 1024)
+            for i in range(0, 40, 10)  # t=0,10,20,30 -> 100..130MB
+        ]
+        trend = rss_trend_mb_per_min(series)
+        self.assertAlmostEqual(trend["slope_mb_per_min"], 60.0, places=1)
+        self.assertGreaterEqual(trend["r2"], 0.99)
+
+    def test_rss_trend_flat(self) -> None:
+        series = [(float(i), 100.0 * 1024 * 1024) for i in range(10)]
+        trend = rss_trend_mb_per_min(series)
+        self.assertAlmostEqual(trend["slope_mb_per_min"], 0.0, places=3)
+
+    def test_rss_trend_undecidable_few_samples(self) -> None:
+        series = [(0.0, 100.0 * 1024 * 1024), (1.0, 110.0 * 1024 * 1024)]
+        trend = rss_trend_mb_per_min(series)
+        self.assertIsNone(trend["slope_mb_per_min"])
+
+    def test_cpu_utilization_series(self) -> None:
+        monitor = MetricsMonitor("http://test")
+        monitor.frames = [
+            MetricsFrame(ts=0.0, samples={CPU_SECONDS: [({}, 0.0)]}),
+            MetricsFrame(ts=1.0, samples={CPU_SECONDS: [({}, 1.0)]}),
+            MetricsFrame(ts=2.0, samples={CPU_SECONDS: [({}, 1.0)]}),
+        ]
+        series = monitor.cpu_utilization_series(0.0, 2.0)
+        self.assertEqual(series, [(1.0, 100.0), (2.0, 0.0)])
+
+
+class FeatureVerdictTests(unittest.TestCase):
+    """evaluate_features: PASS / FAIL / INCONCLUSIVE for the four guarantees."""
+
+    @staticmethod
+    def _base_summary() -> dict:
+        return {
+            "config": {"degradation_threshold": 2.0, "no_metrics": False},
+            "server": {"metrics_available": True},
+            "commit_durability": {
+                "submit_ok_total": 10,
+                "submit_rejected_total": 0,
+                "accepted_done_ok": 10,
+                "accepted_done_failed": 0,
+                "accepted_done_other": 0,
+                "guarantee_violations": 0,
+                "commit_success_rate": 1.0,
+            },
+            "degradation": {"D@4_vs_A@4": {"p50": 1.1, "p95": 1.5, "p99": 1.8}},
+            "tenant_fairness": {
+                "A@4": {
+                    "tenants": [{"tenant_idx": 0, "count": 10, "p95_ms": 20.0}, {"tenant_idx": 1, "count": 10, "p95_ms": 22.0}],
+                    "p95_max_min_ratio": 1.1,
+                    "balanced": True,
+                }
+            },
+            "resources": {
+                "rss_trend": {"slope_mb_per_min": 1.2, "r2": 0.8, "samples": 30},
+                "rss_unsettled_mb": 5.0,
+            },
+        }
+
+    def test_all_pass(self) -> None:
+        result = evaluate_features(self._base_summary())
+        self.assertEqual(result["overall"], "PASS")
+        for key, entry in result["features"].items():
+            self.assertEqual(entry["verdict"], "PASS", key)
+        # 每个特性都带量化 measurements
+        commit_meas = result["features"]["commit_guarantee"]["measurements"]
+        self.assertEqual(commit_meas["durability"]["commit_success_rate"], 1.0)
+        self.assertIn("cases", commit_meas["retrieval_precedence"])
+        fair_meas = result["features"]["tenant_fairness"]["measurements"]
+        self.assertEqual(fair_meas["slowest_tenant_p95_ms"], 22.0)
+        self.assertEqual(fair_meas["slowest_waits_extra_ms"], 2.0)
+        leak_meas = result["features"]["memory_leak"]["measurements"]
+        self.assertEqual(leak_meas["slope_mb_per_min"], 1.2)
+        self.assertEqual(leak_meas["projected_growth_mb_per_hour"], 72.0)
+        timeline_meas = result["features"]["resource_timeline"]["measurements"]
+        self.assertIs(timeline_meas["metrics_available"], True)
+
+    def test_durability_violation_fails(self) -> None:
+        summary = self._base_summary()
+        summary["commit_durability"]["guarantee_violations"] = 2
+        summary["commit_durability"]["accepted_done_failed"] = 2
+        summary["commit_durability"]["commit_success_rate"] = 0.8
+        result = evaluate_features(summary)
+        feature = result["features"]["commit_guarantee"]
+        self.assertEqual(feature["verdict"], "FAIL")
+        self.assertEqual(feature["sub"]["durability"]["verdict"], "FAIL")
+        self.assertEqual(result["overall"], "FAIL")
+
+    def test_retrieval_precedence_fails_on_high_degradation(self) -> None:
+        summary = self._base_summary()
+        summary["degradation"] = {"D@4_vs_A@4": {"p50": 1.0, "p95": 3.5, "p99": 5.0}}
+        result = evaluate_features(summary)
+        feature = result["features"]["commit_guarantee"]
+        self.assertEqual(feature["sub"]["retrieval_precedence"]["verdict"], "FAIL")
+        self.assertEqual(feature["verdict"], "FAIL")
+
+    def test_fairness_fails(self) -> None:
+        summary = self._base_summary()
+        summary["tenant_fairness"]["A@4"].update({"p95_max_min_ratio": 10.0, "balanced": False})
+        result = evaluate_features(summary)
+        feature = result["features"]["tenant_fairness"]
+        self.assertEqual(feature["verdict"], "FAIL")
+        self.assertEqual(result["overall"], "FAIL")
+        # 量化：最慢租户 P95=22ms，比最快(20ms)多等 2ms
+        meas = feature["measurements"]
+        self.assertEqual(meas["slowest_tenant_p95_ms"], 22.0)
+        self.assertEqual(meas["slowest_waits_extra_ms"], 2.0)
+        self.assertIn("多等", feature["reason"])
+
+    def test_memory_leak_fails(self) -> None:
+        summary = self._base_summary()
+        summary["resources"]["rss_trend"]["slope_mb_per_min"] = 12.0
+        result = evaluate_features(summary)
+        feature = result["features"]["memory_leak"]
+        self.assertEqual(feature["verdict"], "FAIL")
+        # 量化：12 MB/min → 预计每小时 720 MB
+        meas = feature["measurements"]
+        self.assertEqual(meas["projected_growth_mb_per_hour"], 720.0)
+        self.assertIn("720.0", feature["reason"])
+
+    def test_inconclusive_cases(self) -> None:
+        # 未跑写场景
+        summary = self._base_summary()
+        summary["commit_durability"] = {"submit_ok_total": 0, "submit_rejected_total": 0}
+        result = evaluate_features(summary)
+        self.assertEqual(result["features"]["commit_guarantee"]["sub"]["durability"]["verdict"], "INCONCLUSIVE")
+        # 无 D 场景
+        summary["degradation"] = {"C:8:1@4_vs_A@4": {"p95": 1.2}}
+        result = evaluate_features(summary)
+        self.assertEqual(result["features"]["commit_guarantee"]["sub"]["retrieval_precedence"]["verdict"], "INCONCLUSIVE")
+        # 单租户公平性不可判
+        summary["tenant_fairness"] = {
+            "A@4": {"tenants": [{"tenant_idx": 0, "count": 10, "p95_ms": 20.0}], "p95_max_min_ratio": None, "balanced": True}
+        }
+        result = evaluate_features(summary)
+        self.assertEqual(result["features"]["tenant_fairness"]["verdict"], "INCONCLUSIVE")
+        # RSS 采样不足
+        summary["resources"]["rss_trend"] = {"slope_mb_per_min": None, "r2": None, "samples": 2}
+        result = evaluate_features(summary)
+        self.assertEqual(result["features"]["memory_leak"]["verdict"], "INCONCLUSIVE")
+        self.assertEqual(result["overall"], "INCONCLUSIVE")
+
+    def test_no_metrics_timeline_inconclusive(self) -> None:
+        summary = self._base_summary()
+        summary["config"]["no_metrics"] = True
+        result = evaluate_features(summary)
+        self.assertEqual(result["features"]["resource_timeline"]["verdict"], "INCONCLUSIVE")
+
+
+class SerializationTests(unittest.TestCase):
+    """Record serialization used by requests.csv."""
+
+    def test_loadgen_records_serialize(self) -> None:
+        record = RequestRecord(
+            scene_key="D@4",
+            step_conc=4,
+            tenant_idx=1,
+            op="read",
+            stage_ms=12.5,
+            status="ok",
+            error_type="",
+            ts_ms=123.0,
+            session_id="s",
+        )
+        row = record.to_csv_row()
+        self.assertEqual(row["op"], "read")
+        self.assertEqual(row["scene"], "D@4")
+
+
+class ReportTests(unittest.TestCase):
+    """report.py: 报告区块完整性 + 从制品再生成时间线 / 报告。"""
+
+    @staticmethod
+    def _summary() -> dict:
+        return {
+            "generator": "test",
+            "status": "completed",
+            "started_at": "2026-01-01T00:00:00+0800",
+            "finished_at": "2026-01-01T00:01:00+0800",
+            "config": {
+                "echomem_url": "http://127.0.0.1:8010",
+                "timeout_s": 10,
+                "top_k": 5,
+                "tenants": 2,
+                "concurrency_steps": [1, 4],
+                "scenario_ids": ["A", "B"],
+                "mix_ratios": ["8:1"],
+                "duration_s": 60,
+                "burst_commits": 32,
+                "burst_window_s": 10,
+                "seed_source": "synthetic",
+                "seed_sessions_per_tenant": 5,
+                "messages_per_session": 10,
+                "metrics_interval_s": 2,
+                "degradation_threshold": 2.0,
+                "commit_poll_timeout_s": 120,
+                "auth_mode": "provision",
+                "cleanup_identities": True,
+                "mode": "max-throughput",
+                "no_metrics": False,
+            },
+            "data_scale": {"tenants": 2, "sessions_per_tenant": 5, "messages_per_session": 10},
+            "server": {"base_url": "http://127.0.0.1:8010", "metrics_available": True},
+            "scenes": {
+                "A@1": {
+                    "scene_id": "A",
+                    "per_tenant_conc": 1,
+                    "duration_s": 60.0,
+                    "mix": None,
+                    "burst_commits": 0,
+                    "burst_window_s": 0.0,
+                    "resource": {
+                        "threads_max": 33,
+                        "python_threads_max": 24,
+                        "http_inflight_max": 3,
+                        "commit_queue_depth_max": 0,
+                        "recall_duration": {"p50": 1.8, "p95": 3.2},
+                        "http_duration": {"p50": 0.007},
+                        "commit_duration": {"p50": 46.6},
+                    },
+                    "ops": {
+                        "A@1": {
+                            "read": {
+                                "count": 57,
+                                "avg_ms": 2140.9,
+                                "p50_ms": 2084.0,
+                                "p95_ms": 2653.2,
+                                "p99_ms": 3063.1,
+                                "max_ms": 3113.3,
+                                "min_ms": 1834.0,
+                                "qps": 0.922,
+                                "errors_total": 0,
+                                "error_rate": 0.0,
+                                "error_breakdown": {},
+                            }
+                        }
+                    },
+                },
+                "B@1": {
+                    "scene_id": "B",
+                    "per_tenant_conc": 1,
+                    "duration_s": 60.0,
+                    "mix": None,
+                    "burst_commits": 0,
+                    "burst_window_s": 0.0,
+                    "resource": {
+                        "threads_max": 40,
+                        "python_threads_max": 30,
+                        "http_inflight_max": 5,
+                        "commit_queue_depth_max": 2,
+                        "recall_duration": {"p50": 2.0, "p95": 3.0},
+                        "http_duration": {"p50": 0.01},
+                        "commit_duration": {"p50": 50.0},
+                    },
+                    "ops": {
+                        "B@1": {
+                            "open": {"count": 3, "p50_ms": 200.0, "p95_ms": 250.0, "p99_ms": 260.0},
+                            "add": {"count": 30, "p50_ms": 210.0, "p95_ms": 300.0, "p99_ms": 320.0},
+                            "commit_submit": {"count": 3, "p50_ms": 100.0, "p95_ms": 120.0, "p99_ms": 130.0},
+                            "commit_done": {"count": 3, "p50_ms": 40000.0, "p95_ms": 45000.0, "p99_ms": 46000.0},
+                            "read": {"count": 1, "p50_ms": 5.0, "p95_ms": 6.0, "p99_ms": 7.0, "qps": 0.02, "error_rate": 0.0},
+                        }
+                    },
+                },
+            },
+            "degradation": {"B@1_vs_A@1": {"p50": 1.1, "p95": 1.2, "p99": 1.3}},
+            "signals": {"signals_found": ["B@1: 测试信号"]},
+            "consistency": {"count": 3, "p50_ms": 2175.5, "p95_ms": 29996.5, "timeouts": 1},
+            "resources": {
+                "cpu_util_mean_percent": 12.3,
+                "cpu_util_max_percent": 40.0,
+                "rss_baseline_mb": 745.17,
+                "rss_peak_mb": 993.96,
+                "rss_settled_mb": 518.04,
+                "rss_unsettled_mb": -227.13,
+                "threads_max": 331,
+                "commit_queue_max": 32,
+                "http_inflight_max": 235,
+                "rss_trend": {"slope_mb_per_min": -13.9, "r2": 0.72, "samples": 100},
+            },
+            "commit_durability": {
+                "submit_ok_total": 211,
+                "submit_rejected_total": 0,
+                "submit_rejected_breakdown": {},
+                "accepted_done_ok": 181,
+                "accepted_done_failed": 0,
+                "accepted_done_poll_timeout": 30,
+                "accepted_done_other": 0,
+                "commit_success_rate": 0.85782,
+                "guarantee_violations": 0,
+            },
+            "tenant_fairness": {
+                "A@1": {
+                    "tenants": [
+                        {"tenant_idx": 0, "count": 10, "p50_ms": 2000.0, "p95_ms": 2100.0, "p99_ms": 2300.0},
+                        {"tenant_idx": 1, "count": 10, "p50_ms": 2200.0, "p95_ms": 2400.0, "p99_ms": 2600.0},
+                    ],
+                    "p95_max_min_ratio": 1.14,
+                    "p95_cv": 0.07,
+                    "balanced": True,
+                }
+            },
+            "commit_latency": {"count": 181, "p50_ms": 47391.6, "p95_ms": 116351.6, "p99_ms": 118316.1},
+            "feature_verdicts": {},
+        }
+
+    def test_build_html_contains_sections(self) -> None:
+        html_text = build_html(self._summary(), {})
+        for section in ("测试方法", "测试场景", "指标字典", "压测结果", "写事务四段延迟", "支撑事实"):
+            self.assertIn(section, html_text, section)
+        # 支撑事实可见：实测值被渲染进报告（A@1 读 QPS=0.922）
+        self.assertIn("0.922", html_text)
+        # 每场景服务端资源快照表头与矩阵顺序
+        self.assertIn("每场景服务端资源快照", html_text)
+        self.assertIn("A@1", html_text)
+        self.assertIn("B@1", html_text)
+
+    def test_chart_series_from_metrics_csv(self) -> None:
+        rows = [
+            ["ts", "metric", "labels", "value"],
+            ["100.0", "echomem_process_resident_memory_bytes", "{}", "104857600.0"],
+            ["101.0", "echomem_process_resident_memory_bytes", "{}", "209715200.0"],
+            ["100.0", "echomem_process_threads", "{}", "33.0"],
+            ["101.0", "echomem_process_threads", "{}", "34.0"],
+            ["100.0", "echomem_session_commit_queue_depth", "{}", "0.0"],
+            ["100.0", "echomem_http_requests_inflight", "{}", "3.0"],
+            ["100.0", "echomem_http_requests_inflight", "{route=\"/x\"}", "2.0"],
+            ["100.0", "echomem_process_cpu_seconds_total", "{}", "10.0"],
+            ["101.0", "echomem_process_cpu_seconds_total", "{}", "12.0"],
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "metrics_samples.csv"
+            path.write_text("\n".join(",".join(r) for r in rows), encoding="utf-8")
+            series = chart_series_from_metrics_csv(path)
+        self.assertEqual(series["rss_mb"], [(100.0, 100.0), (101.0, 200.0)])
+        self.assertEqual(series["threads"], [(100.0, 33.0), (101.0, 34.0)])
+        self.assertEqual(series["commit_queue"], [(100.0, 0.0)])
+        # 同一 ts 跨标签集求和（对齐 monitor._value）：3 + 2 = 5
+        self.assertEqual(series["inflight"], [(100.0, 5.0)])
+        # CPU 帧差：12 - 10 = 2 秒计数 / 1s 墙钟 = 200%
+        self.assertEqual(series["cpu_percent"], [(101.0, 200.0)])
+
+    def test_chart_series_from_metrics_csv_missing_file(self) -> None:
+        self.assertEqual(chart_series_from_metrics_csv(Path("no_such_file.csv")), {})
+
+    def test_regenerate_report(self) -> None:
+        summary = self._summary()
+        summary["scenes"]["A@1"]["window_s"] = [100.0, 102.0]
+        summary["scenes"]["B@1"]["window_s"] = [103.0, 105.0]
+        with tempfile.TemporaryDirectory() as tmp:
+            out_dir = Path(tmp)
+            (out_dir / "summary.json").write_text(
+                json.dumps(summary, ensure_ascii=False), encoding="utf-8"
+            )
+            (out_dir / "metrics_samples.csv").write_text(
+                "ts,metric,labels,value\n"
+                "100.0,echomem_process_resident_memory_bytes,{},104857600.0\n"
+                "101.0,echomem_process_resident_memory_bytes,{},209715200.0\n"
+                "100.0,echomem_process_threads,{},33.0\n"
+                "100.0,echomem_process_cpu_seconds_total,{\"mode\": \"user\"},8.0\n"
+                "100.0,echomem_process_cpu_seconds_total,{\"mode\": \"system\"},2.0\n"
+                "101.0,echomem_process_cpu_seconds_total,{\"mode\": \"user\"},12.0\n"
+                "101.0,echomem_process_cpu_seconds_total,{\"mode\": \"system\"},3.0\n",
+                encoding="utf-8",
+            )
+            path = regenerate_report(out_dir)
+            self.assertTrue(path.name == "report.html")
+            html_text = path.read_text(encoding="utf-8")
+            self.assertIn("测试方法", html_text)
+            self.assertIn("指标字典", html_text)
+            # CPU 统计从 CSV 回填：窗口 [100,105] 内 user+system 10->15，均值 100.0%
+            self.assertIn("CPU 均值 (%)</td><td>100.0", html_text)
+
+    def test_cpu_stats_from_csv(self) -> None:
+        rows = [
+            ["ts", "metric", "labels", "value"],
+            ["100.0", "echomem_process_cpu_seconds_total", '{"mode": "user"}', "8.0"],
+            ["100.0", "echomem_process_cpu_seconds_total", '{"mode": "system"}', "2.0"],
+            ["102.0", "echomem_process_cpu_seconds_total", '{"mode": "user"}', "12.0"],
+            ["102.0", "echomem_process_cpu_seconds_total", '{"mode": "system"}', "3.0"],
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "m.csv"
+            path.write_text("\n".join(",".join(r) for r in rows), encoding="utf-8")
+            mean, maxp = _cpu_stats_from_csv(path, 100.0, 102.0)
+        # 窗口内：user+system = 10 -> 15，delta=5s，wall=2s -> 均值 250%，峰值 250%
+        self.assertEqual(mean, 250.0)
+        self.assertEqual(maxp, 250.0)
+
+    def test_cpu_stats_from_csv_missing(self) -> None:
+        self.assertEqual(_cpu_stats_from_csv(Path("no_such_file.csv"), 0.0, 1.0), (None, None))
+
+    def test_legend_no_overlap(self) -> None:
+        """图例自适应排布：长标签不顶到下一项色块，且不与右侧单位重叠。"""
+        labels = ["open", "add", "commit_submit", "commit_done"]
+        legend = _legend_html([(label, "#000") for label in labels], unit="ms")
+        rects = re.findall(r'<rect x="([\d.]+)" y="2"', legend)
+        texts = re.findall(r'<text x="([\d.]+)" y="11"[^>]*>([^<]+)</text>', legend)
+        self.assertEqual(len(rects), len(labels))
+        self.assertEqual(len(texts), len(labels))
+        for i in range(len(labels) - 1):
+            text_end = float(texts[i][0]) + _estimate_text_width(texts[i][1])
+            self.assertLessEqual(text_end, float(rects[i + 1]), labels[i])
+        # 单位在最右上角，位于图例整体右侧
+        self.assertIn('<text x="632" y="12"', legend)
+
+
+if __name__ == "__main__":
+    unittest.main()
