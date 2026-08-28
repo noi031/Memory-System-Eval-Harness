@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Run the real EchoMem workload under several admission policies.
+"""Run the real EchoMem workload without client-side scheduling.
 
-This compares load-generator admission policies. It does not infer EchoMem's
-internal scheduler unless the service exposes equivalent queue telemetry.
+The standard matrix is one server-observation run. It does not add FIFO,
+priority, lane, or tenant-fair behavior in the load generator.
 """
 
 from __future__ import annotations
@@ -25,13 +25,7 @@ except ImportError:
     from audit_matrix_report import render as render_audit_matrix_report
 
 
-POLICIES = (
-    "fifo",
-    "search-priority",
-    "dual-lane",
-    "tenant-fair",
-    "dual-lane-tenant-fair",
-)
+POLICIES = ("server-observe",)
 
 
 def fmt(value: Any, suffix: str = "s") -> str:
@@ -50,9 +44,12 @@ def render_report_safely(renderer: Any, matrix_path: Path, output_path: Path) ->
     try:
         renderer(matrix_path, output_path)
     except Exception as exc:
+        error_text = html.escape(
+            type(exc).__name__ + ": " + str(exc) + "\n\n" + traceback.format_exc()
+        )
         output_path.write_text(
             "<!doctype html><meta charset='utf-8'><title>报告生成异常</title>"
-            f"<h1>报告生成异常</h1><pre>{html.escape(type(exc).__name__ + ': ' + str(exc) + '\\n\\n' + traceback.format_exc())}</pre>"
+            f"<h1>报告生成异常</h1><pre>{error_text}</pre>"
             f"<p>原始数据仍保存在 <code>{html.escape(str(matrix_path.parent))}</code>。</p>",
             encoding="utf-8",
         )
@@ -160,14 +157,6 @@ def main() -> int:
     )
     parser.add_argument("--commit-workers", type=int, default=4)
     parser.add_argument("--search-workers", type=int, default=4)
-    parser.add_argument(
-        "--no-client-admission",
-        action="store_true",
-        help="Observe EchoMem queueing without client-side admission scheduling.",
-    )
-    parser.add_argument("--admission-capacity", type=int, default=1)
-    parser.add_argument("--search-admission-capacity", type=int, default=4)
-    parser.add_argument("--commit-admission-capacity", type=int, default=1)
     parser.add_argument("--pid", type=int, default=0)
     args = parser.parse_args()
     root = Path(args.out_dir or f"results/stress/matrix_{datetime.now().strftime('%Y%m%d_%H%M%S')}")
@@ -181,16 +170,8 @@ def main() -> int:
             str(runner),
             "--base-url",
             args.base_url,
-            "--scheduler-policy",
-            policy,
             "--auth-header",
             args.auth_header,
-            "--admission-capacity",
-            str(args.admission_capacity),
-            "--search-admission-capacity",
-            str(args.search_admission_capacity),
-            "--commit-admission-capacity",
-            str(args.commit_admission_capacity),
             "--duration-s",
             str(args.duration_s),
             "--search-rps",
@@ -212,8 +193,7 @@ def main() -> int:
         ]
         if args.allow_shared_identity:
             command.append("--allow-shared-identity")
-        if args.no_client_admission:
-            command.append("--no-client-admission")
+        command.append("--no-client-admission")
         if args.tenant_config:
             command += ["--tenant-config", args.tenant_config]
         elif args.auth_key:

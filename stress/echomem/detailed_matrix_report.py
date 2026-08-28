@@ -287,12 +287,12 @@ pre{{max-height:460px;overflow:auto;padding:12px;background:#f7f9fa;border:1px s
 <path d="m12 18 14 8 14-8M26 26v15M18 22.5v9l8 4.5 8-4.5v-9" fill="none" stroke="#13795b" stroke-width="2.5" stroke-linejoin="round"/>
 <circle cx="26" cy="13" r="3" fill="#13795b"/>
 </svg>
-<div><h1>EchoMem 压测数据报告</h1><div class="sub">策略矩阵 · 逐请求数据 · 真实 HTTP / 真实模型 · {esc(first['summary'].get('finished_at'))}</div></div>
+<div><h1>EchoMem 压测数据报告</h1><div class="sub">服务端观测 · 逐请求数据 · 真实 HTTP / 真实模型 · {esc(first['summary'].get('finished_at'))}</div></div>
 </header>
 
 <section class="panel hero">
 <div><div class="label">数据有效性</div><div class="hero-title">{identity_title}</div>
-<div>本报告可以用于比较当前几种压测端准入策略的数值，但不能把共享身份结果当作租户隔离或租户公平性结论。</div>
+<div>本报告展示客户端不做调度时 EchoMem 面对真实并发请求的结果，不能把共享身份结果当作租户隔离结论。</div>
 <div class="callout">当前矩阵配置：<strong>{esc(actual_tenants)} 个标记租户</strong>，认证模式为 <code>{esc(identity_mode)}</code>。要通过多租户上线门槛，必须改用每个租户独立 API Key，并完成完整 N×N 隔离探针。</div></div>
 <div class="hero-meta">服务 <code>{esc(first['summary'].get('base_url'))}</code><br>
 时长 <code>{esc(params.get('duration_s'))}s</code> · Search <code>{esc(params.get('search_rps'))} RPS</code><br>
@@ -303,10 +303,10 @@ pre{{max-height:460px;overflow:auto;padding:12px;background:#f7f9fa;border:1px s
 <div class="metric"><div class="label">最快 Commit P95</div><div class="value bad">{seconds(min(finite_values([(item['commit'].get('completion') or {}).get('p95_s') for item in policies]) or [None]))}</div><div class="note">策略矩阵最小值</div></div>
 <div class="metric"><div class="label">最快 Search P95</div><div class="value blue">{seconds(min(finite_values([(item['search'].get('latency') or {}).get('p95_s') for item in policies]) or [None]))}</div><div class="note">策略矩阵最小值</div></div>
 <div class="metric"><div class="label">Commit 延迟事件</div><div class="value">{sum(len(item['commits_csv']) for item in policies)}</div><div class="note">原始 Commit 记录总数</div></div>
-<div class="metric"><div class="label">策略对比</div><div class="value">{len(policies)}</div><div class="note">FIFO / Search 优先 / Tenant Fair</div></div>
+<div class="metric"><div class="label">服务端观测运行</div><div class="value">{len(policies)}</div><div class="note">客户端调度关闭</div></div>
 </div>
 
-<section class="panel"><div class="section-head"><h2>策略对比：完整数值</h2><span class="section-note">时间单位均为秒；Commit 为端到端完成时间</span></div>
+<section class="panel"><div class="section-head"><h2>运行结果：完整数值</h2><span class="section-note">时间单位均为秒；Commit 为端到端完成时间</span></div>
 <div class="table-wrap"><table><thead><tr>
 <th>策略</th><th>状态</th><th>Commit 提交/完成</th><th>Commit 平均</th><th>P50</th><th>P95</th><th>P99</th><th>最大</th>
 <th>Search 提交/成功</th><th>Search 平均</th><th>P95</th><th>P99</th><th>吞吐 RPS</th><th>准入平均等待</th><th>最大队列</th>

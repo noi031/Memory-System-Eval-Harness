@@ -17,6 +17,7 @@ from stress.echomem.runner import (
     SearchRecord,
     _server_observability,
     build_report,
+    commit_with_retry,
     load_tenant_specs,
     linear_slope_per_minute,
     workload_metrics,
@@ -397,6 +398,45 @@ class StressRunnerTests(unittest.TestCase):
         client = EchoMemHTTP("http://127.0.0.1:1", admission=admission)
         client.commit_status("session", "archive")
         self.assertEqual([], admission.operations)
+
+    def test_commit_retry_honors_retry_after_and_keeps_history(self) -> None:
+        class RetryClient:
+            def __init__(self):
+                self.calls = 0
+
+            def commit(self, session_id):
+                self.calls += 1
+                if self.calls == 1:
+                    return HttpResult(
+                        "POST",
+                        "/commit",
+                        429,
+                        0.001,
+                        {},
+                        "HTTP 429",
+                        0.0,
+                    )
+                return HttpResult(
+                    "POST",
+                    "/commit",
+                    202,
+                    0.001,
+                    {"archive_id": "archive-1"},
+                )
+
+        client = RetryClient()
+        response, history, wait_s = commit_with_retry(
+            client,
+            "session",
+            max_attempts=3,
+            backoff_s=10.0,
+            max_backoff_s=30.0,
+        )
+        self.assertEqual(202, response.status_code)
+        self.assertEqual(2, client.calls)
+        self.assertEqual(2, len(history))
+        self.assertEqual(429, history[0]["status_code"])
+        self.assertEqual(0.0, wait_s)
 
     def test_search_service_time_excludes_worker_admission_interval(self) -> None:
         class SlowAdmissionClient:

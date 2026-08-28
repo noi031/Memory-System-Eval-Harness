@@ -36,16 +36,13 @@ commit, search, resource, and `/metrics` samples. Raw Prometheus responses are
 also retained in `server_metrics.jsonl`. Transport/startup/authentication
 failures are reported as `ENVIRONMENT_ERROR`.
 
-For a policy matrix, the runner also writes `matrix.json`, the legacy compact
-`matrix.html`, the data-first `matrix-detailed.html`, and the number-first
-auditing report `matrix-audit.html`. The auditing report shows Commit/Search
-mean, P50/P90/P95/P99/max, per-tenant statistics, every delayed request's
-timestamps and queue data, strategy semantics, and links to the raw CSV files.
-It explicitly distinguishes client-side admission wait from server-side
-queueing; without server telemetry it must not be used to claim server-side
-rate limiting.
+For a standard stress run, the runner writes `summary.json`, `report.html`,
+request CSVs, raw `/metrics`, and the server-observation timeline. It explicitly
+distinguishes client-side worker wait from server-side queueing; without server
+telemetry it must not be used to claim server-side rate limiting. The standard
+run does not add a client-side scheduling policy.
 
-Example formal matrix command:
+Example formal multi-tenant command:
 
 ```bash
 python3 stress/echomem/run_matrix.py \
@@ -57,8 +54,6 @@ python3 stress/echomem/run_matrix.py \
   --commit-rpm 2 \
   --sessions-per-tenant 4 \
   --messages-per-session 3 \
-  --search-admission-capacity 4 \
-  --commit-admission-capacity 1 \
   --out-dir results/stress/matrix_$(date +%Y%m%d_%H%M%S)
 ```
 
@@ -97,38 +92,59 @@ export STRESS_TENANT_D_KEY='...'
 python3 stress/echomem/runner.py \
   --base-url http://127.0.0.1:8010 \
   --tenant-config stress/echomem/tenants.json \
-  --scheduler-policy tenant-fair \
-  --admission-capacity 1 \
   --duration-s 120 \
   --search-rps 2 \
   --sessions-per-tenant 2 \
   --messages-per-session 3 \
-  --out-dir results/stress/tenant-fair-$(date +%Y%m%d_%H%M%S)
+  --out-dir results/stress/server-observe-$(date +%Y%m%d_%H%M%S)
 ```
 
 The report never writes the key itself. It records only the key source name,
 tenant id, request order, and timing evidence.
 
-## Scheduling policies
+### Commit barrier and Retry-After
 
-`--scheduler-policy` controls request admission in the load generator and is
-recorded as such; it does not claim to inspect EchoMem's internal queue.
+For a rate-limit or Commit-storm regression test, use a fixed barrier rather
+than relying only on a long fixed-rate stream:
 
-- `search-priority`: Search is inserted ahead of queued Commit requests in the
-  shared client-side admission queue; it is not an EchoMem server-side lane.
-- `fifo`: Search and Commit enter one FIFO admission queue.
-- `dual-lane`: Search and Commit use independent FIFO queues with separate
-  admission capacities (`--search-admission-capacity` and
-  `--commit-admission-capacity`).
-- `tenant-fair`: requests are admitted round-robin by tenant, preserving
-  FIFO order inside each tenant.
-- `dual-lane-tenant-fair`: Search and Commit use independent queues, with
-  round-robin tenant admission inside each lane.
+```bash
+python3 stress/echomem/runner.py \
+  --base-url http://127.0.0.1:8010 \
+  --tenant-config stress/echomem/tenants.json \
+  --tenants 4 \
+  --commit-barrier \
+  --commit-barrier-count 160 \
+  --commit-tenant-distribution zipf \
+  --commit-zipf-exponent 2 \
+  --commit-max-attempts 3 \
+  --out-dir results/stress/commit-barrier-$(date +%Y%m%d_%H%M%S)
+```
 
-The report includes admission order, queue depth, wait time, delayed request
-timestamps, per-tenant P50/P95/P99, and the complete CSV request timeline.
-Commit status polling is excluded from the Commit mutation admission lane, so
-Commit queue latency measures the write request rather than its polling loop.
+The barrier schedules all 160 initial Commit requests at one arrival instant
+and distributes them across tenants using the selected distribution. A
+`429` is retried only for the same session, after the server-provided
+`Retry-After`; if that header is absent, bounded exponential backoff is used.
+Every attempt, retry count, retry wait, final status and request ID is retained
+in `commit_results.csv` and `summary.json`. A non-429 failure is not replayed,
+so data or service errors cannot be hidden by the retry mechanism.
+
+## Client scheduling
+
+The standard platform does not simulate FIFO, Search priority, dual lanes, or
+tenant-fair scheduling. Online users may connect directly to EchoMem without
+this test platform, so adding one of those policies would make the load
+generator an artificial intermediary and could hide or create contention.
+
+Search and Commit are submitted through separate client worker pools only to
+allow concurrent HTTP requests; this is an execution-capacity setting, not a
+business scheduling policy. The report records the client worker wait
+separately from EchoMem server queue telemetry.
+
+The low-level `--scheduler-policy` options remain only for backward
+compatibility with old exploratory runs and unit tests. They are not exposed
+by `formal_suite.py`, `run_matrix.py`, the Web entry, or the Feishu entry.
+The high-level platform commands intentionally have no client-scheduling
+selector or admission-capacity setting.
 `--search-rps` is the total Search arrival rate for the whole run, not a
 per-tenant rate. For example, with four tenants and a desired 0.5 RPS per
 tenant, set `--search-rps 2`; the runner distributes arrivals round-robin and
@@ -143,8 +159,7 @@ four tenants this produces `4 x 4 x 5 = 80` probes. Change the count with
 `--isolation-markers-per-tenant`; a release run should not reduce it to one
 without documenting why.
 
-For measuring EchoMem's own scheduler, disable the load generator's admission
-controller:
+For a direct server-observation run:
 
 ```bash
 python3 stress/echomem/runner.py \
@@ -160,11 +175,10 @@ python3 stress/echomem/runner.py \
   --out-dir results/stress/server-observe-$(date +%Y%m%d_%H%M%S)
 ```
 
-`--no-client-admission` removes FIFO/Search-priority/tenant-fair gating from
-the runner. The executor worker pool can still become a client-side bottleneck,
-so its queue wait remains recorded and its worker count must be sized above the
-expected in-flight load. Use this mode for service-side scheduling conclusions;
-use the policy modes above only for comparing client-side request shaping.
+`--no-client-admission` removes all client-side admission gating. The executor
+worker pool can still become a client-side bottleneck, so its queue wait remains
+recorded and its worker count must be sized above the expected in-flight load.
+Use this mode for service-side scheduling observations.
 
 ## Formal release suite
 
@@ -176,11 +190,13 @@ short matrix run. It executes these cases:
 - `commit-storm`: four tenants with elevated Commit traffic
 - `search-storm`: four tenants with elevated Search traffic
 - `soak`: four tenants under a longer steady-state load
+- `commit-barrier`: 160 simultaneous Commit arrivals with Zipf-distributed
+  tenant load, used for the rev5 S2-style rate-limit regression
 
-Each case compares FIFO, Search-priority, dual-lane, tenant-fair, and
-dual-lane-tenant-fair. The default is three repetitions per case. Every run
-retains `summary.json`, request CSVs, raw `/metrics`, and its own `report.html`;
-the suite-level `suite.html` contains the numeric comparison table.
+Each case runs once per repetition with client-side admission disabled. The
+default is three repetitions per case. Every run retains `summary.json`,
+request CSVs, raw `/metrics`, and its own `report.html`; the suite-level
+`suite.html` contains the numeric comparison table.
 
 ```bash
 python3 stress/echomem/formal_suite.py \
@@ -201,15 +217,15 @@ server telemetry such as queue depth, execution start time, HTTP 429, and
 `Retry-After`; those values are retained when the service exposes them.
 
 The generated `suite.html` is data-first. It shows numeric distributions for
-every scenario/policy pair, including Commit and Search mean/P50/P95/P99/max,
+every scenario in the server-observation mode, including Commit and Search mean/P50/P95/P99/max,
 client admission wait, server queue wait, server execution time, per-tenant
 counts and quantiles, delayed requests, HTTP 429, and telemetry coverage.
 Expand a row to inspect every delayed request and the raw CSV files. Missing
 server timestamps are rendered as `-`; they are never replaced with
 client-side timing.
 
-For a service-side scheduling observation, disable the runner's admission
-controller. This is a separate run from the client-policy comparison:
+For a service-side scheduling observation, the formal suite already disables
+the runner's admission controller:
 
 ```bash
 python3 stress/echomem/formal_suite.py \
@@ -217,7 +233,6 @@ python3 stress/echomem/formal_suite.py \
   --tenant-config stress/echomem/tenants.server.json \
   --out-dir results/stress/formal_server_observe_$(date +%Y%m%d_%H%M%S) \
   --repeats 3 \
-  --no-client-admission \
   --commit-workers 64 \
   --search-workers 64
 ```

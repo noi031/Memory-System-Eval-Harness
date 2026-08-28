@@ -455,6 +455,10 @@ class CommitRecord:
     server_terminal_status: str = ""
     scheduled_at: str = ""
     schedule_lateness_s: float = 0.0
+    attempt_count: int = 1
+    retry_count: int = 0
+    retry_wait_s: float = 0.0
+    retry_history: list[dict[str, Any]] = field(default_factory=list)
 
 
 @dataclass
@@ -1106,6 +1110,51 @@ def poll_commit(
     record.end_to_end_s = record.queue_wait_s + record.service_s
 
 
+def commit_with_retry(
+    client: EchoMemHTTP,
+    session_id: str,
+    *,
+    max_attempts: int,
+    backoff_s: float,
+    max_backoff_s: float,
+) -> tuple[HttpResult, list[dict[str, Any]], float]:
+    """Retry only service-side rate limiting, honoring Retry-After.
+
+    A retry is a new HTTP Commit attempt for the same session. Other errors
+    are returned immediately because replaying them could hide a real
+    service or data-integrity failure. The history is persisted with the
+    final request record so the report can distinguish accepted work from
+    failed initial attempts.
+    """
+    attempts: list[dict[str, Any]] = []
+    total_wait_s = 0.0
+    limit = max(1, int(max_attempts))
+    for attempt in range(1, limit + 1):
+        response = client.commit(session_id)
+        attempts.append(
+            {
+                "attempt": attempt,
+                "status_code": response.status_code,
+                "elapsed_s": response.elapsed_s,
+                "retry_after_s": response.retry_after_s,
+                "request_id": response.request_id,
+                "error": response.error,
+            }
+        )
+        if response.status_code != 429 or attempt >= limit:
+            return response, attempts, total_wait_s
+        retry_after = response.retry_after_s
+        delay = (
+            max(0.0, float(retry_after))
+            if retry_after is not None
+            else min(max(0.0, backoff_s) * (2 ** (attempt - 1)), max_backoff_s)
+        )
+        total_wait_s += delay
+        if delay:
+            time.sleep(delay)
+    raise AssertionError("unreachable commit retry loop")
+
+
 def write_csv(path: Path, rows: list[dict[str, Any]]) -> None:
     if not rows:
         path.write_text("", encoding="utf-8")
@@ -1247,6 +1296,10 @@ def run_commits(
     commit_timeout_s: float,
     poll_interval_s: float,
     workers: int,
+    *,
+    commit_max_attempts: int = 3,
+    commit_retry_backoff_s: float = 2.0,
+    commit_retry_max_backoff_s: float = 30.0,
 ) -> list[CommitRecord]:
     records: list[CommitRecord] = []
     for tenant, session_id in sessions:
@@ -1260,11 +1313,21 @@ def run_commits(
             else:
                 message_ids.append(message_id)
         if message_ids:
-            response = client.commit(session_id)
+            response, retry_history, retry_wait_s = commit_with_retry(
+                client,
+                session_id,
+                max_attempts=commit_max_attempts,
+                backoff_s=commit_retry_backoff_s,
+                max_backoff_s=commit_retry_max_backoff_s,
+            )
             archive_id = extract_archive(response.payload)
             records.append(CommitRecord(tenant, session_id, archive_id, now_iso(), message_ids=message_ids,
                                         status="accepted" if response.status_code and response.status_code < 400 and archive_id else "commit_rejected",
                                         error=response.error,
+                                        attempt_count=len(retry_history),
+                                        retry_count=max(0, len(retry_history) - 1),
+                                        retry_wait_s=retry_wait_s,
+                                        retry_history=retry_history,
                                         operation_id=f"commit-{uuid.uuid4().hex}"))
     pending = [record for record in records if record.status == "accepted" and record.archive_id]
     with ThreadPoolExecutor(max_workers=max(1, workers)) as executor:
@@ -1295,6 +1358,13 @@ def run_parallel_workload(
     search_timeout_s: float,
     search_workers: int,
     commit_rpm: float = 0.0,
+    commit_max_attempts: int = 3,
+    commit_retry_backoff_s: float = 2.0,
+    commit_retry_max_backoff_s: float = 30.0,
+    commit_barrier: bool = False,
+    commit_barrier_count: int = 0,
+    commit_tenant_distribution: str = "uniform",
+    commit_zipf_exponent: float = 2.0,
 ) -> tuple[list[CommitRecord], list[SearchRecord]]:
     """Run the write/commit and search lanes concurrently.
 
@@ -1409,11 +1479,20 @@ def run_parallel_workload(
             commit_timeout_s,
             poll_interval_s,
             commit_workers,
+            commit_max_attempts=commit_max_attempts,
+            commit_retry_backoff_s=commit_retry_backoff_s,
+            commit_retry_max_backoff_s=commit_retry_max_backoff_s,
+            commit_barrier=commit_barrier,
+            commit_barrier_count=commit_barrier_count,
+            commit_tenant_distribution=commit_tenant_distribution,
+            commit_zipf_exponent=commit_zipf_exponent,
         )
 
     with ThreadPoolExecutor(max_workers=1) as executor:
         commit_future = executor.submit(
-            commit_stream if commit_rpm > 0 else commit_prepared
+            commit_stream
+            if commit_rpm > 0 or commit_barrier_count > 0
+            else commit_prepared
         )
         searches = scenario_search(
             client_or_clients, sessions, duration_s, search_rps, search_timeout_s,
@@ -1432,6 +1511,14 @@ def run_commit_stream(
     commit_timeout_s: float,
     poll_interval_s: float,
     workers: int,
+    *,
+    commit_max_attempts: int = 3,
+    commit_retry_backoff_s: float = 2.0,
+    commit_retry_max_backoff_s: float = 30.0,
+    commit_barrier: bool = False,
+    commit_barrier_count: int = 0,
+    commit_tenant_distribution: str = "uniform",
+    commit_zipf_exponent: float = 2.0,
 ) -> list[CommitRecord]:
     """Submit Commit requests at a fixed per-tenant arrival rate.
 
@@ -1439,11 +1526,31 @@ def run_commit_stream(
     uses a dedicated session, so repeated commits cannot accidentally overlap
     on the same session or turn the workload into an invalid mutation race.
     """
-    if duration_s <= 0 or commit_rpm <= 0 or not tenants:
+    if duration_s <= 0 or (commit_rpm <= 0 and commit_barrier_count <= 0) or not tenants:
         return []
     jobs: list[tuple[float, str, str, list[str]]] = []
-    for tenant in tenants:
-        count = max(1, math.ceil(commit_rpm * duration_s / 60.0))
+    barrier_count = max(0, int(commit_barrier_count))
+    distribution = str(commit_tenant_distribution or "uniform").lower()
+    if distribution not in {"uniform", "zipf"}:
+        raise ValueError("commit tenant distribution must be uniform or zipf")
+    if commit_zipf_exponent <= 0:
+        raise ValueError("commit zipf exponent must be positive")
+    barrier_counts: list[int] = []
+    if barrier_count:
+        if distribution == "zipf":
+            weights = [1.0 / ((index + 1) ** commit_zipf_exponent) for index in range(len(tenants))]
+            raw = [barrier_count * weight / sum(weights) for weight in weights]
+            barrier_counts = [int(value) for value in raw]
+            for index in sorted(range(len(raw)), key=lambda item: raw[item] - barrier_counts[item], reverse=True)[: barrier_count - sum(barrier_counts)]:
+                barrier_counts[index] += 1
+        else:
+            base = barrier_count // len(tenants)
+            barrier_counts = [base + (1 if index < barrier_count % len(tenants) else 0) for index in range(len(tenants))]
+    for tenant_index, tenant in enumerate(tenants):
+        if barrier_count:
+            count = barrier_counts[tenant_index]
+        else:
+            count = max(1, math.ceil(commit_rpm * duration_s / 60.0))
         client = client_for(client_or_clients, tenant)
         for index in range(count):
             session_id = client.open_session(
@@ -1464,7 +1571,11 @@ def run_commit_stream(
                         f"{response.error or response.status_code}"
                     )
                 message_ids.append(message_id)
-            offset = index * 60.0 / commit_rpm
+            offset = (
+                0.0
+                if commit_barrier or barrier_count
+                else index * 60.0 / commit_rpm
+            )
             jobs.append((offset, tenant, session_id, message_ids))
     jobs.sort(key=lambda item: item[0])
 
@@ -1489,10 +1600,22 @@ def run_commit_stream(
                 def submit_commit(
                     tenant_name: str = tenant,
                     sid: str = session_id,
-                ) -> tuple[HttpResult, float, str]:
+                ) -> tuple[
+                    HttpResult,
+                    float,
+                    str,
+                    list[dict[str, Any]],
+                    float,
+                ]:
                     started_mono = time.monotonic()
-                    response = client_for(client_or_clients, tenant_name).commit(sid)
-                    return response, started_mono, now_iso()
+                    response, retry_history, retry_wait_s = commit_with_retry(
+                        client_for(client_or_clients, tenant_name),
+                        sid,
+                        max_attempts=commit_max_attempts,
+                        backoff_s=commit_retry_backoff_s,
+                        max_backoff_s=commit_retry_max_backoff_s,
+                    )
+                    return response, started_mono, now_iso(), retry_history, retry_wait_s
 
                 futures[commit_executor.submit(submit_commit)] = (
                     tenant,
@@ -1516,7 +1639,13 @@ def run_commit_stream(
                     scheduled_at,
                     target,
                 ) = futures[future]
-                response, started_mono, started_at = future.result()
+                (
+                    response,
+                    started_mono,
+                    started_at,
+                    retry_history,
+                    retry_wait_s,
+                ) = future.result()
                 archive_id = extract_archive(response.payload)
                 record = CommitRecord(
                     tenant,
@@ -1551,6 +1680,10 @@ def run_commit_stream(
                     server_queue_depth=response.server_queue_depth,
                     server_active_workers=response.server_active_workers,
                     server_terminal_status=response.server_terminal_status,
+                    attempt_count=len(retry_history),
+                    retry_count=max(0, len(retry_history) - 1),
+                    retry_wait_s=retry_wait_s,
+                    retry_history=retry_history,
                 )
                 records.append(record)
                 if record.status == "accepted":
@@ -2036,6 +2169,10 @@ def workload_metrics(
             "success_rate": len(commit_success) / len(commits) if commits else None,
             "http_status_counts": status_counts(commits),
             "rate_limited_count": sum(record.status_code == 429 for record in commits),
+            "retry_count": sum(record.retry_count for record in commits),
+            "retried_request_count": sum(record.retry_count > 0 for record in commits),
+            "attempt_count": sum(record.attempt_count for record in commits),
+            "retry_wait": numeric_stats([record.retry_wait_s for record in commits]),
             "retry_after": numeric_stats(retry_after_values(commits)),
             "queue_wait": numeric_stats([record.queue_wait_s for record in commits]),
             "completion": numeric_stats([record.end_to_end_s for record in commit_success]),
@@ -2442,6 +2579,47 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--commit-timeout-s", type=float, default=600.0)
     parser.add_argument("--commit-poll-interval-s", type=float, default=2.0)
+    parser.add_argument(
+        "--commit-max-attempts",
+        type=int,
+        default=3,
+        help="Maximum Commit HTTP attempts; only HTTP 429 is retried.",
+    )
+    parser.add_argument(
+        "--commit-retry-backoff-s",
+        type=float,
+        default=2.0,
+        help="Fallback delay when a 429 response has no Retry-After header.",
+    )
+    parser.add_argument(
+        "--commit-retry-max-backoff-s",
+        type=float,
+        default=30.0,
+        help="Upper bound for exponential fallback backoff.",
+    )
+    parser.add_argument(
+        "--commit-barrier",
+        action="store_true",
+        help="Submit the configured Commit barrier at one arrival instant.",
+    )
+    parser.add_argument(
+        "--commit-barrier-count",
+        type=int,
+        default=0,
+        help="Total Commit requests in a barrier, distributed across tenants.",
+    )
+    parser.add_argument(
+        "--commit-tenant-distribution",
+        choices=("uniform", "zipf"),
+        default="uniform",
+        help="Tenant allocation for a Commit barrier.",
+    )
+    parser.add_argument(
+        "--commit-zipf-exponent",
+        type=float,
+        default=2.0,
+        help="Zipf exponent when --commit-tenant-distribution=zipf.",
+    )
     parser.add_argument("--search-timeout-s", type=float, default=40.0)
     parser.add_argument("--search-p95-limit-s", type=float, default=2.5)
     parser.add_argument("--search-degradation-factor", type=float, default=2.0)
@@ -2477,22 +2655,36 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--no-client-admission",
         action="store_true",
+        default=True,
         help=(
-            "Do not gate requests with the client-side scheduler. Use this to "
-            "observe EchoMem's own queueing; executor worker queues are still recorded."
+            "Do not gate requests with the client-side scheduler (default). "
+            "Executor worker queues are still recorded."
+        ),
+    )
+    parser.add_argument(
+        "--client-admission",
+        dest="no_client_admission",
+        action="store_false",
+        help=(
+            "Explicitly enable the legacy client-side scheduler. This is only "
+            "for exploratory compatibility runs."
         ),
     )
     parser.add_argument(
         "--scheduler-policy",
         choices=(
+            "server-observe",
             "search-priority",
             "fifo",
             "tenant-fair",
             "dual-lane",
             "dual-lane-tenant-fair",
         ),
-        default="search-priority",
-        help="Client admission policy used by the workload.",
+        default="server-observe",
+        help=(
+            "Recorded workload mode. server-observe is the default; legacy "
+            "client policies require --client-admission."
+        ),
     )
     parser.add_argument(
         "--commit-delay-threshold-s",
@@ -2521,7 +2713,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--pid", type=int, help="EchoMem PID for /proc resource sampling")
     parser.add_argument("--no-metrics", action="store_true", help="Mark resource observation INCONCLUSIVE")
     parser.add_argument("--out-dir", default="")
-    return parser.parse_args()
+    args = parser.parse_args()
+    if args.commit_max_attempts < 1:
+        parser.error("--commit-max-attempts must be at least 1")
+    if args.commit_barrier_count < 0:
+        parser.error("--commit-barrier-count must not be negative")
+    if args.commit_barrier_count and args.commit_rpm:
+        parser.error("--commit-barrier-count cannot be combined with --commit-rpm")
+    if args.commit_zipf_exponent <= 0:
+        parser.error("--commit-zipf-exponent must be positive")
+    if not args.no_client_admission and args.scheduler_policy == "server-observe":
+        parser.error("--client-admission requires a legacy --scheduler-policy")
+    return args
 
 
 def main() -> int:
@@ -2680,6 +2883,13 @@ def main() -> int:
                 args.search_timeout_s,
                 args.search_workers,
                 args.commit_rpm,
+                args.commit_max_attempts,
+                args.commit_retry_backoff_s,
+                args.commit_retry_max_backoff_s,
+                args.commit_barrier,
+                args.commit_barrier_count,
+                args.commit_tenant_distribution,
+                args.commit_zipf_exponent,
             )
         elif args.scenario == "fairness":
             search_records = scenario_search(
@@ -2717,7 +2927,9 @@ def main() -> int:
         if args.duration_s > 0 and args.search_rps > 0
         else 0
     )
-    if args.commit_rpm > 0:
+    if args.commit_barrier_count > 0:
+        target_commit = args.commit_barrier_count
+    elif args.commit_rpm > 0:
         target_commit = (
             len(tenants) * max(1, math.ceil(args.commit_rpm * args.duration_s / 60.0))
             if args.duration_s > 0

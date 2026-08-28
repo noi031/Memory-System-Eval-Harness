@@ -21,13 +21,9 @@ from pathlib import Path
 from typing import Any
 
 
-POLICIES = (
-    "fifo",
-    "search-priority",
-    "dual-lane",
-    "tenant-fair",
-    "dual-lane-tenant-fair",
-)
+# Formal runs reproduce online clients. The load generator does not impose
+# FIFO, priority, lane, or tenant-fair scheduling of its own.
+POLICIES = ("server-observe",)
 
 SCENARIOS: dict[str, dict[str, Any]] = {
     "baseline": {
@@ -55,6 +51,19 @@ SCENARIOS: dict[str, dict[str, Any]] = {
         "search_rps": 4.0,
         "commit_rpm": 10.0,
         "sessions_per_tenant": 4,
+        "messages_per_session": 3,
+    },
+    "commit-barrier": {
+        "label": "160 Commit 屏障风暴（Zipf 热租户）",
+        "tenants": 4,
+        "duration_s": 60,
+        "search_rps": 4.0,
+        "commit_rpm": 0.0,
+        "commit_barrier": True,
+        "commit_barrier_count": 160,
+        "commit_tenant_distribution": "zipf",
+        "commit_zipf_exponent": 2.0,
+        "sessions_per_tenant": 40,
         "messages_per_session": 3,
     },
     "search-storm": {
@@ -118,8 +127,6 @@ def run_case(
         str(config_path),
         "--tenants",
         str(case["tenants"]),
-        "--scheduler-policy",
-        policy,
         "--duration-s",
         str(case["duration_s"]),
         "--search-rps",
@@ -132,6 +139,12 @@ def run_case(
         str(case["messages_per_session"]),
         "--commit-workers",
         str(args.commit_workers),
+        "--commit-max-attempts",
+        str(args.commit_max_attempts),
+        "--commit-retry-backoff-s",
+        str(args.commit_retry_backoff_s),
+        "--commit-retry-max-backoff-s",
+        str(args.commit_retry_max_backoff_s),
         "--search-workers",
         str(args.search_workers),
         "--search-admission-capacity",
@@ -143,14 +156,23 @@ def run_case(
         "--out-dir",
         str(output),
     ]
+    if case.get("commit_barrier"):
+        command += [
+            "--commit-barrier",
+            "--commit-barrier-count",
+            str(case["commit_barrier_count"]),
+            "--commit-tenant-distribution",
+            str(case.get("commit_tenant_distribution", "uniform")),
+            "--commit-zipf-exponent",
+            str(case.get("commit_zipf_exponent", 2.0)),
+        ]
     if args.auth_header:
         command += ["--auth-header", args.auth_header]
     if args.pid:
         command += ["--pid", str(args.pid)]
     if args.no_server_metrics:
         command.append("--no-server-metrics")
-    if args.no_client_admission:
-        command.append("--no-client-admission")
+    command.append("--no-client-admission")
     if args.reset_command:
         completed_reset = subprocess.run(
             args.reset_command,
@@ -296,8 +318,8 @@ h1{{margin:0;font-size:25px}}h2{{font-size:18px;margin:0 0 10px}}.muted,small{{c
 .scroll{{overflow:auto}}table{{width:100%;border-collapse:collapse;font-size:12px;white-space:nowrap}}th,td{{padding:9px 8px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}}th{{background:#fafbfc;color:var(--muted)}}a{{color:#286aa6}}
 </style></head><body><main class='page'><header class='top'>{icon}<div><h1>EchoMem 正式多租户压测套件</h1><small>真实 HTTP / 真实模型 · {html.escape(manifest.get('created_at', ''))}</small></div></header>
 <section class='section'><div class='notice'><b>重要边界：</b>本套件的策略控制压测端准入，不自动等同于 EchoMem 内部限流。只有服务端提供队列、429、Retry-After 和执行时间遥测，才能确认服务端调度。</div>
-<p>正式结果要求每次运行使用独立认证租户。当前套件包含单租户基线、四租户均衡、Commit 压力、Search 压力和长稳态场景；每个场景按策略重复执行，保留全部逐请求 CSV、原始 /metrics 和独立报告。</p></section>
-<section class='section'><h2>运行配置</h2><p class='muted'>服务：<code>{html.escape(str(manifest.get('base_url')))}</code> · 重复轮次：{html.escape(str(manifest.get('repeats')))} · 策略数：{len(POLICIES)}</p>
+<p>正式结果要求每次运行使用独立认证租户。当前套件包含单租户基线、四租户均衡、Commit 压力、Search 压力和长稳态场景；每个场景在同一套真实并发模式下重复执行，保留全部逐请求 CSV、原始 /metrics 和独立报告。</p></section>
+<section class='section'><h2>运行配置</h2><p class='muted'>服务：<code>{html.escape(str(manifest.get('base_url')))}</code> · 重复轮次：{html.escape(str(manifest.get('repeats')))} · 客户端调度策略：关闭</p>
 <div class='scroll'><table><thead><tr><th>场景</th><th>轮次</th><th>策略</th><th>状态</th><th>Commit 完成</th><th>Commit 平均</th><th>Commit P95</th><th>Commit P99</th><th>Search 成功</th><th>Search 平均</th><th>Search P95</th><th>最大队列</th><th>隔离</th><th>详情</th></tr></thead><tbody>{''.join(rows)}</tbody></table></div></section>
 <section class='section'><h2>跨轮次聚合数据</h2><p class='muted'>这里直接合并每轮 CSV 的请求级数据，避免只看单轮均值。延迟单位为秒；延迟数使用各轮配置的阈值。</p>
 <div class='scroll'><table><thead><tr><th>场景</th><th>策略</th><th>轮次</th><th>Commit 完成/提交</th><th>Commit 平均</th><th>Commit P50</th><th>Commit P90</th><th>Commit P95</th><th>Commit P99</th><th>Commit 最大</th><th>Commit 延迟数</th><th>Search 成功/提交</th><th>Search 平均</th><th>Search P50</th><th>Search P90</th><th>Search P95</th><th>Search P99</th><th>Search 最大</th><th>Search 延迟数</th><th>429</th></tr></thead><tbody>{''.join(aggregate_rows) or '<tr><td colspan=20>没有可聚合数据</td></tr>'}</tbody></table></div>
@@ -485,19 +507,17 @@ def main() -> int:
     parser.add_argument("--base-url", default=os.getenv("ECHOMEM_BASE_URL", "http://127.0.0.1:8010"))
     parser.add_argument("--tenant-config", required=True)
     parser.add_argument("--out-dir", default="")
-    parser.add_argument("--scenarios", default="baseline,mixed,commit-storm,search-storm,soak")
+    parser.add_argument(
+        "--scenarios",
+        default="baseline,mixed,commit-storm,commit-barrier,search-storm,soak",
+    )
     parser.add_argument("--repeats", type=int, default=3)
     parser.add_argument("--auth-header", default=os.getenv("ECHOMEM_AUTH_HEADER", "X-API-Key"))
     parser.add_argument("--commit-workers", type=int, default=8)
+    parser.add_argument("--commit-max-attempts", type=int, default=3)
+    parser.add_argument("--commit-retry-backoff-s", type=float, default=2.0)
+    parser.add_argument("--commit-retry-max-backoff-s", type=float, default=30.0)
     parser.add_argument("--search-workers", type=int, default=32)
-    parser.add_argument(
-        "--no-client-admission",
-        action="store_true",
-        help="Observe EchoMem queueing without client-side admission scheduling.",
-    )
-    parser.add_argument("--admission-capacity", type=int, default=1)
-    parser.add_argument("--search-admission-capacity", type=int, default=8)
-    parser.add_argument("--commit-admission-capacity", type=int, default=1)
     parser.add_argument("--pid", type=int, default=0)
     parser.add_argument("--reset-command", default="", help="Optional command run before every case")
     parser.add_argument("--no-server-metrics", action="store_true")
@@ -536,8 +556,8 @@ def main() -> int:
         "repeats": args.repeats,
         "policies": list(POLICIES),
         "reset_command": args.reset_command,
-        "client_admission_enabled": not args.no_client_admission,
-        "server_observation_mode": bool(args.no_client_admission),
+        "client_admission_enabled": False,
+        "server_observation_mode": True,
         "runs": [],
     }
     # Use a deterministic order so a rerun is easy to compare. The service
@@ -600,9 +620,7 @@ def main() -> int:
             "policies": list(POLICIES),
             "commit_workers": args.commit_workers,
             "search_workers": args.search_workers,
-            "admission_capacity": args.admission_capacity,
-            "search_admission_capacity": args.search_admission_capacity,
-            "commit_admission_capacity": args.commit_admission_capacity,
+            "client_admission": "disabled",
         },
         "details": {
             "run_count": len(manifest["runs"]),

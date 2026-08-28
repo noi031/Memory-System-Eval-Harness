@@ -116,6 +116,7 @@ def timestamp_delta(row: dict[str, str], start: str, end: str) -> float | None:
 
 def policy_label(value: str) -> str:
     return {
+        "server-observe": "服务端观测（客户端调度关闭）",
         "fifo": "FIFO",
         "search-priority": "Search 优先",
         "dual-lane": "双通道",
