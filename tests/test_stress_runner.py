@@ -381,10 +381,11 @@ class StressRunnerTests(unittest.TestCase):
         self.assertEqual(0.05, metrics["search"]["completed_throughput_rps"])
         self.assertEqual(60, metrics["workload_duration_s"])
 
-    def test_isolation_probe_query_does_not_echo_secret_marker(self) -> None:
-        query = isolation_probe_query("tenant-a")
+    def test_isolation_probe_query_contains_exact_synthetic_marker(self) -> None:
+        marker = "echomem-isolation-tenant-a-abc123"
+        query = isolation_probe_query("tenant-a", marker)
         self.assertIn("tenant-a", query)
-        self.assertNotIn("echomem-isolation-", query)
+        self.assertIn(marker, query)
 
     def test_workload_metrics_include_timeline_and_minute_buckets(self) -> None:
         commits = [

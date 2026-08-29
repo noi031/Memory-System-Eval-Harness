@@ -138,6 +138,42 @@ class AcceptanceTests(unittest.TestCase):
             )
             self.assertEqual(INCONCLUSIVE, check["status"])
 
+    def test_report4_invalid_baseline_cannot_produce_degradation_pass(self):
+        result = evaluate_pr421_acceptance(
+            {
+                "runs": [
+                    {
+                        "scenario": "A-c4",
+                        "summary": {
+                            "metrics": {
+                                "search": {
+                                    "success_rate": 0.8,
+                                    "latency": {"p95_s": 1.0},
+                                }
+                            }
+                        },
+                    },
+                    {
+                        "scenario": "D-c4",
+                        "summary": {
+                            "metrics": {
+                                "search": {
+                                    "success_rate": 1.0,
+                                    "latency": {"p95_s": 1.1},
+                                }
+                            }
+                        },
+                    },
+                ]
+            }
+        )
+        check = next(
+            item for item in result["checks"]
+            if item["name"] == "Search P95 isolation ratio"
+        )
+        self.assertEqual(INCONCLUSIVE, check["status"])
+        self.assertIn("invalid_baselines", check["observed"])
+
     def test_metric_label_violation_is_not_a_coverage_pass(self):
         result = evaluate_pr421_acceptance(
             {

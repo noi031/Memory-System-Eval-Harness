@@ -42,6 +42,22 @@ distinguishes client-side worker wait from server-side queueing; without server
 telemetry it must not be used to claim server-side rate limiting. The standard
 run does not add a client-side scheduling policy.
 
+### report(4) A/B/C/D 矩阵
+
+使用 `report4` profile 可以复现 `report(4).html` 的核心设计：
+
+```bash
+python3 stress/echomem/formal_suite.py \
+  --profile report4 \
+  --tenant-config stress/echomem/tenants.server.json \
+  --out-dir results/stress/report4_$(date +%Y%m%d_%H%M%S)
+```
+
+该 profile 使用 8 个独立认证租户和每租户并发 1/4/16。A 是纯 Search
+基线，B 是纯 Commit，C 覆盖 8:1/4:1/1:1 读写比例，D 在固定冷却窗口后
+重复 3 轮 Commit 洪峰。成功请求延迟和错误率分开统计；如果 A 基线错误率
+过高，不能继续用它计算压力劣化倍数。
+
 Example formal multi-tenant command:
 
 ```bash

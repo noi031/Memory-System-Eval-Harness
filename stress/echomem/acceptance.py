@@ -124,6 +124,20 @@ def _runs_for(manifest: dict[str, Any], scenario: str) -> list[dict[str, Any]]:
     ]
 
 
+def _report4_concurrency(scenario: str) -> int | None:
+    marker = "-c"
+    if marker not in scenario:
+        return None
+    try:
+        return int(scenario.rsplit(marker, 1)[1])
+    except (TypeError, ValueError):
+        return None
+
+
+def _search_success_rate(run: dict[str, Any]) -> float | None:
+    return _number((_run_summary(run).get("metrics") or {}).get("search", {}).get("success_rate"))
+
+
 def _metric_values(
     runs: list[dict[str, Any]],
     path: tuple[str, ...],
@@ -195,7 +209,10 @@ def _target_coverage(manifest: dict[str, Any]) -> dict[str, Any]:
 def _search_success_gate(manifest: dict[str, Any]) -> dict[str, Any]:
     runs = [
         run for run in manifest.get("runs") or []
-        if str(run.get("scenario") or "") in {"mixed", "search-storm", "saturation"}
+        if (
+            str(run.get("scenario") or "") in {"mixed", "search-storm", "saturation"}
+            or str(run.get("scenario") or "").startswith(("A-c", "C", "D-c"))
+        )
     ]
     rates = _metric_values(runs, ("metrics", "search", "success_rate"))
     if not rates:
@@ -207,10 +224,14 @@ def _search_success_gate(manifest: dict[str, Any]) -> dict[str, Any]:
             reason="没有足够的 Search 成功率数据",
         )
     observed = min(rates)
+    target = 0.99 if any(
+        str(run.get("scenario") or "").startswith(("A-c", "C", "D-c"))
+        for run in runs
+    ) else 0.999
     return _result(
         "Search success rate",
-        PASS if observed >= 0.999 else FAIL,
-        target=0.999,
+        PASS if observed >= target else FAIL,
+        target=target,
         observed=observed,
         evidence="metrics.search.success_rate",
         reason="按所有选定压力场景的最差轮次判定",
@@ -218,6 +239,60 @@ def _search_success_gate(manifest: dict[str, Any]) -> dict[str, Any]:
 
 
 def _search_isolation_gate(manifest: dict[str, Any]) -> dict[str, Any]:
+    all_runs = manifest.get("runs") or []
+    report4 = any(
+        str(run.get("scenario") or "").startswith(("A-c", "C", "D-c"))
+        for run in all_runs
+    )
+    if report4:
+        baselines: dict[int, list[float]] = {}
+        stressed: dict[int, list[float]] = {}
+        invalid: list[str] = []
+        for run in all_runs:
+            scenario = str(run.get("scenario") or "")
+            concurrency = _report4_concurrency(scenario)
+            p95 = _number(
+                ((_run_summary(run).get("metrics") or {}).get("search") or {})
+                .get("latency", {})
+                .get("p95_s")
+            )
+            if concurrency is None or p95 is None or p95 <= 0:
+                continue
+            if scenario.startswith("A-c"):
+                if (_search_success_rate(run) or 0.0) < 0.99:
+                    invalid.append(scenario)
+                else:
+                    baselines.setdefault(concurrency, []).append(p95)
+            elif scenario.startswith(("C", "D-c")):
+                stressed.setdefault(concurrency, []).append(p95)
+        pairs = [
+            (concurrency, max(values), max(stressed[concurrency]))
+            for concurrency, values in baselines.items()
+            if concurrency in stressed and values and stressed[concurrency]
+        ]
+        if invalid or not pairs:
+            return _result(
+                "Search P95 isolation ratio",
+                INCONCLUSIVE,
+                target=2.0,
+                evidence="report4 A/C/D paired metrics.search",
+                observed={"invalid_baselines": invalid, "paired_concurrency": [p[0] for p in pairs]},
+                reason="report4 的 A 纯读基线必须先达到 99% Search 成功率，且按同一并发档配对",
+            )
+        ratios = [
+            {"concurrency": concurrency, "ratio": stress_p95 / baseline_p95}
+            for concurrency, baseline_p95, stress_p95 in pairs
+        ]
+        ratio = max(item["ratio"] for item in ratios)
+        return _result(
+            "Search P95 isolation ratio",
+            PASS if ratio < 2.0 else FAIL,
+            target=2.0,
+            observed={"worst_ratio": ratio, "by_concurrency": ratios},
+            evidence="report4 A/C/D paired metrics.search.latency.p95_s",
+            reason="只比较同一并发档且成功率至少 99% 的 A 基线与压力场景",
+        )
+
     baseline = _metric_values(
         _runs_for(manifest, "baseline"),
         ("metrics", "search", "latency", "p95_s"),
@@ -283,7 +358,14 @@ def _fairness_gate(manifest: dict[str, Any]) -> dict[str, Any]:
 
 
 def _commit_completion_gate(manifest: dict[str, Any]) -> dict[str, Any]:
-    runs = _runs_for(manifest, "commit-barrier") + _runs_for(manifest, "tenant-skew")
+    runs = (
+        _runs_for(manifest, "commit-barrier")
+        + _runs_for(manifest, "tenant-skew")
+        + [
+            run for run in manifest.get("runs") or []
+            if str(run.get("scenario") or "").startswith(("B-c", "C", "D-c"))
+        ]
+    )
     rates = _metric_values(runs, ("metrics", "commit", "success_rate"))
     if not rates:
         return _result(

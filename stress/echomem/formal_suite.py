@@ -168,6 +168,60 @@ SCENARIOS: dict[str, dict[str, Any]] = {
 }
 
 
+def report4_scenarios() -> dict[str, dict[str, Any]]:
+    """Build report(4)'s A/B/C/D matrix with a valid read-only baseline."""
+    scenarios: dict[str, dict[str, Any]] = {}
+    for concurrency in (1, 4, 16):
+        workers = 8 * concurrency
+        suffix = f"c{concurrency}"
+        common = {
+            "tenants": 8,
+            "duration_s": 60,
+            "search_workers": workers,
+            "commit_workers": workers,
+            "sessions_per_tenant": max(2, concurrency),
+            "messages_per_session": 3,
+        }
+        scenarios[f"A-{suffix}"] = {
+            **common,
+            "label": f"A 纯读基线 / 每租户并发 {concurrency}",
+            "search_rps": float(workers),
+            "commit_rpm": 0.0,
+        }
+        scenarios[f"B-{suffix}"] = {
+            **common,
+            "label": f"B 纯写注入 / 每租户并发 {concurrency}",
+            "search_rps": 0.0,
+            "commit_rpm": 0.0,
+            "commit_barrier": True,
+            "commit_barrier_count": workers,
+        }
+        for ratio, search_factor in (("8-1", 8), ("4-1", 4), ("1-1", 1)):
+            scenarios[f"C{ratio}-{suffix}"] = {
+                **common,
+                "label": f"C 读写 {ratio} / 每租户并发 {concurrency}",
+                "search_rps": float(workers * search_factor),
+                "commit_rpm": float(workers),
+            }
+        scenarios[f"D-{suffix}"] = {
+            **common,
+            "label": f"D 连续注入洪峰 / 每租户并发 {concurrency}",
+            "search_rps": float(workers),
+            "commit_rpm": 0.0,
+            "commit_barrier": True,
+            "commit_barrier_count": workers,
+            "commit_barrier_waves": 3,
+            "commit_barrier_cooldown_s": 10.0,
+        }
+    return scenarios
+
+
+SCENARIO_PROFILES = {
+    "pr421": SCENARIOS,
+    "report4": report4_scenarios(),
+}
+
+
 def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -199,6 +253,9 @@ def run_case(
 ) -> dict[str, Any]:
     output = case_root / scenario / f"repeat-{repetition:02d}" / policy
     output.mkdir(parents=True, exist_ok=True)
+    duration_s = case["duration_s"]
+    if args.duration_cap_s > 0:
+        duration_s = min(float(duration_s), args.duration_cap_s)
     command = [
         sys.executable,
         str(runner),
@@ -209,7 +266,7 @@ def run_case(
         "--tenants",
         str(case["tenants"]),
         "--duration-s",
-        str(case["duration_s"]),
+        str(duration_s),
         "--search-rps",
         str(case["search_rps"]),
         "--commit-rpm",
@@ -218,8 +275,10 @@ def run_case(
         str(case["sessions_per_tenant"]),
         "--messages-per-session",
         str(case["messages_per_session"]),
+        "--commit-timeout-s",
+        str(args.commit_timeout_s),
         "--commit-workers",
-        str(args.commit_workers),
+        str(case.get("commit_workers", args.commit_workers)),
         "--commit-max-attempts",
         str(args.commit_max_attempts),
         "--commit-retry-backoff-s",
@@ -227,7 +286,7 @@ def run_case(
         "--commit-retry-max-backoff-s",
         str(args.commit_retry_max_backoff_s),
         "--search-workers",
-        str(args.search_workers),
+        str(case.get("search_workers", args.search_workers)),
         "--search-admission-capacity",
         str(args.search_admission_capacity),
         "--commit-admission-capacity",
@@ -251,6 +310,13 @@ def run_case(
             command += [
                 "--commit-tenant-counts",
                 ",".join(map(str, case["commit_tenant_counts"])),
+            ]
+        if case.get("commit_barrier_waves"):
+            command += [
+                "--commit-barrier-waves",
+                str(case["commit_barrier_waves"]),
+                "--commit-barrier-cooldown-s",
+                str(case.get("commit_barrier_cooldown_s", 0.0)),
             ]
     if args.auth_header:
         command += ["--auth-header", args.auth_header]
@@ -299,6 +365,7 @@ def run_case(
         "policy": policy,
         "status": summary.get("status", "NO_SUMMARY"),
         "runner_returncode": completed.returncode,
+        "duration_s": duration_s,
         "output_dir": str(output.resolve()),
         "summary": summary,
     }
@@ -594,16 +661,29 @@ def main() -> int:
     parser.add_argument("--tenant-config", required=True)
     parser.add_argument("--out-dir", default="")
     parser.add_argument(
-        "--scenarios",
-        default="baseline,mixed,commit-storm,commit-barrier,saturation,tenant-skew,search-storm,soak",
+        "--profile",
+        choices=tuple(SCENARIO_PROFILES),
+        default="pr421",
+        help="Scenario profile; report4 reproduces report(4)'s A/B/C/D matrix.",
     )
+    parser.add_argument("--scenarios", default="")
     parser.add_argument("--repeats", type=int, default=3)
+    parser.add_argument(
+        "--duration-cap-s",
+        type=float,
+        default=0.0,
+        help="Optional diagnostic cap for each scenario duration; 0 keeps scenario defaults.",
+    )
     parser.add_argument("--auth-header", default=os.getenv("ECHOMEM_AUTH_HEADER", "X-API-Key"))
     parser.add_argument("--commit-workers", type=int, default=8)
+    parser.add_argument("--commit-timeout-s", type=float, default=120.0)
     parser.add_argument("--commit-max-attempts", type=int, default=3)
     parser.add_argument("--commit-retry-backoff-s", type=float, default=2.0)
     parser.add_argument("--commit-retry-max-backoff-s", type=float, default=30.0)
     parser.add_argument("--search-workers", type=int, default=32)
+    parser.add_argument("--search-admission-capacity", type=int, default=0)
+    parser.add_argument("--commit-admission-capacity", type=int, default=0)
+    parser.add_argument("--admission-capacity", type=int, default=0)
     parser.add_argument("--pid", type=int, default=0)
     parser.add_argument("--reset-command", default="", help="Optional command run before every case")
     parser.add_argument("--no-server-metrics", action="store_true")
@@ -614,8 +694,18 @@ def main() -> int:
     parser.add_argument("--k6-runner-dir", default="")
     args = parser.parse_args()
 
-    scenario_names = [item.strip() for item in args.scenarios.split(",") if item.strip()]
-    unknown = [item for item in scenario_names if item not in SCENARIOS]
+    scenario_catalog = SCENARIO_PROFILES[args.profile]
+    default_scenarios = (
+        "baseline,mixed,commit-storm,commit-barrier,saturation,tenant-skew,search-storm,soak"
+        if args.profile == "pr421"
+        else ",".join(scenario_catalog)
+    )
+    scenario_names = [
+        item.strip()
+        for item in (args.scenarios or default_scenarios).split(",")
+        if item.strip()
+    ]
+    unknown = [item for item in scenario_names if item not in scenario_catalog]
     if unknown:
         parser.error(f"unknown scenarios: {', '.join(unknown)}")
     if args.repeats < 1:
@@ -623,7 +713,7 @@ def main() -> int:
 
     tenant_path = Path(args.tenant_config).expanduser().resolve()
     all_tenants = load_tenants(tenant_path)
-    required_tenants = max(SCENARIOS[name]["tenants"] for name in scenario_names)
+    required_tenants = max(scenario_catalog[name]["tenants"] for name in scenario_names)
     if len(all_tenants) < required_tenants:
         parser.error(
             f"tenant config has {len(all_tenants)} tenants, but selected scenarios require {required_tenants}"
@@ -634,17 +724,19 @@ def main() -> int:
     config_dir = root / "_tenant_configs"
     config_dir.mkdir(exist_ok=True)
     config_paths: dict[int, Path] = {}
-    for count in sorted({SCENARIOS[name]["tenants"] for name in scenario_names}):
+    for count in sorted({scenario_catalog[name]["tenants"] for name in scenario_names}):
         config_paths[count] = config_dir / f"tenants-{count}.json"
         write_subset(config_paths[count], all_tenants[:count])
 
     manifest: dict[str, Any] = {
         "created_at": now_iso(),
         "base_url": args.base_url,
+        "profile": args.profile,
         "tenant_config": str(tenant_path),
         "output_root": str(root.resolve()),
         "scenarios": scenario_names,
         "repeats": args.repeats,
+        "duration_cap_s": args.duration_cap_s,
         "policies": list(POLICIES),
         "acceptance_targets": PR421_ACCEPTANCE_TARGETS,
         "reset_command": args.reset_command,
@@ -655,7 +747,7 @@ def main() -> int:
     # Use a deterministic order so a rerun is easy to compare. The service
     # reset hook is the mechanism for keeping the data/index boundary fixed.
     for scenario in scenario_names:
-        case = SCENARIOS[scenario]
+        case = scenario_catalog[scenario]
         for repetition in range(1, args.repeats + 1):
             for policy in POLICIES:
                 completed_runs = len(manifest["runs"])
@@ -778,6 +870,7 @@ def main() -> int:
             "repeats": args.repeats,
             "policies": list(POLICIES),
             "commit_workers": args.commit_workers,
+            "commit_timeout_s": args.commit_timeout_s,
             "search_workers": args.search_workers,
             "client_admission": "disabled",
         },

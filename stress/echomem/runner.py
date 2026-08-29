@@ -928,11 +928,16 @@ def payload_contains(payload: dict[str, Any], text: str) -> bool:
         return False
 
 
-def isolation_probe_query(writer: str) -> str:
-    """Build a probe query without echoing the secret marker into the request."""
+def isolation_probe_query(writer: str, marker: str) -> str:
+    """Build an exact-marker query for a deterministic isolation probe.
+
+    The marker is a synthetic test token, not a credential. Including it in
+    the query is necessary to distinguish tenant filtering from semantic
+    retrieval misses, especially with fake or lexical embedding backends.
+    """
     return (
-        f"What private isolation marker did tenant {writer} write? "
-        "Return only the matching memory content."
+        f"Return the memory containing this exact private marker for tenant {writer}: "
+        f"{marker}"
     )
 
 
@@ -942,6 +947,7 @@ def run_isolation_probe(
     retries: int = 3,
     retry_interval_s: float = 2.0,
     markers_per_tenant: int = 5,
+    commit_timeout_s: float = 600.0,
 ) -> dict[str, Any]:
     """Probe every directed tenant pair with unique markers.
 
@@ -1015,7 +1021,12 @@ def run_isolation_probe(
             server_active_workers=commit_result.server_active_workers,
             server_terminal_status=commit_result.server_terminal_status,
         )
-        poll_commit(client_or_clients, record, timeout_s=600.0, interval_s=2.0)
+        poll_commit(
+            client_or_clients,
+            record,
+            timeout_s=max(1.0, float(commit_timeout_s)),
+            interval_s=2.0,
+        )
         if record.status not in {"completed", "complete", "transcommit", "succeeded", "success"}:
             return {
                 "status": ENVIRONMENT_ERROR,
@@ -1051,7 +1062,7 @@ def run_isolation_probe(
                 for attempt in range(attempt_count):
                     result = reader_client.search(
                         reader_session,
-                        isolation_probe_query(writer),
+                        isolation_probe_query(writer, marker),
                         timeout_s=40.0,
                     )
                     found = (
@@ -1499,6 +1510,8 @@ def run_parallel_workload(
     commit_tenant_distribution: str = "uniform",
     commit_zipf_exponent: float = 2.0,
     commit_tenant_counts: list[int] | None = None,
+    commit_barrier_waves: int = 1,
+    commit_barrier_cooldown_s: float = 0.0,
 ) -> tuple[list[CommitRecord], list[SearchRecord]]:
     """Run the write/commit and search lanes concurrently.
 
@@ -1622,6 +1635,8 @@ def run_parallel_workload(
             commit_tenant_distribution=commit_tenant_distribution,
             commit_zipf_exponent=commit_zipf_exponent,
             commit_tenant_counts=commit_tenant_counts,
+            commit_barrier_waves=commit_barrier_waves,
+            commit_barrier_cooldown_s=commit_barrier_cooldown_s,
         )
 
     with ThreadPoolExecutor(max_workers=1) as executor:
@@ -1656,6 +1671,8 @@ def run_commit_stream(
     commit_tenant_distribution: str = "uniform",
     commit_zipf_exponent: float = 2.0,
     commit_tenant_counts: list[int] | None = None,
+    commit_barrier_waves: int = 1,
+    commit_barrier_cooldown_s: float = 0.0,
 ) -> list[CommitRecord]:
     """Submit Commit requests at a fixed per-tenant arrival rate.
 
@@ -1695,13 +1712,16 @@ def run_commit_stream(
         else:
             base = barrier_count // len(tenants)
             barrier_counts = [base + (1 if index < barrier_count % len(tenants) else 0) for index in range(len(tenants))]
+    barrier_waves = max(1, int(commit_barrier_waves or 1))
+    barrier_cooldown_s = max(0.0, float(commit_barrier_cooldown_s or 0.0))
     for tenant_index, tenant in enumerate(tenants):
         if barrier_count:
             count = barrier_counts[tenant_index]
         else:
             count = max(1, math.ceil(commit_rpm * duration_s / 60.0))
         client = client_for(client_or_clients, tenant)
-        for index in range(count):
+        for index in range(count * barrier_waves):
+            wave = index // max(1, count)
             session_id = client.open_session(
                 tenant, f"stress-commit-{tenant}-{index}"
             )[0]
@@ -1725,6 +1745,10 @@ def run_commit_stream(
                 if commit_barrier or barrier_count
                 else index * 60.0 / commit_rpm
             )
+            if barrier_count and barrier_waves > 1:
+                offset = wave * (
+                    max(0.0, duration_s / barrier_waves) + barrier_cooldown_s
+                )
             jobs.append((offset, tenant, session_id, message_ids))
     jobs.sort(key=lambda item: item[0])
 
@@ -2777,6 +2801,18 @@ def parse_args() -> argparse.Namespace:
         default="",
         help="Explicit barrier counts per tenant, e.g. 200,20,20,20.",
     )
+    parser.add_argument(
+        "--commit-barrier-waves",
+        type=int,
+        default=1,
+        help="Repeat a Commit barrier in fixed waves.",
+    )
+    parser.add_argument(
+        "--commit-barrier-cooldown-s",
+        type=float,
+        default=0.0,
+        help="Cooldown after each repeated Commit barrier wave.",
+    )
     parser.add_argument("--search-timeout-s", type=float, default=40.0)
     parser.add_argument("--search-p95-limit-s", type=float, default=2.5)
     parser.add_argument("--search-degradation-factor", type=float, default=2.0)
@@ -2875,6 +2911,10 @@ def parse_args() -> argparse.Namespace:
         parser.error("--commit-max-attempts must be at least 1")
     if args.commit_barrier_count < 0:
         parser.error("--commit-barrier-count must not be negative")
+    if args.commit_barrier_waves < 1:
+        parser.error("--commit-barrier-waves must be at least 1")
+    if args.commit_barrier_cooldown_s < 0:
+        parser.error("--commit-barrier-cooldown-s must not be negative")
     if args.commit_barrier_count and args.commit_rpm:
         parser.error("--commit-barrier-count cannot be combined with --commit-rpm")
     if args.commit_zipf_exponent <= 0:
@@ -3036,6 +3076,7 @@ def main() -> int:
             retries=args.isolation_retries,
             retry_interval_s=args.isolation_retry_interval_s,
             markers_per_tenant=args.isolation_markers_per_tenant,
+            commit_timeout_s=args.commit_timeout_s,
         )
         sessions = provision_sessions(clients, tenants, args.sessions_per_tenant)
         if args.scenario in {"baseline", "commit-storm", "all"}:
@@ -3059,6 +3100,8 @@ def main() -> int:
                 args.commit_tenant_distribution,
                 args.commit_zipf_exponent,
                 args.commit_tenant_counts,
+                args.commit_barrier_waves,
+                args.commit_barrier_cooldown_s,
             )
         elif args.scenario == "fairness":
             search_records = scenario_search(
@@ -3097,7 +3140,7 @@ def main() -> int:
         else 0
     )
     if args.commit_barrier_count > 0:
-        target_commit = args.commit_barrier_count
+        target_commit = args.commit_barrier_count * args.commit_barrier_waves
     elif args.commit_rpm > 0:
         target_commit = (
             len(tenants) * max(1, math.ceil(args.commit_rpm * args.duration_s / 60.0))
