@@ -1061,6 +1061,7 @@ def run_isolation_probe(
     retry_interval_s: float = 2.0,
     markers_per_tenant: int = 5,
     commit_timeout_s: float = 600.0,
+    search_timeout_s: float = 40.0,
 ) -> dict[str, Any]:
     """Probe every directed tenant pair with unique markers.
 
@@ -1176,7 +1177,7 @@ def run_isolation_probe(
                     result = reader_client.search(
                         reader_session,
                         isolation_probe_query(writer, marker),
-                        timeout_s=40.0,
+                        timeout_s=max(0.1, float(search_timeout_s)),
                     )
                     found = (
                         result.status_code is not None
@@ -3290,6 +3291,7 @@ def main() -> int:
             retry_interval_s=args.isolation_retry_interval_s,
             markers_per_tenant=args.isolation_markers_per_tenant,
             commit_timeout_s=args.commit_timeout_s,
+            search_timeout_s=args.search_timeout_s,
         )
         sessions = provision_sessions(clients, tenants, args.sessions_per_tenant)
         quality_queries, quality_seed_evidence = prepare_quality_seed(

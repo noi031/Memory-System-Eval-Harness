@@ -30,11 +30,62 @@ from stress.echomem.runner import (
     scenario_search,
     isolation_probe_query,
     quality_probe_query,
+    run_isolation_probe,
 )
 from stress.echomem.audit_matrix_report import render as render_audit_matrix_report
 
 
 class StressRunnerTests(unittest.TestCase):
+    def test_isolation_probe_uses_configured_search_timeout(self) -> None:
+        class FakeClient:
+            def __init__(self) -> None:
+                self.search_timeouts = []
+                self.last_identity = {"tenant": id(self)}
+
+            def open_session(self, account_id, session_name):
+                return ("session-" + session_name, {})
+
+            def add_message(self, session_id, message_id, content):
+                return HttpResult("POST", "/messages", 200, 0.0)
+
+            def commit(self, session_id):
+                return HttpResult(
+                    "POST",
+                    "/commit",
+                    202,
+                    0.0,
+                    payload={"archive_id": "archive-1", "status": "completed"},
+                )
+
+            def commit_status(self, session_id, archive_id):
+                return HttpResult(
+                    "GET",
+                    "/commit",
+                    200,
+                    0.0,
+                    payload={"status": "completed"},
+                )
+
+            def search(self, session_id, query, timeout_s):
+                self.search_timeouts.append(timeout_s)
+                return HttpResult("POST", "/search", 200, 0.0, payload={"items": []})
+
+            def identity(self):
+                return {"tenant": id(self)}
+
+        clients = {"a": FakeClient(), "b": FakeClient()}
+        run_isolation_probe(
+            clients,
+            ["a", "b"],
+            retries=1,
+            retry_interval_s=0.0,
+            markers_per_tenant=1,
+            commit_timeout_s=1.0,
+            search_timeout_s=3.5,
+        )
+        self.assertEqual([3.5, 3.5], clients["a"].search_timeouts)
+        self.assertEqual([3.5, 3.5], clients["b"].search_timeouts)
+
     def test_pr421_prometheus_series_preserves_bounded_labels(self) -> None:
         raw = """
         echomem_lane_queued{lane="interactive"} 2
