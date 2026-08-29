@@ -215,6 +215,32 @@ class EchoMemClient(BaseHTTPMemoryClient):
         archives = resp.get("archives") or resp.get("commits") or []
         return bool(archives)
 
+    # -- message-level reconciliation ------------------------------------
+
+    def session_history(self, session_id: str, limit: int = 200) -> list[dict[str, Any]]:
+        """Server-side message list of a session (for write reconciliation).
+
+        Each entry carries the server-assigned message ``id`` and ``content``
+        when the endpoint exposes them; entries without an id are returned
+        as-is so reconciliation can still compare content hashes.
+        """
+        resp = self._get(f"/api/sessions/{session_id}/history", {"limit": limit})
+        history = resp.get("history") or []
+        if isinstance(history, dict):
+            history = history.get("messages") or []
+        return [dict(item) for item in history if isinstance(item, dict)]
+
+    def commit_memories(
+        self, session_id: str, archive_id: str
+    ) -> dict[str, Any]:
+        """Commit extraction summary (may include atom source_turn_ids)."""
+        return self._get(f"/api/sessions/{session_id}/commits/{archive_id}/memories")
+
+    def session_archives(self, session_id: str, limit: int = 50) -> list[dict[str, Any]]:
+        """List committed archives of a session (for archive terminal state)."""
+        resp = self._get(f"/api/sessions/{session_id}/archives", {"limit": limit})
+        return [dict(item) for item in (resp.get("archives") or []) if isinstance(item, dict)]
+
     # -- retrieval ------------------------------------------------------
 
     def search(
@@ -226,18 +252,52 @@ class EchoMemClient(BaseHTTPMemoryClient):
         timeout_s: float | None = None,
     ) -> list[SearchResult]:
         """Search EchoMem for memory items."""
+        items, _ = self.search_with_meta(
+            query,
+            top_k=top_k,
+            session_id=session_id,
+            agent_id=agent_id,
+            timeout_s=timeout_s,
+        )
+        return items
+
+    def search_with_meta(
+        self,
+        query: str,
+        top_k: int = 10,
+        session_id: str = "",
+        agent_id: str = "",
+        timeout_s: float | None = None,
+    ) -> tuple[list[SearchResult], dict[str, Any]]:
+        """Search and also return response metadata for quality assertions.
+
+        The metadata carries the raw ``result`` payload (explain/debug
+        fields when the server includes them) so loadgen can decide whether
+        the response really came from the recall path rather than being a
+        short-circuited empty reply.
+        """
         body: dict[str, Any] = {
             "query": query,
             "agent_id": agent_id or self.agent_id,
             "limit": top_k,
-            "include_explain": False,
+            "include_explain": True,
             "include_debug": True,
         }
         if session_id:
             body["session_id"] = session_id
         resp = self._post("/api/retrieval/search", body, timeout_s=timeout_s)
-        items = resp.get("result", {}).get("items", []) if "result" in resp else resp.get("items", [])
-        return [SearchResult.from_dict(item) for item in items]
+        result = resp.get("result") if "result" in resp else resp
+        items_raw = result.get("items", []) if isinstance(result, dict) else []
+        items = [SearchResult.from_dict(item) for item in items_raw]
+        meta: dict[str, Any] = {}
+        if isinstance(result, dict):
+            meta = {
+                "hit_count": len(items),
+                "has_explain": bool(result.get("explain")),
+                "has_debug": bool(result.get("debug")),
+                "engine": result.get("engine", ""),
+            }
+        return items, meta
 
     # -- document resources (resource_engine) -----------------------------
 

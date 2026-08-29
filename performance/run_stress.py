@@ -44,8 +44,16 @@ from performance.metrics_calc import (
     commit_durability,
     consistency_summary,
     degradation_factor,
+    error_type_validation,
     evaluate_features,
+    fault_injection_summary,
+    injected_bytes_series,
+    isolation_summary,
+    reconcile_messages,
+    retry_summary,
+    rss_normalized_series,
     rss_trend_mb_per_min,
+    search_quality_summary,
     summarize_records,
     tenant_fairness,
 )
@@ -59,6 +67,12 @@ from performance.monitor import (
     MetricsMonitor,
     scene_resource_summary,
 )
+from performance.perf_mock_provider import (
+    DEFAULT_FAULT_STAGES,
+    MockProvider,
+    run_fault_sequence,
+)
+from performance.perf_preflight import run_preflight
 from performance.prepare import (
     TenantPreparer,
     load_locomo_seed_batches,
@@ -98,8 +112,8 @@ def build_parser() -> argparse.ArgumentParser:
     g.add_argument(
         "--timeout-s",
         type=float,
-        default=10.0,
-        help="Per-request timeout (外网 RTT 大可调大)",
+        default=30.0,
+        help="Per-request timeout (真实模型路径 search/commit 5-7s+；外网 RTT 大可调大)",
     )
     g.add_argument(
         "--top-k",
@@ -110,8 +124,8 @@ def build_parser() -> argparse.ArgumentParser:
     g.add_argument(
         "--commit-poll-timeout-s",
         type=float,
-        default=120.0,
-        help="Timeout for poll-until-commit-completed",
+        default=600.0,
+        help="Timeout for poll-until-commit-completed (真实模型 commit 平均 46s、P99 117s+，加排队)",
     )
     g = parser.add_argument_group("Identity")
     g.add_argument(
@@ -157,8 +171,8 @@ def build_parser() -> argparse.ArgumentParser:
         "--scenarios",
         default="A,B,C,D",
         help=(
-            "场景: A=纯读基线, B=纯写注入, C=读写混合, D=注入洪峰 "
-            "(逗号分隔, 可按需过滤如 A,D)"
+            "场景: A=纯读基线, B=纯写注入, C=读写混合, D=注入洪峰, "
+            "F=故障注入(mock provider) (逗号分隔, 可按需过滤如 A,D)"
         ),
     )
     g.add_argument(
@@ -191,6 +205,24 @@ def build_parser() -> argparse.ArgumentParser:
         help="负载模式: 饱和打满 或 固定速率 (仅限读)",
     )
     g.add_argument("--rps", type=float, default=0.0, help="fixed-rps 模式的总读速率")
+    g.add_argument(
+        "--commit-retry-max",
+        type=int,
+        default=0,
+        help="commit 提交的可重试失败重试上限 (429+Retry-After/5xx/超时/连接; 0=不重试)",
+    )
+    g.add_argument(
+        "--commit-retry-backoff-s",
+        type=float,
+        default=0.5,
+        help="commit 提交重试的基础退避秒数 (429 优先用 Retry-After)",
+    )
+    g.add_argument(
+        "--reconciliation-sessions",
+        type=int,
+        default=20,
+        help="B 场景尾段消息对账的会话数上限 (默认 20)",
+    )
     g = parser.add_argument_group("Observation")
     g.add_argument("--metrics-interval-s", type=float, default=2.0, help="/metrics 采样间隔 (秒)")
     g.add_argument("--cool-down-s", type=float, default=15.0, help="压测结束后的冷却采样时长 (秒)")
@@ -198,6 +230,17 @@ def build_parser() -> argparse.ArgumentParser:
     g.add_argument("--skip-health", action="store_true", help="跳过 /health 预检")
     g.add_argument("--degradation-threshold", type=float, default=2.0, help="P95 劣化倍数判定阈值")
     g = parser.add_argument_group("Run")
+    g.add_argument(
+        "--preflight-config",
+        default="",
+        help="engine 配置文件路径 (JSON); 传入则先过模型/配置预检门禁，失败即停",
+    )
+    g.add_argument(
+        "--mock-provider-port",
+        type=int,
+        default=18090,
+        help="F 场景故障注入 mock provider 的监听端口",
+    )
     g.add_argument(
         "--quick",
         action="store_true",
@@ -212,10 +255,10 @@ def build_parser() -> argparse.ArgumentParser:
 def _resolve_args(args: argparse.Namespace) -> dict[str, Any]:
     """Normalize CLI args; apply --quick overrides and basic validation."""
     scenarios = [part.strip().upper() for part in str(args.scenarios).split(",") if part.strip()]
-    known = {"A", "B", "C", "D"}
+    known = {"A", "B", "C", "D", "F"}
     unknown = [sid for sid in scenarios if sid not in known]
     if unknown:
-        raise ValueError(f"--scenarios 未知场景: {', '.join(unknown)} (可选 A,B,C,D)")
+        raise ValueError(f"--scenarios 未知场景: {', '.join(unknown)} (可选 A,B,C,D,F)")
     mix_ratios = parse_mix_ratios([part.strip() for part in str(args.mix_ratios).split(",")])
     concurrency_steps = parse_concurrency_steps(args.concurrency_steps)
     if args.quick:
@@ -293,9 +336,14 @@ def _run_all_scenes(
     tenants: list[Any],
     monitor: MetricsMonitor,
 ) -> dict[str, Any]:
-    """Execute the matrix; returns per-scene summaries + full records."""
+    """Execute the matrix; returns per-scene summaries + full records.
+
+    Scene F (fault injection) is an independent flow and is excluded from
+    the concurrency matrix; it runs separately in ``main``.
+    """
+    matrix_ids = [sid for sid in resolved["scenario_ids"] if sid != "F"]
     runs = expand_matrix(
-        scenario_ids=resolved["scenario_ids"],
+        scenario_ids=matrix_ids,
         concurrency_steps=resolved["concurrency_steps"],
         mix_ratios=resolved["mix_ratios"],
         duration_s=args.duration_s,
@@ -310,6 +358,7 @@ def _run_all_scenes(
     scenes: dict[str, Any] = {}
     scene_read_stats: dict[str, dict[str, Any]] = {}
     consistency = {"status": "skipped"}
+    reconciliation_data: list[Any] = []
     first_t0: float | None = None
     last_t1: float | None = None
 
@@ -319,7 +368,18 @@ def _run_all_scenes(
         if first_t0 is None:
             first_t0 = t0
         logger.info("===> 场景 %s (%s) 并发/租户=%d 时长=%.0fs", scene.key, name, scene.per_tenant_conc, scene.duration_s)
-        result: SceneResult = generator.run_scene(scene, tenants, args.messages_per_session)
+        try:
+            result: SceneResult = generator.run_scene(scene, tenants, args.messages_per_session)
+        except BaseException as exc:  # noqa: BLE001 - 场景失败不中断矩阵，失败场景记入报告
+            logger.exception("场景 %s 执行失败（继续后续场景）", scene.key)
+            scenes[scene.key] = {
+                "scene_id": scene.scene_id,
+                "per_tenant_conc": scene.per_tenant_conc,
+                "duration_s": scene.duration_s,
+                "status": "failed",
+                "error": f"{type(exc).__name__}: {exc}",
+            }
+            continue
         t1 = time.time()
         last_t1 = t1
         wall = max(result.wall_s, 1e-6)
@@ -355,12 +415,19 @@ def _run_all_scenes(
             )
             all_records.extend(check_records)
             consistency = consistency_summary(check_records)
+            # 消息级对账（正确写入 = 重试成功 + 对账通过）：候选在下一个场景前清空
+            reconciliation_data.extend(
+                generator.run_reconciliation(
+                    tenants, max_sessions=args.reconciliation_sessions
+                )
+            )
 
     return {
         "records": all_records,
         "scenes": scenes,
         "scene_read_stats": scene_read_stats,
         "consistency": consistency,
+        "reconciliation_data": reconciliation_data,
         "window_first_t0": first_t0 if first_t0 is not None else time.time(),
         "window_last_t1": last_t1 if last_t1 is not None else time.time(),
     }
@@ -386,6 +453,36 @@ def _build_degradation(
         if any(value is not None for value in factors.values()):
             degradation[f"{key}_vs_A@{conc}"] = factors
     return degradation
+
+
+def _build_isolation(
+    records: list[Any],
+    scenes: dict[str, Any],
+    scene_reads: dict[str, dict[str, Any]],
+    tenants: list[Any],
+    *,
+    degradation_threshold: float,
+) -> dict[str, Any]:
+    """D-scene burst-window read isolation (same/cross tenant) vs A baseline."""
+    burst_tenant_idx = tenants[0].idx if tenants else 0
+    result: dict[str, Any] = {}
+    for scene_key, entry in scenes.items():
+        if entry.get("scene_id") != "D":
+            continue
+        burst = entry.get("burst_window_s")
+        if not burst:
+            continue
+        conc = entry.get("per_tenant_conc")
+        a_stats = (scene_reads.get(f"A@{conc}") or {})
+        result[scene_key] = isolation_summary(
+            records,
+            t0_ms=burst[0] * 1000,
+            t1_ms=burst[1] * 1000,
+            burst_tenant_idx=burst_tenant_idx,
+            baseline_p95=a_stats.get("p95_ms"),
+            degradation_threshold=degradation_threshold,
+        )
+    return result
 
 
 def _build_signals(
@@ -629,6 +726,53 @@ def _print_terminal_summary(
     )
 
 
+def _write_failure_report(
+    out_dir: Path,
+    args: argparse.Namespace,
+    resolved: dict[str, Any],
+    error: BaseException,
+    *,
+    monitor: MetricsMonitor | None = None,
+    server_info: dict[str, Any] | None = None,
+    partial: dict[str, Any] | None = None,
+) -> None:
+    """压测失败兜底：仍生成一份失败报告，写入失败原因与已收集的部分数据。
+
+    调用时机：预检 / prepare / 场景矩阵 / 故障注入 / 汇总 / 写文件任一阶段
+    抛出未处理异常时。报告 status=failed，顶部渲染失败横幅，已收集的场景
+    数据与请求记录照常写入，便于人工核查「失败发生在哪、损失了什么」。
+    """
+    now = time.strftime("%Y-%m-%dT%H:%M:%S%z")
+    scenes = (partial or {}).get("scenes") or {}
+    records = (partial or {}).get("records") or []
+    summary: dict[str, Any] = {
+        "generator": "performance/run_stress.py",
+        "status": "failed",
+        "error": f"{type(error).__name__}: {error}",
+        "started_at": now,
+        "finished_at": now,
+        "config": {
+            **vars(args),
+            "scenario_ids": resolved["scenario_ids"],
+            "concurrency_steps": resolved["concurrency_steps"],
+            "mix_ratios": [f"{r}:{w}" for r, w in resolved["mix_ratios"]],
+        },
+        "server": server_info or {},
+        "scenes": scenes,
+        "signals": {"signals_found": [], "threshold": args.degradation_threshold},
+        "feature_verdicts": {"features": {}, "overall": "env_error"},
+    }
+    try:
+        write_config(out_dir, summary["config"])
+        if records:
+            write_requests_csv(out_dir, records)
+        write_summary(out_dir, summary)
+        save_html(out_dir, build_html(summary, {}))
+    except BaseException as write_exc:  # noqa: BLE001 - 兜底写入自身失败也要可见
+        logger.exception("失败报告写入异常: %s", write_exc)
+    logger.error("压测失败，失败报告已生成: %s", out_dir)
+
+
 def main() -> None:
     args = build_parser().parse_args()
     logging.basicConfig(
@@ -653,159 +797,257 @@ def main() -> None:
         "base_url": args.echomem_url,
         "metrics_requested": not args.no_metrics,
     }
-    if not args.no_metrics:
-        monitor.start()
-
-    if not args.skip_health:
-        probe = EchoMemClient(args.echomem_url, timeout_s=args.timeout_s, max_retries=0)
-        health = probe.health()
-        logger.info("预检 /health: %s", health)
-    if not args.no_metrics:
-        server_info.update(_probe_metrics(monitor))
-
-    preparer = TenantPreparer(
-        args.echomem_url,
-        auth_mode=args.auth_mode,
-        auth_key=args.auth_key,
-        tenant_id=args.tenant_id,
-        user_id=args.user_id,
-        agent_id=args.agent_id,
-        tenants=args.tenants,
-        timeout_s=args.timeout_s,
-        label_prefix="perf",
-    )
+    all_data: dict[str, Any] | None = None
     try:
-        tenants = preparer.prepare(
-            args.seed_sessions_per_tenant,
-            args.messages_per_session,
-            args.commit_poll_timeout_s,
-            locomo_batches=(
-                load_locomo_seed_batches(
-                    resolved["seed_dataset_path"], args.sample_filter
+        # -- 模型/配置预检门禁（失败即停，归类环境/依赖失败） ---------------------
+        preflight_result: dict[str, Any] | None = None
+        if args.preflight_config:
+            logger.info("预检门禁: %s", args.preflight_config)
+            preflight_result = run_preflight(
+                args.preflight_config, timeout_s=max(1.0, args.timeout_s)
+            )
+            if not preflight_result["ok"]:
+                raise RuntimeError(
+                    f"预检门禁失败（环境/依赖，非被测代码）: {preflight_result['error']}"
                 )
-                if args.seed_source == "locomo"
-                else None
-            ),
-        )
-    except BaseException:
-        # prepare 阶段失败也要清掉已 provision 的租户（seed 中途失败时
-        # preparer 仍持有它们的 client）；清完再向上抛。
-        if args.cleanup_identities:
-            logger.info("prepare 失败，清理已 provision 的压测租户...")
-            preparer.cleanup()
-        raise
-    if not args.no_metrics:
-        monitor.sample()  # RSS baseline frame right after seeding
 
-    generator = LoadGenerator(
-        top_k=args.top_k,
-        timeout_s=args.timeout_s,
-        commit_poll_timeout_s=args.commit_poll_timeout_s,
-        rps=resolved["rps"] or None,
-    )
-
-    try:
-        try:
-            all_data = _run_all_scenes(args, resolved, generator, tenants, monitor)
-            cool_down_until = time.time() + args.cool_down_s
-            logger.info("冷却观测 %.0fs（观测内存回落与 commit 队列排空）", args.cool_down_s)
-            while time.time() < cool_down_until:
-                if not args.no_metrics:
-                    monitor.sample()
-                time.sleep(min(1.0, max(0.0, cool_down_until - time.time())))
-            settle_t = time.time()
-        finally:
-            if not args.no_metrics:
-                monitor.stop()
-
-        t_first = all_data["window_first_t0"]
-        t_last = all_data["window_last_t1"]
-        resources = _build_resource_totals(monitor, t_first, t_last, settle_t)
-        degradation = _build_degradation(all_data["scenes"], all_data["scene_read_stats"])
-        durability = commit_durability(all_data["records"])
-        fairness = tenant_fairness(all_data["records"])
-        signals = _build_signals(
-            args,
-            all_data["scenes"],
-            all_data["scene_read_stats"],
-            degradation,
-            monitor,
-            durability,
-            fairness,
-            resources,
-        )
-
-        def _redact(value: str) -> str:
-            return f"***configured*** ({len(value)} chars)" if value else ""
-
-        summary: dict[str, Any] = {
-            "generator": "performance/run_stress.py",
-            "status": "completed",
-            "started_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
-            "finished_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
-            "config": {
-                **vars(args),
-                "auth_key": _redact(args.auth_key),
-                "scenario_ids": resolved["scenario_ids"],
-                "concurrency_steps": resolved["concurrency_steps"],
-                "mix_ratios": [f"{r}:{w}" for r, w in resolved["mix_ratios"]],
-            },
-            "data_scale": {
-                "tenants": len(tenants),
-                "sessions_per_tenant": args.seed_sessions_per_tenant,
-                "messages_per_session": args.messages_per_session,
-                "queries_per_tenant": [len(tenant.queries) for tenant in tenants],
-                "tenant_details": [tenant.to_dict() for tenant in tenants],
-            },
-            "server": server_info,
-            "scenes": {
-                key: entry for key, entry in all_data["scenes"].items()
-            },
-            "degradation": degradation,
-            "signals": signals,
-            "consistency": all_data["consistency"],
-            "resources": resources,
-            "commit_durability": durability,
-            "tenant_fairness": fairness,
-            "commit_latency": commit_completion_latency(all_data["records"]),
-        }
-        summary["feature_verdicts"] = evaluate_features(summary)
-
-        write_config(out_dir, summary["config"])
-        write_requests_csv(out_dir, all_data["records"])
         if not args.no_metrics:
-            write_metrics_csv(out_dir, monitor)
-        else:
-            write_metrics_csv(out_dir, MetricsMonitor(args.echomem_url))  # empty frames
-        write_summary(out_dir, summary)
+            monitor.start()
 
-        chart_series = {
-            "rss_mb": [
-                (ts, round(value / 1024 / 1024, 2))
-                for ts, value in monitor.gauge_series(RESIDENT_MEMORY, t_first, t_last)
-            ],
-            "threads": monitor.gauge_series(PROCESS_THREADS, t_first, t_last),
-            "commit_queue": monitor.gauge_series(COMMIT_QUEUE_DEPTH, t_first, t_last),
-            "inflight": monitor.gauge_series(HTTP_INFLIGHT, t_first, t_last),
-            "cpu_percent": monitor.cpu_utilization_series(t_first, t_last),
-        }
-        save_html(out_dir, build_html(summary, chart_series))
-        _print_terminal_summary(
-            all_data["scenes"],
-            degradation,
-            signals,
-            resources,
-            durability,
-            fairness,
-            summary["feature_verdicts"],
+        if not args.skip_health:
+            probe = EchoMemClient(args.echomem_url, timeout_s=args.timeout_s, max_retries=0)
+            health = probe.health()
+            logger.info("预检 /health: %s", health)
+        if not args.no_metrics:
+            server_info.update(_probe_metrics(monitor))
+
+        preparer = TenantPreparer(
+            args.echomem_url,
+            auth_mode=args.auth_mode,
+            auth_key=args.auth_key,
+            tenant_id=args.tenant_id,
+            user_id=args.user_id,
+            agent_id=args.agent_id,
+            tenants=args.tenants,
+            timeout_s=args.timeout_s,
+            label_prefix="perf",
         )
-    finally:
-        # 压测租户清理：prepare/场景/报告任一阶段异常也执行
-        # （preparer 记录全部已 provision 的租户，seed 中途失败也会被清；
-        #  static 模式复用预置身份，组合已在参数校验拒绝）
-        if args.cleanup_identities:
-            logger.info("清理压测租户（--cleanup-identities）...")
-            preparer.cleanup()
+        try:
+            tenants = preparer.prepare(
+                args.seed_sessions_per_tenant,
+                args.messages_per_session,
+                args.commit_poll_timeout_s,
+                locomo_batches=(
+                    load_locomo_seed_batches(
+                        resolved["seed_dataset_path"], args.sample_filter
+                    )
+                    if args.seed_source == "locomo"
+                    else None
+                ),
+            )
+        except BaseException:
+            # prepare 阶段失败也要清掉已 provision 的租户（seed 中途失败时
+            # preparer 仍持有它们的 client）；清完再向上抛。
+            if args.cleanup_identities:
+                logger.info("prepare 失败，清理已 provision 的压测租户...")
+                preparer.cleanup()
+            raise
+        if not args.no_metrics:
+            monitor.sample()  # RSS baseline frame right after seeding
+
+        generator = LoadGenerator(
+            top_k=args.top_k,
+            timeout_s=args.timeout_s,
+            commit_poll_timeout_s=args.commit_poll_timeout_s,
+            rps=resolved["rps"] or None,
+            commit_retry_max=args.commit_retry_max,
+            commit_retry_backoff_s=args.commit_retry_backoff_s,
+        )
+
+        try:
+            try:
+                all_data = _run_all_scenes(args, resolved, generator, tenants, monitor)
+
+                # -- 场景 F: 故障注入（mock provider，独立流程，不并入并发矩阵） -----
+                fault_result: dict[str, Any] | None = None
+                if "F" in resolved["scenario_ids"]:
+                    logger.info("===> 场景 F 故障注入（mock provider，只改配置不改服务端）")
+                    provider = MockProvider(port=args.mock_provider_port)
+                    provider.start()
+                    try:
+                        sequence = run_fault_sequence(
+                            provider,
+                            timeout_s=min(max(args.timeout_s, 0.5), 10.0),
+                        )
+                    finally:
+                        provider.stop()
+                    fault_result = fault_injection_summary(sequence)
+
+                cool_down_until = time.time() + args.cool_down_s
+                logger.info("冷却观测 %.0fs（观测内存回落与 commit 队列排空）", args.cool_down_s)
+                while time.time() < cool_down_until:
+                    if not args.no_metrics:
+                        monitor.sample()
+                    time.sleep(min(1.0, max(0.0, cool_down_until - time.time())))
+                settle_t = time.time()
+            finally:
+                if not args.no_metrics:
+                    monitor.stop()
+
+            t_first = all_data["window_first_t0"]
+            t_last = all_data["window_last_t1"]
+            resources = _build_resource_totals(monitor, t_first, t_last, settle_t)
+            # RSS 归一校正：扣除按注入消息字节归一估计的索引增长（正常增长不计为泄漏）
+            injected = injected_bytes_series(all_data["records"])
+            net_rss = (
+                rss_normalized_series(
+                    monitor.gauge_series(RESIDENT_MEMORY, t_first, t_last), injected
+                )
+                if not args.no_metrics
+                else []
+            )
+            total_injected_bytes = injected[-1][1] if injected else 0
+            raw_settled_mb = resources.get("rss_settled_mb")
+            resources["rss_normalized"] = {
+                "injected_mb": round(total_injected_bytes / 1024 / 1024, 2),
+                "net_trend": rss_trend_mb_per_min(net_rss),
+                "net_peak_mb": (
+                    round(max((value for _, value in net_rss), default=0) / 1024 / 1024, 2)
+                    if net_rss
+                    else None
+                ),
+                "net_settled_mb": (
+                    round(raw_settled_mb - total_injected_bytes / 1024 / 1024, 2)
+                    if raw_settled_mb is not None
+                    else None
+                ),
+            }
+            isolation = _build_isolation(
+                all_data["records"],
+                all_data["scenes"],
+                all_data["scene_read_stats"],
+                tenants,
+                degradation_threshold=args.degradation_threshold,
+            )
+            degradation = _build_degradation(all_data["scenes"], all_data["scene_read_stats"])
+            durability = commit_durability(all_data["records"])
+            fairness = tenant_fairness(all_data["records"])
+            signals = _build_signals(
+                args,
+                all_data["scenes"],
+                all_data["scene_read_stats"],
+                degradation,
+                monitor,
+                durability,
+                fairness,
+                resources,
+            )
+
+            def _redact(value: str) -> str:
+                return f"***configured*** ({len(value)} chars)" if value else ""
+
+            summary: dict[str, Any] = {
+                "generator": "performance/run_stress.py",
+                "status": "completed",
+                "started_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+                "finished_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+                "config": {
+                    **vars(args),
+                    "auth_key": _redact(args.auth_key),
+                    "scenario_ids": resolved["scenario_ids"],
+                    "concurrency_steps": resolved["concurrency_steps"],
+                    "mix_ratios": [f"{r}:{w}" for r, w in resolved["mix_ratios"]],
+                },
+                "data_scale": {
+                    "tenants": len(tenants),
+                    "sessions_per_tenant": args.seed_sessions_per_tenant,
+                    "messages_per_session": args.messages_per_session,
+                    "queries_per_tenant": [len(tenant.queries) for tenant in tenants],
+                    "tenant_details": [tenant.to_dict() for tenant in tenants],
+                },
+                "server": server_info,
+                "scenes": {
+                    key: entry for key, entry in all_data["scenes"].items()
+                },
+                "degradation": degradation,
+                "signals": signals,
+                "consistency": all_data["consistency"],
+                "resources": resources,
+                "commit_durability": durability,
+                "tenant_fairness": fairness,
+                "commit_latency": commit_completion_latency(all_data["records"]),
+                "write_retry": retry_summary(all_data["records"]),
+                "reconciliation": reconcile_messages(all_data["reconciliation_data"]),
+                "search_quality": search_quality_summary(
+                    all_data["records"],
+                    burst_windows=[
+                        (entry["burst_window_s"][0] * 1000, entry["burst_window_s"][1] * 1000)
+                        for entry in all_data["scenes"].values()
+                        if entry.get("scene_id") == "D" and entry.get("burst_window_s")
+                    ],
+                ),
+                "isolation": isolation,
+                "error_type_validation": error_type_validation(
+                    all_data["records"], fault_result
+                ),
+                "fault_injection": fault_result,
+                "preflight": preflight_result,
+            }
+            summary["feature_verdicts"] = evaluate_features(summary)
+
+            write_config(out_dir, summary["config"])
+            write_requests_csv(out_dir, all_data["records"])
+            if not args.no_metrics:
+                write_metrics_csv(out_dir, monitor)
+            else:
+                write_metrics_csv(out_dir, MetricsMonitor(args.echomem_url))  # empty frames
+            write_summary(out_dir, summary)
+
+            chart_series = {
+                "rss_mb": [
+                    (ts, round(value / 1024 / 1024, 2))
+                    for ts, value in monitor.gauge_series(RESIDENT_MEMORY, t_first, t_last)
+                ],
+                "threads": monitor.gauge_series(PROCESS_THREADS, t_first, t_last),
+                "commit_queue": monitor.gauge_series(COMMIT_QUEUE_DEPTH, t_first, t_last),
+                "inflight": monitor.gauge_series(HTTP_INFLIGHT, t_first, t_last),
+                "cpu_percent": monitor.cpu_utilization_series(t_first, t_last),
+            }
+            save_html(out_dir, build_html(summary, chart_series))
+            _print_terminal_summary(
+                all_data["scenes"],
+                degradation,
+                signals,
+                resources,
+                durability,
+                fairness,
+                summary["feature_verdicts"],
+            )
+        finally:
+            # 压测租户清理：prepare/场景/报告任一阶段异常也执行
+            # （preparer 记录全部已 provision 的租户，seed 中途失败也会被清；
+            #  static 模式复用预置身份，组合已在参数校验拒绝）
+            if args.cleanup_identities:
+                logger.info("清理压测租户（--cleanup-identities）...")
+                preparer.cleanup()
+    except BaseException as exc:  # noqa: BLE001 - 压测失败也生成报告（含失败原因与已收集部分）
+        if not args.no_metrics:
+            monitor.stop()
+        partial = None
+        if all_data is not None:
+            partial = {
+                "scenes": all_data.get("scenes") or {},
+                "records": all_data.get("records") or [],
+            }
+        _write_failure_report(
+            out_dir,
+            args,
+            resolved,
+            exc,
+            server_info=server_info,
+            partial=partial,
+        )
+        raise
     logger.info("完成! 结果目录: %s", out_dir)
 
 

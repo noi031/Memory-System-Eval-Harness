@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from performance.loadgen import RequestRecord
+from performance.metrics_calc import FEATURE_LABELS
 from performance.monitor import MetricsMonitor
 
 CSV_HEADERS = [
@@ -26,6 +27,17 @@ CSV_HEADERS = [
     "ts_ms",
     "session_id",
     "extra",
+    "retry_count",
+    "retried",
+    "retry_total_wait_ms",
+    "final_success",
+    "message_id",
+    "content_hash",
+    "content_bytes",
+    "hit_count",
+    "real_recall",
+    "quality_ok",
+    "query",
 ]
 
 
@@ -152,7 +164,8 @@ def _bar_chart(labels: list[str], series: list[dict[str, Any]], title: str, unit
     for gi, label in enumerate(labels):
         cx = pad_l + group_w * gi + group_w / 2
         for si, series_entry in enumerate(series):
-            value = series_entry["values"][gi] or 0.0
+            values = series_entry["values"]
+            value = (values[gi] if gi < len(values) else 0.0) or 0.0
             h_px = value * scale
             x = cx - (len(series) * bar_w) / 2 + si * bar_w
             parts.append(
@@ -549,8 +562,19 @@ def build_html(summary: dict[str, Any], chart_series: dict[str, Any]) -> str:
     scenes = summary.get("scenes", {})
     read_rows: list[tuple[str, ...]] = []
     write_rows: list[tuple[str, ...]] = []
+    failed_rows: list[tuple[str, ...]] = []
     for key in sorted(scenes):
         scene = scenes[key]
+        if scene.get("status") == "failed":
+            failed_rows.append(
+                (
+                    key,
+                    str(scene.get("scene_id", "")),
+                    str(scene.get("per_tenant_conc", "")),
+                    html.escape(str(scene.get("error", ""))),
+                )
+            )
+            continue
         ops = ((scene.get("ops") or {}).get(key) or {})
         read = ops.get("read") or {}
         write = ops.get("commit_done") or {}
@@ -603,12 +627,21 @@ def build_html(summary: dict[str, Any], chart_series: dict[str, Any]) -> str:
             ["项目", "值"],
         )
     )
+    if summary.get("status") == "failed" or summary.get("run_error"):
+        blocks.append(
+            "<h3>压测执行失败</h3>"
+            + _note("本次压测执行异常中断，以下为失败原因与已收集到的部分数据。")
+            + "<p style='color:#e26d5c;font-weight:bold'>"
+            + html.escape(str(summary.get("error") or summary.get("run_error") or ""))
+            + "</p>"
+        )
     blocks.append(_methodology(summary))
     blocks.append(_scenarios_section(summary))
     blocks.append(_metric_glossary(summary))
 
     # -- 特性结论 / 量化分析 / 判定摘要 ----------------------------------------
     blocks.append(verdict_block)
+    blocks.append(_baseline_validity_note(summary))
     if quantified_block:
         blocks.append(quantified_block)
     blocks.append(summary_block)
@@ -619,6 +652,12 @@ def build_html(summary: dict[str, Any], chart_series: dict[str, Any]) -> str:
         + _note("客户端视角：逐请求计时统计。QPS = 场景墙钟时长内完成请求数 ÷ 秒；"
                 "P50/P95/P99 为耗时升序线性插值分位数；错误分类见各表下方说明。")
     )
+    if failed_rows:
+        blocks.append(
+            "<h3>执行失败场景</h3>"
+            + _note("以下场景执行异常中断，未产出该场景的读 / 写指标；其余场景结果不受影响。")
+            + _stat_table(failed_rows, ["场景", "类型", "并发/租户", "失败原因"])
+        )
     if read_rows:
         labels = [row[0] for row in read_rows]
         blocks.append(
@@ -691,25 +730,63 @@ def build_html(summary: dict[str, Any], chart_series: dict[str, Any]) -> str:
             + "</ul>"
         )
 
+    # -- 压测过程确认的问题（EchoMem 侧缺陷/观察） -----------------------------
+    findings = summary.get("process_findings") or []
+    if findings:
+        findings_html = ["<h3>压测过程发现的问题</h3>"]
+        findings_html.append(
+            _note("压测执行期间确认并核实的问题记录；severity=bug 为确认的 EchoMem 缺陷，"
+                  "observation 为观察项（含压测工具/环境问题，供区分）。")
+        )
+        for finding in findings:
+            if isinstance(finding, dict):
+                title = html.escape(str(finding.get("title", "")))
+                scope = str(finding.get("scope", ""))
+                severity = str(finding.get("severity", ""))
+                evidence = html.escape(str(finding.get("evidence", "")))
+                impact = html.escape(str(finding.get("impact", "")))
+                badge = f'<span style="color:#e26d5c;font-weight:bold">[{html.escape(severity)}]</span>'
+                scope_txt = f'<span style="color:#888">({html.escape(scope)})</span>' if scope else ""
+                findings_html.append(
+                    f"<p><b>{title}</b> {badge} {scope_txt}<br/>"
+                    f"{impact}<br/>"
+                    f"<span style='color:#555'>证据：{evidence}</span></p>"
+                )
+            else:
+                findings_html.append(f"<p>{html.escape(str(finding))}</p>")
+        blocks.append("".join(findings_html))
+
     resources = summary.get("resources", {})
     if resources:
         rss_trend = resources.get("rss_trend") or {}
+        rss_norm = resources.get("rss_normalized") or {}
+        norm_rows = []
+        if rss_norm:
+            net_trend = rss_norm.get("net_trend") or {}
+            norm_rows = [
+                ("注入数据量 (MB)", str(rss_norm.get("injected_mb"))),
+                ("净 RSS 峰值 (MB)", str(rss_norm.get("net_peak_mb"))),
+                ("净 RSS 冷却后 (MB)", str(rss_norm.get("net_settled_mb"))),
+                ("净 RSS 上升斜率 (MB/min)", str(net_trend.get("slope_mb_per_min"))),
+            ]
         blocks.append(
             "<h3>资源与内存趋势（支撑事实）</h3>"
             + _note("CPU 为帧差换算单核百分比；RSS 基线为压测前采样，未回落 = 冷却后与基线差（负值表示低于基线）；"
-                    "上升斜率 ≥ 5 MB/min 判疑似泄漏。")
+                    "上升斜率 ≥ 5 MB/min 判疑似泄漏。归一校正：净 RSS = 原始 RSS − 按注入消息字节估计的索引增长，"
+                    "正常数据增长不计为泄漏。")
             + _stat_table(
                 [
                     ("CPU 均值 (%)", str(resources.get("cpu_util_mean_percent"))),
                     ("RSS 基线 (MB)", str(resources.get("rss_baseline_mb"))),
-                    ("RSS 峰值 (MB)", str(resources.get("rss_peak_mb"))),
+                    ("RSS 原始峰值 (MB)", str(resources.get("rss_peak_mb"))),
                     ("RSS 冷却后 (MB)", str(resources.get("rss_settled_mb"))),
                     ("RSS 未回落 (MB)", str(resources.get("rss_unsettled_mb"))),
                     ("RSS 上升斜率 (MB/min)", str(rss_trend.get("slope_mb_per_min"))),
                     ("RSS 拟合 R²", str(rss_trend.get("r2"))),
                     ("线程峰值", str(resources.get("threads_max"))),
                     ("commit 队列峰值", str(resources.get("commit_queue_max"))),
-                ],
+                ]
+                + norm_rows,
                 ["指标", "值"],
             )
         )
@@ -772,6 +849,9 @@ def build_html(summary: dict[str, Any], chart_series: dict[str, Any]) -> str:
             + _stat_table(rows, ["场景", "租户数", "P95 max/min 比", "P95 变异系数", "结论"])
         )
 
+    # -- 扩展目标支撑事实：重试 / 对账 / 质量断言 / 隔离 / 错误类型 / 故障注入 / 预检 --
+    blocks.append(_extended_evidence_section(summary))
+
     return (
         "<!DOCTYPE html><html><head><meta charset='utf-8'>"
         "<title>EchoMem 性能压测报告</title>"
@@ -787,29 +867,235 @@ def build_html(summary: dict[str, Any], chart_series: dict[str, Any]) -> str:
     )
 
 
+def _extended_evidence_section(summary: dict[str, Any]) -> str:
+    """扩展目标的支撑事实：重试 / 对账 / 质量断言 / 隔离 / 错误类型 / 故障 / 预检。"""
+    blocks: list[str] = ["<h2>扩展目标支撑事实</h2>"]
+
+    retry = summary.get("write_retry") or {}
+    if retry:
+        rows = [
+            ("commit_submit 总数", str(retry.get("submit_total"))),
+            ("重试过的事务数", str(retry.get("retried_total"))),
+            ("首次尝试成功（原始值）", f"{retry.get('first_attempt_ok')}（成功率 {retry.get('first_attempt_rate')}）"),
+            ("重试后最终成功（重试后值）", f"{retry.get('final_ok')}（成功率 {retry.get('final_success_rate')}）"),
+            ("重试耗尽仍失败", str(retry.get("retry_exhausted_failures"))),
+        ]
+        retried_errors = retry.get("retried_errors") or {}
+        if retried_errors:
+            rows += [(f"重试失败分类 {key}", str(value)) for key, value in retried_errors.items()]
+        blocks.append(
+            "<h3>写事务重试（特性 5，支撑事实）</h3>"
+            + _note("429+Retry-After 与 5xx/超时/连接按退避重试（上限 --commit-retry-max）；"
+                    "业务 4xx 不重试。原始值=首次尝试口径，重试后值=最终成功口径。")
+            + _stat_table(rows, ["指标", "值"])
+        )
+
+    reconciliation = summary.get("reconciliation") or {}
+    sessions = reconciliation.get("sessions") or []
+    if sessions:
+        check_rows: list[tuple[str, ...]] = []
+        for session in sessions:
+            for check in session.get("checks") or []:
+                ok = check.get("ok")
+                status = {True: "通过", False: "失败", None: "不可用"}.get(ok, str(ok))
+                check_rows.append(
+                    (str(session.get("session_id"))[:24], str(check.get("name")), status, str(check.get("detail")))
+                )
+        blocks.append(
+            "<h3>消息对账与去重（特性 5，支撑事实）</h3>"
+            + _note(f"总体: {reconciliation.get('verdict')} — {reconciliation.get('reason')}。"
+                    "核验: 客户端消息全集 ⊆ 服务端 history、服务端无重复、archive completed、"
+                    "atom source_turn_ids 无重复且 ⊆ 客户端 message_id；接口缺失标记「不可用」。")
+            + _stat_table(check_rows, ["会话", "核验项", "结果", "明细"])
+        )
+
+    quality = summary.get("search_quality") or {}
+    if quality:
+        gated = quality.get("gated_read_stats") or {}
+        rows = [
+            ("read 总数（ok）", str(quality.get("total"))),
+            ("锚词查询数", str(quality.get("anchor_total"))),
+            ("锚词未召回（质量失败）", str(quality.get("anchor_failures"))),
+            ("普通查询数", str(quality.get("ordinary_total"))),
+            ("real_recall 无法判定", str(quality.get("undetermined_real_recall"))),
+            ("hit_count P50/P95", f"{quality.get('hit_count_p50')} / {quality.get('hit_count_p95')}"),
+            ("通过断言 read 的 P95 (ms)", str(gated.get("p95_ms"))),
+        ]
+        blocks.append(
+            "<h3>search 质量断言（特性 6，支撑事实）</h3>"
+            + _note("锚词查询必须可召回（hit_count≥1），空结果计为假通过/失败；普通查询需有真实召回证据"
+                    "（explain/debug/非空命中），无证据计「无法判定」而非失败；延迟统计仅覆盖断言通过的 read。")
+            + _stat_table(rows, ["指标", "值"])
+        )
+
+    isolation = summary.get("isolation") or {}
+    if isolation:
+        iso_rows: list[tuple[str, ...]] = []
+        for scene_key, group in isolation.items():
+            same = group.get("same_tenant") or {}
+            cross = group.get("cross_tenant") or {}
+            iso_rows.append(
+                (
+                    scene_key,
+                    str(group.get("burst_tenant_idx")),
+                    str(same.get("count")),
+                    str(same.get("p95_ms")),
+                    str(group.get("same_tenant_degradation")),
+                    str(cross.get("count")),
+                    str(cross.get("p95_ms")),
+                    str(group.get("cross_tenant_degradation")),
+                    str(group.get("verdict")),
+                )
+            )
+        blocks.append(
+            "<h3>读写隔离细粒度（特性 7，支撑事实）</h3>"
+            + _note("洪峰窗口内 read 按租户分组：同租户=发起洪峰写入的租户自己的 search；跨租户=其它租户。"
+                    "判定: 跨租户 P95 劣化 ≤ 同租户劣化 且均 < --degradation-threshold。")
+            + _stat_table(
+                iso_rows,
+                ["场景", "洪峰租户", "同租户数", "同租户P95", "同租户劣化",
+                 "跨租户数", "跨租户P95", "跨租户劣化", "结论"],
+            )
+        )
+
+    error_type = summary.get("error_type_validation") or {}
+    if error_type:
+        rows = [("结论", str(error_type.get("verdict"))), ("依据", str(error_type.get("reason")))]
+        breakdown = error_type.get("observed_breakdown") or {}
+        rows += [(f"观测 {key}", str(value)) for key, value in breakdown.items()]
+        blocks.append(
+            "<h3>服务端错误类型正确性（特性 8，支撑事实）</h3>"
+            + _note("对每种拒绝/故障场景断言服务端返回的错误类型与预期一致（429 带 Retry-After、"
+                    "400 模型名、5xx 模型故障、超时挂起、终态 failed），作为其它判定成立的前提。")
+            + _stat_table(rows, ["指标", "值"])
+        )
+
+    fault = summary.get("fault_injection") or {}
+    if fault.get("stages"):
+        rows = [
+            (
+                str(stage.get("stage")),
+                str(stage.get("behavior")),
+                str(stage.get("expected_error_type")),
+                str(stage.get("observed_error_type")),
+                str(stage.get("requests")),
+                str(stage.get("recovered")),
+                "通过" if stage.get("ok") else "失败",
+            )
+            for stage in fault.get("stages") or []
+        ]
+        blocks.append(
+            "<h3>故障注入（特性 9，mock 可控故障语义证据）</h3>"
+            + _note(f"总体: {fault.get('verdict')} — {fault.get('reason')}。注入对象为外部 LLM/embedding 端点"
+                    "（engine api_base 指向 mock，只改配置不改服务端）；500→5xx、挂起→超时、429→Retry-After，"
+                    "恢复阶段须成功。真实容量证据另测，两类证据禁止互相替代。")
+            + _stat_table(rows, ["阶段", "注入行为", "期望错误类型", "观测错误类型", "请求数", "恢复", "结论"])
+        )
+
+    preflight = summary.get("preflight") or {}
+    if preflight:
+        rows = [("预检结论", "通过" if preflight.get("ok") else "失败"),
+                ("engine 数", str(preflight.get("engines_checked"))),
+                ("配置摘要 (SHA-256)", str(preflight.get("digest")))]
+        for engine in preflight.get("engines") or []:
+            rows.append(
+                (
+                    f"engine {engine.get('id')} ({engine.get('kind')})",
+                    f"模型 {engine.get('model')} 状态 {engine.get('status')} "
+                    f"code={engine.get('code')} 耗时 {engine.get('elapsed_s')}s",
+                )
+            )
+        blocks.append(
+            "<h3>模型与配置预检门禁（特性 10，支撑事实）</h3>"
+            + _note("逐 engine 解析 api_key_env/api_base/model，检查环境变量、对每个 endpoint 发最小真实请求、"
+                    "校验模型名被支持；任一失败即停止压测并归类环境/依赖失败。")
+            + _stat_table(rows, ["指标", "值"])
+        )
+
+    return "".join(blocks)
+
+
+def _baseline_validity_note(summary: dict[str, Any], threshold: float = 0.2) -> str:
+    """A 纯读基线错误率过高时，劣化倍数判定失真，显式警示（假 PASS 检测）。
+
+    劣化倍数以 A 基线的读延迟为分母；当 A 自身已大量超时/报错时比值趋近 1，
+    会把真实劣化误判为「无劣化」。逐并发档检查 A 基线错误率，超阈值则告警，
+    并提示总体 PASS 可能是基线失效导致的假 PASS。
+    """
+    scenes = summary.get("scenes") or {}
+    verdicts = summary.get("feature_verdicts") or {}
+    overall = verdicts.get("overall", "")
+    bad: list[str] = []
+    for key, scene in scenes.items():
+        if not key.startswith("A@"):
+            continue
+        read = ((scene.get("ops") or {}).get(key) or {}).get("read") or {}
+        count = read.get("count") or 0
+        errors = read.get("errors_total") or 0
+        if count <= 0:
+            continue
+        err_rate = errors / count
+        if err_rate > threshold:
+            bad.append(
+                f"<li><b>{html.escape(key)}</b> 纯读基线错误率 {err_rate:.0%}（{errors}/{count}），"
+                f"超过阈值 {threshold:.0%}：该档劣化倍数分母已失真，此并发档的 PASS/FAIL 判定不可信。</li>"
+            )
+    if not bad:
+        return ""
+    head = (
+        "<h3>基线有效性警示</h3>"
+        + _note(
+            "劣化倍数 = 目标场景读 P95 ÷ 同并发 A 纯读基线读 P95；A 基线自身超时/报错会使比值趋近 1，"
+            "掩盖真实劣化（假 PASS）。以下并发档的 A 基线已失效："
+        )
+    )
+    if overall == "PASS":
+        head += (
+            "<p style='color:#e26d5c;font-weight:bold'>总体结论为 PASS，但上述基线档已失效："
+            "此 PASS 是基线自身劣化导致的假 PASS，不代表系统在该并发下表现良好；"
+            "请以「压测过程发现的问题」与各场景原始延迟/错误率数据为准。</p>"
+        )
+    elif overall == "FAIL":
+        head += (
+            "<p style='color:#e9b949'>总体结论为 FAIL，但上述基线档已失效："
+            "这些档位之间的劣化对比无意义，请核对结论所依赖的档位是否仍有效。</p>"
+        )
+    return head + "<ul>" + "".join(bad) + "</ul>"
+
+
 def _verdict_table(verdicts: dict[str, Any]) -> str:
-    """Feature-verdict table: 特性 | 结论 | 依据."""
+    """Feature-verdict table: 特性 | 结论 | 依据（含判定分层与 SLO 口径）。"""
     features = verdicts.get("features") or {}
     overall = verdicts.get("overall", "INCONCLUSIVE")
-    labels = {
-        "commit_guarantee": "特性1 commit 异步 / 成功保证 / 不阻塞检索",
-        "tenant_fairness": "特性2 租户公平性",
-        "memory_leak": "特性3 无内存泄漏",
-        "resource_timeline": "特性4 资源利用率随时间变化图",
+    labels = FEATURE_LABELS
+    verdict_text = {
+        "PASS": "通过",
+        "FAIL": "不通过",
+        "INCONCLUSIVE": "数据不足",
+        "not_run": "未执行",
+        "known_limit": "已知限制",
+        "env_error": "环境/依赖失败",
     }
-    verdict_text = {"PASS": "通过", "FAIL": "不通过", "INCONCLUSIVE": "数据不足"}
     css_class = {
         "PASS": "v-pass",
         "FAIL": "v-fail",
         "INCONCLUSIVE": "v-inconclusive",
+        "not_run": "v-inconclusive",
+        "known_limit": "v-inconclusive",
+        "env_error": "v-fail",
     }
     rows = []
     for feature_key, title in labels.items():
         entry = features.get(feature_key) or {}
         verdict = entry.get("verdict", "INCONCLUSIVE")
+        evidence = (
+            f' <span style="color:#888">[{html.escape(str(entry.get("evidence_type", "real")))}]</span>'
+            if entry.get("evidence_type")
+            else ""
+        )
         rows.append(
             "<tr>"
-            f'<td>{html.escape(title)}</td>'
+            f'<td>{html.escape(title)}{evidence}</td>'
             f'<td class="{css_class.get(verdict, "")}">{html.escape(verdict_text.get(verdict, verdict))}</td>'
             f'<td>{html.escape(entry.get("reason", ""))}</td>'
             "</tr>"
@@ -838,9 +1124,44 @@ def _verdict_table(verdicts: dict[str, Any]) -> str:
         f"<tbody>{''.join(rows)}"
         f'<tr class="v-overall"><td>总体结论</td>'
         f'<td class="{overall_class}">{html.escape(overall_text)}</td>'
-        "<td>任一特性“不通过”则总体不通过；存在“数据不足”且无不通过时同判数据不足</td></tr>"
+        "<td>任一特性“不通过/环境依赖失败”则总体同判；存在“数据不足”且无失败时同判数据不足；"
+        "未执行/已知限制不拉低总体</td></tr>"
         "</tbody></table>"
+        + _layers_and_slo(verdicts)
     )
+
+
+def _layers_and_slo(verdicts: dict[str, Any]) -> str:
+    """判定分层（real/mock 证据分节）+ SLO 口径表。"""
+    blocks: list[str] = []
+    layers = verdicts.get("verdict_layers") or {}
+    if layers:
+        blocks.append("<h3>判定分层（证据类型）</h3>")
+        for layer, mapping in layers.items():
+            if not mapping:
+                continue
+            rows = [(html.escape(k), str(v)) for k, v in mapping.items()]
+            blocks.append(
+                _note(
+                    "real = 真实容量证据（真实服务端/模型）；mock = 可控故障语义证据（mock provider）。"
+                    "两类证据分节报告，禁止互相替代。"
+                )
+                + f"<h4>证据类型: {html.escape(layer)}</h4>"
+                + _stat_table(rows, ["特性", "结论"])
+            )
+    slo = verdicts.get("slo_accounting") or {}
+    if slo:
+        rows = [
+            (html.escape(key), str(value.get("numerator", "")), str(value.get("denominator", "")),
+             str(value.get("window", "")), "含" if value.get("retry_included") else "不含")
+            for key, value in slo.items()
+        ]
+        blocks.append(
+            "<h3>SLO 口径</h3>"
+            + _note("每个指标的分子 / 分母 / 时间窗口 / 是否含客户端重试；涉及重试的指标同时输出原始值与重试后值。")
+            + _stat_table(rows, ["指标", "分子", "分母", "时间窗口", "含重试"])
+        )
+    return "".join(blocks)
 
 
 def _quantified_section(verdicts: dict[str, Any]) -> str:
@@ -854,12 +1175,7 @@ def _quantified_section(verdicts: dict[str, Any]) -> str:
     if not features:
         return ""
     blocks = ["<h2>特性量化分析</h2>"]
-    labels = {
-        "commit_guarantee": "特性1 commit 提交/完成与检索优先级",
-        "tenant_fairness": "特性2 租户公平性（跨场景最坏情况）",
-        "memory_leak": "特性3 内存趋势（RSS）",
-        "resource_timeline": "特性4 资源利用率时间线",
-    }
+    labels = FEATURE_LABELS
     for feature_key, title in labels.items():
         measurements = (features.get(feature_key) or {}).get("measurements")
         if not measurements:
@@ -905,6 +1221,18 @@ def _summary_bullets(summary: dict[str, Any]) -> list[str]:
         bullets.append(
             f"写后读一致性：P50={consistency.get('p50_ms')}ms "
             f"P95={consistency.get('p95_ms')}ms 超时={consistency.get('timeouts')}"
+        )
+    reconciliation = summary.get("reconciliation") or {}
+    if reconciliation.get("sessions"):
+        bullets.append(
+            f"消息对账：{reconciliation.get('verdict')}（{reconciliation.get('reason', '')}）"
+        )
+    retry = summary.get("write_retry") or {}
+    if retry.get("submit_total"):
+        bullets.append(
+            f"commit 提交：原始成功率 {retry.get('first_attempt_rate')} → "
+            f"重试后 {retry.get('final_success_rate')}（重试耗尽失败 "
+            f"{retry.get('retry_exhausted_failures')}）"
         )
     return bullets
 

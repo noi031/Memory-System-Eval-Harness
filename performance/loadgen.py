@@ -10,6 +10,7 @@ with the four stages timed individually.
 
 from __future__ import annotations
 
+import hashlib
 import itertools
 import logging
 import socket
@@ -21,10 +22,65 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from backends.echomem.client import EchoMemClient
-from performance.prepare import TenantContext, WRITE_ANCHOR_PREFIX
+from performance.prepare import ANCHOR_PREFIX, WRITE_ANCHOR_PREFIX, TenantContext
 from performance.scenarios import SceneRun
 
 logger = logging.getLogger("performance.loadgen")
+
+
+def _content_hash(content: str) -> str:
+    """Deterministic hash of one injected message (reconciliation key)."""
+    return hashlib.sha256(content.encode("utf-8")).hexdigest()
+
+
+def is_anchor_query(query: str) -> bool:
+    """Whether a read query is an anchor token (must always be recallable)."""
+    return ANCHOR_PREFIX in query or WRITE_ANCHOR_PREFIX in query
+
+
+def _retry_after_seconds(exc: BaseException) -> float | None:
+    """Parse the ``Retry-After`` header of a 429 into seconds (or None)."""
+    headers = getattr(exc, "headers", None)
+    if headers is None:
+        return None
+    raw = headers.get("Retry-After") or ""
+    raw = raw.strip()
+    if not raw:
+        return None
+    try:
+        return max(0.0, float(raw))
+    except ValueError:
+        return None  # HTTP-date form unsupported; fall back to client backoff
+
+
+def retry_decision(
+    exc: BaseException,
+    *,
+    max_retries: int,
+    attempt: int,
+    backoff_s: float,
+) -> tuple[bool, float]:
+    """Decide whether a failed commit_submit attempt is retryable.
+
+    Returns ``(retryable, wait_s)``. Retryable: HTTP 429 (honouring
+    ``Retry-After`` when present), HTTP 408/409/425, any 5xx, timeouts and
+    connection errors. Non-retryable business 4xx are not retried.
+    ``max_retries == 0`` means no retry at all.
+    """
+    if isinstance(exc, urllib.error.HTTPError):
+        code = exc.code
+        if code == 429:
+            return True, _retry_after_seconds(exc) or backoff_s * attempt
+        if code in (408, 409, 425):
+            return True, backoff_s * attempt
+        if code < 500:
+            return False, 0.0
+        return True, backoff_s * attempt
+    if isinstance(exc, (TimeoutError, socket.timeout)):
+        return True, backoff_s * attempt
+    if isinstance(exc, urllib.error.URLError):
+        return True, backoff_s * attempt
+    return False, 0.0
 
 
 @dataclass
@@ -41,6 +97,20 @@ class RequestRecord:
     ts_ms: float
     session_id: str = ""
     extra: str = ""  # e.g. "burst"
+    # -- write retry instrumentation (commit_submit) ---------------------
+    retry_count: int = 0
+    retried: bool = False
+    retry_total_wait_ms: float = 0.0
+    final_success: bool = False
+    # -- message-level reconciliation (add) ------------------------------
+    message_id: str = ""
+    content_hash: str = ""
+    content_bytes: int = 0
+    # -- search quality assertion (read) ----------------------------------
+    query: str = ""
+    hit_count: int = 0
+    real_recall: bool = False
+    quality_ok: bool = True
 
     def to_csv_row(self) -> dict[str, Any]:
         return {
@@ -54,6 +124,17 @@ class RequestRecord:
             "ts_ms": round(self.ts_ms, 3),
             "session_id": self.session_id,
             "extra": self.extra,
+            "retry_count": self.retry_count,
+            "retried": self.retried,
+            "retry_total_wait_ms": round(self.retry_total_wait_ms, 3),
+            "final_success": self.final_success,
+            "message_id": self.message_id,
+            "content_hash": self.content_hash,
+            "content_bytes": self.content_bytes,
+            "hit_count": self.hit_count,
+            "real_recall": self.real_recall,
+            "quality_ok": self.quality_ok,
+            "query": self.query,
         }
 
 
@@ -93,6 +174,9 @@ class WriteTransactionResult:
     session_id: str
     anchor: str
     records: list[RequestRecord] = field(default_factory=list)
+    message_ids: list[str] = field(default_factory=list)
+    content_hashes: list[str] = field(default_factory=list)
+    archive_id: str = ""
 
 
 def run_write_transaction(
@@ -107,18 +191,28 @@ def run_write_transaction(
     commit_poll_interval_s: float = 0.2,
     extra: str = "",
     seed_anchor: str = "",
+    commit_retry_max: int = 0,
+    commit_retry_backoff_s: float = 0.5,
 ) -> WriteTransactionResult:
     """One full injection transaction with per-stage timing.
 
     The final message carries the transaction anchor; when an anchor is
     supplied for consistency probing the content embeds it.
+
+    ``commit_submit`` is retried up to ``commit_retry_max`` times when the
+    rejection is retryable (HTTP 429 with Retry-After, 408/409/425, 5xx,
+    timeouts, connection errors). Non-retryable business 4xx fail the
+    transaction immediately. Every accepted message is recorded with its
+    message id and content hash for message-level reconciliation.
     """
     records: list[RequestRecord] = []
     result = WriteTransactionResult(ok=False, session_id="", anchor="")
     result.records = records  # same list; all failure paths return with records attached
     anchor = seed_anchor or f"{WRITE_ANCHOR_PREFIX}-{tenant_idx}-{seq}"
 
-    def record(op: str, ms: float, status: str, error_type: str = "") -> None:
+    def record(
+        op: str, ms: float, status: str, error_type: str = "", **extra_fields: Any
+    ) -> None:
         records.append(
             RequestRecord(
                 scene_key=scene_key,
@@ -131,6 +225,7 @@ def run_write_transaction(
                 ts_ms=time.time() * 1000,
                 session_id=result.session_id,
                 extra=extra,
+                **extra_fields,
             )
         )
 
@@ -144,22 +239,76 @@ def run_write_transaction(
 
     for msg_idx in range(messages_per_session):
         last = msg_idx == messages_per_session - 1
-        content = f"压测写入会话消息 {anchor}" if last else "压测写入会话消息"
+        # 每条消息 content 必须唯一（末条携带 anchor 供 search 探测），
+        # 否则 server_no_duplicate 会把客户端主动写入的重复内容误判为服务端重复。
+        content = (
+            f"压测写入会话消息 {anchor}-{msg_idx}" if last else f"压测写入会话消息-{msg_idx}"
+        )
         started = time.perf_counter()
         try:
-            client.add_message(result.session_id, "user", content)
+            resp = client.add_message(result.session_id, "user", content)
         except Exception as exc:
             record("add", (time.perf_counter() - started) * 1000, "error", classify_error(exc))
             return result
-        record("add", (time.perf_counter() - started) * 1000, "ok")
+        message_id = str(
+            resp.get("message_id")
+            or resp.get("id")
+            or resp.get("msg_id")
+            or ""
+        ) if isinstance(resp, dict) else ""
+        result.message_ids.append(message_id)
+        result.content_hashes.append(_content_hash(content))
+        record(
+            "add",
+            (time.perf_counter() - started) * 1000,
+            "ok",
+            message_id=message_id,
+            content_hash=_content_hash(content),
+            content_bytes=len(content.encode("utf-8")),
+        )
 
     started = time.perf_counter()
-    try:
-        archive_id = client.commit_session(result.session_id)
-    except Exception as exc:
-        record("commit_submit", (time.perf_counter() - started) * 1000, "error", classify_error(exc))
-        return result
-    record("commit_submit", (time.perf_counter() - started) * 1000, "ok")
+    attempts = 0
+    retried = False
+    total_wait_ms = 0.0
+    while True:
+        attempts += 1
+        try:
+            archive_id = client.commit_session(result.session_id)
+            break
+        except Exception as exc:
+            error_type = classify_error(exc)
+            retryable, wait_s = retry_decision(
+                exc,
+                max_retries=commit_retry_max,
+                attempt=attempts,
+                backoff_s=commit_retry_backoff_s,
+            )
+            if not retryable or attempts > commit_retry_max:
+                record(
+                    "commit_submit",
+                    (time.perf_counter() - started) * 1000,
+                    "error",
+                    error_type,
+                    retry_count=attempts - 1,
+                    retried=retried,
+                    retry_total_wait_ms=total_wait_ms,
+                )
+                return result
+            retried = True
+            if wait_s > 0:
+                time.sleep(wait_s)
+                total_wait_ms += wait_s * 1000
+    record(
+        "commit_submit",
+        (time.perf_counter() - started) * 1000,
+        "ok",
+        retry_count=attempts - 1,
+        retried=retried,
+        retry_total_wait_ms=total_wait_ms,
+        final_success=True,
+    )
+    result.archive_id = archive_id
 
     started = time.perf_counter()
     try:
@@ -227,13 +376,18 @@ class LoadGenerator:
         commit_poll_timeout_s: float = 120.0,
         commit_poll_interval_s: float = 0.2,
         rps: float | None = None,
+        commit_retry_max: int = 0,
+        commit_retry_backoff_s: float = 0.5,
     ) -> None:
         self.top_k = top_k
         self.timeout_s = timeout_s
         self.commit_poll_timeout_s = commit_poll_timeout_s
         self.commit_poll_interval_s = commit_poll_interval_s
         self.rate_limiter = RateLimiter(rps) if rps else None
+        self.commit_retry_max = commit_retry_max
+        self.commit_retry_backoff_s = commit_retry_backoff_s
         self._last_write_anchors: list[AnchorWrite] = []
+        self._reconciliation_candidates: list[tuple[int, str, list[str], list[str], str]] = []
 
     # -- single operations ------------------------------------------------
 
@@ -247,11 +401,24 @@ class LoadGenerator:
         tenant_idx: int,
     ) -> RequestRecord:
         started = time.perf_counter()
+        hit_count = 0
+        real_recall = False
+        quality_ok = True
         try:
-            client.search(query, top_k=self.top_k, agent_id="", timeout_s=self.timeout_s)
+            items, meta = client.search_with_meta(
+                query, top_k=self.top_k, agent_id="", timeout_s=self.timeout_s
+            )
             status, error = "ok", ""
+            hit_count = len(items)
+            real_recall = (
+                bool(meta.get("has_explain"))
+                or bool(meta.get("has_debug"))
+                or bool(hit_count)
+            )
         except Exception as exc:
             status, error = "error", classify_error(exc)
+        if status == "ok" and is_anchor_query(query):
+            quality_ok = hit_count >= 1
         return RequestRecord(
             scene_key=scene_key,
             step_conc=step_conc,
@@ -261,6 +428,10 @@ class LoadGenerator:
             status=status,
             error_type=error,
             ts_ms=time.time() * 1000,
+            query=query,
+            hit_count=hit_count,
+            real_recall=real_recall,
+            quality_ok=quality_ok,
         )
 
     # -- worker loops ------------------------------------------------------
@@ -315,10 +486,21 @@ class LoadGenerator:
                 messages_per_session=messages_per_session,
                 commit_poll_timeout_s=self.commit_poll_timeout_s,
                 commit_poll_interval_s=self.commit_poll_interval_s,
+                commit_retry_max=self.commit_retry_max,
+                commit_retry_backoff_s=self.commit_retry_backoff_s,
             )
             records.extend(result.records)
             if result.ok:
                 anchors.append((tenant.idx, result.session_id, result.anchor))
+                self._reconciliation_candidates.append(
+                    (
+                        tenant.idx,
+                        result.session_id,
+                        result.message_ids,
+                        result.content_hashes,
+                        result.archive_id,
+                    )
+                )
         self._last_write_anchors.extend(anchors)
         return records
 
@@ -348,6 +530,7 @@ class LoadGenerator:
         else:  # C
             read_count, write_count = split_threads(total_workers, scene.mix or (1, 1))
         self._last_write_anchors.clear()
+        self._reconciliation_candidates.clear()
 
         futures: list[Any] = []
         with ThreadPoolExecutor(
@@ -383,7 +566,12 @@ class LoadGenerator:
                 delay = max(0.0, scene.duration_s - scene.burst_window_s) / 2.0
                 time.sleep(delay)
                 burst_start = time.time()
-                burst_records = self._run_burst(scene, tenants, messages_per_session)
+                burst_records = self._run_burst(
+                    scene,
+                    tenants,
+                    messages_per_session,
+                    burst_tenant_idx=tenants[0].idx if tenants else None,
+                )
                 burst_end = time.time()
                 remaining = started_wall + scene.duration_s - time.time()
                 if remaining > 0:
@@ -412,30 +600,49 @@ class LoadGenerator:
         scene: SceneRun,
         tenants: list[TenantContext],
         messages_per_session: int,
+        burst_tenant_idx: int | None = None,
     ) -> list[RequestRecord]:
-        """Saturate the server with K parallel write transactions (scene D)."""
+        """Saturate the server with K parallel write transactions (scene D).
+
+        When ``burst_tenant_idx`` is set, every burst write uses that one
+        tenant, so isolation granularity can compare same-tenant vs
+        cross-tenant read latency inside the burst window.
+        """
         count = scene.burst_commits
         step_conc = scene.per_tenant_conc
         records: list[RequestRecord] = []
         seq_counter = itertools.count()
+
+        def submit(client: Any, tenant_idx: int) -> Any:
+            return pool.submit(
+                run_write_transaction,
+                client,
+                scene_key=scene.key,
+                step_conc=step_conc,
+                tenant_idx=tenant_idx,
+                seq=next(seq_counter),
+                messages_per_session=messages_per_session,
+                commit_poll_timeout_s=self.commit_poll_timeout_s,
+                commit_poll_interval_s=self.commit_poll_interval_s,
+                extra="burst",
+                commit_retry_max=self.commit_retry_max,
+                commit_retry_backoff_s=self.commit_retry_backoff_s,
+            )
+
         with ThreadPoolExecutor(
             max_workers=min(count, 8), thread_name_prefix="perf-burst"
         ) as pool:
-            futures = [
-                pool.submit(
-                    run_write_transaction,
-                    tenants[i % len(tenants)].client,
-                    scene_key=scene.key,
-                    step_conc=step_conc,
-                    tenant_idx=tenants[i % len(tenants)].idx,
-                    seq=next(seq_counter),
-                    messages_per_session=messages_per_session,
-                    commit_poll_timeout_s=self.commit_poll_timeout_s,
-                    commit_poll_interval_s=self.commit_poll_interval_s,
-                    extra="burst",
-                )
-                for i in range(count)
-            ]
+            if burst_tenant_idx is not None:
+                tenant = tenants[burst_tenant_idx % len(tenants)]
+                futures = [submit(tenant.client, tenant.idx) for _ in range(count)]
+            else:
+                futures = [
+                    submit(
+                        tenants[i % len(tenants)].client,
+                        tenants[i % len(tenants)].idx,
+                    )
+                    for i in range(count)
+                ]
             for future in futures:
                 result = future.result()
                 records.extend(result.records)
@@ -516,3 +723,97 @@ class LoadGenerator:
                     )
                 )
         return records
+
+    # -- message-level reconciliation --------------------------------------
+
+    def run_reconciliation(
+        self,
+        tenants: list[TenantContext],
+        *,
+        max_sessions: int = 20,
+    ) -> list[dict[str, Any]]:
+        """Collect per-session reconciliation data for the write audit.
+
+        For the most recently completed write transactions this pulls the
+        server-side message list, archive terminal state and (when exposed)
+        the atom source turn ids, alongside the client-side injected message
+        ids and content hashes. Judgment is a pure function in
+        ``metrics_calc.reconcile_messages``; endpoint failures are recorded
+        as ``*_available=False`` instead of aborting.
+        """
+        data: list[dict[str, Any]] = []
+        for tenant_idx, session_id, client_ids, client_hashes, archive_id in (
+            self._reconciliation_candidates[-max_sessions:]
+        ):
+            client = tenants[tenant_idx].client
+            entry: dict[str, Any] = {
+                "tenant_idx": tenant_idx,
+                "session_id": session_id,
+                "client_ids": client_ids,
+                "client_hashes": client_hashes,
+                "archive_id": archive_id,
+                "server_ids": [],
+                "server_hashes": [],
+                "archive_status": "",
+                "atom_source_turn_ids": [],
+                "history_available": False,
+                "archive_available": False,
+                "atoms_available": False,
+            }
+            try:
+                history = client.session_history(
+                    session_id, limit=max(200, len(client_hashes))
+                )
+                entry["server_ids"] = [
+                    str(item.get("id") or "") for item in history if item.get("id")
+                ]
+                entry["server_hashes"] = [
+                    _content_hash(str(item.get("content") or "")) for item in history
+                ]
+                entry["history_available"] = True
+            except Exception as exc:
+                logger.warning("对账 history 获取失败 session=%s: %s", session_id, exc)
+            try:
+                archives = client.session_archives(session_id, limit=50)
+                # The server exposes committed archives without a status
+                # field: an archive present in this list has reached its
+                # terminal committed state.
+                entry["archive_status"] = "completed" if archives else ""
+                entry["archive_available"] = True
+            except Exception as exc:
+                logger.warning("对账 archives 获取失败 session=%s: %s", session_id, exc)
+            if archive_id:
+                try:
+                    memories = client.commit_memories(session_id, archive_id)
+                    entry["atom_source_turn_ids"] = _extract_source_turn_ids(memories)
+                    entry["atoms_available"] = True
+                except Exception as exc:
+                    logger.warning(
+                        "对账 commit_memories 获取失败 session=%s: %s", session_id, exc
+                    )
+            data.append(entry)
+        return data
+
+
+def _extract_source_turn_ids(memories: dict[str, Any]) -> list[str]:
+    """Collect atom source_turn_ids from a commit memories payload, if any.
+
+    The payload shape is not contractual across servers; both a flat
+    ``source_turn_ids`` list and a nested atoms list are tolerated. Missing
+    data yields an empty list (reconciliation marks atoms as unavailable).
+    """
+    ids: list[str] = []
+    for key in ("source_turn_ids", "source_ids", "message_ids"):
+        value = memories.get(key)
+        if isinstance(value, list):
+            ids.extend(str(item) for item in value)
+    atoms = memories.get("atoms") or memories.get("items") or []
+    if isinstance(atoms, list):
+        for atom in atoms:
+            if not isinstance(atom, dict):
+                continue
+            for key in ("source_turn_ids", "source_ids", "message_ids"):
+                value = atom.get(key)
+                if isinstance(value, list):
+                    ids.extend(str(item) for item in value)
+    return [item for item in ids if item]

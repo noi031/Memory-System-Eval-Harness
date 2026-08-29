@@ -12,17 +12,22 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import tempfile
 import unittest
 import urllib.error
 from pathlib import Path
+from unittest import mock
 
-from backends.memory_types import CommitResult
+from backends.memory_types import CommitResult, SearchResult
 from performance.loadgen import (
+    LoadGenerator,
     RequestRecord,
     classify_error,
+    is_anchor_query,
     mix_token_sequence,
+    retry_decision,
     run_write_transaction,
     split_threads,
 )
@@ -33,12 +38,20 @@ from performance.metrics_calc import (
     consistency_summary,
     degradation_factor,
     degradation_measurements,
+    error_type_validation,
     evaluate_features,
     fairness_measurements,
+    fault_injection_summary,
+    injected_bytes_series,
+    isolation_summary,
     percentile,
     percentiles,
     read_records_in_window,
+    reconcile_messages,
+    retry_summary,
+    rss_normalized_series,
     rss_trend_mb_per_min,
+    search_quality_summary,
     summarize_records,
     tenant_fairness,
 )
@@ -47,6 +60,18 @@ from performance.monitor import (
     MetricsFrame,
     MetricsMonitor,
     parse_prometheus_text,
+)
+from performance.perf_mock_provider import (
+    MockProvider,
+    probe,
+    run_fault_sequence,
+)
+from performance.perf_preflight import (
+    check_env,
+    config_digest,
+    parse_engine_configs,
+    probe_endpoint,
+    run_preflight,
 )
 from performance.prepare import (
     TenantPreparer,
@@ -332,6 +357,15 @@ class FakeMemClient:
         self.account = "fake-tenant"
         self.user_id = "fake-user"
         self.auth_key = "fake-key"
+        # -- write retry / reconciliation / quality knobs -------------------
+        self.commit_attempts = 0
+        self.commit_failures_left = 0  # 抛 503 的次数（之后成功）
+        self.commit_429_left = 0  # 抛 429+Retry-After 的次数
+        self.commit_400 = False  # 抛 400（不可重试）
+        self.archive_status = "completed"
+        self.search_short_circuit = False  # 普通查询短路空响应
+        self.anchor_short_circuit = False  # 锚词查询短路空响应
+        self.retry_after_s = "1"
 
     def delete_current_identity(self) -> None:
         if self.fail_step == "delete":
@@ -349,11 +383,22 @@ class FakeMemClient:
             raise TimeoutError("slow")
         self.add_calls += 1
         self.messages.append(content)
-        return {}
+        return {"message_id": f"msg-{self.add_calls}"}
 
     def commit_session(self, session_id: str):
+        self.commit_attempts += 1
         if self.fail_step == "commit":
             raise urllib.error.HTTPError("http://x", 503, "busy", None, None)
+        if self.commit_400:
+            raise urllib.error.HTTPError("http://x", 400, "bad request", None, None)
+        if self.commit_failures_left > 0:
+            self.commit_failures_left -= 1
+            raise urllib.error.HTTPError("http://x", 503, "busy", None, None)
+        if self.commit_429_left > 0:
+            self.commit_429_left -= 1
+            exc = urllib.error.HTTPError("http://x", 429, "limited", None, None)
+            exc.headers = {"Retry-After": self.retry_after_s}
+            raise exc
         self.commit_calls += 1
         return "archive-1"
 
@@ -364,6 +409,55 @@ class FakeMemClient:
             self.poll_failures_left -= 1
             return CommitResult(session_id, archive_id, "failed", self.poll_elapsed_s, 2)
         return CommitResult(session_id, archive_id, self.poll_status, self.poll_elapsed_s, 2)
+
+    # -- reconciliation / search quality -----------------------------------
+
+    def session_history(self, session_id: str, limit: int = 200):
+        if self.fail_step == "history":
+            raise RuntimeError("no history endpoint")
+        return [
+            {"id": f"msg-{i + 1}", "content": content}
+            for i, content in enumerate(self.messages)
+        ]
+
+    def session_archives(self, session_id: str, limit: int = 50):
+        if self.fail_step == "archives":
+            raise RuntimeError("no archives endpoint")
+        return [{"status": self.archive_status}]
+
+    def commit_memories(self, session_id: str, archive_id: str):
+        if self.fail_step == "memories":
+            raise RuntimeError("no memories endpoint")
+        return {
+            "atoms": [
+                {"source_turn_ids": [f"msg-{i + 1}" for i in range(len(self.messages))]}
+            ]
+        }
+
+    def search_with_meta(
+        self,
+        query: str,
+        top_k: int = 10,
+        session_id: str = "",
+        agent_id: str = "",
+        timeout_s: float | None = None,
+    ):
+        if "PERFANCHOR" in query or "PERFTAIL" in query:
+            items = (
+                []
+                if self.anchor_short_circuit
+                else [SearchResult(uri="echo://x", score=1.0, content=query)]
+            )
+        elif self.search_short_circuit:
+            items = []
+        else:
+            items = [SearchResult(uri="echo://y", score=0.5, content="ordinary hit")]
+        meta = {"has_explain": True, "has_debug": False, "hit_count": len(items)}
+        return items, meta
+
+    def search(self, query: str, top_k: int = 10, session_id: str = "", agent_id: str = "", timeout_s: float | None = None):
+        items, _ = self.search_with_meta(query, top_k=top_k)
+        return items
 
 
 class WriteTransactionTests(unittest.TestCase):
@@ -649,6 +743,16 @@ class RunStressArgsTests(unittest.TestCase):
         resolved = _resolve_args(args)
         self.assertEqual(resolved["scenario_ids"], ["A", "D"])
 
+    def test_scenario_f_accepted(self) -> None:
+        args = self._args(scenarios="A,B,C,D,F")
+        resolved = _resolve_args(args)
+        self.assertIn("F", resolved["scenario_ids"])
+
+    def test_unknown_scenario_rejected(self) -> None:
+        args = self._args(scenarios="A,X")
+        with self.assertRaises(ValueError):
+            _resolve_args(args)
+
     def test_static_without_cleanup_is_ok(self) -> None:
         args = self._args(auth_mode="static", cleanup_identities=False)
         _resolve_args(args)  # 不抛错即可
@@ -807,6 +911,32 @@ class FeatureVerdictTests(unittest.TestCase):
                 "rss_trend": {"slope_mb_per_min": 1.2, "r2": 0.8, "samples": 30},
                 "rss_unsettled_mb": 5.0,
             },
+            "write_retry": {
+                "submit_total": 10,
+                "retried_total": 0,
+                "first_attempt_ok": 10,
+                "first_attempt_rate": 1.0,
+                "final_ok": 10,
+                "final_success_rate": 1.0,
+                "retry_exhausted_failures": 0,
+            },
+            "reconciliation": {
+                "sessions": [
+                    {"session_id": "s1", "checks": [{"ok": True}], "verdict": "pass"}
+                ],
+                "verdict": "PASS",
+                "reason": "全部会话对账通过",
+            },
+            "search_quality": {
+                "total": 10,
+                "anchor_total": 10,
+                "anchor_failures": 0,
+                "quality_failures": 0,
+            },
+            "isolation": {"D@4": {"verdict": "PASS", "reason": "同/跨租户劣化均 < 阈值"}},
+            "error_type_validation": {"verdict": "PASS", "observed_breakdown": {"http_4xx": 1}},
+            "fault_injection": {"verdict": "PASS", "reason": "全部阶段一致", "stages": []},
+            "preflight": {"ok": True, "engines_checked": 1},
         }
 
     def test_all_pass(self) -> None:
@@ -1159,3 +1289,593 @@ class ReportTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+class _FakeTenant:
+    """Minimal tenant stub for reconciliation tests (idx + client + queries)."""
+
+    def __init__(self, idx: int, client: FakeMemClient) -> None:
+        self.idx = idx
+        self.client = client
+        self.queries: list[str] = []
+
+
+class WriteRetryTests(unittest.TestCase):
+    """写事务重试：429+Retry-After / 5xx 退避重试、不可重试 4xx、上限、原始/重试后值。"""
+
+    def _run(self, client: FakeMemClient, retry_max: int = 3, messages: int = 3):
+        return run_write_transaction(
+            client,
+            scene_key="B@1",
+            step_conc=1,
+            tenant_idx=0,
+            seq=7,
+            messages_per_session=messages,
+            commit_poll_timeout_s=30.0,
+            commit_retry_max=retry_max,
+            commit_retry_backoff_s=0.01,
+        )
+
+    def _submit(self, result):
+        return [rec for rec in result.records if rec.op == "commit_submit"][0]
+
+    def test_429_retry_after_backs_off_and_succeeds(self) -> None:
+        client = FakeMemClient()
+        client.commit_429_left = 2
+        client.retry_after_s = "0"
+        result = self._run(client)
+        self.assertTrue(result.ok)
+        self.assertEqual(client.commit_attempts, 3)  # 首次 + 2 次重试
+        submit = self._submit(result)
+        self.assertTrue(submit.retried)
+        self.assertEqual(submit.retry_count, 2)
+        self.assertTrue(submit.final_success)
+
+    def test_5xx_backs_off_and_succeeds(self) -> None:
+        client = FakeMemClient()
+        client.commit_failures_left = 2
+        result = self._run(client)
+        self.assertTrue(result.ok)
+        self.assertEqual(client.commit_attempts, 3)
+        submit = self._submit(result)
+        self.assertTrue(submit.retried)
+        self.assertEqual(submit.retry_count, 2)
+        self.assertTrue(submit.final_success)
+
+    def test_non_retryable_4xx_fails_immediately(self) -> None:
+        client = FakeMemClient()
+        client.commit_400 = True
+        result = self._run(client, retry_max=3)
+        self.assertFalse(result.ok)
+        self.assertEqual(client.commit_attempts, 1)  # 业务 4xx 不重试
+        submit = self._submit(result)
+        self.assertEqual(submit.error_type, "http_4xx")
+        self.assertFalse(submit.retried)
+
+    def test_retry_exhausted_fails(self) -> None:
+        client = FakeMemClient()
+        client.commit_failures_left = 10
+        result = self._run(client, retry_max=2)
+        self.assertFalse(result.ok)
+        self.assertEqual(client.commit_attempts, 3)  # 首次 + 2 次重试后耗尽
+        submit = self._submit(result)
+        self.assertTrue(submit.retried)
+        self.assertEqual(submit.retry_count, 2)
+        self.assertFalse(submit.final_success)
+
+    def test_no_retry_when_max_zero(self) -> None:
+        client = FakeMemClient()
+        client.commit_failures_left = 2
+        result = self._run(client, retry_max=0)
+        self.assertFalse(result.ok)
+        self.assertEqual(client.commit_attempts, 1)
+        submit = self._submit(result)
+        self.assertEqual(submit.error_type, "http_5xx")
+        self.assertFalse(submit.retried)
+
+    def test_retry_decision_classification(self) -> None:
+        e429 = urllib.error.HTTPError("http://x", 429, "x", None, None)
+        e429.headers = {"Retry-After": "2"}
+        retryable, wait = retry_decision(e429, max_retries=3, attempt=1, backoff_s=0.5)
+        self.assertTrue(retryable)
+        self.assertEqual(wait, 2.0)  # 429 优先用 Retry-After
+        e500 = urllib.error.HTTPError("http://x", 500, "x", None, None)
+        retryable, wait = retry_decision(e500, max_retries=3, attempt=2, backoff_s=0.5)
+        self.assertTrue(retryable)
+        self.assertEqual(wait, 1.0)  # 退避 = backoff * attempt
+        e400 = urllib.error.HTTPError("http://x", 400, "x", None, None)
+        self.assertFalse(retry_decision(e400, max_retries=3, attempt=1, backoff_s=0.5)[0])
+        self.assertTrue(retry_decision(TimeoutError("slow"), max_retries=3, attempt=1, backoff_s=0.5)[0])
+
+    def test_retry_summary_raw_vs_retried(self) -> None:
+        client_a = FakeMemClient()
+        client_a.commit_429_left = 1
+        client_a.retry_after_s = "0"
+        client_b = FakeMemClient()
+        result_a = self._run(client_a)
+        result_b = self._run(client_b)
+        summary = retry_summary(result_a.records + result_b.records)
+        self.assertEqual(summary["submit_total"], 2)
+        self.assertEqual(summary["retried_total"], 1)
+        self.assertEqual(summary["first_attempt_ok"], 1)  # 原始值
+        self.assertEqual(summary["final_ok"], 2)  # 重试后值
+        self.assertEqual(summary["retry_exhausted_failures"], 0)
+        self.assertEqual(summary["first_attempt_rate"], 0.5)
+        self.assertEqual(summary["final_success_rate"], 1.0)
+
+
+class MessageReconciliationTests(unittest.TestCase):
+    """消息级对账去重：全集⊆cursor/atom、无重复、archive 终态。"""
+
+    def _entry(self, **overrides) -> dict:
+        base = {
+            "tenant_idx": 0,
+            "session_id": "s1",
+            "client_ids": ["m1", "m2"],
+            "client_hashes": ["h1", "h2"],
+            "archive_id": "a1",
+            "server_ids": ["m1", "m2"],
+            "server_hashes": ["h1", "h2"],
+            "archive_status": "completed",
+            "atom_source_turn_ids": ["m1", "m2"],
+            "history_available": True,
+            "archive_available": True,
+            "atoms_available": True,
+        }
+        base.update(overrides)
+        return base
+
+    def test_reconcile_all_pass(self) -> None:
+        result = reconcile_messages([self._entry()])
+        self.assertEqual(result["verdict"], "PASS")
+        self.assertEqual(result["sessions"][0]["verdict"], "pass")
+
+    def test_reconcile_missing_message_fails(self) -> None:
+        result = reconcile_messages([self._entry(server_hashes=["h1"])])
+        self.assertEqual(result["verdict"], "FAIL")
+
+    def test_reconcile_server_duplicate_fails(self) -> None:
+        result = reconcile_messages([self._entry(server_hashes=["h1", "h1", "h2"])])
+        self.assertEqual(result["verdict"], "FAIL")
+
+    def test_reconcile_archive_not_completed_fails(self) -> None:
+        result = reconcile_messages([self._entry(archive_status="failed")])
+        self.assertEqual(result["verdict"], "FAIL")
+
+    def test_reconcile_atom_duplicate_fails(self) -> None:
+        result = reconcile_messages([self._entry(atom_source_turn_ids=["m1", "m1"])])
+        self.assertEqual(result["verdict"], "FAIL")
+
+    def test_reconcile_sources_unavailable_inconclusive(self) -> None:
+        result = reconcile_messages(
+            [self._entry(history_available=False, archive_available=False, atoms_available=False)]
+        )
+        self.assertEqual(result["verdict"], "INCONCLUSIVE")
+        self.assertEqual(result["sessions"][0]["verdict"], "not_available")
+
+    def test_run_reconciliation_collects_data(self) -> None:
+        client = FakeMemClient()
+        result = run_write_transaction(
+            client,
+            scene_key="B@1", step_conc=1, tenant_idx=0, seq=1,
+            messages_per_session=3, commit_poll_timeout_s=30.0,
+        )
+        gen = LoadGenerator()
+        gen._reconciliation_candidates.append(
+            (0, result.session_id, result.message_ids, result.content_hashes, result.archive_id)
+        )
+        data = gen.run_reconciliation([_FakeTenant(0, client)])
+        self.assertEqual(len(data), 1)
+        self.assertTrue(data[0]["history_available"])
+        self.assertTrue(data[0]["archive_available"])
+        self.assertTrue(data[0]["atoms_available"])
+        self.assertEqual(len(data[0]["server_ids"]), 3)
+
+    def test_run_reconciliation_tolerates_missing_endpoints(self) -> None:
+        client = FakeMemClient()
+        client.fail_step = "history"
+        result = run_write_transaction(
+            client,
+            scene_key="B@1", step_conc=1, tenant_idx=0, seq=1,
+            messages_per_session=2, commit_poll_timeout_s=30.0,
+        )
+        gen = LoadGenerator()
+        gen._reconciliation_candidates.append(
+            (0, result.session_id, result.message_ids, result.content_hashes, result.archive_id)
+        )
+        data = gen.run_reconciliation([_FakeTenant(0, client)])
+        self.assertFalse(data[0]["history_available"])
+
+
+class SearchQualityAssertionTests(unittest.TestCase):
+    """search 质量断言：锚词可召回、普通查询真实召回证据、假通过识别。"""
+
+    def test_is_anchor_query(self) -> None:
+        self.assertTrue(is_anchor_query("PERFANCHOR-0-1-2"))
+        self.assertTrue(is_anchor_query("压测写入会话消息 PERFTAIL-0-1"))
+        self.assertFalse(is_anchor_query("本周项目进展顺利"))
+
+    def test_read_quality_anchor_failure(self) -> None:
+        client = FakeMemClient()
+        gen = LoadGenerator(timeout_s=2.0)
+        rec = gen._read_once(client, "PERFANCHOR-0-1-2", scene_key="A@1", step_conc=1, tenant_idx=0)
+        self.assertTrue(rec.quality_ok)
+        self.assertEqual(rec.hit_count, 1)
+        client.anchor_short_circuit = True
+        rec2 = gen._read_once(client, "PERFANCHOR-0-1-2", scene_key="A@1", step_conc=1, tenant_idx=0)
+        self.assertFalse(rec2.quality_ok)
+        self.assertEqual(rec2.hit_count, 0)
+
+    def _mk_read(self, query: str, hit: int, quality_ok: bool, real: bool = False) -> RequestRecord:
+        return RequestRecord(
+            scene_key="A@1", step_conc=1, tenant_idx=0, op="read",
+            stage_ms=5.0, status="ok", error_type="", ts_ms=0.0,
+            query=query, hit_count=hit, real_recall=real, quality_ok=quality_ok,
+        )
+
+    def test_quality_summary_counts(self) -> None:
+        records = [
+            self._mk_read("PERFANCHOR-0", 1, True, True),
+            self._mk_read("PERFANCHOR-0", 0, False),  # 锚词未召回 = 失败
+            self._mk_read("普通查询", 0, True),  # 无证据 → undetermined
+            self._mk_read("普通查询", 2, True, True),
+        ]
+        summary = search_quality_summary(records)
+        self.assertEqual(summary["total"], 4)
+        self.assertEqual(summary["anchor_failures"], 1)
+        self.assertEqual(summary["undetermined_real_recall"], 1)
+        self.assertEqual(summary["quality_failures"], 1)
+        self.assertEqual(summary["hit_count_p95"], 1.9)
+
+    def test_quality_burst_window_excluded(self) -> None:
+        # D 场景洪峰窗口（burst）内是刻意过载场景，读降级不计入质量失败；
+        # 窗口外的锚词查询仍严格判定。
+        def rec(ts: float, query: str, hit: int) -> RequestRecord:
+            return RequestRecord(
+                scene_key="D@4", step_conc=4, tenant_idx=1, op="read",
+                stage_ms=5.0, status="ok", error_type="", ts_ms=ts,
+                query=query, hit_count=hit,
+                real_recall=hit > 0, quality_ok=hit >= 1,
+            )
+
+        records = [
+            rec(4500.0, "PERFANCHOR-0", 0),  # burst 窗口 [4000,6000] 内：降级，不计失败
+            rec(5000.0, "PERFANCHOR-1", 1),  # burst 窗口内：正常命中，也不计入
+            rec(7000.0, "PERFANCHOR-2", 0),  # 窗口外：锚词未召回 = 失败
+            rec(8000.0, "PERFANCHOR-3", 2),  # 窗口外：命中
+        ]
+        summary = search_quality_summary(records, burst_windows=[(4000.0, 6000.0)])
+        self.assertEqual(summary["total"], 2)  # 窗口内两条被排除
+        self.assertEqual(summary["anchor_total"], 2)
+        self.assertEqual(summary["anchor_failures"], 1)  # 仅窗口外未召回计失败
+
+    def test_quality_no_burst_window_keeps_all(self) -> None:
+        records = [
+            self._mk_read("PERFANCHOR-0", 0, False),
+            self._mk_read("PERFANCHOR-1", 1, True, True),
+        ]
+        summary = search_quality_summary(records)
+        self.assertEqual(summary["total"], 2)
+        self.assertEqual(summary["anchor_failures"], 1)
+
+
+class IsolationGranularityTests(unittest.TestCase):
+    """读写隔离细粒度：同/跨租户分组与劣化判定。"""
+
+    def _mk_read(self, tenant: int, ts: float, ms: float) -> RequestRecord:
+        return RequestRecord(
+            scene_key="D@4", step_conc=4, tenant_idx=tenant, op="read",
+            stage_ms=ms, status="ok", error_type="", ts_ms=ts,
+        )
+
+    def test_isolation_pass(self) -> None:
+        records = [
+            self._mk_read(0, 1000, 110),
+            self._mk_read(0, 1000, 115),
+            self._mk_read(1, 1000, 105),
+            self._mk_read(1, 1000, 108),
+        ]
+        result = isolation_summary(
+            records, t0_ms=0, t1_ms=2000, burst_tenant_idx=0,
+            baseline_p95=100.0, degradation_threshold=2.0,
+        )
+        self.assertEqual(result["verdict"], "PASS")
+        self.assertLessEqual(result["cross_tenant_degradation"], result["same_tenant_degradation"])
+
+    def test_isolation_cross_worse_fails(self) -> None:
+        records = [
+            self._mk_read(0, 1000, 110),
+            self._mk_read(0, 1000, 115),
+            self._mk_read(1, 1000, 200),
+            self._mk_read(1, 1000, 210),
+        ]
+        result = isolation_summary(
+            records, t0_ms=0, t1_ms=2000, burst_tenant_idx=0,
+            baseline_p95=100.0, degradation_threshold=2.0,
+        )
+        self.assertEqual(result["verdict"], "FAIL")
+        self.assertGreater(result["cross_tenant_degradation"], result["same_tenant_degradation"])
+
+    def test_isolation_inconclusive(self) -> None:
+        result = isolation_summary(
+            [], t0_ms=0, t1_ms=2000, burst_tenant_idx=0,
+            baseline_p95=100.0, degradation_threshold=2.0,
+        )
+        self.assertEqual(result["verdict"], "INCONCLUSIVE")
+        no_baseline = isolation_summary(
+            [self._mk_read(0, 1000, 110)], t0_ms=0, t1_ms=2000,
+            burst_tenant_idx=0, baseline_p95=None, degradation_threshold=2.0,
+        )
+        self.assertEqual(no_baseline["verdict"], "INCONCLUSIVE")
+
+    def test_isolation_cross_slightly_worse_within_threshold_passes(self) -> None:
+        # 真实模型路径：embedding 全局共享，burst 抽取导致所有租户公平退化，
+        # cross 略高于 same（比值 < 串扰容差 1.25）且均 < 阈值 → PASS。
+        records = [
+            self._mk_read(0, 1000, 100),
+            self._mk_read(0, 1000, 110),
+            self._mk_read(0, 1000, 115),
+            self._mk_read(0, 1000, 118),
+            self._mk_read(1, 1000, 105),
+            self._mk_read(1, 1000, 115),
+            self._mk_read(1, 1000, 120),
+            self._mk_read(1, 1000, 125),
+        ]
+        result = isolation_summary(
+            records, t0_ms=0, t1_ms=2000, burst_tenant_idx=0,
+            baseline_p95=100.0, degradation_threshold=2.0,
+        )
+        self.assertEqual(result["verdict"], "PASS")
+        self.assertGreater(result["cross_tenant_degradation"], result["same_tenant_degradation"])
+
+    def test_isolation_cross_significantly_worse_fails(self) -> None:
+        # 跨租户显著高于同租户（比值 > 串扰容差 1.25）且均 < 阈值 → 隔离失效 FAIL。
+        records = [
+            self._mk_read(0, 1000, 100),
+            self._mk_read(0, 1000, 105),
+            self._mk_read(0, 1000, 108),
+            self._mk_read(0, 1000, 110),
+            self._mk_read(1, 1000, 130),
+            self._mk_read(1, 1000, 135),
+            self._mk_read(1, 1000, 140),
+            self._mk_read(1, 1000, 145),
+        ]
+        result = isolation_summary(
+            records, t0_ms=0, t1_ms=2000, burst_tenant_idx=0,
+            baseline_p95=100.0, degradation_threshold=2.0,
+        )
+        self.assertEqual(result["verdict"], "FAIL")
+        self.assertIn("串扰", result["reason"])
+
+
+class RSSNormalizedTrendTests(unittest.TestCase):
+    """RSS 归一校正：净 RSS = 原始 − 累计注入字节，斜率判定用净序列。"""
+
+    def test_rss_normalized(self) -> None:
+        net = rss_normalized_series([(0.0, 1000.0), (10.0, 1200.0)], [(0.0, 100.0), (10.0, 200.0)])
+        self.assertEqual(net, [(0.0, 900.0), (10.0, 1000.0)])
+
+    def test_rss_normalized_aligns_cumulative(self) -> None:
+        # raw 采样点在注入序列中间 → 取该时刻前累计注入
+        net = rss_normalized_series([(5.0, 1100.0)], [(0.0, 100.0), (10.0, 300.0)])
+        self.assertEqual(net, [(5.0, 1000.0)])
+
+    def test_rss_normalized_empty_inputs(self) -> None:
+        self.assertEqual(rss_normalized_series([], [(0.0, 1.0)]), [])
+        self.assertEqual(rss_normalized_series([(0.0, 1.0)], []), [])
+
+    def test_injected_bytes_series(self) -> None:
+        records = [
+            RequestRecord(scene_key="B@1", step_conc=1, tenant_idx=0, op="add",
+                          stage_ms=1.0, status="ok", error_type="", ts_ms=1000.0, content_bytes=10),
+            RequestRecord(scene_key="B@1", step_conc=1, tenant_idx=0, op="add",
+                          stage_ms=1.0, status="ok", error_type="", ts_ms=2000.0, content_bytes=20),
+            RequestRecord(scene_key="B@1", step_conc=1, tenant_idx=0, op="add",
+                          stage_ms=1.0, status="error", error_type="timeout", ts_ms=3000.0, content_bytes=5),
+        ]
+        self.assertEqual(injected_bytes_series(records), [(1.0, 10.0), (2.0, 30.0)])
+
+
+class MockProviderTests(unittest.TestCase):
+    """故障注入 mock：500/挂起/429/恢复 行为与错误类型分类。"""
+
+    def setUp(self) -> None:
+        self.provider = MockProvider(port=0, hang_s=5.0, retry_after_s=1)
+
+    def test_ok_behavior(self) -> None:
+        self.provider.start()
+        try:
+            result = probe(self.provider.url, timeout_s=2.0)
+            self.assertEqual(result["status"], "ok")
+            self.assertEqual(result["error_type"], "")
+        finally:
+            self.provider.stop()
+
+    def test_error500_classified_5xx(self) -> None:
+        self.provider.start()
+        try:
+            self.provider.set_behavior("error500")
+            result = probe(self.provider.url, timeout_s=2.0)
+            self.assertEqual(result["error_type"], "http_5xx")
+            self.assertEqual(result["code"], 500)
+        finally:
+            self.provider.stop()
+
+    def test_rate_limit_retry_after(self) -> None:
+        self.provider.start()
+        try:
+            self.provider.set_behavior("rate_limit")
+            result = probe(self.provider.url, timeout_s=2.0)
+            self.assertEqual(result["error_type"], "http_4xx")
+            self.assertEqual(result["retry_after"], "1")
+        finally:
+            self.provider.stop()
+
+    def test_hang_times_out(self) -> None:
+        self.provider.start()
+        try:
+            self.provider.set_behavior("hang")
+            result = probe(self.provider.url, timeout_s=0.3)
+            self.assertEqual(result["error_type"], "timeout")
+        finally:
+            self.provider.stop()
+
+    def test_restore_recovers(self) -> None:
+        self.provider.start()
+        try:
+            self.provider.set_behavior("restore")
+            result = probe(self.provider.url, timeout_s=2.0)
+            self.assertEqual(result["status"], "ok")
+        finally:
+            self.provider.stop()
+
+    def test_run_fault_sequence_summary(self) -> None:
+        self.provider.start()
+        try:
+            stages = [
+                {"stage": "baseline", "behavior": "ok", "expected_error_type": "", "requests": 2},
+                {"stage": "e500", "behavior": "error500", "expected_error_type": "http_5xx", "requests": 2},
+                {"stage": "recover", "behavior": "restore", "expected_error_type": "", "requests": 2, "recovered": True},
+            ]
+            sequence = run_fault_sequence(self.provider, stages=stages, timeout_s=2.0)
+            summary = fault_injection_summary(sequence)
+            self.assertEqual(summary["verdict"], "PASS")
+            self.assertEqual(len(summary["stages"]), 3)
+        finally:
+            self.provider.stop()
+
+
+class PreflightTests(unittest.TestCase):
+    """模型/配置预检门禁：解析、env 检查、最小真实请求、失败即停。"""
+
+    def _write_config(self, payload) -> str:
+        with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False, encoding="utf-8") as f:
+            json.dump(payload, f)
+            return f.name
+
+    def test_parse_engine_configs_dict_and_list(self) -> None:
+        path = self._write_config(
+            {"engines": [{"id": "e1", "kind": "llm", "api_key_env": "K", "api_base": "http://x/", "model": "m"}]}
+        )
+        engines = parse_engine_configs(path)
+        os.unlink(path)
+        self.assertEqual(engines[0]["id"], "e1")
+        self.assertEqual(engines[0]["api_base"], "http://x")  # rstrip("/")
+
+    def test_parse_requires_fields(self) -> None:
+        path = self._write_config({"engines": [{"id": "e1"}]})
+        try:
+            with self.assertRaises(ValueError):
+                parse_engine_configs(path)
+        finally:
+            os.unlink(path)
+
+    def test_config_digest_stable(self) -> None:
+        self.assertEqual(config_digest([{"a": 1}]), config_digest([{"a": 1}]))
+        self.assertNotEqual(config_digest([{"a": 1}]), config_digest([{"a": 2}]))
+
+    def test_check_env(self) -> None:
+        with mock.patch.dict(os.environ, {"PERF_MOCK_KEY": "v"}, clear=False):
+            self.assertEqual(check_env([{"id": "e", "api_key_env": "PERF_MOCK_KEY"}]), [])
+            errors = check_env([{"id": "e", "api_key_env": "PERF_MISSING_KEY"}])
+            self.assertEqual(len(errors), 1)
+            self.assertIn("PERF_MISSING_KEY", errors[0])
+
+    def test_run_preflight_config_error(self) -> None:
+        result = run_preflight("/nonexistent/preflight.json")
+        self.assertFalse(result["ok"])
+        self.assertIn("配置读取失败", result["error"])
+
+    def test_probe_endpoint_against_mock(self) -> None:
+        provider = MockProvider(port=0)
+        provider.start()
+        try:
+            engine = {"id": "e", "kind": "llm", "api_key_env": "", "api_base": provider.url, "model": "m"}
+            result = probe_endpoint(engine, timeout_s=2.0)
+            self.assertTrue(result["model_supported"])
+            self.assertEqual(result["status"], "ok")
+        finally:
+            provider.stop()
+
+
+class ErrorTypeTests(unittest.TestCase):
+    """服务端错误类型正确性 / 故障注入判定 / 判定分层状态。"""
+
+    def test_error_type_validation_pass(self) -> None:
+        records = [RequestRecord(
+            scene_key="B@1", step_conc=1, tenant_idx=0, op="commit_submit",
+            stage_ms=1.0, status="error", error_type="http_5xx", ts_ms=0.0,
+        )]
+        fault = {"stages": [{"stage": "s", "expected_error_type": "http_5xx",
+                             "observed_error_type": "http_5xx", "ok": True}]}
+        result = error_type_validation(records, fault)
+        self.assertEqual(result["verdict"], "PASS")
+        self.assertEqual(result["observed_breakdown"], {"http_5xx": 1})
+
+    def test_error_type_validation_mismatch_fails(self) -> None:
+        fault = {"stages": [{"stage": "s", "expected_error_type": "timeout",
+                             "observed_error_type": "http_5xx", "ok": False}]}
+        result = error_type_validation([], fault)
+        self.assertEqual(result["verdict"], "FAIL")
+
+    def test_error_type_validation_not_run(self) -> None:
+        self.assertEqual(error_type_validation([])["verdict"], "not_run")
+
+    def test_fault_injection_summary_pass(self) -> None:
+        sequence = [
+            {"stage": "a", "behavior": "ok", "expected_error_type": "", "observed_error_type": "",
+             "requests": 2, "hang": False, "recovered": True},
+            {"stage": "b", "behavior": "error500", "expected_error_type": "http_5xx",
+             "observed_error_type": "http_5xx", "requests": 2, "hang": False, "recovered": False},
+        ]
+        summary = fault_injection_summary(sequence)
+        self.assertEqual(summary["verdict"], "PASS")
+        self.assertTrue(all(stage["ok"] for stage in summary["stages"]))
+
+    def test_fault_injection_summary_fail(self) -> None:
+        sequence = [
+            {"stage": "a", "behavior": "error500", "expected_error_type": "http_5xx",
+             "observed_error_type": "timeout", "requests": 2, "hang": False, "recovered": False},
+        ]
+        self.assertEqual(fault_injection_summary(sequence)["verdict"], "FAIL")
+
+    def test_fault_injection_not_run(self) -> None:
+        self.assertEqual(fault_injection_summary([])["verdict"], "not_run")
+
+    def test_verdict_layers_and_slo(self) -> None:
+        summary = {
+            "config": {"degradation_threshold": 2.0, "no_metrics": False},
+            "server": {"metrics_available": True},
+            "commit_durability": {"submit_ok_total": 1, "submit_rejected_total": 0,
+                                  "accepted_done_ok": 1, "accepted_done_failed": 0,
+                                  "accepted_done_other": 0, "guarantee_violations": 0,
+                                  "commit_success_rate": 1.0},
+            "degradation": {},
+            "tenant_fairness": {},
+            "resources": {"rss_trend": {"slope_mb_per_min": 0.5, "r2": 0.9, "samples": 10},
+                          "rss_unsettled_mb": 1.0},
+            "fault_injection": {"stages": [], "verdict": "PASS", "reason": "全部一致"},
+            "isolation": {"D@4": {"verdict": "PASS", "reason": "同/跨租户隔离判定通过",
+                                  "same_tenant": {}, "cross_tenant": {}}},
+        }
+        result = evaluate_features(summary)
+        self.assertIn("verdict_layers", result)
+        self.assertIn("slo_accounting", result)
+        self.assertEqual(result["verdict_layers"]["mock"]["fault_injection"], "PASS")
+        self.assertIn("write_submit_success_raw", result["slo_accounting"])
+        self.assertEqual(result["features"]["isolation_granularity"]["verdict"], "PASS")
+
+    def test_isolation_verdict_fail_from_scenes(self) -> None:
+        from performance.metrics_calc import evaluate_features
+
+        summary = {
+            "config": {"degradation_threshold": 2.0, "no_metrics": True},
+            "server": {"metrics_available": False},
+            "commit_durability": {},
+            "degradation": {},
+            "tenant_fairness": {},
+            "resources": {},
+            "isolation": {"D@4": {"verdict": "FAIL", "reason": "跨租户劣化超阈值"}},
+        }
+        result = evaluate_features(summary)
+        self.assertEqual(result["features"]["isolation_granularity"]["verdict"], "FAIL")
+        self.assertEqual(result["overall"], "FAIL")
