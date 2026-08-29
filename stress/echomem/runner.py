@@ -2748,6 +2748,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--search-rps", type=float, default=1.0)
     parser.add_argument("--messages-per-session", type=int, default=3)
     parser.add_argument(
+        "--read-only",
+        action="store_true",
+        help="Run only the timed Search lane; do not create timed Commit traffic.",
+    )
+    parser.add_argument(
         "--commit-rpm",
         type=float,
         default=0.0,
@@ -3079,7 +3084,16 @@ def main() -> int:
             commit_timeout_s=args.commit_timeout_s,
         )
         sessions = provision_sessions(clients, tenants, args.sessions_per_tenant)
-        if args.scenario in {"baseline", "commit-storm", "all"}:
+        if args.read_only:
+            search_records = scenario_search(
+                clients,
+                sessions,
+                args.duration_s,
+                args.search_rps,
+                args.search_timeout_s,
+                workers=args.search_workers,
+            )
+        elif args.scenario in {"baseline", "commit-storm", "all"}:
             commit_records, search_records = run_parallel_workload(
                 clients,
                 sessions,

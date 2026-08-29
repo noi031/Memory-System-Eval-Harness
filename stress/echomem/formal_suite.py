@@ -187,6 +187,7 @@ def report4_scenarios() -> dict[str, dict[str, Any]]:
             "label": f"A 纯读基线 / 每租户并发 {concurrency}",
             "search_rps": float(workers),
             "commit_rpm": 0.0,
+            "read_only": True,
         }
         scenarios[f"B-{suffix}"] = {
             **common,
@@ -296,6 +297,8 @@ def run_case(
         "--out-dir",
         str(output),
     ]
+    if case.get("read_only"):
+        command.append("--read-only")
     if case.get("commit_barrier"):
         command += [
             "--commit-barrier",
