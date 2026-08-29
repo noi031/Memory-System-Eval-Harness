@@ -51,7 +51,7 @@ class EvalConfig:
 
     # LLM for answering
     llm_base_url: str = ""
-    llm_model: str = "doubao-seed-2.0-pro"
+    llm_model: str = "deepseek-v4-flash-0731"
     llm_api_key: str = ""
     llm_temperature: float = 0.7
     llm_max_tokens: int = 2048
@@ -211,8 +211,18 @@ def add_llm_args(parser) -> None:
     Benchmark run_eval does NOT call this directly.
     """
     g = parser.add_argument_group("LLM")
-    g.add_argument("--llm-base-url", default=os.getenv("LLM_BASE_URL", ""), help="LLM API base URL")
-    g.add_argument("--llm-model", default=os.getenv("LLM_MODEL", "doubao-seed-2.0-pro"))
+    g.add_argument(
+        "--llm-base-url",
+        default=os.getenv(
+            "LLM_BASE_URL",
+            "https://dashscope.aliyuncs.com/compatible-mode/v1",
+        ),
+        help="LLM API base URL",
+    )
+    g.add_argument(
+        "--llm-model",
+        default=os.getenv("LLM_MODEL", "deepseek-v4-flash-0731"),
+    )
     g.add_argument("--llm-api-key", default=os.getenv("LLM_API_KEY", ""), help="LLM API key")
     g.add_argument("--llm-temperature", type=float, default=0.7)
     g.add_argument("--llm-max-tokens", type=int, default=2048)

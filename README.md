@@ -46,6 +46,11 @@
 - **预检**：评测启动时自动验证数据集、记忆后端连通性和模型配置，通过后才进入
   正式评测流程。
 
+正式 EchoMem 压测还支持 `--preflight-config`，会在第一条压测请求前拒绝
+`fake-llm` / `fake-embedding`，并检查真实模型的 Endpoint、模型名和 API Key
+环境变量。默认真实模型为 DashScope 的 `deepseek-v4-flash-0731`；
+Embedding 使用 `text-embedding-v3`。
+
 ### 4. 生产一致
 
 确保评测结果与生产环境完全一致。
@@ -290,7 +295,7 @@ python benchmarks/locomo/run_eval.py \
   --sample conv-30 \
   --questions 0 \
   --llm-base-url https://dashscope.aliyuncs.com/compatible-mode/v1 \
-  --llm-model deepseek-v4-flash \
+  --llm-model deepseek-v4-flash-0731 \
   --llm-api-key YOUR_KEY \
   --commit-timeout-s 0 \
   --question-timeout-s 0 \
@@ -322,7 +327,7 @@ python benchmarks/locomo/run_eval.py \
 python benchmarks/hotpotqa/run_eval.py \
   --agent-plugin bare_llm \
   --llm-base-url https://dashscope.aliyuncs.com/compatible-mode/v1 \
-  --llm-model deepseek-v4-flash \
+  --llm-model deepseek-v4-flash-0731 \
   --llm-api-key YOUR_KEY \
   --questions 10
 
@@ -330,7 +335,7 @@ python benchmarks/hotpotqa/run_eval.py \
 python benchmarks/longmemeval/run_eval.py \
   --agent-plugin bare_llm \
   --llm-base-url https://dashscope.aliyuncs.com/compatible-mode/v1 \
-  --llm-model deepseek-v4-flash \
+  --llm-model deepseek-v4-flash-0731 \
   --llm-api-key YOUR_KEY \
   --questions 10
 ```
@@ -365,11 +370,11 @@ python dynamic/run_eval.py \
   --num-queries 5 \
   --new-session-ratio 0.3 \
   --typing-speed-ms 2 \
-  --scenario-model deepseek-v4-flash \
+  --scenario-model deepseek-v4-flash-0731 \
   --scenario-base-url https://dashscope.aliyuncs.com/compatible-mode/v1 \
   --scenario-api-key YOUR_KEY \
   --llm-base-url https://dashscope.aliyuncs.com/compatible-mode/v1 \
-  --llm-model deepseek-v4-flash \
+  --llm-model deepseek-v4-flash-0731 \
   --llm-api-key YOUR_KEY
 ```
 
@@ -387,11 +392,11 @@ python dynamic/run_eval.py \
   --dataset dynamic/results/20260728_175544/dataset.json \
   --new-session-ratio 0.3 \
   --typing-speed-ms 2 \
-  --scenario-model deepseek-v4-flash \
+  --scenario-model deepseek-v4-flash-0731 \
   --scenario-base-url https://dashscope.aliyuncs.com/compatible-mode/v1 \
   --scenario-api-key YOUR_KEY \
   --llm-base-url https://dashscope.aliyuncs.com/compatible-mode/v1 \
-  --llm-model deepseek-v4-flash \
+  --llm-model deepseek-v4-flash-0731 \
   --llm-api-key YOUR_KEY
 ```
 

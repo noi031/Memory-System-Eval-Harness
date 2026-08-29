@@ -20,13 +20,21 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+# Support both ``python -m stress.echomem.formal_suite`` and the direct
+# command documented for server deployments.
+_PROJECT_ROOT = Path(__file__).resolve().parents[2]
+if str(_PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(_PROJECT_ROOT))
+
 try:
     from .acceptance import (
         build_model_analysis_input,
         evaluate_pr421_acceptance,
     )
+    from shared.runtime_config import validate_real_model_config
 except ImportError:
     from acceptance import build_model_analysis_input, evaluate_pr421_acceptance
+    from shared.runtime_config import validate_real_model_config
 
 
 # Formal runs reproduce online clients. The load generator does not impose
@@ -217,9 +225,72 @@ def report4_scenarios() -> dict[str, dict[str, Any]]:
     return scenarios
 
 
+def report6_scenarios() -> dict[str, dict[str, Any]]:
+    """Build report(6)'s 8-tenant, 12-case A/B/C/D matrix.
+
+    The runner's rates are global, while the report(6) concurrency is per
+    tenant.  We therefore use eight tenant lanes and scale the global offered
+    rate by the requested per-tenant concurrency.  Commit counts in C are
+    rounded to whole requests per tenant, which is recorded in the manifest.
+    """
+    scenarios: dict[str, dict[str, Any]] = {}
+    for concurrency in (1, 2):
+        workers = 8 * concurrency
+        common = {
+            "tenants": 8,
+            "duration_s": 60,
+            "search_workers": workers,
+            "commit_workers": workers,
+            "sessions_per_tenant": 2,
+            "messages_per_session": 10,
+            "per_tenant_concurrency": concurrency,
+        }
+        suffix = f"@{concurrency}"
+        scenarios[f"A{suffix}"] = {
+            **common,
+            "label": f"A 纯读基线 / 每租户并发 {concurrency}",
+            "search_rps": float(workers),
+            "commit_rpm": 0.0,
+            "read_only": True,
+        }
+        scenarios[f"B{suffix}"] = {
+            **common,
+            "label": f"B 纯写注入 / 每租户并发 {concurrency}",
+            "search_rps": 0.0,
+            "commit_rpm": 0.0,
+            "commit_barrier": True,
+            "commit_barrier_count": workers,
+        }
+        for ratio, factor in (("8:1", 8), ("4:1", 4), ("1:1", 1)):
+            # Search is a global arrival rate.  Commit is a per-tenant
+            # requests/minute rate.  With eight tenants, this gives an exact
+            # global read:write ratio over the one-minute scenario window:
+            # (8 * concurrency * factor reads/s) : (8 * 60 * concurrency writes/min).
+            commit_rpm = 60.0 * concurrency
+            scenarios[f"C{ratio}{suffix}"] = {
+                **common,
+                "label": f"C 读写 {ratio} / 每租户并发 {concurrency}",
+                "search_rps": float(workers * factor),
+                "commit_rpm": commit_rpm,
+            }
+        scenarios[f"D{suffix}"] = {
+            **common,
+            "label": f"D 注入洪峰 / 每租户并发 {concurrency}",
+            "search_rps": float(workers),
+            "commit_rpm": 0.0,
+            "commit_barrier": True,
+            "commit_barrier_count": 32,
+            "commit_barrier_waves": 1,
+            "commit_barrier_cooldown_s": 0.0,
+            "commit_burst_window_s": 10.0,
+        }
+    return scenarios
+
+
 SCENARIO_PROFILES = {
     "pr421": SCENARIOS,
     "report4": report4_scenarios(),
+    "report6": report6_scenarios(),
 }
 
 
@@ -320,6 +391,11 @@ def run_case(
                 str(case["commit_barrier_waves"]),
                 "--commit-barrier-cooldown-s",
                 str(case.get("commit_barrier_cooldown_s", 0.0)),
+            ]
+        if case.get("commit_burst_window_s"):
+            command += [
+                "--commit-barrier-window-s",
+                str(case["commit_burst_window_s"]),
             ]
     if args.auth_header:
         command += ["--auth-header", args.auth_header]
@@ -669,7 +745,7 @@ def main() -> int:
         "--profile",
         choices=tuple(SCENARIO_PROFILES),
         default="pr421",
-        help="Scenario profile; report4 reproduces report(4)'s A/B/C/D matrix.",
+        help="Scenario profile; report4/report6 reproduce the corresponding A/B/C/D matrix.",
     )
     parser.add_argument("--scenarios", default="")
     parser.add_argument("--repeats", type=int, default=3)
@@ -702,6 +778,11 @@ def main() -> int:
     parser.add_argument("--fault-auth-key", default=os.getenv("ECHOMEM_AUTH_KEY", ""))
     parser.add_argument("--k6-summary", default="")
     parser.add_argument("--k6-runner-dir", default="")
+    parser.add_argument(
+        "--preflight-config",
+        default=os.getenv("ECHOMEM_CONFIG", ""),
+        help="EchoMem config.json to validate before the suite starts",
+    )
     args = parser.parse_args()
 
     scenario_catalog = SCENARIO_PROFILES[args.profile]
@@ -720,6 +801,24 @@ def main() -> int:
         parser.error(f"unknown scenarios: {', '.join(unknown)}")
     if args.repeats < 1:
         parser.error("--repeats must be >= 1")
+    if args.profile == "report6" and not args.preflight_config:
+        parser.error("--profile report6 requires --preflight-config with the actual EchoMem config.json")
+    preflight_errors: list[str] = []
+    if args.preflight_config:
+        preflight_errors = validate_real_model_config(
+            args.preflight_config,
+            expected_embedding_dimensions=1024 if args.profile == "report6" else None,
+        )
+        if preflight_errors:
+            parser.error(
+                "real-model preflight failed:\n- " + "\n- ".join(preflight_errors)
+            )
+    if args.preflight_config:
+        model_errors = validate_real_model_config(args.preflight_config)
+        if model_errors:
+            parser.error(
+                "real-model preflight failed:\n- " + "\n- ".join(model_errors)
+            )
 
     tenant_path = Path(args.tenant_config).expanduser().resolve()
     all_tenants = load_tenants(tenant_path)
@@ -750,6 +849,26 @@ def main() -> int:
         "duration_cap_s": args.duration_cap_s,
         "policies": list(POLICIES),
         "acceptance_targets": PR421_ACCEPTANCE_TARGETS,
+        "preflight_config": (
+            str(Path(args.preflight_config).expanduser().resolve())
+            if args.preflight_config
+            else ""
+        ),
+        "preflight": {
+            "status": "PASS" if args.preflight_config else "NOT_RUN",
+            "config": (
+                str(Path(args.preflight_config).expanduser().resolve())
+                if args.preflight_config
+                else ""
+            ),
+            "checks": {
+                "llm_provider_model": "real",
+                "embedding_provider_model": "real",
+                "embedding_dimensions": 1024 if args.profile == "report6" else "not_required",
+                "api_key_values": "not_recorded",
+            },
+            "errors": preflight_errors,
+        },
         "reset_command": args.reset_command,
         "client_admission_enabled": False,
         "server_observation_mode": True,

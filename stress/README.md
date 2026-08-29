@@ -4,6 +4,19 @@
 Python's standard library and does not replace the real model service with a
 mock during an official run.
 
+Official runs must configure EchoMem with a real LLM and embedding provider:
+DashScope OpenAI-compatible API, `deepseek-v4-flash-0731` for text generation,
+and `text-embedding-v3` for embeddings. The API key is supplied through
+`DASHSCOPE_API_KEY`; it must not be written into JSON, HTML, CSV, or logs.
+For a formal suite, pass the actual EchoMem config explicitly:
+
+```bash
+python3 -m stress.echomem.formal_suite \
+  --preflight-config "$ECHOMEM_CONFIG" \
+  --tenant-config stress/echomem/tenants.server.json \
+  --profile report4
+```
+
 The default authentication header is `X-API-Key`, matching the current
 EchoMem HTTP server. Use `--auth-header Authorization` when the deployment
 expects a bearer token, or set `ECHOMEM_AUTH_HEADER`.
@@ -44,7 +57,8 @@ run does not add a client-side scheduling policy.
 
 ### report(4) A/B/C/D 矩阵
 
-使用 `report4` profile 可以复现 `report(4).html` 的核心设计：
+使用 `report4` profile 可以复现 `report(4).html` 的核心设计；使用
+`report6` profile 可以执行 report(6) 的 8 租户、12 组 A/B/C/D 方案：
 
 ```bash
 python3 stress/echomem/formal_suite.py \
@@ -52,6 +66,18 @@ python3 stress/echomem/formal_suite.py \
   --tenant-config stress/echomem/tenants.server.json \
   --out-dir results/stress/report4_$(date +%Y%m%d_%H%M%S)
 ```
+
+```bash
+python3 -m stress.echomem.formal_suite \
+  --profile report6 \
+  --tenant-config stress/echomem/tenants.server.example.json \
+  --preflight-config "$ECHOMEM_CONFIG" \
+  --out-dir results/stress/report6_$(date +%Y%m%d_%H%M%S)
+```
+
+report6 固定每租户并发 1/2、每场景 60 秒、每租户 2 个会话且每会话
+10 条消息。C 场景按总请求量精确保持 8:1、4:1、1:1；D 场景在
+10 秒窗口内提交 32 个 Commit。正式运行必须提供 8 个独立认证 Key。
 
 该 profile 使用 8 个独立认证租户和每租户并发 1/4/16。A 是纯 Search
 基线，B 是纯 Commit，C 覆盖 8:1/4:1/1:1 读写比例，D 在固定冷却窗口后

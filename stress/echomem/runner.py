@@ -1512,6 +1512,7 @@ def run_parallel_workload(
     commit_tenant_counts: list[int] | None = None,
     commit_barrier_waves: int = 1,
     commit_barrier_cooldown_s: float = 0.0,
+    commit_barrier_window_s: float = 0.0,
 ) -> tuple[list[CommitRecord], list[SearchRecord]]:
     """Run the write/commit and search lanes concurrently.
 
@@ -1637,6 +1638,7 @@ def run_parallel_workload(
             commit_tenant_counts=commit_tenant_counts,
             commit_barrier_waves=commit_barrier_waves,
             commit_barrier_cooldown_s=commit_barrier_cooldown_s,
+            commit_barrier_window_s=commit_barrier_window_s,
         )
 
     with ThreadPoolExecutor(max_workers=1) as executor:
@@ -1673,6 +1675,7 @@ def run_commit_stream(
     commit_tenant_counts: list[int] | None = None,
     commit_barrier_waves: int = 1,
     commit_barrier_cooldown_s: float = 0.0,
+    commit_barrier_window_s: float = 0.0,
 ) -> list[CommitRecord]:
     """Submit Commit requests at a fixed per-tenant arrival rate.
 
@@ -1714,6 +1717,7 @@ def run_commit_stream(
             barrier_counts = [base + (1 if index < barrier_count % len(tenants) else 0) for index in range(len(tenants))]
     barrier_waves = max(1, int(commit_barrier_waves or 1))
     barrier_cooldown_s = max(0.0, float(commit_barrier_cooldown_s or 0.0))
+    barrier_window_s = max(0.0, float(commit_barrier_window_s or 0.0))
     for tenant_index, tenant in enumerate(tenants):
         if barrier_count:
             count = barrier_counts[tenant_index]
@@ -1749,6 +1753,17 @@ def run_commit_stream(
                 offset = wave * (
                     max(0.0, duration_s / barrier_waves) + barrier_cooldown_s
                 )
+            if barrier_count and barrier_window_s > 0:
+                within_wave = index % max(1, count)
+                wave_start = wave * (
+                    max(0.0, duration_s / barrier_waves) + barrier_cooldown_s
+                )
+                spread = (
+                    barrier_window_s * within_wave / max(1, count - 1)
+                    if count > 1
+                    else 0.0
+                )
+                offset = wave_start + spread
             jobs.append((offset, tenant, session_id, message_ids))
     jobs.sort(key=lambda item: item[0])
 
@@ -1888,6 +1903,8 @@ def scenario_status(
     commit_failures = [r for r in records if r.status not in {"completed", "complete", "transcommit", "succeeded", "success"}]
     search_latencies = [r.elapsed_s for r in searches if r.status_code and 200 <= r.status_code < 300]
     search_errors = [r for r in searches if not r.status_code or r.status_code >= 400]
+    commit_expected = target_commit is None or target_commit > 0
+    search_expected = target_search is None or target_search > 0
     target_gaps: dict[str, int] = {}
     if target_commit is not None:
         target_gaps["commit"] = max(0, target_commit - len(records))
@@ -1902,9 +1919,15 @@ def scenario_status(
             (target_search, len(searches)),
         )
     )
-    if not records or len(searches) < min_samples:
+    if commit_expected and len(records) < min_samples:
         return INCONCLUSIVE, {
-            "reason": "insufficient samples",
+            "reason": "insufficient commit samples",
+            "commit_failures": len(commit_failures),
+            "target_gaps": target_gaps,
+        }
+    if search_expected and len(searches) < min_samples:
+        return INCONCLUSIVE, {
+            "reason": "insufficient search samples",
             "commit_failures": len(commit_failures),
             "target_gaps": target_gaps,
         }
@@ -1915,10 +1938,17 @@ def scenario_status(
             "target_gaps": target_gaps,
             "minimum_target_ratio": minimum_target_ratio,
         }
-    p95 = percentile(search_latencies, 95)
-    status = PASS if not commit_failures and p95 is not None and p95 <= p95_limit_s and not search_errors else FAIL
+    p95 = percentile(search_latencies, 95) if search_expected else None
+    commit_ok = not commit_failures if commit_expected else True
+    search_ok = (
+        p95 is not None and p95 <= p95_limit_s and not search_errors
+        if search_expected
+        else True
+    )
+    status = PASS if commit_ok and search_ok else FAIL
     return status, {"commit_total": len(records), "commit_failures": len(commit_failures), "search_total": len(searches),
                     "search_errors": len(search_errors), "search_p95_s": p95, "search_limit_s": p95_limit_s,
+                    "commit_expected": commit_expected, "search_expected": search_expected,
                     "target_gaps": target_gaps}
 
 
@@ -2818,6 +2848,12 @@ def parse_args() -> argparse.Namespace:
         default=0.0,
         help="Cooldown after each repeated Commit barrier wave.",
     )
+    parser.add_argument(
+        "--commit-barrier-window-s",
+        type=float,
+        default=0.0,
+        help="Spread each Commit barrier wave across this fixed arrival window.",
+    )
     parser.add_argument("--search-timeout-s", type=float, default=40.0)
     parser.add_argument("--search-p95-limit-s", type=float, default=2.5)
     parser.add_argument("--search-degradation-factor", type=float, default=2.0)
@@ -2920,6 +2956,8 @@ def parse_args() -> argparse.Namespace:
         parser.error("--commit-barrier-waves must be at least 1")
     if args.commit_barrier_cooldown_s < 0:
         parser.error("--commit-barrier-cooldown-s must not be negative")
+    if args.commit_barrier_window_s < 0:
+        parser.error("--commit-barrier-window-s must not be negative")
     if args.commit_barrier_count and args.commit_rpm:
         parser.error("--commit-barrier-count cannot be combined with --commit-rpm")
     if args.commit_zipf_exponent <= 0:
@@ -3116,6 +3154,7 @@ def main() -> int:
                 args.commit_tenant_counts,
                 args.commit_barrier_waves,
                 args.commit_barrier_cooldown_s,
+                args.commit_barrier_window_s,
             )
         elif args.scenario == "fairness":
             search_records = scenario_search(
