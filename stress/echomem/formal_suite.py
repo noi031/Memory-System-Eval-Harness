@@ -320,6 +320,8 @@ def run_case(
             ]
     if args.auth_header:
         command += ["--auth-header", args.auth_header]
+    if args.allow_shared_identity:
+        command.append("--allow-shared-identity")
     if args.pid:
         command += ["--pid", str(args.pid)]
     if args.no_server_metrics:
@@ -675,6 +677,11 @@ def main() -> int:
         help="Optional diagnostic cap for each scenario duration; 0 keeps scenario defaults.",
     )
     parser.add_argument("--auth-header", default=os.getenv("ECHOMEM_AUTH_HEADER", "X-API-Key"))
+    parser.add_argument(
+        "--allow-shared-identity",
+        action="store_true",
+        help="Allow an exploratory shared credential; isolation/fairness remain inconclusive.",
+    )
     parser.add_argument("--commit-workers", type=int, default=8)
     parser.add_argument("--commit-timeout-s", type=float, default=120.0)
     parser.add_argument("--commit-max-attempts", type=int, default=3)
@@ -733,6 +740,7 @@ def main() -> int:
         "base_url": args.base_url,
         "profile": args.profile,
         "tenant_config": str(tenant_path),
+        "allow_shared_identity": args.allow_shared_identity,
         "output_root": str(root.resolve()),
         "scenarios": scenario_names,
         "repeats": args.repeats,
