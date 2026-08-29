@@ -238,6 +238,61 @@ def _search_success_gate(manifest: dict[str, Any]) -> dict[str, Any]:
     )
 
 
+def _report6_quality_gate(manifest: dict[str, Any]) -> dict[str, Any]:
+    """Reject report(6) runs that hide empty or unverified retrievals."""
+    runs = [
+        run for run in manifest.get("runs") or []
+        if str(run.get("scenario") or "").startswith(
+            ("A@", "B@", "C", "D@")
+        )
+    ]
+    if not runs:
+        return _result(
+            "report(6) Search quality assertion",
+            INCONCLUSIVE,
+            evidence="metrics.search.quality_failures",
+            reason="没有 report(6) 场景结果",
+        )
+    search_metrics = [
+        (_run_summary(run).get("metrics") or {}).get("search") or {}
+        for run in runs
+    ]
+    asserted = sum(int(item.get("quality_asserted") or 0) for item in search_metrics)
+    failures = sum(int(item.get("quality_failures") or 0) for item in search_metrics)
+    seed_rows = [
+        row
+        for run in runs
+        for row in ((_run_summary(run).get("details") or {}).get("quality_seed") or [])
+    ]
+    seed_failures = sum(not bool(row.get("completed")) for row in seed_rows)
+    if not asserted:
+        return _result(
+            "report(6) Search quality assertion",
+            INCONCLUSIVE,
+            target="all measured Search requests have a deterministic marker assertion",
+            observed={"quality_asserted": asserted, "seed_failures": seed_failures},
+            evidence="metrics.search.quality_asserted; details.quality_seed",
+            reason="Search 未启用确定性 marker 断言，不能证明空召回没有被假通过",
+        )
+    status = FAIL if failures or seed_failures else PASS
+    return _result(
+        "report(6) Search quality assertion",
+        status,
+        target="quality_failures=0 and seed_failures=0",
+        observed={
+            "quality_asserted": asserted,
+            "quality_failures": failures,
+            "seed_failures": seed_failures,
+        },
+        evidence="metrics.search.quality_failures; details.quality_seed",
+        reason=(
+            "所有 marker Search 均有真实召回证据"
+            if status == PASS
+            else "存在 seed 未完成或 marker 未召回，不能把 HTTP 200 当作检索成功"
+        ),
+    )
+
+
 def _search_isolation_gate(manifest: dict[str, Any]) -> dict[str, Any]:
     all_runs = manifest.get("runs") or []
     report4 = any(
@@ -509,6 +564,7 @@ def evaluate_pr421_acceptance(manifest: dict[str, Any]) -> dict[str, Any]:
         _target_coverage(manifest),
         _search_isolation_gate(manifest),
         _search_success_gate(manifest),
+        _report6_quality_gate(manifest),
         _fairness_gate(manifest),
         _commit_completion_gate(manifest),
         _rejection_gate(manifest),

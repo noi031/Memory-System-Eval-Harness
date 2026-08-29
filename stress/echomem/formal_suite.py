@@ -347,6 +347,8 @@ def run_case(
         str(case["sessions_per_tenant"]),
         "--messages-per-session",
         str(case["messages_per_session"]),
+        "--quality-seed-messages",
+        str(case.get("quality_seed_messages", case["messages_per_session"])),
         "--commit-timeout-s",
         str(args.commit_timeout_s),
         "--commit-workers",

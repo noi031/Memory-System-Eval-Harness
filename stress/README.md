@@ -77,7 +77,19 @@ python3 -m stress.echomem.formal_suite \
 
 report6 固定每租户并发 1/2、每场景 60 秒、每租户 2 个会话且每会话
 10 条消息。C 场景按总请求量精确保持 8:1、4:1、1:1；D 场景在
-10 秒窗口内提交 32 个 Commit。正式运行必须提供 8 个独立认证 Key。
+10 秒窗口内提交 32 个 Commit。计时前每个 session 还会写入并完成
+确定性质量种子；Search 使用对应 marker 查询，空召回会计为质量失败，
+不会再把 HTTP 200 当作检索成功。正式运行必须提供 8 个独立认证 Key。
+
+report6 的结果会同时保留：
+
+- `seed_results.csv`：计时前种子写入、Commit 最终状态和 marker；
+- `search_results.csv`：query、expected marker、marker 是否命中和质量状态；
+- `commit_results.csv`：所有提交、429 重试、最终状态和请求级时间线；
+- `acceptance.json`：质量断言、租户隔离、服务端遥测以及未执行能力的分层判定。
+
+Search 延迟统计只使用质量断言通过的请求；种子失败或 marker 未命中会在
+场景和正式套件验收中明确显示为 `FAIL`，不隐藏分母。
 
 该 profile 使用 8 个独立认证租户和每租户并发 1/4/16。A 是纯 Search
 基线，B 是纯 Commit，C 覆盖 8:1/4:1/1:1 读写比例，D 在固定冷却窗口后

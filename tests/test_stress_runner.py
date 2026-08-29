@@ -29,6 +29,7 @@ from stress.echomem.runner import (
     scenario_status,
     scenario_search,
     isolation_probe_query,
+    quality_probe_query,
 )
 from stress.echomem.audit_matrix_report import render as render_audit_matrix_report
 
@@ -257,6 +258,54 @@ class StressRunnerTests(unittest.TestCase):
         # part of the returned workload evidence.
         self.assertEqual(3, len(records))
         self.assertTrue(all(record.status_code == 200 for record in records))
+
+    def test_search_quality_marker_is_recorded_and_empty_result_fails(self) -> None:
+        marker = "echomem-quality-test-marker"
+
+        class QualityClient:
+            def __init__(self, payload):
+                self.payload = payload
+
+            def search(self, session_id, query, timeout_s):
+                self.query = query
+                return HttpResult(
+                    "POST",
+                    "/api/retrieval/search",
+                    200,
+                    0.02,
+                    self.payload,
+                )
+
+        passing = QualityClient({"items": [{"text": marker}]})
+        records = scenario_search(
+            passing,
+            [("tenant-a", "session-a")],
+            duration_s=0.01,
+            rps=1,
+            timeout_s=1,
+            workers=1,
+            quality_queries={
+                "session-a": (quality_probe_query(marker), marker),
+            },
+        )
+        self.assertEqual(PASS, records[0].quality_status)
+        self.assertTrue(records[0].marker_found)
+        self.assertIn(marker, passing.query)
+
+        failing = QualityClient({"items": []})
+        records = scenario_search(
+            failing,
+            [("tenant-a", "session-a")],
+            duration_s=0.01,
+            rps=1,
+            timeout_s=1,
+            workers=1,
+            quality_queries={
+                "session-a": (quality_probe_query(marker), marker),
+            },
+        )
+        self.assertEqual("FAIL", records[0].quality_status)
+        self.assertFalse(records[0].marker_found)
 
     def test_percentile_is_interpolated(self) -> None:
         self.assertEqual(2.5, percentile([1, 2, 3, 4], 50))

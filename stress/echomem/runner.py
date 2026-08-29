@@ -498,6 +498,11 @@ class SearchRecord:
     server_terminal_status: str = ""
     scheduled_at: str = ""
     schedule_lateness_s: float = 0.0
+    query: str = ""
+    query_kind: str = "unasserted"
+    expected_marker: str = ""
+    marker_found: bool | None = None
+    quality_status: str = "NOT_ASSERTED"
 
 
 @dataclass
@@ -928,6 +933,114 @@ def payload_contains(payload: dict[str, Any], text: str) -> bool:
         return False
 
 
+def quality_probe_query(marker: str) -> str:
+    """Build a deterministic query for the report(6) search-quality gate."""
+    return f"Return the memory containing this exact test marker: {marker}"
+
+
+def prepare_quality_seed(
+    client_or_clients: EchoMemHTTP | dict[str, EchoMemHTTP],
+    sessions: list[tuple[str, str]],
+    messages_per_session: int,
+    commit_timeout_s: float,
+    poll_interval_s: float,
+    commit_max_attempts: int = 3,
+    commit_retry_backoff_s: float = 2.0,
+    commit_retry_max_backoff_s: float = 30.0,
+) -> tuple[dict[str, tuple[str, str]], list[dict[str, Any]]]:
+    """Write deterministic seed markers before the measured workload.
+
+    The seed is deliberately outside the timed window.  Each session gets a
+    private marker, and Search can later assert that the marker is actually
+    present in the response instead of treating HTTP 200 plus an empty list
+    as a successful retrieval.
+    """
+    queries: dict[str, tuple[str, str]] = {}
+    evidence: list[dict[str, Any]] = []
+    count = max(1, int(messages_per_session))
+    for tenant, session_id in sessions:
+        marker = f"echomem-quality-{tenant}-{uuid.uuid4().hex}"
+        client = client_for(client_or_clients, tenant)
+        message_ids: list[str] = []
+        add_errors: list[str] = []
+        for index in range(count):
+            message_id = f"quality-seed-{uuid.uuid4().hex}"
+            response = client.add_message(
+                session_id,
+                message_id,
+                f"EchoMem report6 quality seed for {tenant}: {marker} ({index})",
+            )
+            if response.status_code is None or response.status_code >= 400:
+                add_errors.append(response.error or str(response.status_code))
+            else:
+                message_ids.append(message_id)
+        if add_errors or not message_ids:
+            evidence.append({
+                "tenant": tenant,
+                "session_id": session_id,
+                "marker": marker,
+                "message_ids": message_ids,
+                "status": "seed_message_failed",
+                "error": "; ".join(add_errors),
+            })
+            continue
+        response, retry_history, retry_wait_s = commit_with_retry(
+            client,
+            session_id,
+            max_attempts=commit_max_attempts,
+            backoff_s=commit_retry_backoff_s,
+            max_backoff_s=commit_retry_max_backoff_s,
+        )
+        archive_id = extract_archive(response.payload)
+        accepted = bool(response.status_code and response.status_code < 400 and archive_id)
+        status = "accepted" if accepted else "commit_rejected"
+        completed = False
+        error = response.error
+        if accepted:
+            record = CommitRecord(
+                tenant=tenant,
+                session_id=session_id,
+                archive_id=archive_id,
+                accepted_at=now_iso(),
+                message_ids=message_ids,
+                status="accepted",
+                attempt_count=len(retry_history),
+                retry_count=max(0, len(retry_history) - 1),
+                retry_wait_s=retry_wait_s,
+            )
+            poll_commit(
+                client_or_clients,
+                record,
+                timeout_s=commit_timeout_s,
+                interval_s=poll_interval_s,
+            )
+            completed = record.status in {
+                "completed",
+                "complete",
+                "transcommit",
+                "succeeded",
+                "success",
+            }
+            status = record.status
+            error = record.error
+        # Keep the query even when seed preparation failed.  The following
+        # Search must then produce an explicit quality failure rather than
+        # silently falling back to an unasserted random query.
+        queries[session_id] = (quality_probe_query(marker), marker)
+        evidence.append({
+            "tenant": tenant,
+            "session_id": session_id,
+            "marker": marker,
+            "message_ids": message_ids,
+            "archive_id": archive_id,
+            "status": status,
+            "completed": completed,
+            "retry_count": max(0, len(retry_history) - 1),
+            "error": error,
+        })
+    return queries, evidence
+
+
 def isolation_probe_query(writer: str, marker: str) -> str:
     """Build an exact-marker query for a deterministic isolation probe.
 
@@ -1316,6 +1429,7 @@ def scenario_search(
     rps: float,
     timeout_s: float,
     workers: int = 2,
+    quality_queries: dict[str, tuple[str, str]] | None = None,
 ) -> list[SearchRecord]:
     """Generate a fixed-rate Search arrival stream.
 
@@ -1367,9 +1481,13 @@ def scenario_search(
                 started_at = now_iso()
                 operation_id = f"search-{uuid.uuid4().hex}"
                 client = client_for(client_or_clients, tenant_name)
-                response = client.search(
-                    sid, f"stress query {uuid.uuid4().hex[:8]}", timeout_s
+                query, expected_marker = (
+                    quality_queries.get(sid, ("", "")) if quality_queries else ("", "")
                 )
+                query_kind = "marker" if expected_marker else "unasserted"
+                if not query:
+                    query = f"stress query {uuid.uuid4().hex[:8]}"
+                response = client.search(sid, query, timeout_s)
                 finished_at = now_iso()
                 # EchoMemHTTP.response.elapsed_s measures the actual HTTP
                 # request.  The worker-side interval also contains client
@@ -1381,6 +1499,16 @@ def scenario_search(
                     or response.payload.get("result", {}).get("items", [])
                     if isinstance(response.payload, dict)
                     else []
+                )
+                marker_found = (
+                    payload_contains(response.payload, expected_marker)
+                    if expected_marker
+                    else None
+                )
+                quality_status = (
+                    PASS if marker_found else FAIL
+                    if expected_marker
+                    else "NOT_ASSERTED"
                 )
                 return SearchRecord(
                     tenant_name,
@@ -1412,6 +1540,11 @@ def scenario_search(
                     server_queue_depth=response.server_queue_depth,
                     server_active_workers=response.server_active_workers,
                     server_terminal_status=response.server_terminal_status,
+                    query=query,
+                    query_kind=query_kind,
+                    expected_marker=expected_marker,
+                    marker_found=marker_found,
+                    quality_status=quality_status,
                 )
 
             futures[executor.submit(search_one)] = submitted
@@ -1513,6 +1646,7 @@ def run_parallel_workload(
     commit_barrier_waves: int = 1,
     commit_barrier_cooldown_s: float = 0.0,
     commit_barrier_window_s: float = 0.0,
+    quality_queries: dict[str, tuple[str, str]] | None = None,
 ) -> tuple[list[CommitRecord], list[SearchRecord]]:
     """Run the write/commit and search lanes concurrently.
 
@@ -1650,6 +1784,7 @@ def run_parallel_workload(
         searches = scenario_search(
             client_or_clients, sessions, duration_s, search_rps, search_timeout_s,
             workers=search_workers,
+            quality_queries=quality_queries,
         )
         commits = commit_future.result()
     return commits, searches
@@ -1903,6 +2038,10 @@ def scenario_status(
     commit_failures = [r for r in records if r.status not in {"completed", "complete", "transcommit", "succeeded", "success"}]
     search_latencies = [r.elapsed_s for r in searches if r.status_code and 200 <= r.status_code < 300]
     search_errors = [r for r in searches if not r.status_code or r.status_code >= 400]
+    quality_asserted = [r for r in searches if r.expected_marker]
+    quality_failures = [
+        r for r in quality_asserted if r.quality_status != PASS
+    ]
     commit_expected = target_commit is None or target_commit > 0
     search_expected = target_search is None or target_search > 0
     target_gaps: dict[str, int] = {}
@@ -1945,9 +2084,12 @@ def scenario_status(
         if search_expected
         else True
     )
-    status = PASS if commit_ok and search_ok else FAIL
+    quality_ok = not quality_failures
+    status = PASS if commit_ok and search_ok and quality_ok else FAIL
     return status, {"commit_total": len(records), "commit_failures": len(commit_failures), "search_total": len(searches),
                     "search_errors": len(search_errors), "search_p95_s": p95, "search_limit_s": p95_limit_s,
+                    "quality_asserted": len(quality_asserted),
+                    "quality_failures": len(quality_failures),
                     "commit_expected": commit_expected, "search_expected": search_expected,
                     "target_gaps": target_gaps}
 
@@ -2014,12 +2156,15 @@ def workload_metrics(
         record for record in searches
         if record.status_code is not None and 200 <= record.status_code < 300
     ]
+    quality_asserted = [record for record in searches if record.expected_marker]
+    quality_passed = [record for record in quality_asserted if record.quality_status == PASS]
     commit_delayed = [
         record for record in commits
         if record.end_to_end_s >= commit_delay_threshold_s
     ]
+    quality_searches = quality_passed if quality_asserted else search_success
     search_delayed = [
-        record for record in searches
+        record for record in quality_searches
         if record.service_s >= search_delay_threshold_s
     ]
 
@@ -2116,7 +2261,9 @@ def workload_metrics(
         tenant_commits = [record for record in commits if record.tenant == tenant]
         tenant_searches = [record for record in searches if record.tenant == tenant]
         tenant_commit_success = [record for record in commit_success if record.tenant == tenant]
-        tenant_search_success = [record for record in search_success if record.tenant == tenant]
+        tenant_search_success = [
+            record for record in quality_searches if record.tenant == tenant
+        ]
         def http_status_counts(records: list[Any]) -> dict[str, int]:
             counts: dict[str, int] = {}
             for record in records:
@@ -2194,7 +2341,12 @@ def workload_metrics(
         usable = [value for value in values.values() if value is not None and value > 0]
         return max(usable) / min(usable) if len(usable) >= 2 else None
 
-    search_values = [record.service_s for record in search_success]
+    search_values = [
+        record.service_s
+        for record in (
+            quality_passed if quality_asserted else search_success
+        )
+    ]
     admission_events = sorted(
         [
             {
@@ -2436,11 +2588,19 @@ def workload_metrics(
             "submitted": len(searches),
             "succeeded": len(search_success),
             "errors": len(searches) - len(search_success),
-            "success_rate": len(search_success) / len(searches) if searches else None,
+                "success_rate": len(search_success) / len(searches) if searches else None,
+                "quality_asserted": len(quality_asserted),
+                "quality_passed": len(quality_passed),
+                "quality_failures": len(quality_asserted) - len(quality_passed),
+                "quality_success_rate": (
+                    len(quality_passed) / len(quality_asserted)
+                    if quality_asserted
+                    else None
+                ),
             "http_status_counts": status_counts(searches),
             "rate_limited_count": sum(record.status_code == 429 for record in searches),
             "retry_after": numeric_stats(retry_after_values(searches)),
-            "latency": numeric_stats(search_values),
+                "latency": numeric_stats(search_values),
             "server": server_observation(searches),
             # These rates use the configured arrival window, not the shorter
             # time spent draining futures after the workload ended.
@@ -2778,6 +2938,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--search-rps", type=float, default=1.0)
     parser.add_argument("--messages-per-session", type=int, default=3)
     parser.add_argument(
+        "--quality-seed-messages",
+        type=int,
+        default=1,
+        help="Deterministic marker messages per session written before timed Search.",
+    )
+    parser.add_argument(
         "--read-only",
         action="store_true",
         help="Run only the timed Search lane; do not create timed Commit traffic.",
@@ -2950,6 +3116,8 @@ def parse_args() -> argparse.Namespace:
     args = parser.parse_args()
     if args.commit_max_attempts < 1:
         parser.error("--commit-max-attempts must be at least 1")
+    if args.quality_seed_messages < 1:
+        parser.error("--quality-seed-messages must be at least 1")
     if args.commit_barrier_count < 0:
         parser.error("--commit-barrier-count must not be negative")
     if args.commit_barrier_waves < 1:
@@ -3108,6 +3276,8 @@ def main() -> int:
     started = time.monotonic()
     commit_records: list[CommitRecord] = []
     search_records: list[SearchRecord] = []
+    quality_queries: dict[str, tuple[str, str]] = {}
+    quality_seed_evidence: list[dict[str, Any]] = []
     isolation: dict[str, Any] = {
         "status": INCONCLUSIVE,
         "reason": "single authentication identity; labels are not real tenants",
@@ -3122,6 +3292,16 @@ def main() -> int:
             commit_timeout_s=args.commit_timeout_s,
         )
         sessions = provision_sessions(clients, tenants, args.sessions_per_tenant)
+        quality_queries, quality_seed_evidence = prepare_quality_seed(
+            clients,
+            sessions,
+            args.quality_seed_messages,
+            args.commit_timeout_s,
+            args.commit_poll_interval_s,
+            args.commit_max_attempts,
+            args.commit_retry_backoff_s,
+            args.commit_retry_max_backoff_s,
+        )
         if args.read_only:
             search_records = scenario_search(
                 clients,
@@ -3130,6 +3310,7 @@ def main() -> int:
                 args.search_rps,
                 args.search_timeout_s,
                 workers=args.search_workers,
+                quality_queries=quality_queries,
             )
         elif args.scenario in {"baseline", "commit-storm", "all"}:
             commit_records, search_records = run_parallel_workload(
@@ -3155,6 +3336,7 @@ def main() -> int:
                 args.commit_barrier_waves,
                 args.commit_barrier_cooldown_s,
                 args.commit_barrier_window_s,
+                quality_queries,
             )
         elif args.scenario == "fairness":
             search_records = scenario_search(
@@ -3164,15 +3346,17 @@ def main() -> int:
                 args.search_rps,
                 args.search_timeout_s,
                 workers=args.search_workers,
+                quality_queries=quality_queries,
             )
     except Exception as exc:
         summary = {"status": ENVIRONMENT_ERROR, "scenario_status": {"environment": ENVIRONMENT_ERROR},
                    "base_url": args.base_url, "finished_at": now_iso(), "parameters": vars(args),
-                   "details": {
+            "details": {
                        "error": f"{type(exc).__name__}: {exc}",
                        "identity_mode": identity_mode,
                        "tenant_auth_sources": tenant_auth_sources,
                        "isolation": isolation,
+                       "quality_seed": quality_seed_evidence,
                    }}
         (out_dir / "summary.json").write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
         build_readable_report(summary, out_dir / "report.html")
@@ -3324,12 +3508,14 @@ def main() -> int:
                                                                                 "identity_mode": identity_mode,
                                                                                 "tenant_auth_sources": tenant_auth_sources,
                                                                                 "isolation": isolation,
+                                                                                "quality_seed": quality_seed_evidence,
                                                                                 "server_observation_complete": server_observation_complete},
                "metrics": metrics,
                "resource_points": [asdict(sample) for sample in (sampler.samples if sampler else [])]}
     (out_dir / "summary.json").write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
     write_csv(out_dir / "commit_results.csv", [asdict(record) for record in commit_records])
     write_csv(out_dir / "search_results.csv", [asdict(record) for record in search_records])
+    write_csv(out_dir / "seed_results.csv", quality_seed_evidence)
     write_csv(out_dir / "resource_samples.csv", [asdict(record) for record in (sampler.samples if sampler else [])])
     write_csv(
         out_dir / "server_metrics.csv",

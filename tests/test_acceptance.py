@@ -23,6 +23,33 @@ class AcceptanceTests(unittest.TestCase):
         self.assertIn(INCONCLUSIVE, statuses)
         self.assertIn(NOT_IMPLEMENTED, statuses)
 
+    def test_report6_quality_gate_rejects_empty_marker_results(self):
+        manifest = {
+            "runs": [{
+                "scenario": "A@1",
+                "summary": {
+                    "metrics": {
+                        "search": {
+                            "quality_asserted": 10,
+                            "quality_failures": 2,
+                        }
+                    },
+                    "details": {
+                        "quality_seed": [
+                            {"status": "completed"},
+                        ]
+                    },
+                },
+            }]
+        }
+        result = evaluate_pr421_acceptance(manifest)
+        quality = next(
+            item for item in result["checks"]
+            if item["name"] == "report(6) Search quality assertion"
+        )
+        self.assertEqual("FAIL", quality["status"])
+        self.assertEqual(2, quality["observed"]["quality_failures"])
+
     def test_model_input_is_secret_free_and_preserves_acceptance(self):
         manifest = {
             "base_url": "http://127.0.0.1:8010",
