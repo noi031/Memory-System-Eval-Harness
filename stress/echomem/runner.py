@@ -23,6 +23,7 @@ from collections import deque
 import urllib.error
 import urllib.request
 import uuid
+from urllib.parse import quote
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
@@ -425,6 +426,16 @@ def load_tenant_specs(
             )
         )
     return specs
+
+
+def classify_tenant_identity(specs: list[TenantSpec]) -> str:
+    """Classify whether configured tenant labels use distinct credentials."""
+    unique_keys = {spec.auth_key for spec in specs}
+    if len(unique_keys) <= 1:
+        return "shared_auth_key"
+    if len(unique_keys) < len(specs):
+        return "mixed_auth_keys"
+    return "independent_auth_keys"
 
 
 @dataclass
@@ -888,6 +899,28 @@ class EchoMemHTTP:
         return self.request("POST", f"/api/sessions/{session_id}/messages", {
             "role": "user", "content": content, "metadata": {"stress_message_id": message_id},
         })
+
+    def get_history(self, session_id: str, limit: int = 200) -> HttpResult:
+        return self.request(
+            "GET",
+            f"/api/sessions/{session_id}/history?limit={max(1, min(200, int(limit)))}",
+        )
+
+    def get_archive(self, session_id: str, archive_id: str) -> HttpResult:
+        return self.request(
+            "GET",
+            f"/api/sessions/{session_id}/archives/{archive_id}",
+        )
+
+    def get_commit_memories(self, session_id: str, archive_id: str) -> HttpResult:
+        return self.request(
+            "GET",
+            f"/api/sessions/{session_id}/commits/{archive_id}/memories",
+        )
+
+    def fs_read(self, uri: str) -> HttpResult:
+        """Read an EchoMem echo:// file through the existing read-only API."""
+        return self.request("GET", f"/fs/read?uri={quote(uri, safe=':/')}")
 
     def commit(self, session_id: str) -> HttpResult:
         return self.request(
@@ -2931,6 +2964,14 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Allow labeled tenants to share one credential; isolation is not evaluated",
     )
+    parser.add_argument(
+        "--skip-isolation",
+        action="store_true",
+        help=(
+            "Skip the destructive N×N marker probe. Use for capacity and "
+            "saturation measurements; run isolation as a separate scenario."
+        ),
+    )
     parser.add_argument("--tenant", action="append", help="Tenant label; repeat for multiple tenants")
     parser.add_argument("--tenants", type=int, default=1)
     parser.add_argument("--sessions-per-tenant", type=int, default=2)
@@ -3211,7 +3252,7 @@ def main() -> int:
             tenant_auth_sources = {
                 spec.tenant_id: spec.auth_key_source for spec in specs
             }
-            identity_mode = "independent_auth_keys"
+            identity_mode = classify_tenant_identity(specs)
         else:
             tenants = args.tenant or [f"tenant-{i+1}" for i in range(args.tenants)]
             client = EchoMemHTTP(
@@ -3284,15 +3325,21 @@ def main() -> int:
         "reason": "single authentication identity; labels are not real tenants",
     }
     try:
-        isolation = run_isolation_probe(
-            clients,
-            tenants,
-            retries=args.isolation_retries,
-            retry_interval_s=args.isolation_retry_interval_s,
-            markers_per_tenant=args.isolation_markers_per_tenant,
-            commit_timeout_s=args.commit_timeout_s,
-            search_timeout_s=args.search_timeout_s,
-        )
+        if args.skip_isolation:
+            isolation = {
+                "status": INCONCLUSIVE,
+                "reason": "isolation probe intentionally skipped for load measurement",
+            }
+        else:
+            isolation = run_isolation_probe(
+                clients,
+                tenants,
+                retries=args.isolation_retries,
+                retry_interval_s=args.isolation_retry_interval_s,
+                markers_per_tenant=args.isolation_markers_per_tenant,
+                commit_timeout_s=args.commit_timeout_s,
+                search_timeout_s=args.search_timeout_s,
+            )
         sessions = provision_sessions(clients, tenants, args.sessions_per_tenant)
         quality_queries, quality_seed_evidence = prepare_quality_seed(
             clients,

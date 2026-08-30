@@ -68,8 +68,11 @@ PR28_REVIEW_RESOLUTION = [
     },
     {
         "item": "Incident regression and full capacity ladder",
-        "status": "NOT_IMPLEMENTED",
-        "evidence": "S7-S10 and complete 2/4/8/16/32 resource profiles are unavailable",
+        # This is a harness coverage item, not a claim that EchoMem lacks the
+        # capability. Runtime capability probes use INCONCLUSIVE until the
+        # target provides external evidence.
+        "status": NOT_IMPLEMENTED,
+        "evidence": "S7-S10 and complete 2/4/8/16/32 resource profiles are not implemented in the harness",
     },
     {
         "item": "Persistence reconciliation judge",
@@ -580,7 +583,7 @@ def evaluate_pr421_acceptance(manifest: dict[str, Any]) -> dict[str, Any]:
             if case.get("kind") == case_kind
         ]
         result = (matching[0].get("execution") or {}).get("result") if matching else None
-        status = str((result or {}).get("status") or NOT_IMPLEMENTED)
+        status = str((result or {}).get("status") or INCONCLUSIVE)
         return _result(
             name,
             status if status in {PASS, FAIL, INCONCLUSIVE, NOT_IMPLEMENTED} else INCONCLUSIVE,
@@ -590,17 +593,38 @@ def evaluate_pr421_acceptance(manifest: dict[str, Any]) -> dict[str, Any]:
         )
 
     k6_result = manifest.get("k6_reconciliation") or {}
+    capability_checks = {
+        str(item.get("name")): item
+        for item in (manifest.get("capability_probe") or {}).get("checks") or []
+        if isinstance(item, dict) and item.get("name")
+    }
+
+    def capability_gate(name: str, fallback: str, reason: str) -> dict[str, Any]:
+        observed = capability_checks.get(name)
+        if not observed:
+            return _result(name, fallback, evidence="capability-probe.json", reason=reason)
+        return _result(
+            name,
+            str(observed.get("status") or fallback),
+            evidence="capability-probe.json",
+            reason=str(observed.get("reason") or reason),
+            observed={
+                "http_status": observed.get("http_status"),
+                "error": observed.get("error"),
+            },
+        )
+
     unavailable = [
         _result(
             "k6 native load reconciliation",
-            str(k6_result.get("status") or NOT_IMPLEMENTED),
+            str(k6_result.get("status") or INCONCLUSIVE),
             evidence=k6_result.get("path", "k6-reconciliation.json"),
             reason=k6_result.get("reason") or "未提供 k6 summary 与 runner 证据",
             observed=k6_result.get("runner_total_requests"),
         ),
-        artifact_gate(
-            "Cursor/message-set reconciliation",
-            "cursor-reconciliation",
+        capability_gate(
+            "cursor/message-set",
+            INCONCLUSIVE,
             "未配置 cursor 对账计划或 EchoMem 未提供真实消息集合接口",
         ),
         artifact_gate(
@@ -608,9 +632,9 @@ def evaluate_pr421_acceptance(manifest: dict[str, Any]) -> dict[str, Any]:
             "kill-9-recovery",
             "未配置真实 PID/container 和重启命令",
         ),
-        artifact_gate(
-            "LLM/vector failure injection",
-            "llm-vector-faults",
+        capability_gate(
+            "fault control",
+            INCONCLUSIVE,
             "未配置真实依赖故障控制接口或命令",
         ),
     ]

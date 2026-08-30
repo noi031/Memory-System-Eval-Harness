@@ -19,6 +19,7 @@ from stress.echomem.runner import (
     _server_observability,
     build_report,
     commit_with_retry,
+    classify_tenant_identity,
     load_tenant_specs,
     linear_slope_per_minute,
     workload_metrics,
@@ -32,10 +33,21 @@ from stress.echomem.runner import (
     quality_probe_query,
     run_isolation_probe,
 )
+from stress.echomem import runner as stress_runner
 from stress.echomem.audit_matrix_report import render as render_audit_matrix_report
 
 
 class StressRunnerTests(unittest.TestCase):
+    def test_skip_isolation_is_explicitly_inconclusive(self) -> None:
+        """Load tests must not silently claim tenant-isolation evidence."""
+        isolation = {
+            "status": stress_runner.INCONCLUSIVE,
+            "reason": "isolation probe intentionally skipped for load measurement",
+        }
+
+        self.assertEqual(stress_runner.INCONCLUSIVE, isolation["status"])
+        self.assertIn("load measurement", isolation["reason"])
+
     def test_isolation_probe_uses_configured_search_timeout(self) -> None:
         class FakeClient:
             def __init__(self) -> None:
@@ -187,6 +199,18 @@ class StressRunnerTests(unittest.TestCase):
             self.assertEqual(["a", "b"], [spec.tenant_id for spec in specs])
             self.assertEqual("secret-a", specs[0].auth_key)
             self.assertEqual("env:KEY_A", specs[0].auth_key_source)
+
+    def test_shared_tenant_credentials_are_not_called_independent(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "tenants.json"
+            path.write_text(json.dumps({
+                "tenants": [
+                    {"tenant_id": "a", "auth_key": "same"},
+                    {"tenant_id": "b", "auth_key": "same"},
+                ]
+            }), encoding="utf-8")
+            specs = load_tenant_specs(path)
+            self.assertEqual("shared_auth_key", classify_tenant_identity(specs))
 
     def test_fifo_admission_preserves_order(self) -> None:
         gate = AdmissionController("fifo", capacity=1)

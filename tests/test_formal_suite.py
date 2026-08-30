@@ -2,10 +2,16 @@ from __future__ import annotations
 
 import unittest
 
-from stress.echomem.formal_suite import report6_scenarios
+from stress.echomem.formal_suite import SCENARIOS, complete_scenarios, report6_scenarios
 
 
 class Report6ScenarioTests(unittest.TestCase):
+    def test_complete_contains_both_plan_catalogs(self) -> None:
+        scenarios = complete_scenarios()
+
+        self.assertEqual(set(report6_scenarios()) | set(SCENARIOS), set(scenarios))
+        self.assertEqual(21, len(scenarios))
+
     def test_report6_contains_the_full_matrix(self) -> None:
         scenarios = report6_scenarios()
 

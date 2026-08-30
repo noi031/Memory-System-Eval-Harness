@@ -49,6 +49,36 @@ commit, search, resource, and `/metrics` samples. Raw Prometheus responses are
 also retained in `server_metrics.jsonl`. Transport/startup/authentication
 failures are reported as `ENVIRONMENT_ERROR`.
 
+### PR397/PR421 缺口补测
+
+在多个 EchoMem 实例之间切换测试时，限流阶梯必须在目标实例上新建
+session，不能复用另一实例的 CSV session ID：
+
+```bash
+python3 stress/echomem/limit_failure_sweep.py \
+  --base-url http://127.0.0.1:8010 \
+  --tenant-config stress/echomem/tenants.json \
+  --session-root results/stress \
+  --create-sessions \
+  --levels 4,16,64,128,256 \
+  --out-dir results/stress/limit-sweep-$(date +%Y%m%d_%H%M%S)
+```
+
+该探针会在每个 Commit 前写入真实消息，并分别记录 HTTP 状态、transport
+超时和降载后的恢复波次；因此空 Session 的 `400` 不会被当作限流证据。
+同一 Session 的并发 Commit 可用以下命令检查合并、重复 archive 和终态：
+
+```bash
+python3 stress/echomem/concurrent_commit_cases.py \
+  --base-url http://127.0.0.1:8010 \
+  --tenant-config stress/echomem/tenants.json \
+  --concurrency 8 \
+  --out results/stress/concurrent-commit.json
+```
+
+该测试不会把相同 `archive_id` 自动解释为幂等通过；EchoMem 仍需公开
+`operation_id` 或幂等键和消息集合接口，才能完成严格对账。
+
 For a standard stress run, the runner writes `summary.json`, `report.html`,
 request CSVs, raw `/metrics`, and the server-observation timeline. It explicitly
 distinguishes client-side worker wait from server-side queueing; without server
@@ -74,6 +104,28 @@ python3 -m stress.echomem.formal_suite \
   --preflight-config "$ECHOMEM_CONFIG" \
   --out-dir results/stress/report6_$(date +%Y%m%d_%H%M%S)
 ```
+
+### PR397 + PR421 完整测试
+
+需要同时覆盖 PR397/report(6) 的 A/B/C/D 故障发现型矩阵和 PR421 的
+饱和、热租户、公平性及验收门禁时，使用 `complete` profile。它执行两套
+场景的并集，共 21 个场景；默认重复 3 次，即 63 个独立运行目录。
+
+```bash
+python3 -m stress.echomem.formal_suite \
+  --profile complete \
+  --preflight-config "$ECHOMEM_CONFIG" \
+  --tenant-config stress/echomem/tenants.server.json \
+  --fault-plan stress/echomem/fault-plan.example.json \
+  --out-dir results/stress/complete_$(date +%Y%m%d_%H%M%S)
+```
+
+`complete` 会在 `suite.json` 中记录 PR397 和 PR421 的来源、场景清单和
+实际运行数，并生成统一的 `suite.html`、`acceptance.json` 和
+`model_analysis_input.json`。`--fault-plan` 只编排部署提供的真实故障
+控制命令；没有真实控制接口时，LLM/vector 故障、kill-9/重启恢复和 k6
+对账会标记为 `INCONCLUSIVE`，不会伪造为通过；只有真实 HTTP 接口明确
+返回 `404` 才标记为 `NOT_IMPLEMENTED`。
 
 report6 固定每租户并发 1/2、每场景 60 秒、每租户 2 个会话且每会话
 10 条消息。C 场景按总请求量精确保持 8:1、4:1、1:1；D 场景在
@@ -258,6 +310,11 @@ default is three repetitions per case. Every run retains `summary.json`,
 request CSVs, raw `/metrics`, and its own `report.html`; the suite-level
 `suite.html` contains the numeric comparison table.
 
+容量/饱和测试可以给底层 runner 增加 `--skip-isolation`。这会明确把
+`isolation` 写成 `INCONCLUSIVE`，仅用于避免 N×N marker 探针干扰吞吐、
+队列和拒绝行为测量；它不能产生多租户隔离通过证据。隔离必须使用独立
+认证凭证单独执行。
+
 ```bash
 python3 stress/echomem/formal_suite.py \
   --base-url http://127.0.0.1:8010 \
@@ -295,7 +352,55 @@ The formal suite also writes three machine-readable review artifacts:
 The acceptance layer distinguishes `PASS`, `FAIL`, `INCONCLUSIVE`, and
 `NOT_IMPLEMENTED`. A configured target is not treated as verified merely
 because a scenario ran; missing server evidence and unavailable control-plane
-operations remain visible.
+operations remain visible. The harness reports `NOT_IMPLEMENTED` only after
+the target explicitly returns HTTP 404; its own missing configuration is
+`INCONCLUSIVE`.
+
+### PR397 + PR421 缺口总报告
+
+可以将正式验收、PR397 可观测缺口、饱和阶梯和故障套件的结果汇总为一份
+HTML。先把各结果 JSON 放入同一目录并使用固定文件名：
+
+```text
+pr421_acceptance.json
+pr397_observable.json
+saturation.json
+fault_suite.json
+```
+
+然后执行：
+
+```bash
+python3 stress/echomem/completeness_report.py \
+  --root results/stress/complete-$(date +%Y%m%d_%H%M%S) \
+  --out results/stress/complete-report.html
+```
+
+报告会逐项保留 `PASS`、`FAIL`、`INCONCLUSIVE` 和
+`NOT_IMPLEMENTED`。测试平台没有配置探针不等于 EchoMem 没有实现：
+只有真实 HTTP 接口明确返回 404 才使用 `NOT_IMPLEMENTED`。写后读测试会同时检查 `history`、`archive`、
+`commit memories` 和 Search：如果数据已经持久化但 Search 未召回，会标记
+为检索可见性问题，而不会误报成数据丢失。
+
+### PR397 observable missing cases
+
+The following command runs the PR397 cases that can be observed through the
+real EchoMem HTTP API:
+
+```bash
+python3 stress/echomem/missing_cases.py \
+  --base-url http://127.0.0.1:8010 \
+  --tenant-config stress/echomem/tenants.server.json \
+  --out-dir results/stress/pr397-missing-$(date +%Y%m%d_%H%M%S)
+```
+
+It records write-after-read visibility, the Commit state sequence, cold versus
+warm Search latency, and the explicit status of idempotency. Idempotency is
+`INCONCLUSIVE` unless EchoMem exposes a documented idempotency key or
+operation replay contract; two successful HTTP requests alone are not proof.
+Capacity runs may use `runner.py --skip-isolation`, but a tenant config that
+reuses one key is recorded as `shared_auth_key` and cannot produce isolation
+evidence.
 
 For a service-side scheduling observation, the formal suite already disables
 the runner's admission controller:
@@ -323,7 +428,8 @@ PR28 的逐条验收状态见
 Commit barrier、Zipf 分布、429 Retry-After 重试、请求级重试审计和服务端
 观测边界；cursor 对账、真实重启恢复、故障注入和 k6 工具链已提供可执行
 入口，但必须配置真实的 EchoMem 控制接口、重启拓扑和 cursor API，缺少依赖
-时仍会保守标记为 `PARTIAL` 或 `NOT_IMPLEMENTED`。
+时仍会保守标记为 `PARTIAL` 或 `INCONCLUSIVE`；只有接口明确返回 404
+才使用 `NOT_IMPLEMENTED`。
 `acceptance.json` 和 `suite.html` 还会逐条列出
 `RESOLVED/PARTIAL/NOT_IMPLEMENTED`，作为检视意见是否闭环的机器可读证据。
 
@@ -352,7 +458,7 @@ S4 才进行向量库、LLM、worker 或网络故障注入。
 - commit 完成后仍不可检索到 marker，直接判定 FAIL；
 - 轮询超时不能当作成功，必须经过 drain 或标记为 INCONCLUSIVE；
 - 幂等、状态机和恢复测试没有服务端接口支持时，标记
-  `NOT_IMPLEMENTED`，不使用 mock 结果代替；
+  `INCONCLUSIVE`，不使用 mock 结果代替；
 - 高并发场景同时报告成功请求延迟和超时率，避免超时样本污染 P95。
 
 ### k6、故障注入与恢复
@@ -365,13 +471,16 @@ HTTP 请求，并通过 `handleSummary` 输出 k6 原始结果。使用
 真实故障由 `stress/echomem/fault_suite.py` 编排，计划文件见
 `stress/echomem/fault-plan.example.json`。每个故障必须配置一个真实的
 HTTP 控制接口、shell 控制命令或 Docker 容器；没有控制点时结果为
-`NOT_IMPLEMENTED`，不会伪造 500、超时或熔断。
+`INCONCLUSIVE`，不会伪造 500、超时或熔断；只有控制 HTTP 接口明确返回
+404 才标记为 `NOT_IMPLEMENTED`。
 
 kill-9 恢复使用 `recovery.py`，支持真实 PID 或容器，记录杀进程前健康、
 恢复轮询时间线和恢复耗时。cursor 对账使用
 `cursor_reconcile.py --cursor-url-template`，按已完成 Commit 的
-`session_id`、`archive_id` 和 `message_ids` 对照服务端真实 message-set；
-服务端不提供接口时保持 `NOT_IMPLEMENTED`。
+`session_id`、`archive_id` 和 `message_ids` 对照服务端真实 message-set。
+默认通过 EchoMem 已有的
+`/fs/read?uri=echo://sessions/{session_id}/current/commit_cursor.json`
+读取游标；无法访问或无法解析时保持 `INCONCLUSIVE`。
 
 将故障和恢复纳入正式验收时显式传入计划，默认不会主动执行破坏性操作：
 
@@ -385,6 +494,26 @@ python3 stress/echomem/formal_suite.py \
 
 已有 k6 结果可通过 `--k6-summary` 和 `--k6-runner-dir` 纳入同一份
 `suite.json` / `acceptance.json`。
+
+Commit 进行中 kill-9 恢复可用以下探针执行。它会先写入真实消息，再提交
+真实 Commit，在 `pending` 窗口杀掉指定容器并启动同一容器，随后轮询
+Commit 终态并保存 history、Commit memories 和恢复时间线：
+
+```bash
+python3 stress/echomem/commit_recovery_probe.py \
+  --base-url http://127.0.0.1:8010 \
+  --container echomem \
+  --tenant-config stress/echomem/tenants.server.json \
+  --tenant stress-a \
+  --messages 12 \
+  --content-chars 2500 \
+  --kill-delay-s 0.2 \
+  --out results/stress/commit-recovery-$(date +%Y%m%d_%H%M%S).json
+```
+
+该探针不会把“服务恢复健康”直接当作“Commit 正确恢复”：如果没有
+cursor/message-set 导出，报告仍会保留为部分证据，幂等和精确 replay
+需要 EchoMem 提供对应接口后才能闭环。
 
 示例：
 
@@ -418,3 +547,66 @@ Each invocation builds the runner image, starts one disposable container,
 writes results to `STRESS_OUTPUT_DIR/echomem_<RUN_ID>`, and removes the
 container after completion. Do not put API keys in compose files or commit
 them to git.
+
+### Unified capability probe and request-level k6 reconciliation
+
+Run the capability probe against the target EchoMem instance before gap tests.
+All requests use real HTTP. An unconfigured capability is `INCONCLUSIVE`;
+an explicit HTTP 404 is `NOT_IMPLEMENTED`; an unreachable target is
+`INCONCLUSIVE`.
+
+### 黑盒接入边界与归属
+
+测试平台不修改 EchoMem 代码，只通过公开 HTTP 接口取证。当前
+`EchoMem develop` 可直接使用的只读证据链为：
+
+- `GET /api/sessions/{session_id}/history`：核对会话累计消息是否包含已提交消息；
+- `GET /api/sessions/{session_id}/archives/{archive_id}`：核对单个 Commit
+  归档及其中的消息；
+- `GET /api/sessions/{session_id}/commits/{archive_id}`：核对 Commit 状态、
+  阶段、错误和终态；
+- `GET /api/sessions/{session_id}/commits/{archive_id}/memories`：核对该
+  Commit 产出的记忆摘要；
+- `GET /fs/read?uri=echo://sessions/{session_id}/current/commit_cursor.json`：
+  读取持久化 Commit cursor。
+
+因此，消息丢失、Commit 状态和 kill-9 后的最终收敛属于测试平台可以黑盒
+验证的内容；普通 Session Commit 的幂等 replay 次数，以及 Memory Garden
+的幂等/版本冲突，必须分别使用其公开契约验证。没有拿到外部证据时标记为
+`INCONCLUSIVE`，不会写成 EchoMem 的 `NOT_IMPLEMENTED`。只有真实请求得到
+明确 `404`，才可以下“该接口未实现”的结论。
+
+```bash
+python3 stress/echomem/capability_probe.py \
+  --base-url http://127.0.0.1:8010 \
+  --auth-key "$ECHOMEM_AUTH_KEY" \
+  --cursor-path "/api/sessions/{session}/message-set" \
+  --operation-path "/api/operations/status" \
+  --conflict-path "/api/sessions/{session}/conflicts" \
+  --ttl-path "/api/cache/status" \
+  --engine-path "/api/engines/status" \
+  --fault-path "/admin/fault/status" \
+  --out results/stress/capability-probe.json
+```
+
+The paths above are deployment examples and must match real EchoMem contracts.
+Do not add fake test-platform endpoints just to make the probe pass.
+`completeness_report.py` consumes `capability-probe.json` and attaches the
+observed status to the corresponding PR397/PR421 gaps.
+
+For request-level k6 reconciliation, emit k6's JSON point stream in addition
+to the summary:
+
+```bash
+k6 run --out json=results/k6-request-stream.json \
+  stress/k6/echomem_stress.js
+python3 stress/echomem/k6_reconcile.py \
+  --k6-summary results/k6-summary.json \
+  --runner-dir results/stress/run-01 \
+  --k6-request-stream results/k6-request-stream.json \
+  --out results/stress/run-01/k6-reconciliation.json
+```
+
+Search and Commit requests carry stable `X-Request-ID` values and k6 tags.
+Without the request stream, the reconciler only performs aggregate-count
+comparison and keeps the result `INCONCLUSIVE`.

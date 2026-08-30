@@ -14,6 +14,7 @@ from typing import Any
 NOT_IMPLEMENTED = "NOT_IMPLEMENTED"
 PASS = "PASS"
 FAIL = "FAIL"
+INCONCLUSIVE = "INCONCLUSIVE"
 
 
 def now() -> str:
@@ -40,7 +41,12 @@ def main() -> int:
     parser.add_argument("--plan", required=True, type=Path)
     parser.add_argument("--out-dir", required=True, type=Path)
     parser.add_argument("--commit-csv", type=Path)
+    parser.add_argument("--base-url", default="")
     parser.add_argument("--cursor-url-template", default="")
+    parser.add_argument(
+        "--cursor-uri-template",
+        default="echo://sessions/{session}/current/commit_cursor.json",
+    )
     parser.add_argument("--auth-key", default="")
     parser.add_argument("--auth-header", default="X-API-Key")
     args = parser.parse_args()
@@ -66,13 +72,13 @@ def main() -> int:
     }
     if fault_kinds:
         fault_results = [
-            (case["execution"].get("result") or {}).get("status", NOT_IMPLEMENTED)
+            (case["execution"].get("result") or {}).get("status", INCONCLUSIVE)
             for case in cases
             if case.get("kind") in fault_kinds
         ]
         aggregate_status = (
             FAIL if FAIL in fault_results
-            else NOT_IMPLEMENTED if NOT_IMPLEMENTED in fault_results
+            else INCONCLUSIVE if INCONCLUSIVE in fault_results or NOT_IMPLEMENTED in fault_results
             else PASS
         )
         cases.append({
@@ -106,7 +112,9 @@ def main() -> int:
         command = [
             sys.executable, str(Path(__file__).with_name("cursor_reconcile.py")),
             "--commit-csv", str(args.commit_csv),
+            "--base-url", str(args.base_url),
             "--cursor-url-template", str(cursor.get("url_template", args.cursor_url_template)),
+            "--cursor-uri-template", str(cursor.get("uri_template", args.cursor_uri_template)),
             "--auth-key", args.auth_key, "--auth-header", args.auth_header,
             "--out", str(output),
         ]
@@ -115,16 +123,20 @@ def main() -> int:
         cases.append({
             "kind": "cursor-reconciliation",
             "execution": {"result": {
-                "status": NOT_IMPLEMENTED,
-                "reason": "commit CSV is required for cursor reconciliation",
+                "status": INCONCLUSIVE,
+                "reason": "commit CSV is required for cursor reconciliation; capability was not externally tested",
             }},
         })
 
     statuses = [
-        (case["execution"].get("result") or {}).get("status", NOT_IMPLEMENTED)
+        (case["execution"].get("result") or {}).get("status", INCONCLUSIVE)
         for case in cases
     ]
-    status = FAIL if FAIL in statuses else NOT_IMPLEMENTED if NOT_IMPLEMENTED in statuses else PASS
+    status = (
+        FAIL if FAIL in statuses
+        else INCONCLUSIVE if INCONCLUSIVE in statuses or NOT_IMPLEMENTED in statuses
+        else PASS
+    )
     result = {
         "status": status,
         "created_at": now(),

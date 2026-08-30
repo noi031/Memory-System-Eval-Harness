@@ -3,7 +3,8 @@
 
 The harness never simulates a dependency failure. A control is either supplied
 by the deployment (command, HTTP endpoint, or Docker container) or the case is
-reported as NOT_IMPLEMENTED.
+reported as INCONCLUSIVE. An explicit HTTP 404 is the only evidence that an
+HTTP control endpoint is not implemented.
 """
 
 from __future__ import annotations
@@ -22,6 +23,7 @@ from typing import Any
 NOT_IMPLEMENTED = "NOT_IMPLEMENTED"
 PASS = "PASS"
 FAIL = "FAIL"
+INCONCLUSIVE = "INCONCLUSIVE"
 
 
 def now() -> str:
@@ -33,7 +35,7 @@ def run_control(args: argparse.Namespace) -> dict[str, Any]:
     command = args.command
     if not command and not args.endpoint and not args.container:
         return {
-            "status": NOT_IMPLEMENTED,
+            "status": INCONCLUSIVE,
             "reason": "no real fault control supplied",
             "started_at": started,
             "finished_at": now(),
@@ -51,7 +53,13 @@ def run_control(args: argparse.Namespace) -> dict[str, Any]:
                 "stdout": completed.stdout[-4000:],
                 "stderr": completed.stderr[-4000:],
             }
-            status = PASS if completed.returncode == 0 else FAIL
+            status = (
+                PASS
+                if completed.returncode == 0
+                else INCONCLUSIVE
+                if completed.returncode == 127
+                else FAIL
+            )
         elif args.container:
             completed = subprocess.run(
                 ["docker", "kill", "--signal", args.signal, args.container],
@@ -65,7 +73,13 @@ def run_control(args: argparse.Namespace) -> dict[str, Any]:
                 "stdout": completed.stdout[-4000:],
                 "stderr": completed.stderr[-4000:],
             }
-            status = PASS if completed.returncode == 0 else FAIL
+            status = (
+                PASS
+                if completed.returncode == 0
+                else INCONCLUSIVE
+                if completed.returncode == 127
+                else FAIL
+            )
         else:
             request = urllib.request.Request(
                 args.endpoint,
@@ -80,7 +94,24 @@ def run_control(args: argparse.Namespace) -> dict[str, Any]:
                     "status_code": response.status,
                     "body": response.read().decode(errors="replace")[-4000:],
                 }
-            status = PASS if 200 <= result["status_code"] < 300 else FAIL
+            status = (
+                PASS
+                if 200 <= result["status_code"] < 300
+                else INCONCLUSIVE
+                if result["status_code"] == 404
+                else FAIL
+            )
+    except urllib.error.HTTPError as exc:
+        result = {
+            "control": "http",
+            "endpoint": args.endpoint,
+            "status_code": exc.code,
+            "body": exc.read().decode(errors="replace")[-4000:],
+        }
+        status = NOT_IMPLEMENTED if exc.code == 404 else FAIL
+    except FileNotFoundError as exc:
+        result = {"error": str(exc)}
+        status = INCONCLUSIVE
     except (OSError, urllib.error.URLError, subprocess.TimeoutExpired) as exc:
         result, status = {"error": str(exc)}, FAIL
     result.update({"status": status, "started_at": started, "finished_at": now()})

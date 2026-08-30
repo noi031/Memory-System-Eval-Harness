@@ -18,6 +18,7 @@ from typing import Any
 NOT_IMPLEMENTED = "NOT_IMPLEMENTED"
 PASS = "PASS"
 FAIL = "FAIL"
+INCONCLUSIVE = "INCONCLUSIVE"
 
 
 def now() -> str:
@@ -44,15 +45,79 @@ def main() -> int:
     args = parser.parse_args()
     started = now()
     if not args.pid and not args.container:
-        result = {"status": NOT_IMPLEMENTED, "reason": "pid or container is required"}
+        result = {
+            "status": INCONCLUSIVE,
+            "reason": "pid or container is required; recovery was not externally exercised",
+        }
     else:
         before = health(args.health_url, 5)
-        if args.container:
-            killed = subprocess.run(["docker", "kill", "--signal", "KILL", args.container], capture_output=True, text=True, check=False)
-            kill_result = {"control": "docker", "returncode": killed.returncode, "stderr": killed.stderr[-2000:]}
-        else:
-            os.kill(args.pid, signal.SIGKILL)
-            kill_result = {"control": "pid", "pid": args.pid, "signal": "SIGKILL"}
+        try:
+            if args.container:
+                killed = subprocess.run(
+                    ["docker", "kill", "--signal", "KILL", args.container],
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+                if killed.returncode != 0:
+                    result = {
+                        "status": (
+                            INCONCLUSIVE
+                            if killed.returncode == 127
+                            else FAIL
+                        ),
+                        "before_health": before[0],
+                        "kill": {
+                            "control": "docker",
+                            "returncode": killed.returncode,
+                            "stderr": killed.stderr[-2000:],
+                        },
+                        "reason": "container kill command is unavailable or failed",
+                    }
+                    result.update(
+                        {
+                            "started_at": started,
+                            "finished_at": now(),
+                            "health_url": args.health_url,
+                        }
+                    )
+                    args.out = args.out.expanduser()
+                    args.out.parent.mkdir(parents=True, exist_ok=True)
+                    args.out.write_text(
+                        json.dumps(result, ensure_ascii=False, indent=2) + "\n",
+                        encoding="utf-8",
+                    )
+                    print(json.dumps(result, ensure_ascii=False))
+                    return 0 if result["status"] == PASS else 2
+                kill_result = {
+                    "control": "docker",
+                    "returncode": killed.returncode,
+                    "stderr": killed.stderr[-2000:],
+                }
+            else:
+                os.kill(args.pid, signal.SIGKILL)
+                kill_result = {"control": "pid", "pid": args.pid, "signal": "SIGKILL"}
+        except FileNotFoundError as exc:
+            result = {
+                "status": INCONCLUSIVE,
+                "before_health": before[0],
+                "reason": f"kill control is unavailable: {exc}",
+            }
+            result.update(
+                {
+                    "started_at": started,
+                    "finished_at": now(),
+                    "health_url": args.health_url,
+                }
+            )
+            args.out = args.out.expanduser()
+            args.out.parent.mkdir(parents=True, exist_ok=True)
+            args.out.write_text(
+                json.dumps(result, ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8",
+            )
+            print(json.dumps(result, ensure_ascii=False))
+            return 2
         restart = None
         if args.restart_command:
             restart = subprocess.Popen(args.restart_command, shell=True, start_new_session=True)

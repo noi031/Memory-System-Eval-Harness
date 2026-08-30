@@ -287,10 +287,19 @@ def report6_scenarios() -> dict[str, dict[str, Any]]:
     return scenarios
 
 
+def complete_scenarios() -> dict[str, dict[str, Any]]:
+    """Combine the PR397/report(6) and PR421 scenario catalogs."""
+    combined: dict[str, dict[str, Any]] = {}
+    combined.update(report6_scenarios())
+    combined.update(SCENARIOS)
+    return combined
+
+
 SCENARIO_PROFILES = {
     "pr421": SCENARIOS,
     "report4": report4_scenarios(),
     "report6": report6_scenarios(),
+    "complete": complete_scenarios(),
 }
 
 
@@ -747,7 +756,10 @@ def main() -> int:
         "--profile",
         choices=tuple(SCENARIO_PROFILES),
         default="pr421",
-        help="Scenario profile; report4/report6 reproduce the corresponding A/B/C/D matrix.",
+        help=(
+            "Scenario profile; report6 is the PR397/report(6) matrix, pr421 "
+            "is the PR421 acceptance suite, and complete runs both catalogs."
+        ),
     )
     parser.add_argument("--scenarios", default="")
     parser.add_argument("--repeats", type=int, default=3)
@@ -780,6 +792,12 @@ def main() -> int:
     parser.add_argument("--fault-auth-key", default=os.getenv("ECHOMEM_AUTH_KEY", ""))
     parser.add_argument("--k6-summary", default="")
     parser.add_argument("--k6-runner-dir", default="")
+    parser.add_argument("--k6-request-stream", default="")
+    parser.add_argument(
+        "--capability-probe",
+        default="",
+        help="Existing capability_probe.json to include in suite evidence",
+    )
     parser.add_argument(
         "--preflight-config",
         default=os.getenv("ECHOMEM_CONFIG", ""),
@@ -803,13 +821,15 @@ def main() -> int:
         parser.error(f"unknown scenarios: {', '.join(unknown)}")
     if args.repeats < 1:
         parser.error("--repeats must be >= 1")
-    if args.profile == "report6" and not args.preflight_config:
-        parser.error("--profile report6 requires --preflight-config with the actual EchoMem config.json")
+    if args.profile in {"report6", "complete"} and not args.preflight_config:
+        parser.error(
+            f"--profile {args.profile} requires --preflight-config with the actual EchoMem config.json"
+        )
     preflight_errors: list[str] = []
     if args.preflight_config:
         preflight_errors = validate_real_model_config(
             args.preflight_config,
-            expected_embedding_dimensions=1024 if args.profile == "report6" else None,
+            expected_embedding_dimensions=1024 if args.profile in {"report6", "complete"} else None,
         )
         if preflight_errors:
             parser.error(
@@ -843,6 +863,22 @@ def main() -> int:
         "created_at": now_iso(),
         "base_url": args.base_url,
         "profile": args.profile,
+        "plan_sources": {
+            "pr397": {
+                "name": "EchoMem PR397 / report(6) 故障发现与真实多租户压测方案",
+                "included": args.profile in {"report6", "complete"},
+                "scenario_count": len(report6_scenarios()) if args.profile in {"report6", "complete"} else 0,
+                "scenarios": sorted(report6_scenarios()) if args.profile in {"report6", "complete"} else [],
+                "fault_plan_supplied": bool(args.fault_plan),
+            },
+            "pr421": {
+                "name": "EchoMem PR421 可量化验收与调度指标方案",
+                "included": args.profile in {"pr421", "complete"},
+                "scenario_count": len(SCENARIOS) if args.profile in {"pr421", "complete"} else 0,
+                "scenarios": sorted(SCENARIOS) if args.profile in {"pr421", "complete"} else [],
+                "acceptance_targets_recorded": True,
+            },
+        },
         "tenant_config": str(tenant_path),
         "allow_shared_identity": args.allow_shared_identity,
         "output_root": str(root.resolve()),
@@ -917,6 +953,7 @@ def main() -> int:
             str(Path(__file__).with_name("fault_suite.py")),
             "--plan", str(Path(args.fault_plan).expanduser().resolve()),
             "--out-dir", str(fault_out),
+            "--base-url", args.base_url,
             "--auth-key", args.fault_auth_key,
             "--auth-header", args.auth_header,
         ]
@@ -944,6 +981,11 @@ def main() -> int:
             "--runner-dir", str(Path(args.k6_runner_dir).expanduser().resolve()),
             "--out", str(k6_output),
         ]
+        if args.k6_request_stream:
+            k6_command.extend([
+                "--k6-request-stream",
+                str(Path(args.k6_request_stream).expanduser().resolve()),
+            ])
         completed = subprocess.run(k6_command, capture_output=True, text=True, check=False)
         k6_manifest = {
             "path": str(k6_output),
@@ -957,6 +999,25 @@ def main() -> int:
             except json.JSONDecodeError:
                 pass
         manifest["k6_reconciliation"] = k6_manifest
+
+    if args.capability_probe:
+        capability_path = Path(args.capability_probe).expanduser().resolve()
+        if capability_path.is_file():
+            try:
+                manifest["capability_probe"] = json.loads(
+                    capability_path.read_text(encoding="utf-8")
+                )
+                manifest["capability_probe_path"] = str(capability_path)
+            except json.JSONDecodeError as exc:
+                manifest["capability_probe"] = {
+                    "status": "INCONCLUSIVE",
+                    "reason": f"invalid capability probe JSON: {exc}",
+                }
+        else:
+            manifest["capability_probe"] = {
+                "status": "INCONCLUSIVE",
+                "reason": "capability probe file does not exist",
+            }
 
     acceptance = evaluate_pr421_acceptance(manifest)
     manifest["acceptance"] = acceptance
@@ -998,6 +1059,13 @@ def main() -> int:
         "finished_at": now_iso(),
         "parameters": {
             "tenant_config": str(tenant_path),
+            "profile": args.profile,
+            "plan_sources": (
+                ["PR397/report(6)", "PR421"] if args.profile == "complete"
+                else ["PR397/report(6)"] if args.profile == "report6"
+                else ["PR421"] if args.profile == "pr421"
+                else ["report(4)"]
+            ),
             "scenarios": scenario_names,
             "repeats": args.repeats,
             "policies": list(POLICIES),
@@ -1008,6 +1076,8 @@ def main() -> int:
         },
         "details": {
             "run_count": len(manifest["runs"]),
+            "expected_run_count": len(scenario_names) * args.repeats * len(POLICIES),
+            "plan_sources": manifest["plan_sources"],
             "failed_runs": sum(status == "FAIL" for status in statuses),
             "inconclusive_runs": sum(status == "INCONCLUSIVE" for status in statuses),
             "environment_errors": sum(
