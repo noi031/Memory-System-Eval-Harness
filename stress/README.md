@@ -318,7 +318,8 @@ request CSVs, raw `/metrics`, and its own `report.html`; the suite-level
 
 ### 多规格实例对比
 
-测试平台不假定 2U/4U/8U 对应哪一种容器或资源限制。把每个规格的真实
+测试平台不假定规格对应哪一种容器或资源限制。本轮使用服务器上可用的
+`4U8G`、`8U16G` 两档。把每个规格的真实
 部署、重启或恢复动作写成 `prepare_command`，平台会在执行同一套真实 HTTP
 场景前调用它，并把规格、配置路径、准备日志和完整结果写入 `matrix.json`。
 示例计划见 `stress/echomem/instance-profiles.example.json`：

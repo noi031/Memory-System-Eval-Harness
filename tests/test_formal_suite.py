@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import unittest
+import json
+from pathlib import Path
 
 from stress.echomem.formal_suite import SCENARIOS, complete_scenarios, report6_scenarios
 
@@ -41,6 +43,30 @@ class Report6ScenarioTests(unittest.TestCase):
         for count in (2, 4, 8, 16, 32):
             self.assertIn(f"capacity-{count}", scenarios)
             self.assertEqual(count, scenarios[f"capacity-{count}"]["tenants"])
+
+    def test_instance_profile_example_matches_available_machine_sizes(self) -> None:
+        path = (
+            Path(__file__).resolve().parents[1]
+            / "stress"
+            / "echomem"
+            / "instance-profiles.example.json"
+        )
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        profiles = payload["profiles"]
+        self.assertEqual(
+            ["4U8G", "8U16G"],
+            [item["name"] for item in profiles],
+        )
+        self.assertEqual(
+            [
+                ("4 vCPU", "8 GiB"),
+                ("8 vCPU", "16 GiB"),
+            ],
+            [
+                (item["resource_profile"]["cpu"], item["resource_profile"]["memory"])
+                for item in profiles
+            ],
+        )
 
     def test_report6_contains_the_full_matrix(self) -> None:
         scenarios = report6_scenarios()

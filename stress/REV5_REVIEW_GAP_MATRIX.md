@@ -65,5 +65,5 @@ PR29 当前不能验收为：
 2. 在部署中接入真实 LLM/vector 故障控制接口，再执行 `fault_suite.py`。
 3. 增加 cluster+MySQL 的真实重启控制脚本和恢复后的 cursor 对账。
 4. 在 CI/服务器安装 k6，并将 k6 summary 与 runner 请求证据绑定。
-5. 为 2U/4U/8U/16U/32U/64U 提供真实资源限制和 profile 生效证明，再执行
+5. 为 `4U8G`、`8U16G` 提供真实资源限制和 profile 生效证明，再执行
    `instance_profile_matrix.py`。
