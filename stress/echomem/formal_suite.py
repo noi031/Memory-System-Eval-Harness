@@ -156,6 +156,57 @@ SCENARIOS: dict[str, dict[str, Any]] = {
         "sessions_per_tenant": 2,
         "messages_per_session": 3,
     },
+    "capacity-2": {
+        "label": "2 租户容量阶梯",
+        "tenants": 2,
+        "duration_s": 180,
+        "search_rps": 2.0,
+        "commit_rpm": 2.0,
+        "sessions_per_tenant": 2,
+        "messages_per_session": 3,
+    },
+    "capacity-4": {
+        "label": "4 租户容量阶梯",
+        "tenants": 4,
+        "duration_s": 180,
+        "search_rps": 4.0,
+        "commit_rpm": 2.0,
+        "sessions_per_tenant": 2,
+        "messages_per_session": 3,
+    },
+    "capacity-8": {
+        "label": "8 租户容量阶梯",
+        "tenants": 8,
+        "duration_s": 180,
+        "search_rps": 8.0,
+        "commit_rpm": 2.0,
+        "sessions_per_tenant": 2,
+        "messages_per_session": 3,
+    },
+    "capacity-32": {
+        "label": "32 租户容量阶梯",
+        "tenants": 32,
+        "duration_s": 300,
+        "search_rps": 32.0,
+        "commit_rpm": 2.0,
+        "sessions_per_tenant": 2,
+        "messages_per_session": 3,
+    },
+    "search-priority-blackbox": {
+        "label": "Search/Commit 同时到达（服务端优先级黑盒）",
+        "tenants": 4,
+        "duration_s": 90,
+        "search_rps": 16.0,
+        "commit_rpm": 0.0,
+        "search_workers": 32,
+        "commit_workers": 32,
+        "commit_barrier": True,
+        "commit_barrier_count": 128,
+        "commit_tenant_distribution": "uniform",
+        "sessions_per_tenant": 32,
+        "messages_per_session": 3,
+        "blackbox_search_priority": True,
+    },
     "search-storm": {
         "label": "Search 压力",
         "tenants": 4,
@@ -886,7 +937,8 @@ def main() -> int:
 
     scenario_catalog = SCENARIO_PROFILES[args.profile]
     default_scenarios = (
-        "baseline,mixed,commit-storm,commit-barrier,saturation,tenant-skew,search-storm,soak"
+        "baseline,mixed,commit-storm,commit-barrier,saturation,tenant-skew,"
+        "search-priority-blackbox,search-storm,soak"
         if args.profile == "pr421"
         else ",".join(scenario_catalog)
     )

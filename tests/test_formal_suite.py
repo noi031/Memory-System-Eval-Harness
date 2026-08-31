@@ -10,7 +10,37 @@ class Report6ScenarioTests(unittest.TestCase):
         scenarios = complete_scenarios()
 
         self.assertEqual(set(report6_scenarios()) | set(SCENARIOS), set(scenarios))
-        self.assertEqual(21, len(scenarios))
+        self.assertEqual(26, len(scenarios))
+
+    def test_capacity_ladder_has_expected_points(self) -> None:
+        scenarios = SCENARIOS
+
+        self.assertEqual(
+            {2, 4, 8, 16, 32},
+            {scenarios[f"capacity-{count}"]["tenants"] for count in (2, 4, 8, 16, 32)},
+        )
+        self.assertTrue(
+            all(
+                scenarios[f"capacity-{count}"]["search_rps"] == count
+                for count in (2, 4, 8, 16, 32)
+            )
+        )
+
+    def test_search_priority_blackbox_is_server_contention_case(self) -> None:
+        case = SCENARIOS["search-priority-blackbox"]
+
+        self.assertTrue(case["blackbox_search_priority"])
+        self.assertTrue(case["commit_barrier"])
+        self.assertEqual(128, case["commit_barrier_count"])
+        self.assertGreater(case["search_rps"], 0)
+        self.assertEqual(0.0, case["commit_rpm"])
+
+    def test_complete_capacity_points_are_executable(self) -> None:
+        scenarios = complete_scenarios()
+
+        for count in (2, 4, 8, 16, 32):
+            self.assertIn(f"capacity-{count}", scenarios)
+            self.assertEqual(count, scenarios[f"capacity-{count}"]["tenants"])
 
     def test_report6_contains_the_full_matrix(self) -> None:
         scenarios = report6_scenarios()

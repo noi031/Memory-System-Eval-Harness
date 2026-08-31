@@ -109,7 +109,8 @@ python3 -m stress.echomem.formal_suite \
 
 需要同时覆盖 PR397/report(6) 的 A/B/C/D 故障发现型矩阵和 PR421 的
 饱和、热租户、公平性及验收门禁时，使用 `complete` profile。它执行两套
-场景的并集，共 21 个场景；默认重复 3 次，即 63 个独立运行目录。
+场景的并集，共 26 个场景；默认重复 3 次，即 78 个独立运行目录。
+新增 2/4/8/32 租户容量阶梯，以及 Search/Commit 同时到达的服务端优先级黑盒场景。
 
 ```bash
 python3 -m stress.echomem.formal_suite \
@@ -302,13 +303,37 @@ short matrix run. It executes these cases:
   tenant load, used for the rev5 S2-style rate-limit regression
 - `saturation`: 128 concurrent arrivals for the PR421 entrance saturation gate
 - `tenant-skew`: explicit 200/20/20/20 Commit distribution for hot-tenant fairness
-- `capacity-16`: optional 16-tenant capacity point; select it explicitly and
-  provide at least 16 independently authenticated tenants
+- `capacity-2`, `capacity-4`, `capacity-8`, `capacity-16`, `capacity-32`:
+  capacity ladder points; each requires at least that many independently
+  authenticated tenants
+- `search-priority-blackbox`: simultaneous Search traffic and a Commit barrier;
+  this observes EchoMem's real HTTP behavior and server telemetry. It does not
+  claim strict priority unless the service exposes enough queue/start-time
+  evidence to compare Search against a clean baseline.
 
 Each case runs once per repetition with client-side admission disabled. The
 default is three repetitions per case. Every run retains `summary.json`,
 request CSVs, raw `/metrics`, and its own `report.html`; the suite-level
 `suite.html` contains the numeric comparison table.
+
+### 多规格实例对比
+
+测试平台不假定 2U/4U/8U 对应哪一种容器或资源限制。把每个规格的真实
+部署、重启或恢复动作写成 `prepare_command`，平台会在执行同一套真实 HTTP
+场景前调用它，并把规格、配置路径、准备日志和完整结果写入 `matrix.json`。
+示例计划见 `stress/echomem/instance-profiles.example.json`：
+
+```bash
+python3 stress/echomem/instance_profile_matrix.py \
+  --plan stress/echomem/instance-profiles.example.json \
+  --profile pr421 \
+  --scenarios baseline,mixed,commit-storm,search-priority-blackbox,soak \
+  --repeats 1 \
+  --out-dir results/stress/instance-matrix-$(date +%Y%m%d_%H%M%S)
+```
+
+如果 `prepare_command` 没有真正切换实例规格，平台只会如实记录准备命令
+及其结果，不能把同一实例的重复运行报告成多规格对比。
 
 容量/饱和测试可以给底层 runner 增加 `--skip-isolation`。这会明确把
 `isolation` 写成 `INCONCLUSIVE`，仅用于避免 N×N marker 探针干扰吞吐、
