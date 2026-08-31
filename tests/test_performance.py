@@ -365,6 +365,7 @@ class FakeMemClient:
         self.archive_status = "completed"
         self.search_short_circuit = False  # 普通查询短路空响应
         self.anchor_short_circuit = False  # 锚词查询短路空响应
+        self.search_degraded = False  # 核心标记降级（引擎跳过/饱和）
         self.retry_after_s = "1"
 
     def delete_current_identity(self) -> None:
@@ -452,7 +453,13 @@ class FakeMemClient:
             items = []
         else:
             items = [SearchResult(uri="echo://y", score=0.5, content="ordinary hit")]
-        meta = {"has_explain": True, "has_debug": False, "hit_count": len(items)}
+        meta = {
+            "has_explain": True,
+            "has_debug": False,
+            "hit_count": len(items),
+            "status": "degraded" if self.search_degraded else "completed",
+            "degraded_reasons": ["engine:atomic_engine"] if self.search_degraded else [],
+        }
         return items, meta
 
     def search(self, query: str, top_k: int = 10, session_id: str = "", agent_id: str = "", timeout_s: float | None = None):
@@ -1504,12 +1511,46 @@ class SearchQualityAssertionTests(unittest.TestCase):
         rec2 = gen._read_once(client, "PERFANCHOR-0-1-2", scene_key="A@1", step_conc=1, tenant_idx=0)
         self.assertFalse(rec2.quality_ok)
         self.assertEqual(rec2.hit_count, 0)
+        self.assertFalse(rec2.degraded)
 
-    def _mk_read(self, query: str, hit: int, quality_ok: bool, real: bool = False) -> RequestRecord:
+    def test_read_quality_anchor_degraded_empty_is_not_failure(self) -> None:
+        # 核心标记 degraded（引擎跳过/饱和）时空结果不是召回缺陷：不计质量失败。
+        client = FakeMemClient()
+        client.anchor_short_circuit = True
+        client.search_degraded = True
+        gen = LoadGenerator(timeout_s=2.0)
+        rec = gen._read_once(client, "PERFANCHOR-0-1-2", scene_key="A@1", step_conc=1, tenant_idx=0)
+        self.assertEqual(rec.hit_count, 0)
+        self.assertTrue(rec.degraded)
+        self.assertTrue(rec.quality_ok)
+
+    def test_quality_summary_degraded_breakdown(self) -> None:
+        records = [
+            self._mk_read("PERFANCHOR-0", 0, True, degraded=True),  # 降级空结果
+            self._mk_read("PERFANCHOR-1", 0, False),  # 干净空结果 = 失败
+            self._mk_read("PERFANCHOR-2", 2, True, True, degraded=True),  # 降级但有命中
+            self._mk_read("普通查询", 1, True, True),
+        ]
+        summary = search_quality_summary(records)
+        self.assertEqual(summary["anchor_failures"], 1)  # 仅干净空结果
+        self.assertEqual(summary["degraded_total"], 2)
+        self.assertEqual(summary["anchor_degraded"], 2)
+        # gated 延迟只覆盖实际召回（hit_count≥1）的 read：降级空结果不入列
+        self.assertEqual(summary["gated_read_stats"]["count"], 2)
+
+    def _mk_read(
+        self,
+        query: str,
+        hit: int,
+        quality_ok: bool,
+        real: bool = False,
+        degraded: bool = False,
+    ) -> RequestRecord:
         return RequestRecord(
             scene_key="A@1", step_conc=1, tenant_idx=0, op="read",
             stage_ms=5.0, status="ok", error_type="", ts_ms=0.0,
             query=query, hit_count=hit, real_recall=real, quality_ok=quality_ok,
+            degraded=degraded,
         )
 
     def test_quality_summary_counts(self) -> None:
@@ -1524,7 +1565,10 @@ class SearchQualityAssertionTests(unittest.TestCase):
         self.assertEqual(summary["anchor_failures"], 1)
         self.assertEqual(summary["undetermined_real_recall"], 1)
         self.assertEqual(summary["quality_failures"], 1)
-        self.assertEqual(summary["hit_count_p95"], 1.9)
+        self.assertEqual(summary["degraded_total"], 0)
+        self.assertEqual(summary["anchor_degraded"], 0)
+        # hit 分布只覆盖实际召回（hit_count≥1）的 read：无证据的 0 命中不再计入
+        self.assertEqual(summary["hit_count_p95"], 1.95)
 
     def test_quality_burst_window_excluded(self) -> None:
         # D 场景洪峰窗口（burst）内是刻意过载场景，读降级不计入质量失败；

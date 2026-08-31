@@ -972,10 +972,14 @@ def search_quality_summary(
 
     Success for an anchor query is ``hit_count >= 1`` (anchors are unique
     tokens that must be recallable); an empty result on an anchor query is a
-    false pass and is counted as a failure. Ordinary queries must show
+    false pass and is counted as a failure — unless the orchestrator reported
+    a degraded response (engine skipped / saturated), which is a capacity
+    artifact, not a recall defect, and is tallied separately
+    (``degraded_total`` / ``anchor_degraded``). Ordinary queries must show
     recall evidence; when the server exposes none, they are counted as
-    ``undetermined`` rather than failed. Gated latency stats cover only the
-    quality-passing reads so a short-circuited fast path cannot drag them.
+    ``undetermined`` rather than failed. Gated latency / hit stats cover only
+    reads that actually recalled items so a short-circuited fast path or a
+    degraded empty response cannot drag them.
 
     Reads inside a burst window (``burst_windows`` as (t0_ms, t1_ms) pairs)
     are excluded from the quality judgment: the burst window is a deliberate
@@ -996,11 +1000,20 @@ def search_quality_summary(
     anchor = [rec for rec in reads if is_anchor_query(rec.query)]
     ordinary = [rec for rec in reads if not is_anchor_query(rec.query)]
     anchor_failures = [rec for rec in anchor if not rec.quality_ok]
+    # Degraded contract: a degraded response means the engine was skipped /
+    # saturated — an empty result is a capacity artifact, not a recall
+    # failure. Surface it separately from clean quality failures.
+    degraded = [rec for rec in reads if rec.degraded]
+    anchor_degraded = [rec for rec in anchor if rec.degraded]
     undetermined = [
         rec for rec in ordinary if not rec.real_recall and rec.hit_count == 0
     ]
     passed = [rec for rec in reads if rec.quality_ok]
-    hit_counts = [rec.hit_count for rec in passed]
+    # Gated latency / hit distribution cover reads that actually recalled
+    # items; degraded empty responses did no recall work and must not drag
+    # the latency or hit statistics.
+    recalled = [rec for rec in passed if rec.hit_count >= 1]
+    hit_counts = [rec.hit_count for rec in recalled]
     return {
         "total": len(reads),
         "anchor_total": len(anchor),
@@ -1010,13 +1023,15 @@ def search_quality_summary(
         ),
         "ordinary_total": len(ordinary),
         "undetermined_real_recall": len(undetermined),
+        "degraded_total": len(degraded),
+        "anchor_degraded": len(anchor_degraded),
         "quality_failures": len(anchor_failures),
         "quality_failure_rate": (
             round(len(anchor_failures) / len(reads), 5) if reads else None
         ),
         "hit_count_p50": percentile(sorted(hit_counts), 0.5) if hit_counts else None,
         "hit_count_p95": percentile(sorted(hit_counts), 0.95) if hit_counts else None,
-        "gated_read_stats": _op_stats([rec.stage_ms for rec in passed]),
+        "gated_read_stats": _op_stats([rec.stage_ms for rec in recalled]),
     }
 
 

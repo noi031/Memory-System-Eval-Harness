@@ -296,6 +296,11 @@ class EchoMemClient(BaseHTTPMemoryClient):
                 "has_explain": bool(result.get("explain")),
                 "has_debug": bool(result.get("debug")),
                 "engine": result.get("engine", ""),
+                # Degraded contract: surface the orchestrator status so the
+                # caller can tell partial results (engine skipped / saturated)
+                # from full ones.
+                "status": str(result.get("status") or ""),
+                "degraded_reasons": list(result.get("degraded_reasons") or []),
             }
         return items, meta
 

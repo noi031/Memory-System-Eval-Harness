@@ -111,6 +111,10 @@ class RequestRecord:
     hit_count: int = 0
     real_recall: bool = False
     quality_ok: bool = True
+    # Core orchestrator reported a degraded response (engine skipped /
+    # saturated): an empty result is a capacity artifact, not a recall
+    # failure, and must not be counted as a quality failure.
+    degraded: bool = False
 
     def to_csv_row(self) -> dict[str, Any]:
         return {
@@ -134,6 +138,7 @@ class RequestRecord:
             "hit_count": self.hit_count,
             "real_recall": self.real_recall,
             "quality_ok": self.quality_ok,
+            "degraded": self.degraded,
             "query": self.query,
         }
 
@@ -404,12 +409,16 @@ class LoadGenerator:
         hit_count = 0
         real_recall = False
         quality_ok = True
+        degraded = False
         try:
             items, meta = client.search_with_meta(
                 query, top_k=self.top_k, agent_id="", timeout_s=self.timeout_s
             )
             status, error = "ok", ""
             hit_count = len(items)
+            degraded = bool(meta.get("degraded_reasons")) or str(
+                meta.get("status") or ""
+            ).lower() == "degraded"
             real_recall = (
                 bool(meta.get("has_explain"))
                 or bool(meta.get("has_debug"))
@@ -418,7 +427,10 @@ class LoadGenerator:
         except Exception as exc:
             status, error = "error", classify_error(exc)
         if status == "ok" and is_anchor_query(query):
-            quality_ok = hit_count >= 1
+            # A degraded empty result is a capacity artifact (engine skipped /
+            # saturated), not a recall defect: only clean empty results are
+            # counted as quality failures.
+            quality_ok = hit_count >= 1 or degraded
         return RequestRecord(
             scene_key=scene_key,
             step_conc=step_conc,
@@ -432,6 +444,7 @@ class LoadGenerator:
             hit_count=hit_count,
             real_recall=real_recall,
             quality_ok=quality_ok,
+            degraded=degraded,
         )
 
     # -- worker loops ------------------------------------------------------
