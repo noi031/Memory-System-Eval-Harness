@@ -13,6 +13,7 @@ import argparse
 import csv
 import json
 import os
+import signal
 import statistics
 import subprocess
 import sys
@@ -322,6 +323,65 @@ def write_subset(path: Path, tenants: list[dict[str, Any]]) -> None:
     )
 
 
+def run_case_process(
+    command: list[str],
+    *,
+    timeout_s: float,
+) -> tuple[subprocess.CompletedProcess[str], bool]:
+    """Run one case with a bounded wall-clock budget.
+
+    A runner can contain its own per-request retries, so limiting only the
+    workload duration does not bound the total case duration.  Start a new
+    process group so a timed-out barrier cannot leave worker children behind.
+    """
+    process = subprocess.Popen(
+        command,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        start_new_session=(os.name == "posix"),
+    )
+    try:
+        stdout, stderr = process.communicate(timeout=max(1.0, timeout_s))
+        return (
+            subprocess.CompletedProcess(
+                command, process.returncode, stdout, stderr
+            ),
+            False,
+        )
+    except subprocess.TimeoutExpired as exc:
+        if os.name == "posix":
+            try:
+                os.killpg(process.pid, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
+        else:
+            process.terminate()
+        try:
+            stdout, stderr = process.communicate(timeout=10)
+        except subprocess.TimeoutExpired:
+            if os.name == "posix":
+                try:
+                    os.killpg(process.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+            else:
+                process.kill()
+            stdout, stderr = process.communicate()
+        stdout = stdout or ""
+        stderr = stderr or ""
+        stderr += (
+            f"\nformal_suite: case wall-clock timeout after "
+            f"{timeout_s:.1f}s\n"
+        )
+        if exc.stderr:
+            stderr = f"{exc.stderr}\n{stderr}"
+        return (
+            subprocess.CompletedProcess(command, 124, stdout, stderr),
+            True,
+        )
+
+
 def run_case(
     runner: Path,
     case_root: Path,
@@ -337,6 +397,11 @@ def run_case(
     duration_s = case["duration_s"]
     if args.duration_cap_s > 0:
         duration_s = min(float(duration_s), args.duration_cap_s)
+    case_timeout_s = (
+        args.case_timeout_s
+        if args.case_timeout_s > 0
+        else duration_s + max(60.0, float(args.commit_timeout_s))
+    )
     command = [
         sys.executable,
         str(runner),
@@ -439,7 +504,10 @@ def run_case(
                 "returncode": completed_reset.returncode,
                 "output_dir": str(output.resolve()),
             }
-    completed = subprocess.run(command, text=True, capture_output=True)
+    completed, timed_out = run_case_process(
+        command,
+        timeout_s=case_timeout_s,
+    )
     (output / "suite_runner.stdout.log").write_text(
         completed.stdout, encoding="utf-8"
     )
@@ -458,6 +526,8 @@ def run_case(
         "status": summary.get("status", "NO_SUMMARY"),
         "runner_returncode": completed.returncode,
         "duration_s": duration_s,
+        "case_timeout_s": case_timeout_s,
+        "runner_timeout": timed_out,
         "output_dir": str(output.resolve()),
         "summary": summary,
     }
@@ -769,6 +839,15 @@ def main() -> int:
         default=0.0,
         help="Optional diagnostic cap for each scenario duration; 0 keeps scenario defaults.",
     )
+    parser.add_argument(
+        "--case-timeout-s",
+        type=float,
+        default=0.0,
+        help=(
+            "Wall-clock timeout for one scenario case, including setup and "
+            "retries; 0 derives it from workload duration and commit timeout."
+        ),
+    )
     parser.add_argument("--auth-header", default=os.getenv("ECHOMEM_AUTH_HEADER", "X-API-Key"))
     parser.add_argument(
         "--allow-shared-identity",
@@ -821,6 +900,8 @@ def main() -> int:
         parser.error(f"unknown scenarios: {', '.join(unknown)}")
     if args.repeats < 1:
         parser.error("--repeats must be >= 1")
+    if args.case_timeout_s < 0:
+        parser.error("--case-timeout-s must not be negative")
     if args.profile in {"report6", "complete"} and not args.preflight_config:
         parser.error(
             f"--profile {args.profile} requires --preflight-config with the actual EchoMem config.json"
@@ -885,6 +966,7 @@ def main() -> int:
         "scenarios": scenario_names,
         "repeats": args.repeats,
         "duration_cap_s": args.duration_cap_s,
+        "case_timeout_s": args.case_timeout_s,
         "policies": list(POLICIES),
         "acceptance_targets": PR421_ACCEPTANCE_TARGETS,
         "preflight_config": (
