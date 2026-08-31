@@ -839,6 +839,39 @@ class EchoMemHTTP:
         result.admission_order = order
         return result
 
+    def setup_request_with_retry(
+        self,
+        method: str,
+        path: str,
+        body: dict[str, Any] | None = None,
+        *,
+        max_attempts: int = 5,
+        backoff_s: float = 1.0,
+        max_backoff_s: float = 15.0,
+    ) -> HttpResult:
+        """Retry setup-only HTTP 429 responses without hiding workload 429s.
+
+        Session/message provisioning is a precondition for a scenario. A
+        server-side tenant limiter can legitimately reject a burst there, so
+        honor Retry-After before declaring the environment unusable. The
+        returned result is always the final attempt; workload calls continue
+        to use request() directly and preserve every rejection in results.
+        """
+        limit = max(1, int(max_attempts))
+        for attempt in range(limit):
+            result = self.request(method, path, body)
+            if result.status_code != 429 or attempt + 1 >= limit:
+                return result
+            retry_after = result.retry_after_s
+            delay = (
+                max(0.0, float(retry_after))
+                if retry_after is not None
+                else min(max(0.0, backoff_s) * (2**attempt), max_backoff_s)
+            )
+            if delay:
+                time.sleep(delay)
+        raise AssertionError("unreachable setup retry loop")
+
     def health(self) -> HttpResult:
         return self.request("GET", "/health")
 
@@ -853,8 +886,15 @@ class EchoMemHTTP:
             return "no /api-doc/openapi.json"
         return f"openapi status={response.status_code or 'transport_error'}"
 
-    def open_session(self, tenant: str, session_name: str) -> tuple[str, str]:
-        result = self.request("POST", "/api/sessions/open", {
+    def open_session(
+        self,
+        tenant: str,
+        session_name: str,
+        *,
+        retry_rate_limit: bool = True,
+    ) -> tuple[str, str]:
+        request = self.setup_request_with_retry if retry_rate_limit else self.request
+        result = request("POST", "/api/sessions/open", {
             "agent_id": self.agent_id,
             "metadata": {
                 "title": session_name,
@@ -895,8 +935,16 @@ class EchoMemHTTP:
             raise RuntimeError(f"open session returned no session_id: {result.payload}")
         return str(session_id), tenant
 
-    def add_message(self, session_id: str, message_id: str, content: str) -> HttpResult:
-        return self.request("POST", f"/api/sessions/{session_id}/messages", {
+    def add_message(
+        self,
+        session_id: str,
+        message_id: str,
+        content: str,
+        *,
+        retry_rate_limit: bool = False,
+    ) -> HttpResult:
+        request = self.setup_request_with_retry if retry_rate_limit else self.request
+        return request("POST", f"/api/sessions/{session_id}/messages", {
             "role": "user", "content": content, "metadata": {"stress_message_id": message_id},
         })
 
@@ -956,6 +1004,28 @@ def client_for(
         except KeyError as exc:
             raise RuntimeError(f"no authenticated client configured for tenant {tenant}") from exc
     return client_or_clients
+
+
+def add_setup_message(
+    client: EchoMemHTTP,
+    session_id: str,
+    message_id: str,
+    content: str,
+) -> HttpResult:
+    """Add a setup message with rate-limit retry for real HTTP clients.
+
+    The runner keeps accepting lightweight duck-typed clients used by unit
+    tests and downstream integrations; those clients may only implement the
+    original three-argument method.
+    """
+    if isinstance(client, EchoMemHTTP):
+        return client.add_message(
+            session_id,
+            message_id,
+            content,
+            retry_rate_limit=True,
+        )
+    return client.add_message(session_id, message_id, content)
 
 
 def payload_contains(payload: dict[str, Any], text: str) -> bool:
@@ -1122,7 +1192,8 @@ def run_isolation_probe(
         identity_observations[writer] = dict(writer_client.last_identity)
         for marker in markers:
             message_id = f"isolation-{uuid.uuid4().hex}"
-            add_result = writer_client.add_message(
+            add_result = add_setup_message(
+                writer_client,
                 writer_session,
                 message_id,
                 f"Tenant {writer} private marker {marker}",
@@ -1618,7 +1689,12 @@ def run_commits(
         message_ids = []
         for index in range(messages_per_session):
             message_id = f"stress-{uuid.uuid4().hex}"
-            response = client.add_message(session_id, message_id, f"EchoMem stress message {tenant} {index} " + ("x" * 1200))
+            response = add_setup_message(
+                client,
+                session_id,
+                message_id,
+                f"EchoMem stress message {tenant} {index} " + ("x" * 1200),
+            )
             if response.status_code is None or response.status_code >= 400:
                 records.append(CommitRecord(tenant, session_id, "", now_iso(), status="message_failed", error=response.error or str(response.status_code), message_ids=[message_id]))
             else:
@@ -1693,7 +1769,8 @@ def run_parallel_workload(
         for index in range(messages_per_session):
             message_id = f"stress-{uuid.uuid4().hex}"
             client = client_for(client_or_clients, tenant)
-            response = client.add_message(
+            response = add_setup_message(
+                client,
                 session_id,
                 message_id,
                 f"EchoMem stress message {tenant} {index} " + ("x" * 1200),
@@ -1901,7 +1978,8 @@ def run_commit_stream(
             message_ids: list[str] = []
             for message_index in range(messages_per_commit):
                 message_id = f"stress-{uuid.uuid4().hex}"
-                response = client.add_message(
+                response = add_setup_message(
+                    client,
                     session_id,
                     message_id,
                     f"EchoMem fixed-rate commit {tenant} {index} {message_index} "

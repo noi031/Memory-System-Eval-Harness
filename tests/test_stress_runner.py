@@ -5,11 +5,13 @@ import unittest
 import json
 import threading
 import time
+from unittest.mock import patch
 from pathlib import Path
 
 from stress.echomem.runner import (
     AdmissionController,
     CommitRecord,
+    EchoMemHTTP,
     HttpResult,
     INCONCLUSIVE,
     PASS,
@@ -185,6 +187,28 @@ class StressRunnerTests(unittest.TestCase):
         self.assertEqual(4, values["server_queue_depth"])
         self.assertEqual(2, values["server_active_workers"])
         self.assertEqual("capacity", values["reason_code"])
+
+    def test_setup_request_retries_429_using_retry_after(self) -> None:
+        client = EchoMemHTTP("http://example.test")
+        responses = iter(
+            [
+                HttpResult(
+                    "POST",
+                    "/setup",
+                    429,
+                    0.0,
+                    {},
+                    "HTTP 429",
+                    retry_after_s=0.25,
+                ),
+                HttpResult("POST", "/setup", 200, 0.0, {"ok": True}),
+            ]
+        )
+        with patch.object(client, "request", side_effect=lambda *args, **kwargs: next(responses)), \
+            patch("stress.echomem.runner.time.sleep") as sleep:
+            result = client.setup_request_with_retry("POST", "/setup", {"x": 1})
+        self.assertEqual(200, result.status_code)
+        sleep.assert_called_once_with(0.25)
 
     def test_tenant_config_uses_environment_key_without_exposing_value(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
