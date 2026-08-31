@@ -1,0 +1,44 @@
+{
+  "tenants": [
+    {
+      "tenant_id": "stress-a",
+      "user_id": "stress-user-a",
+      "auth_key_env": "STRESS_TENANT_A_KEY"
+    },
+    {
+      "tenant_id": "stress-b",
+      "user_id": "stress-user-b",
+      "auth_key_env": "STRESS_TENANT_B_KEY"
+    },
+    {
+      "tenant_id": "stress-c",
+      "user_id": "stress-user-c",
+      "auth_key_env": "STRESS_TENANT_C_KEY"
+    },
+    {
+      "tenant_id": "stress-d",
+      "user_id": "stress-user-d",
+      "auth_key_env": "STRESS_TENANT_D_KEY"
+    },
+    {
+      "tenant_id": "stress-e",
+      "user_id": "stress-user-e",
+      "auth_key_env": "STRESS_TENANT_E_KEY"
+    },
+    {
+      "tenant_id": "stress-f",
+      "user_id": "stress-user-f",
+      "auth_key_env": "STRESS_TENANT_F_KEY"
+    },
+    {
+      "tenant_id": "stress-g",
+      "user_id": "stress-user-g",
+      "auth_key_env": "STRESS_TENANT_G_KEY"
+    },
+    {
+      "tenant_id": "stress-h",
+      "user_id": "stress-user-h",
+      "auth_key_env": "STRESS_TENANT_H_KEY"
+    }
+  ]
+}
