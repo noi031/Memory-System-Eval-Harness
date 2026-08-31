@@ -39,24 +39,25 @@
 | 原子写阻塞级联 | 原子写期间 Search/Commit 的级联影响 | `NOT_IMPLEMENTED` |
 | 版本冲突毒循环 | 冲突重试次数、上限和最终状态 | `NOT_IMPLEMENTED` |
 | 启动引擎隔离 | 单个引擎加载失败不拖垮其他引擎 | `NOT_IMPLEMENTED` |
-| 容量阶梯 | 已提供可执行的 16 租户容量点；2/4/8/32 和资源 profile 仍待补齐 | `capacity-16`；资源限制缺失时仍为 `INCONCLUSIVE` |
+| 容量阶梯 | 已提供可执行的 2/4/8/16/32 租户容量点；真实多规格资源 profile 由外部编排 | 容量场景已覆盖；独立凭证或资源限制缺失时仍为 `INCONCLUSIVE` |
 | 租户自带 LLM Key | 不同租户 key、配额和泄漏检查 | `NOT_IMPLEMENTED` |
 | 游标对账 | 已提供可配置 cursor URL、Commit message-set 对账和缺失项证据；EchoMem 必须暴露真实接口 | `PARTIAL` |
+| Search 服务端优先级 | 已提供 `search-priority-blackbox`：Search 与 Commit barrier 同时施压，关闭客户端准入并采集服务端时序 | `PARTIAL`；缺少可配对基线或完整服务端队列时序时不能证明严格优先 |
 | 提交阈值扫描 | 不同 auto-commit threshold 的系统性对比 | `NOT_IMPLEMENTED` |
 
 ## 验收结论
 
-PR28 当前可以验收为：
+PR29 当前可以验收为：
 
 > 真实 HTTP 多租户隔离和服务端观测型压测套件，已补齐 Commit barrier、
 > Zipf/显式租户分布、429 Retry-After 重试，以及 PR421 可量化指标的保守判定层。
 
-PR28 当前不能验收为：
+PR29 当前不能验收为：
 
 > rev5 完整 SaaS 压测方案，或具备完整故障注入、重启恢复和持久化对账能力。
 
-仍未完成的 PR28 检视项不会被隐藏，而是在验收矩阵中明确标记为
-`NOT_IMPLEMENTED`；因此 PR28 仍不能宣称为 rev5 全量事故回归方案。
+仍未完成的检视项不会被隐藏，而是在验收矩阵中明确标记为
+`NOT_IMPLEMENTED`；因此 PR29 仍不能宣称为 rev5 全量事故回归方案。
 
 下一阶段建议只实现最小闭环：
 
@@ -64,3 +65,5 @@ PR28 当前不能验收为：
 2. 在部署中接入真实 LLM/vector 故障控制接口，再执行 `fault_suite.py`。
 3. 增加 cluster+MySQL 的真实重启控制脚本和恢复后的 cursor 对账。
 4. 在 CI/服务器安装 k6，并将 k6 summary 与 runner 请求证据绑定。
+5. 为 2U/4U/8U/16U/32U/64U 提供真实资源限制和 profile 生效证明，再执行
+   `instance_profile_matrix.py`。
