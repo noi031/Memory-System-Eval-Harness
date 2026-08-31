@@ -1,0 +1,760 @@
+from __future__ import annotations
+
+import tempfile
+import unittest
+import json
+import threading
+import time
+from unittest.mock import patch
+from pathlib import Path
+
+from stress.echomem.runner import (
+    AdmissionController,
+    CommitRecord,
+    EchoMemHTTP,
+    HttpResult,
+    INCONCLUSIVE,
+    PASS,
+    ResourceSample,
+    ServerMetricSample,
+    SearchRecord,
+    _server_observability,
+    build_report,
+    commit_with_retry,
+    classify_tenant_identity,
+    load_tenant_specs,
+    linear_slope_per_minute,
+    workload_metrics,
+    percentile,
+    parse_prometheus_series,
+    pr421_metric_coverage,
+    run_commit_stream,
+    scenario_status,
+    scenario_search,
+    isolation_probe_query,
+    quality_probe_query,
+    run_isolation_probe,
+)
+from stress.echomem import runner as stress_runner
+from stress.echomem.audit_matrix_report import render as render_audit_matrix_report
+
+
+class StressRunnerTests(unittest.TestCase):
+    def test_skip_isolation_is_explicitly_inconclusive(self) -> None:
+        """Load tests must not silently claim tenant-isolation evidence."""
+        isolation = {
+            "status": stress_runner.INCONCLUSIVE,
+            "reason": "isolation probe intentionally skipped for load measurement",
+        }
+
+        self.assertEqual(stress_runner.INCONCLUSIVE, isolation["status"])
+        self.assertIn("load measurement", isolation["reason"])
+
+    def test_isolation_probe_uses_configured_search_timeout(self) -> None:
+        class FakeClient:
+            def __init__(self) -> None:
+                self.search_timeouts = []
+                self.last_identity = {"tenant": id(self)}
+
+            def open_session(self, account_id, session_name):
+                return ("session-" + session_name, {})
+
+            def add_message(self, session_id, message_id, content):
+                return HttpResult("POST", "/messages", 200, 0.0)
+
+            def commit(self, session_id):
+                return HttpResult(
+                    "POST",
+                    "/commit",
+                    202,
+                    0.0,
+                    payload={"archive_id": "archive-1", "status": "completed"},
+                )
+
+            def commit_status(self, session_id, archive_id):
+                return HttpResult(
+                    "GET",
+                    "/commit",
+                    200,
+                    0.0,
+                    payload={"status": "completed"},
+                )
+
+            def search(self, session_id, query, timeout_s):
+                self.search_timeouts.append(timeout_s)
+                return HttpResult("POST", "/search", 200, 0.0, payload={"items": []})
+
+            def identity(self):
+                return {"tenant": id(self)}
+
+        clients = {"a": FakeClient(), "b": FakeClient()}
+        run_isolation_probe(
+            clients,
+            ["a", "b"],
+            retries=1,
+            retry_interval_s=0.0,
+            markers_per_tenant=1,
+            commit_timeout_s=1.0,
+            search_timeout_s=3.5,
+        )
+        self.assertEqual([3.5, 3.5], clients["a"].search_timeouts)
+        self.assertEqual([3.5, 3.5], clients["b"].search_timeouts)
+
+    def test_pr421_prometheus_series_preserves_bounded_labels(self) -> None:
+        raw = """
+        echomem_lane_queued{lane="interactive"} 2
+        echomem_lane_rejected_total{lane="interactive",reason_code="capacity"} 3
+        echomem_engine_fanout_exec_seconds_count{engine="atomic"} 4
+        """
+        series = parse_prometheus_series(raw)
+        self.assertEqual("interactive", series[0]["labels"]["lane"])
+        self.assertEqual("capacity", series[1]["labels"]["reason_code"])
+        self.assertEqual("atomic", series[2]["labels"]["engine"])
+
+    def test_pr421_metric_coverage_is_inconclusive_when_families_missing(self) -> None:
+        sample = ServerMetricSample(
+            elapsed_s=0.0,
+            timestamp="2026-08-28T00:00:00+00:00",
+            status_code=200,
+            metric_count=1,
+            series=parse_prometheus_series(
+                'echomem_lane_queued{lane="http_interactive"} 1'
+            ),
+        )
+        coverage = pr421_metric_coverage([sample])
+        self.assertEqual(INCONCLUSIVE, coverage["status"])
+        self.assertIn("lane_queued", coverage["present"])
+        self.assertEqual(["http_interactive"], coverage["lanes"])
+        self.assertIn("lane_wait", coverage["missing"])
+
+    def test_pr421_metric_coverage_passes_all_required_families(self) -> None:
+        raw = """
+        echomem_lane_queued{lane="http_interactive"} 1
+        echomem_lane_wait_seconds_count{lane="http_interactive"} 1
+        echomem_lane_exec_seconds_count{lane="http_interactive"} 1
+        echomem_lane_rejected_total{lane="http_interactive",reason_code="capacity"} 1
+        echomem_engine_fanout_exec_seconds_count{engine="atomic"} 1
+        echomem_engine_fanout_skipped_total{engine="base",reason_code="deadline"} 1
+        """
+        sample = ServerMetricSample(
+            elapsed_s=0.0,
+            timestamp="2026-08-28T00:00:00+00:00",
+            status_code=200,
+            metric_count=6,
+            series=parse_prometheus_series(raw),
+        )
+        coverage = pr421_metric_coverage([sample])
+        self.assertEqual(PASS, coverage["status"])
+        self.assertEqual([], coverage["missing"])
+        self.assertIn("capacity", coverage["reason_codes"])
+        self.assertIn("atomic", coverage["engines"])
+
+    def test_pr421_metric_coverage_rejects_unbounded_tenant_label(self) -> None:
+        raw = """
+        echomem_lane_queued{lane="commit",tenant_id="tenant-a"} 1
+        echomem_lane_wait_seconds_count{lane="commit"} 1
+        echomem_lane_exec_seconds_count{lane="commit"} 1
+        echomem_lane_rejected_total{lane="commit",reason_code="capacity"} 1
+        echomem_engine_fanout_exec_seconds_count{engine="atomic"} 1
+        echomem_engine_fanout_skipped_total{engine="base",reason_code="deadline"} 1
+        """
+        sample = ServerMetricSample(
+            elapsed_s=0.0,
+            timestamp="2026-08-28T00:00:00+00:00",
+            status_code=200,
+            metric_count=6,
+            series=parse_prometheus_series(raw),
+        )
+        coverage = pr421_metric_coverage([sample])
+        self.assertEqual(INCONCLUSIVE, coverage["status"])
+        self.assertTrue(coverage["bounded_label_violations"])
+
+    def test_server_observability_accepts_payload_and_headers(self) -> None:
+        values = _server_observability(
+            {
+                "telemetry": {
+                    "received_at": "2026-08-26T00:00:00Z",
+                    "queue_depth": 4,
+                    "reason_code": "capacity",
+                }
+            },
+            {
+                "x-server-execution-started-at": "2026-08-26T00:00:01Z",
+                "x-active-workers": "2",
+            },
+        )
+        self.assertEqual("2026-08-26T00:00:00Z", values["server_received_at"])
+        self.assertEqual(4, values["server_queue_depth"])
+        self.assertEqual(2, values["server_active_workers"])
+        self.assertEqual("capacity", values["reason_code"])
+
+    def test_setup_request_retries_429_using_retry_after(self) -> None:
+        client = EchoMemHTTP("http://example.test")
+        responses = iter(
+            [
+                HttpResult(
+                    "POST",
+                    "/setup",
+                    429,
+                    0.0,
+                    {},
+                    "HTTP 429",
+                    retry_after_s=0.25,
+                ),
+                HttpResult("POST", "/setup", 200, 0.0, {"ok": True}),
+            ]
+        )
+        with patch.object(client, "request", side_effect=lambda *args, **kwargs: next(responses)), \
+            patch("stress.echomem.runner.time.sleep") as sleep:
+            result = client.setup_request_with_retry("POST", "/setup", {"x": 1})
+        self.assertEqual(200, result.status_code)
+        sleep.assert_called_once_with(0.25)
+
+    def test_tenant_config_uses_environment_key_without_exposing_value(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "tenants.json"
+            path.write_text(json.dumps({
+                "tenants": [
+                    {"tenant_id": "a", "auth_key_env": "KEY_A"},
+                    {"tenant_id": "b", "auth_key_env": "KEY_B"},
+                ]
+            }), encoding="utf-8")
+            specs = load_tenant_specs(path, {"KEY_A": "secret-a", "KEY_B": "secret-b"})
+            self.assertEqual(["a", "b"], [spec.tenant_id for spec in specs])
+            self.assertEqual("secret-a", specs[0].auth_key)
+            self.assertEqual("env:KEY_A", specs[0].auth_key_source)
+
+    def test_shared_tenant_credentials_are_not_called_independent(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "tenants.json"
+            path.write_text(json.dumps({
+                "tenants": [
+                    {"tenant_id": "a", "auth_key": "same"},
+                    {"tenant_id": "b", "auth_key": "same"},
+                ]
+            }), encoding="utf-8")
+            specs = load_tenant_specs(path)
+            self.assertEqual("shared_auth_key", classify_tenant_identity(specs))
+
+    def test_fifo_admission_preserves_order(self) -> None:
+        gate = AdmissionController("fifo", capacity=1)
+        wait, depth, order = gate.acquire("commit", "a")
+        self.assertGreaterEqual(wait, 0.0)
+        self.assertEqual(0, depth)
+        self.assertEqual(1, order)
+        gate.release("commit", "a")
+
+    def test_explicit_commit_distribution_requires_counts(self) -> None:
+        with self.assertRaisesRegex(ValueError, "requires --commit-tenant-counts"):
+            run_commit_stream(
+                {},
+                ["tenant-a", "tenant-b"],
+                duration_s=1,
+                commit_rpm=0,
+                messages_per_commit=1,
+                commit_timeout_s=1,
+                poll_interval_s=0.01,
+                workers=1,
+                commit_barrier=True,
+                commit_barrier_count=2,
+                commit_tenant_distribution="explicit",
+            )
+
+    def test_explicit_commit_distribution_validates_and_preserves_counts(self) -> None:
+        class FakeClient:
+            def __init__(self, tenant):
+                self.tenant = tenant
+
+            def open_session(self, tenant, _title):
+                return f"{tenant}-session", HttpResult("POST", "/session", 200, 0, {})
+
+            def add_message(self, session_id, message_id, _content):
+                return HttpResult("POST", "/message", 200, 0, {
+                    "session_id": session_id,
+                    "message_id": message_id,
+                })
+
+            def commit(self, session_id):
+                return HttpResult("POST", "/commit", 200, 0, {}, headers={
+                    "x-request-id": f"{self.tenant}-{session_id}",
+                })
+
+            def poll_commit(self, session_id, _request_id, timeout_s, poll_interval_s):
+                return HttpResult("GET", "/commit/status", 200, 0, {
+                    "status": "completed",
+                })
+
+        clients = {
+            tenant: FakeClient(tenant)
+            for tenant in ("tenant-a", "tenant-b", "tenant-c", "tenant-d")
+        }
+        records = run_commit_stream(
+            clients,
+            list(clients),
+            duration_s=1,
+            commit_rpm=0,
+            messages_per_commit=1,
+            commit_timeout_s=1,
+            poll_interval_s=0.01,
+            workers=4,
+            commit_barrier=True,
+            commit_barrier_count=5,
+            commit_tenant_distribution="explicit",
+            commit_tenant_counts=[2, 1, 1, 1],
+        )
+        self.assertEqual(5, len(records))
+        self.assertEqual(
+            {"tenant-a": 2, "tenant-b": 1, "tenant-c": 1, "tenant-d": 1},
+            {
+                tenant: sum(record.tenant == tenant for record in records)
+                for tenant in clients
+            },
+        )
+
+    def test_search_priority_waits_for_capacity_but_jumps_queued_commit(self) -> None:
+        gate = AdmissionController("search-priority", capacity=1)
+        _, _, commit_order = gate.acquire("commit", "a")
+        acquired = {}
+
+        def acquire_search() -> None:
+            acquired["result"] = gate.acquire("search", "b")
+
+        thread = threading.Thread(target=acquire_search)
+        thread.start()
+        thread.join(0.05)
+        self.assertTrue(thread.is_alive())
+        gate.release("commit", "a")
+        thread.join(1.0)
+        self.assertFalse(thread.is_alive())
+        _, _, search_order = acquired["result"]
+        self.assertLess(commit_order, search_order)
+        gate.release("search", "b")
+        gate.release("commit", "a")
+
+    def test_fixed_rate_search_keeps_completed_futures_in_results(self) -> None:
+        class FakeClient:
+            def search(self, session_id, query, timeout_s):
+                time.sleep(0.02)
+                return HttpResult(
+                    "POST",
+                    "/api/retrieval/search",
+                    200,
+                    0.02,
+                    {"items": []},
+                )
+
+        records = scenario_search(
+            FakeClient(),
+            [("tenant-a", "session-a")],
+            duration_s=0.25,
+            rps=12.0,
+            timeout_s=1.0,
+            workers=2,
+        )
+
+        # Three arrivals are scheduled in the interval. Completed futures may
+        # leave the in-flight map before the final collection, but must remain
+        # part of the returned workload evidence.
+        self.assertEqual(3, len(records))
+        self.assertTrue(all(record.status_code == 200 for record in records))
+
+    def test_search_quality_marker_is_recorded_and_empty_result_fails(self) -> None:
+        marker = "echomem-quality-test-marker"
+
+        class QualityClient:
+            def __init__(self, payload):
+                self.payload = payload
+
+            def search(self, session_id, query, timeout_s):
+                self.query = query
+                return HttpResult(
+                    "POST",
+                    "/api/retrieval/search",
+                    200,
+                    0.02,
+                    self.payload,
+                )
+
+        passing = QualityClient({"items": [{"text": marker}]})
+        records = scenario_search(
+            passing,
+            [("tenant-a", "session-a")],
+            duration_s=0.01,
+            rps=1,
+            timeout_s=1,
+            workers=1,
+            quality_queries={
+                "session-a": (quality_probe_query(marker), marker),
+            },
+        )
+        self.assertEqual(PASS, records[0].quality_status)
+        self.assertTrue(records[0].marker_found)
+        self.assertIn(marker, passing.query)
+
+        failing = QualityClient({"items": []})
+        records = scenario_search(
+            failing,
+            [("tenant-a", "session-a")],
+            duration_s=0.01,
+            rps=1,
+            timeout_s=1,
+            workers=1,
+            quality_queries={
+                "session-a": (quality_probe_query(marker), marker),
+            },
+        )
+        self.assertEqual("FAIL", records[0].quality_status)
+        self.assertFalse(records[0].marker_found)
+
+    def test_percentile_is_interpolated(self) -> None:
+        self.assertEqual(2.5, percentile([1, 2, 3, 4], 50))
+
+    def test_rss_slope_requires_four_samples(self) -> None:
+        samples = [ResourceSample(float(i), "", 100 + i, None, None, None, None, None) for i in range(4)]
+        self.assertIsNotNone(linear_slope_per_minute(samples))
+        self.assertIsNone(linear_slope_per_minute(samples[:3]))
+
+    def test_insufficient_samples_is_inconclusive(self) -> None:
+        status, details = scenario_status(
+            [CommitRecord("t", "s", "a", "", status="completed")],
+            [],
+            min_samples=4,
+            p95_limit_s=2.5,
+        )
+        self.assertEqual(INCONCLUSIVE, status)
+        self.assertIn("insufficient", details["reason"])
+
+    def test_report_contains_resource_charts(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "report.html"
+            build_report({
+                "status": PASS,
+                "base_url": "http://127.0.0.1:8010",
+                "finished_at": "",
+                "scenario_status": {},
+                "parameters": {},
+                "details": {},
+                "resource_points": [
+                    {"elapsed_s": 0, "rss_mb": 10, "cpu_percent": 2},
+                    {"elapsed_s": 1, "rss_mb": 11, "cpu_percent": 4},
+                ],
+            }, path)
+            content = path.read_text(encoding="utf-8")
+            self.assertIn("rss_mb", content)
+            self.assertIn("<polyline", content)
+
+    def test_workload_metrics_include_timing_and_tenants(self) -> None:
+        commits = [
+            CommitRecord(
+                "tenant-a", "s1", "a1", "", completed_at="",
+                status="completed", queue_wait_s=1.0, service_s=9.0,
+                end_to_end_s=10.0,
+            ),
+            CommitRecord(
+                "tenant-b", "s2", "a2", "", completed_at="",
+                status="timeout", queue_wait_s=2.0, service_s=12.0,
+                end_to_end_s=14.0,
+            ),
+        ]
+        searches = [
+            SearchRecord(
+                "tenant-a", "s1", "", 0.5, 200,
+                service_s=0.5, end_to_end_s=0.5,
+            ),
+            SearchRecord(
+                "tenant-b", "s2", "", 3.0, 200,
+                service_s=3.0, end_to_end_s=3.0,
+            ),
+        ]
+        metrics = workload_metrics(
+            commits,
+            searches,
+            ["tenant-a", "tenant-b"],
+            duration_s=10,
+            commit_delay_threshold_s=10,
+            search_delay_threshold_s=2.5,
+        )
+        self.assertEqual(2, metrics["commit"]["submitted"])
+        self.assertEqual(1, metrics["commit"]["completed"])
+        self.assertEqual(2, metrics["commit"]["delayed_count"])
+        self.assertEqual(1, metrics["search"]["delayed_count"])
+        self.assertEqual(2, len(metrics["per_tenant"]))
+        self.assertEqual(10.0, metrics["per_tenant"]["tenant-a"]["commit"]["completion"]["mean_s"])
+        self.assertGreater(metrics["fairness"]["search_latency_p95_jain"], 0.0)
+
+    def test_workload_metrics_summarize_rate_limit_responses(self) -> None:
+        commits = [
+            CommitRecord(
+                "tenant-a", "s1", "a1", "", status="commit_rejected",
+                status_code=429, retry_after_s=3.0,
+            ),
+        ]
+        searches = [
+            SearchRecord(
+                "tenant-a", "s1", "", 0.2, 429,
+                error="HTTP 429", retry_after_s=1.5,
+            ),
+            SearchRecord("tenant-a", "s1", "", 0.2, 200, service_s=0.2),
+        ]
+        metrics = workload_metrics(
+            commits,
+            searches,
+            ["tenant-a"],
+            duration_s=10,
+            commit_delay_threshold_s=10,
+            search_delay_threshold_s=2.5,
+        )
+        self.assertEqual({"429": 1}, metrics["commit"]["http_status_counts"])
+        self.assertEqual(1, metrics["commit"]["rate_limited_count"])
+        self.assertEqual(3.0, metrics["commit"]["retry_after"]["mean_s"])
+        self.assertEqual({"200": 1, "429": 1}, metrics["search"]["http_status_counts"])
+        self.assertEqual(1, metrics["search"]["rate_limited_count"])
+        self.assertEqual(1.5, metrics["search"]["retry_after"]["mean_s"])
+
+    def test_search_throughput_uses_configured_arrival_window(self) -> None:
+        searches = [
+            SearchRecord("tenant-a", "s1", "", 0.2, 200, service_s=0.2),
+            SearchRecord("tenant-a", "s1", "", 0.2, 200, service_s=0.2),
+            SearchRecord("tenant-a", "s1", "", 0.2, 200, service_s=0.2),
+        ]
+        metrics = workload_metrics(
+            [],
+            searches,
+            ["tenant-a"],
+            duration_s=60,
+            commit_delay_threshold_s=10,
+            search_delay_threshold_s=2.5,
+        )
+        self.assertEqual(0.05, metrics["search"]["throughput_rps"])
+        self.assertEqual(0.05, metrics["search"]["completed_throughput_rps"])
+        self.assertEqual(60, metrics["workload_duration_s"])
+
+    def test_isolation_probe_query_contains_exact_synthetic_marker(self) -> None:
+        marker = "echomem-isolation-tenant-a-abc123"
+        query = isolation_probe_query("tenant-a", marker)
+        self.assertIn("tenant-a", query)
+        self.assertIn(marker, query)
+
+    def test_workload_metrics_include_timeline_and_minute_buckets(self) -> None:
+        commits = [
+            CommitRecord(
+                "tenant-a",
+                "s1",
+                "a1",
+                "",
+                queued_at="2026-08-26T00:00:01+00:00",
+                started_at="2026-08-26T00:00:02+00:00",
+                completed_at="2026-08-26T00:00:13+00:00",
+                status="completed",
+                end_to_end_s=11.0,
+                queue_wait_s=1.0,
+                admission_order=1,
+            ),
+        ]
+        searches = [
+            SearchRecord(
+                "tenant-b",
+                "s2",
+                "2026-08-26T00:00:03+00:00",
+                0.4,
+                200,
+                queued_at="2026-08-26T00:00:03+00:00",
+                finished_at="2026-08-26T00:00:03.4+00:00",
+                service_s=0.4,
+                end_to_end_s=0.4,
+                admission_order=2,
+            ),
+        ]
+        metrics = workload_metrics(
+            commits,
+            searches,
+            ["tenant-a", "tenant-b"],
+            duration_s=60,
+            commit_delay_threshold_s=10,
+            search_delay_threshold_s=2.5,
+        )
+        self.assertEqual(2, len(metrics["timeline"]))
+        self.assertEqual("commit", metrics["timeline"][0]["operation"])
+        self.assertEqual(0.0, metrics["timeline"][0]["workload_offset_s"])
+        self.assertEqual(1, metrics["time_buckets"][0]["commit"]["delayed"])
+        self.assertEqual(1, metrics["time_buckets"][0]["search"]["succeeded"])
+
+    def test_workload_metrics_include_server_side_timing_when_present(self) -> None:
+        commits = [
+            CommitRecord(
+                "tenant-a",
+                "s1",
+                "a1",
+                "",
+                status="completed",
+                server_received_at="2026-08-26T00:00:00+00:00",
+                server_queue_entered_at="2026-08-26T00:00:00.100+00:00",
+                server_execution_started_at="2026-08-26T00:00:02+00:00",
+                server_finished_at="2026-08-26T00:00:07+00:00",
+                server_queue_depth=3,
+                server_active_workers=2,
+            )
+        ]
+        metrics = workload_metrics(
+            commits,
+            [],
+            ["tenant-a"],
+            duration_s=10,
+            commit_delay_threshold_s=10,
+            search_delay_threshold_s=2.5,
+        )
+        server = metrics["commit"]["server"]
+        self.assertEqual(1, server["observed_count"])
+        self.assertEqual(1.9, server["queue_wait"]["mean_s"])
+        self.assertEqual(5.0, server["execution"]["mean_s"])
+        self.assertEqual(3.0, server["queue_depth"]["mean_s"])
+
+    def test_audit_matrix_report_contains_full_latency_statistics(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            policy_dir = root / "fifo"
+            policy_dir.mkdir()
+            summary = {
+                "status": "INCONCLUSIVE",
+                "base_url": "http://127.0.0.1:8010",
+                "parameters": {"scheduler_policy": "fifo", "tenants": 1},
+                "details": {"identity_mode": "single_auth_key"},
+                "metrics": {
+                    "commit": {
+                        "submitted": 2,
+                        "completed": 2,
+                        "failed": 0,
+                        "success_rate": 1.0,
+                        "completion": {
+                            "count": 2, "mean_s": 10, "min_s": 9,
+                            "p50_s": 10, "p90_s": 11, "p95_s": 11.5,
+                            "p99_s": 11.9, "max_s": 12, "total_s": 20,
+                        },
+                        "queue_wait": {"count": 2, "mean_s": 1, "min_s": 0,
+                                       "p50_s": 1, "p90_s": 1.5, "p95_s": 1.8,
+                                       "p99_s": 1.9, "max_s": 2, "total_s": 2},
+                        "service": {},
+                        "delayed_threshold_s": 10,
+                        "delayed": [{
+                            "tenant": "tenant-a", "session_id": "s1",
+                            "started_at": "2026-08-26T00:00:00Z",
+                            "completed_at": "2026-08-26T00:00:12Z",
+                            "completion_s": 12, "queue_wait_s": 2,
+                            "admission_wait_s": 1, "admission_order": 7,
+                            "status": "completed",
+                        }],
+                    },
+                    "search": {
+                        "submitted": 1, "succeeded": 1, "errors": 0,
+                        "success_rate": 1.0, "latency": {
+                            "count": 1, "mean_s": 1, "min_s": 1,
+                            "p50_s": 1, "p90_s": 1, "p95_s": 1,
+                            "p99_s": 1, "max_s": 1, "total_s": 1,
+                        },
+                        "admission_wait": {}, "delayed_threshold_s": 2.5,
+                        "delayed": [],
+                    },
+                    "admission": {"max_queue_depth": 3, "wait": {}},
+                    "per_tenant": {},
+                },
+            }
+            (policy_dir / "summary.json").write_text(
+                json.dumps(summary), encoding="utf-8"
+            )
+            (root / "matrix.json").write_text(
+                json.dumps({"summaries": [summary]}), encoding="utf-8"
+            )
+            output = root / "matrix-audit.html"
+            render_audit_matrix_report(root / "matrix.json", output)
+            content = output.read_text(encoding="utf-8")
+            self.assertIn("Commit 端到端完成时间", content)
+            self.assertIn("P99", content)
+            self.assertIn("2026-08-26T00:00:12Z", content)
+
+    def test_commit_poll_does_not_use_admission_operation(self) -> None:
+        class RecordingAdmission:
+            def __init__(self):
+                self.operations = []
+
+            def acquire(self, operation, tenant):
+                self.operations.append(operation)
+                return 0.0, 0, 1
+
+            def release(self, operation, tenant):
+                self.operations.append(f"release:{operation}")
+
+        from stress.echomem.runner import EchoMemHTTP
+
+        admission = RecordingAdmission()
+        client = EchoMemHTTP("http://127.0.0.1:1", admission=admission)
+        client.commit_status("session", "archive")
+        self.assertEqual([], admission.operations)
+
+    def test_commit_retry_honors_retry_after_and_keeps_history(self) -> None:
+        class RetryClient:
+            def __init__(self):
+                self.calls = 0
+
+            def commit(self, session_id):
+                self.calls += 1
+                if self.calls == 1:
+                    return HttpResult(
+                        "POST",
+                        "/commit",
+                        429,
+                        0.001,
+                        {},
+                        "HTTP 429",
+                        0.0,
+                    )
+                return HttpResult(
+                    "POST",
+                    "/commit",
+                    202,
+                    0.001,
+                    {"archive_id": "archive-1"},
+                )
+
+        client = RetryClient()
+        response, history, wait_s = commit_with_retry(
+            client,
+            "session",
+            max_attempts=3,
+            backoff_s=10.0,
+            max_backoff_s=30.0,
+        )
+        self.assertEqual(202, response.status_code)
+        self.assertEqual(2, client.calls)
+        self.assertEqual(2, len(history))
+        self.assertEqual(429, history[0]["status_code"])
+        self.assertEqual(0.0, wait_s)
+
+    def test_search_service_time_excludes_worker_admission_interval(self) -> None:
+        class SlowAdmissionClient:
+            def search(self, session_id, query, timeout_s):
+                import time
+
+                time.sleep(0.02)
+                return HttpResult(
+                    "POST",
+                    "/api/retrieval/search",
+                    200,
+                    0.003,
+                    {"items": []},
+                )
+
+        records = scenario_search(
+            SlowAdmissionClient(),
+            [("tenant-a", "session-a")],
+            duration_s=0.01,
+            rps=1,
+            timeout_s=1,
+            workers=1,
+        )
+        self.assertEqual(1, len(records))
+        self.assertEqual(0.003, records[0].service_s)
+        self.assertGreater(records[0].end_to_end_s, records[0].service_s)
+
+
+if __name__ == "__main__":
+    unittest.main()
