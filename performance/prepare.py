@@ -16,7 +16,9 @@ searchable query and as a write-read consistency probe.
 
 from __future__ import annotations
 
+import json
 import logging
+import os
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -28,6 +30,44 @@ logger = logging.getLogger("performance.prepare")
 
 ANCHOR_PREFIX = "PERFANCHOR"
 WRITE_ANCHOR_PREFIX = "PERFTAIL"
+
+
+def load_tenant_specs(path: str | Path) -> list[dict[str, Any]]:
+    """读 tenants.json 独立凭据（每租户一条，用于隔离/公平结论的前提）。
+
+    JSON 取 ``tenants`` 数组，每项 ``{"tenant_id","user_id","auth_key_env"}``，
+    可选内联 ``auth_key``/``account_id``/``agent_id``。auth_key 内联优先，
+    否则从 ``os.environ[auth_key_env]`` 读取（缺 env 抛 ValueError，错误信息
+    含 env 名）。空/缺 tenants 抛 ValueError。
+    """
+    data = json.loads(Path(path).read_text(encoding="utf-8"))
+    tenants = data.get("tenants")
+    if not isinstance(tenants, list) or not tenants:
+        raise ValueError(f"租户配置文件缺少 tenants 数组: {path}")
+    specs: list[dict[str, Any]] = []
+    for item in tenants:
+        if not isinstance(item, dict):
+            raise ValueError(f"租户配置项必须是对象: {item}")
+        spec: dict[str, Any] = {
+            "tenant_id": str(item.get("tenant_id") or ""),
+            "user_id": str(item.get("user_id") or ""),
+            "auth_key_env": str(item.get("auth_key_env") or ""),
+            "auth_key": str(item.get("auth_key") or ""),
+            "account_id": str(item.get("account_id") or ""),
+            "agent_id": str(item.get("agent_id") or ""),
+        }
+        if not spec["auth_key"]:
+            env_name = spec["auth_key_env"]
+            if not env_name:
+                raise ValueError(
+                    f"租户 {spec['tenant_id'] or spec['user_id']} 未配置 auth_key "
+                    f"或 auth_key_env"
+                )
+            if env_name not in os.environ:
+                raise ValueError(f"auth_key 环境变量缺失: {env_name}")
+            spec["auth_key"] = os.environ[env_name]
+        specs.append(spec)
+    return specs
 
 _USER_MSGS = (
     "本周项目进展顺利，核心模块已完成联调，计划下周发布测试版本。",
@@ -336,6 +376,7 @@ class TenantPreparer:
         tenants: int = 8,
         timeout_s: float = 10.0,
         label_prefix: str = "perf",
+        tenant_specs: list[dict[str, Any]] | None = None,
     ) -> None:
         if tenants < 1:
             raise ValueError("tenants must be >= 1")
@@ -348,8 +389,10 @@ class TenantPreparer:
         self.tenants = tenants
         self.timeout_s = timeout_s
         self.label_prefix = label_prefix
+        # --tenant-config 独立凭据：非空时优先于 auth_mode，--tenants 忽略
+        self.tenant_specs = tenant_specs
         self._provisioned: list[tuple[int, EchoMemClient]] = []
-        if auth_mode == "static" and tenants != 1:
+        if auth_mode == "static" and tenants != 1 and not tenant_specs:
             raise ValueError(
                 "--auth-mode static 仅支持单租户（--tenants 1）：外网部署通常只有一个预置身份"
             )
@@ -368,6 +411,30 @@ class TenantPreparer:
         同一批会话，复制式多租户布局），否则用合成锚词消息。
         """
         contexts: list[TenantContext] = []
+        if self.tenant_specs:
+            # --tenant-config 独立凭据模式：逐条构造客户端并灌种。
+            # 不向 _provisioned 记录（config 凭据不归本 preparer 清理）。
+            for idx, spec in enumerate(self.tenant_specs):
+                client = EchoMemClient(
+                    self.base_url,
+                    auth_key=str(spec.get("auth_key") or ""),
+                    account=str(spec.get("account_id") or spec.get("tenant_id") or ""),
+                    user_id=str(spec.get("user_id") or ""),
+                    agent_id=str(spec.get("agent_id") or "default"),
+                    timeout_s=self.timeout_s,
+                    max_retries=0,
+                )
+                contexts.append(
+                    self._seed_one(
+                        client,
+                        idx,
+                        seed_sessions,
+                        messages_per_session,
+                        commit_poll_timeout_s,
+                        locomo_batches,
+                    )
+                )
+            return contexts
         if self.auth_mode == "provision":
             stamp = int(time.time())
             for idx in range(self.tenants):
@@ -409,6 +476,17 @@ class TenantPreparer:
         else:
             raise ValueError(f"unknown auth mode: {self.auth_mode}")
         return contexts
+
+    def keys_independent(self) -> bool:
+        """tenant_specs 模式下各 spec 的 auth_key 是否非空且互不相同。
+
+        独立且互异的 key 是隔离/公平结论的前提；非 config 模式（provision）
+        天然独立，恒为 True。
+        """
+        if not self.tenant_specs:
+            return True
+        keys = [str(spec.get("auth_key") or "") for spec in self.tenant_specs]
+        return all(keys) and len(set(keys)) == len(keys)
 
     def cleanup(self) -> None:
         """Delete every tenant this preparer provisioned.

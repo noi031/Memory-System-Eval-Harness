@@ -36,7 +36,7 @@ def request(
     method: str = "GET",
     body: dict[str, Any] | None = None,
     auth_key: str = "",
-    auth_header: str = "X-API-Key",
+    auth_header: str = "X-Auth-Key",
     timeout_s: float = 10.0,
 ) -> dict[str, Any]:
     headers = {"Accept": "application/json"}
@@ -232,7 +232,7 @@ def main() -> int:
     parser.add_argument("--base-url", required=True)
     parser.add_argument("--auth-key", default="")
     parser.add_argument("--auth-key-env", default="ECHOMEM_AUTH_KEY")
-    parser.add_argument("--auth-header", default="X-API-Key")
+    parser.add_argument("--auth-header", default="X-Auth-Key")
     parser.add_argument("--health-path", default="/health")
     parser.add_argument("--metrics-path", default="/metrics")
     parser.add_argument("--session-id", default="")

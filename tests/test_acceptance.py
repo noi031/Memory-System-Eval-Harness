@@ -5,14 +5,14 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from stress.echomem.acceptance import (
+from performance.acceptance import (
     INCONCLUSIVE,
     NOT_IMPLEMENTED,
     PR28_REVIEW_RESOLUTION,
     build_model_analysis_input,
     evaluate_pr421_acceptance,
 )
-from stress.echomem.formal_data_report import render
+from performance.formal_data_report import render
 
 
 class AcceptanceTests(unittest.TestCase):

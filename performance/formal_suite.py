@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""Run a repeatable, real multi-tenant EchoMem stress suite.
+"""可重复的真实多租户 EchoMem 压测验收套件。
 
-The suite is deliberately orchestration-only: each case is executed by the
-existing runner, which keeps per-request CSV and raw server telemetry. The
-suite adds scenario/repetition metadata and refuses to make a release claim
-unless every run has independent tenant credentials.
+套件只负责编排：每个 case 由 run_stress 子进程执行，并保留逐请求 CSV 与
+原始服务端遥测；套件在其上叠加场景/轮次元数据，并把 run_stress 原生产物
+推导成验收求值器消费的契约摘要（summary.json / commit_results.csv /
+search_results.csv）。只有每次运行都使用独立租户凭据时才允许做出上线结论。
 """
 
 from __future__ import annotations
@@ -21,26 +21,23 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-# Support both ``python -m stress.echomem.formal_suite`` and the direct
-# command documented for server deployments.
-_PROJECT_ROOT = Path(__file__).resolve().parents[2]
+# 支持 ``python -m performance.formal_suite`` 与直接执行两种方式。
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
-try:
-    from .acceptance import (
-        build_model_analysis_input,
-        evaluate_pr421_acceptance,
-    )
-    from shared.runtime_config import validate_real_model_config
-except ImportError:
-    from acceptance import build_model_analysis_input, evaluate_pr421_acceptance
-    from shared.runtime_config import validate_real_model_config
+from performance.acceptance import (
+    build_model_analysis_input,
+    evaluate_pr421_acceptance,
+)
+from performance.perf_preflight import run_preflight
 
 
-# Formal runs reproduce online clients. The load generator does not impose
-# FIFO, priority, lane, or tenant-fair scheduling of its own.
+# 正式运行复现在线客户端。压测端不施加 FIFO、优先级、lane 或租户公平调度。
 POLICIES = ("server-observe",)
+
+# 正式套件的运行器。每个 case 作为独立子进程执行，产物落到 case 的 run/ 子目录。
+RUNNER = Path(__file__).with_name("run_stress.py")
 
 # Acceptance targets from EchoMem PR421. These are recorded in suite.json so
 # every result carries the intended gate instead of relying on report prose.
@@ -374,6 +371,20 @@ def write_subset(path: Path, tenants: list[dict[str, Any]]) -> None:
     )
 
 
+def _identity_is_independent(tenants: list[dict[str, Any]]) -> bool:
+    """所有租户都能解析出非空 auth_key 且彼此不同，才算独立认证。"""
+    keys: list[str] = []
+    for tenant in tenants:
+        key = str(tenant.get("auth_key") or "").strip()
+        if not key:
+            env_name = str(tenant.get("auth_key_env") or "").strip()
+            key = os.environ.get(env_name, "").strip() if env_name else ""
+        if not key:
+            return False
+        keys.append(key)
+    return len(set(keys)) == len(keys)
+
+
 def run_case_process(
     command: list[str],
     *,
@@ -433,6 +444,371 @@ def run_case_process(
         )
 
 
+def _read_requests_csv(path: Path) -> list[dict[str, str]]:
+    """读取逐请求 CSV；文件缺失时返回空列表。"""
+    if not path.is_file():
+        return []
+    with path.open(newline="", encoding="utf-8") as handle:
+        return list(csv.DictReader(handle))
+
+
+def _resolve_run_dir(run_dir: Path) -> Path:
+    """定位 run_stress 实际产物目录。
+
+    run_stress 会在 ``--out-dir`` 下再创建时间戳子目录，产物实际落在该
+    子目录内；直接构造的产物（如测试夹具）则落在 ``run_dir`` 自身。两者
+    都能被解析到同一份 summary.json 所在目录。
+    """
+    if (run_dir / "summary.json").is_file():
+        return run_dir
+    children = [
+        child for child in run_dir.iterdir()
+        if child.is_dir() and (child / "summary.json").is_file()
+    ]
+    return children[0] if len(children) == 1 else run_dir
+
+
+def _ms_to_s(value: Any) -> float | None:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    if number != number:
+        return None
+    return number / 1000.0
+
+
+def _bounded_label_violations(metrics_rows: list[dict[str, str]]) -> list[dict[str, str]]:
+    """从 lane 指标样本提取违反 bounded-label 契约的 tenant 标签。"""
+    violations: list[dict[str, str]] = []
+    seen: set[tuple[str, str, str]] = set()
+    for row in metrics_rows:
+        metric = str(row.get("metric") or "")
+        if not metric.startswith("echomem_lane_"):
+            continue
+        try:
+            labels = json.loads(row.get("labels") or "{}")
+        except json.JSONDecodeError:
+            labels = {}
+        if not isinstance(labels, dict):
+            continue
+        for label_key in ("tenant_id", "tenant"):
+            value = labels.get(label_key)
+            if value is None:
+                continue
+            key = (metric, label_key, str(value))
+            if key not in seen:
+                seen.add(key)
+                violations.append(
+                    {"metric": metric, "label": label_key, "value": str(value)}
+                )
+            break
+        if len(violations) >= 5:
+            break
+    return violations
+
+
+def _build_case_command(
+    args: argparse.Namespace,
+    case: dict[str, Any],
+    config_path: Path,
+    output: Path,
+    duration_s: float,
+) -> list[str]:
+    """把 stress case 字典映射为 run_stress CLI 参数。
+
+    barrier 场景按「洪峰窗口 / 多波 / 其余分布」映射到 D / H / S；无 barrier
+    的定速率场景映射到 K。``blackbox_search_priority`` 等仅记录在 manifest
+    的字段不映射 CLI。
+    """
+    per_tenant_conc = int(case.get("per_tenant_concurrency") or 1)
+    cmd = [
+        sys.executable,
+        str(RUNNER),
+        "--echomem-url",
+        args.base_url,
+        "--tenant-config",
+        str(config_path),
+        "--tenants",
+        str(case["tenants"]),
+        "--duration-s",
+        str(duration_s),
+        "--concurrency-steps",
+        str(per_tenant_conc),
+        "--out-dir",
+        str(output / "run"),
+        "--seed-sessions-per-tenant",
+        str(case.get("sessions_per_tenant", 5)),
+        "--messages-per-session",
+        str(case.get("messages_per_session", 10)),
+        "--commit-poll-timeout-s",
+        str(args.commit_timeout_s),
+        "--commit-retry-max",
+        str(args.commit_max_attempts),
+        "--commit-retry-backoff-s",
+        str(args.commit_retry_backoff_s),
+    ]
+    if case.get("search_rps"):
+        cmd += ["--mode", "fixed-rps", "--rps", str(case["search_rps"])]
+    if case.get("commit_rpm"):
+        cmd += ["--commit-rpm", str(case["commit_rpm"])]
+    if args.preflight_config:
+        cmd += ["--preflight-config", args.preflight_config]
+    if args.no_server_metrics:
+        cmd += ["--no-metrics"]
+    if case.get("commit_barrier"):
+        # 洪峰窗口（report6 D：waves 为 1 且存在 burst 窗口）→ D 场景。
+        if case.get("commit_burst_window_s") and not (case.get("commit_barrier_waves") or 1) > 1:
+            cmd += [
+                "--scenarios", "D",
+                "--burst-commits", str(case.get("commit_barrier_count", 32)),
+                "--burst-window-s", str(case["commit_burst_window_s"]),
+            ]
+        # 多波（report4 D：waves > 1）→ H 场景。
+        elif (case.get("commit_barrier_waves") or 1) > 1:
+            cmd += [
+                "--scenarios", "H", "--commit-barrier",
+                "--commit-barrier-count", str(case["commit_barrier_count"]),
+                "--commit-barrier-waves", str(case["commit_barrier_waves"]),
+                "--commit-barrier-cooldown-s", str(case.get("commit_barrier_cooldown_s", 0.0)),
+            ]
+        # 其余 barrier（并发读 + 一次性 barrier）→ S 场景。
+        else:
+            cmd += [
+                "--scenarios", "S", "--commit-barrier",
+                "--commit-barrier-count", str(case["commit_barrier_count"]),
+                "--commit-tenant-distribution", str(case.get("commit_tenant_distribution", "uniform")),
+            ]
+            if case.get("commit_zipf_exponent"):
+                cmd += ["--commit-zipf-exponent", str(case["commit_zipf_exponent"])]
+            if case.get("commit_tenant_counts"):
+                cmd += ["--commit-tenant-counts", ",".join(map(str, case["commit_tenant_counts"]))]
+    else:
+        cmd += ["--scenarios", "K"]
+    return cmd
+
+
+def _derive_case_summary(run_dir: Path, identity_independent: bool) -> dict[str, Any]:
+    """把 run_stress 原生产物推导成 stress 契约摘要。
+
+    契约字段（metrics.search / metrics.commit / metrics.fairness /
+    metrics.per_tenant / details.*）供 acceptance 求值器与 data report
+    消费；run_stress 原始 summary.json / requests.csv 保留在 run 目录内不动。
+    """
+    run_dir = _resolve_run_dir(run_dir)
+    summary_path = run_dir / "summary.json"
+    native: dict[str, Any] = {}
+    if summary_path.is_file():
+        try:
+            native = json.loads(summary_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            native = {}
+    rows = _read_requests_csv(run_dir / "requests.csv")
+    reads = [row for row in rows if row.get("op") == "read"]
+    ok_reads = [row for row in reads if row.get("status") == "ok"]
+    commit_submits = [row for row in rows if row.get("op") == "commit_submit"]
+    ok_commits = [row for row in commit_submits if row.get("status") == "ok"]
+    commit_dones = [row for row in rows if row.get("op") == "commit_done"]
+    ok_dones = [row for row in commit_dones if row.get("status") == "ok"]
+    fail_dones = [row for row in commit_dones if row.get("status") == "error"]
+
+    read_latencies = [
+        value for value in (_ms_to_s(row.get("stage_ms")) for row in ok_reads)
+        if value is not None
+    ]
+    search_quality = native.get("search_quality") or {}
+    native_durability = native.get("commit_durability") or {}
+
+    submitted = len(reads)
+    succeeded = len(ok_reads)
+    commit_submitted = len(commit_submits)
+    completed = len(ok_dones)
+    failed = len(fail_dones)
+    commit_success_rate = native_durability.get("commit_success_rate")
+    if commit_success_rate is None:
+        commit_success_rate = completed / commit_submitted if commit_submitted else None
+
+    completed_by_tenant: dict[str, int] = {}
+    for row in ok_dones:
+        tenant_idx = str(row.get("tenant_idx") or "")
+        if tenant_idx:
+            completed_by_tenant[tenant_idx] = completed_by_tenant.get(tenant_idx, 0) + 1
+
+    per_tenant: dict[str, dict[str, Any]] = {}
+    for tenant_idx in sorted({str(row.get("tenant_idx") or "") for row in rows}):
+        if not tenant_idx:
+            continue
+        tenant_ok_commits = [
+            row for row in ok_commits if str(row.get("tenant_idx") or "") == tenant_idx
+        ]
+        tenant_done_stages = [
+            value for value in (
+                _ms_to_s(row.get("stage_ms"))
+                for row in ok_dones
+                if str(row.get("tenant_idx") or "") == tenant_idx
+            )
+            if value is not None
+        ]
+        if not tenant_ok_commits and not tenant_done_stages:
+            continue
+        commit_entry: dict[str, Any] = {}
+        if tenant_ok_commits:
+            commit_entry["submitted"] = len(tenant_ok_commits)
+        if tenant_done_stages:
+            commit_entry["completion"] = {
+                "p50_s": round(percentile(tenant_done_stages, 50), 3)
+            }
+        per_tenant[tenant_idx] = {"commit": commit_entry}
+
+    details: dict[str, Any] = {
+        "identity_mode": "independent_auth_keys" if identity_independent else "shared",
+        "quality_seed": [],
+    }
+    metrics_path = run_dir / "metrics_samples.csv"
+    if metrics_path.is_file():
+        metrics_rows = _read_requests_csv(metrics_path)
+        if metrics_rows:
+            families = (
+                tuple(PR421_ACCEPTANCE_TARGETS["lane_metric_families"])
+                + tuple(PR421_ACCEPTANCE_TARGETS["fanout_metric_families"])
+            )
+            observed = {row.get("metric") for row in metrics_rows}
+            details["pr421_metric_coverage"] = {
+                "present": {family: True for family in families if family in observed},
+                "missing": [family for family in families if family not in observed],
+                "bounded_label_violations": _bounded_label_violations(metrics_rows),
+            }
+
+    def _percentile(values: list[float], p: float) -> float | None:
+        value = percentile(values, p)
+        return round(value, 3) if value is not None else None
+
+    return {
+        "status": "completed" if str(native.get("status") or "") == "completed" else "NO_SUMMARY",
+        "metrics": {
+            "search": {
+                "submitted": submitted,
+                "succeeded": succeeded,
+                "errors": submitted - succeeded,
+                "success_rate": (succeeded / submitted) if submitted else None,
+                "latency": {
+                    "mean_s": (
+                        round(statistics.mean(read_latencies), 3) if read_latencies else None
+                    ),
+                    "p50_s": _percentile(read_latencies, 50),
+                    "p95_s": _percentile(read_latencies, 95),
+                    "p99_s": _percentile(read_latencies, 99),
+                },
+                "rate_limited_count": sum(
+                    1 for row in reads if row.get("error_type") == "http_4xx"
+                ),
+                "quality_asserted": int(search_quality.get("anchor_total") or 0),
+                "quality_failures": int(search_quality.get("quality_failures") or 0),
+            },
+            "commit": {
+                "submitted": commit_submitted,
+                "completed": completed,
+                "failed": failed,
+                "success_rate": commit_success_rate,
+                "rate_limited_count": sum(
+                    1 for row in commit_submits if row.get("error_type") == "http_4xx"
+                ),
+            },
+            "fairness": {
+                "commit_completed_per_tenant": completed_by_tenant,
+            },
+            "per_tenant": per_tenant,
+        },
+        "details": details,
+        "parameters": {
+            "commit_delay_threshold_s": 10.0,
+            "search_delay_threshold_s": 2.5,
+        },
+    }
+
+
+def _write_case_csvs(output: Path, rows: list[dict[str, str]]) -> None:
+    """把 run_stress 逐请求记录归一化为套件契约的两个 CSV。"""
+    done_by_session: dict[str, dict[str, str]] = {}
+    for row in rows:
+        if row.get("op") == "commit_done" and row.get("session_id"):
+            done_by_session.setdefault(row["session_id"], row)
+
+    commit_rows: list[dict[str, str]] = []
+    for row in rows:
+        if row.get("op") != "commit_submit":
+            continue
+        session_id = row.get("session_id") or ""
+        done = done_by_session.get(session_id)
+        if done is not None and done.get("status") == "ok":
+            status = "completed"
+            end_to_end = _ms_to_s(done.get("stage_ms"))
+        elif done is not None:
+            status = "failed"
+            end_to_end = _ms_to_s(done.get("stage_ms"))
+        else:
+            status = "submitted"
+            end_to_end = _ms_to_s(row.get("stage_ms"))
+        commit_rows.append(
+            {
+                "tenant": row.get("tenant_idx") or "",
+                "session_id": session_id,
+                "status": status,
+                "end_to_end_s": f"{end_to_end:.3f}" if end_to_end is not None else "",
+                "queue_wait_s": "",
+                "admission_wait_s": "",
+                "admission_queue_depth": "",
+                "request_id": session_id,
+            }
+        )
+    with (output / "commit_results.csv").open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(
+            handle,
+            fieldnames=[
+                "tenant", "session_id", "status", "end_to_end_s",
+                "queue_wait_s", "admission_wait_s", "admission_queue_depth", "request_id",
+            ],
+        )
+        writer.writeheader()
+        writer.writerows(commit_rows)
+
+    search_rows: list[dict[str, str]] = []
+    for row in rows:
+        if row.get("op") != "read":
+            continue
+        if row.get("status") == "ok":
+            status_code = "200"
+        elif row.get("error_type") == "http_4xx" and (
+            row.get("retry_after_s") or row.get("reason_code")
+        ):
+            status_code = "429"
+        else:
+            status_code = "500"
+        service_s = _ms_to_s(row.get("stage_ms"))
+        search_rows.append(
+            {
+                "tenant": row.get("tenant_idx") or "",
+                "session_id": row.get("session_id") or "",
+                "status_code": status_code,
+                "service_s": f"{service_s:.3f}" if service_s is not None else "",
+                "queue_wait_s": "",
+                "request_id": row.get("session_id") or "",
+                "retry_after_s": row.get("retry_after_s") or "",
+                "reason_code": row.get("reason_code") or "",
+            }
+        )
+    with (output / "search_results.csv").open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(
+            handle,
+            fieldnames=[
+                "tenant", "session_id", "status_code", "service_s",
+                "queue_wait_s", "request_id", "retry_after_s", "reason_code",
+            ],
+        )
+        writer.writeheader()
+        writer.writerows(search_rows)
+
+
 def run_case(
     runner: Path,
     case_root: Path,
@@ -453,86 +829,7 @@ def run_case(
         if args.case_timeout_s > 0
         else duration_s + max(60.0, float(args.commit_timeout_s))
     )
-    command = [
-        sys.executable,
-        str(runner),
-        "--base-url",
-        args.base_url,
-        "--tenant-config",
-        str(config_path),
-        "--tenants",
-        str(case["tenants"]),
-        "--duration-s",
-        str(duration_s),
-        "--search-rps",
-        str(case["search_rps"]),
-        "--commit-rpm",
-        str(case["commit_rpm"]),
-        "--sessions-per-tenant",
-        str(case["sessions_per_tenant"]),
-        "--messages-per-session",
-        str(case["messages_per_session"]),
-        "--quality-seed-messages",
-        str(case.get("quality_seed_messages", case["messages_per_session"])),
-        "--commit-timeout-s",
-        str(args.commit_timeout_s),
-        "--commit-workers",
-        str(case.get("commit_workers", args.commit_workers)),
-        "--commit-max-attempts",
-        str(args.commit_max_attempts),
-        "--commit-retry-backoff-s",
-        str(args.commit_retry_backoff_s),
-        "--commit-retry-max-backoff-s",
-        str(args.commit_retry_max_backoff_s),
-        "--search-workers",
-        str(case.get("search_workers", args.search_workers)),
-        "--search-admission-capacity",
-        str(args.search_admission_capacity),
-        "--commit-admission-capacity",
-        str(args.commit_admission_capacity),
-        "--admission-capacity",
-        str(args.admission_capacity),
-        "--out-dir",
-        str(output),
-    ]
-    if case.get("read_only"):
-        command.append("--read-only")
-    if case.get("commit_barrier"):
-        command += [
-            "--commit-barrier",
-            "--commit-barrier-count",
-            str(case["commit_barrier_count"]),
-            "--commit-tenant-distribution",
-            str(case.get("commit_tenant_distribution", "uniform")),
-            "--commit-zipf-exponent",
-            str(case.get("commit_zipf_exponent", 2.0)),
-        ]
-        if case.get("commit_tenant_counts"):
-            command += [
-                "--commit-tenant-counts",
-                ",".join(map(str, case["commit_tenant_counts"])),
-            ]
-        if case.get("commit_barrier_waves"):
-            command += [
-                "--commit-barrier-waves",
-                str(case["commit_barrier_waves"]),
-                "--commit-barrier-cooldown-s",
-                str(case.get("commit_barrier_cooldown_s", 0.0)),
-            ]
-        if case.get("commit_burst_window_s"):
-            command += [
-                "--commit-barrier-window-s",
-                str(case["commit_burst_window_s"]),
-            ]
-    if args.auth_header:
-        command += ["--auth-header", args.auth_header]
-    if args.allow_shared_identity:
-        command.append("--allow-shared-identity")
-    if args.pid:
-        command += ["--pid", str(args.pid)]
-    if args.no_server_metrics:
-        command.append("--no-server-metrics")
-    command.append("--no-client-admission")
+    command = _build_case_command(args, case, config_path, output, duration_s)
     if args.reset_command:
         completed_reset = subprocess.run(
             args.reset_command,
@@ -549,11 +846,15 @@ def run_case(
         if completed_reset.returncode != 0:
             return {
                 "scenario": scenario,
+                "scenario_label": case["label"],
                 "repetition": repetition,
                 "policy": policy,
                 "status": "RESET_FAILED",
-                "returncode": completed_reset.returncode,
+                "runner_returncode": completed_reset.returncode,
+                "duration_s": duration_s,
+                "case_timeout_s": case_timeout_s,
                 "output_dir": str(output.resolve()),
+                "summary": {},
             }
     completed, timed_out = run_case_process(
         command,
@@ -565,134 +866,29 @@ def run_case(
     (output / "suite_runner.stderr.log").write_text(
         completed.stderr, encoding="utf-8"
     )
-    summary_path = output / "summary.json"
-    summary: dict[str, Any] = {}
-    if summary_path.is_file():
-        summary = json.loads(summary_path.read_text(encoding="utf-8"))
+    run_dir = _resolve_run_dir(output / "run")
+    rows = _read_requests_csv(run_dir / "requests.csv")
+    _write_case_csvs(output, rows)
+    derived = _derive_case_summary(run_dir, args.identity_independent)
+    if completed.returncode != 0:
+        derived["status"] = "NO_SUMMARY"
+    (output / "summary.json").write_text(
+        json.dumps(derived, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
     return {
         "scenario": scenario,
         "scenario_label": case["label"],
         "repetition": repetition,
         "policy": policy,
-        "status": summary.get("status", "NO_SUMMARY"),
+        "status": "FAIL" if completed.returncode != 0 else derived["status"],
         "runner_returncode": completed.returncode,
         "duration_s": duration_s,
         "case_timeout_s": case_timeout_s,
         "runner_timeout": timed_out,
         "output_dir": str(output.resolve()),
-        "summary": summary,
+        "summary": derived,
     }
-
-
-def render_report(manifest: dict[str, Any], output_path: Path) -> None:
-    import html
-
-    runs = manifest.get("runs") or []
-    rows = []
-    for run in runs:
-        summary = run.get("summary") or {}
-        metrics = summary.get("metrics") or {}
-        commit = metrics.get("commit") or {}
-        search = metrics.get("search") or {}
-        c = commit.get("completion") or {}
-        s = search.get("latency") or {}
-        details = summary.get("details") or {}
-        isolation = details.get("isolation") or {}
-        rows.append(
-            "<tr>"
-            f"<td>{html.escape(str(run.get('scenario')))}</td>"
-            f"<td>{html.escape(str(run.get('repetition')))}</td>"
-            f"<td><b>{html.escape(str(run.get('policy')))}</b></td>"
-            f"<td>{html.escape(str(run.get('status')))}</td>"
-            f"<td>{html.escape(str(commit.get('completed', 0)))} / {html.escape(str(commit.get('submitted', 0)))}</td>"
-            f"<td>{fmt_seconds(c.get('mean_s'))}</td><td>{fmt_seconds(c.get('p95_s'))}</td><td>{fmt_seconds(c.get('p99_s'))}</td>"
-            f"<td>{html.escape(str(search.get('succeeded', 0)))} / {html.escape(str(search.get('submitted', 0)))}</td>"
-            f"<td>{fmt_seconds(s.get('mean_s'))}</td><td>{fmt_seconds(s.get('p95_s'))}</td>"
-            f"<td>{html.escape(str((metrics.get('admission') or {}).get('max_queue_depth', 0)))}</td>"
-            f"<td>{html.escape(str(isolation.get('status', '未提供')))}</td>"
-            f"<td><a href='{html.escape(str(Path(run.get('output_dir', '')).relative_to(Path(manifest['output_root'])) / 'report.html'))}'>详情</a></td>"
-            "</tr>"
-        )
-    if not runs:
-        rows.append("<tr><td colspan='14'>没有执行记录</td></tr>")
-    aggregates = aggregate_runs(runs)
-    aggregate_rows = []
-    aggregate_details = []
-    for item in aggregates:
-        aggregate_rows.append(
-            "<tr>"
-            f"<td>{html.escape(item['scenario'])}</td><td><b>{html.escape(item['policy'])}</b></td>"
-            f"<td>{item['repetitions']}</td>"
-            f"<td>{item['commit_completed']} / {item['commit_submitted']}</td>"
-            f"<td>{fmt_seconds(item['commit_mean'])}</td><td>{fmt_seconds(item['commit_p50'])}</td>"
-            f"<td>{fmt_seconds(item['commit_p90'])}</td><td>{fmt_seconds(item['commit_p95'])}</td>"
-            f"<td>{fmt_seconds(item['commit_p99'])}</td><td>{fmt_seconds(item['commit_max'])}</td>"
-            f"<td>{item['commit_delayed']}</td>"
-            f"<td>{item['search_succeeded']} / {item['search_submitted']}</td>"
-            f"<td>{fmt_seconds(item['search_mean'])}</td><td>{fmt_seconds(item['search_p50'])}</td>"
-            f"<td>{fmt_seconds(item['search_p90'])}</td><td>{fmt_seconds(item['search_p95'])}</td>"
-            f"<td>{fmt_seconds(item['search_p99'])}</td><td>{fmt_seconds(item['search_max'])}</td>"
-            f"<td>{item['search_delayed']}</td><td>{item['rate_limited']}</td>"
-            "</tr>"
-        )
-        tenant_lines = []
-        for tenant, values in sorted(item["tenant_rows"].items()):
-            commit_means = values["commit"]
-            search_means = values["search"]
-            tenant_lines.append(
-                f"<tr><td>{html.escape(tenant)}</td>"
-                f"<td>{values['commit_completed']} / {values['commit_submitted']}</td>"
-                f"<td>{fmt_seconds(statistics.mean(commit_means) if commit_means else None)}</td>"
-                f"<td>{fmt_seconds(percentile(commit_means, 50))}</td>"
-                f"<td>{fmt_seconds(percentile(commit_means, 95))}</td>"
-                f"<td>{fmt_seconds(max(commit_means) if commit_means else None)}</td>"
-                f"<td>{values['commit_delayed']}</td>"
-                f"<td>{values['search_succeeded']} / {values['search_submitted']}</td>"
-                f"<td>{fmt_seconds(statistics.mean(search_means) if search_means else None)}</td>"
-                f"<td>{fmt_seconds(percentile(search_means, 50))}</td>"
-                f"<td>{fmt_seconds(percentile(search_means, 95))}</td>"
-                f"<td>{fmt_seconds(percentile(search_means, 99))}</td>"
-                f"<td>{fmt_seconds(max(search_means) if search_means else None)}</td>"
-                f"<td>{values['search_delayed']}</td></tr>"
-            )
-        aggregate_details.append(
-            f"<details><summary>{html.escape(item['scenario'])} · {html.escape(item['policy'])} · "
-            f"逐租户汇总</summary><div class='scroll'><table><thead><tr>"
-            f"<th>租户</th><th>Commit 完成/提交</th><th>Commit 平均</th><th>Commit P50</th>"
-            f"<th>Commit P95</th><th>Commit 最大</th><th>Commit 延迟</th>"
-            f"<th>Search 成功/提交</th><th>Search 平均</th><th>Search P95</th>"
-            f"<th>Search P50</th><th>Search P99</th><th>Search 最大</th>"
-            f"<th>Search 延迟</th></tr></thead><tbody>"
-            f"{''.join(tenant_lines) or '<tr><td colspan=14>没有逐租户数据</td></tr>'}"
-            "</tbody></table></div></details>"
-        )
-    icon = (
-        "<svg class='logo' viewBox='0 0 56 56' role='img' aria-label='压测报告'>"
-        "<rect x='3' y='3' width='50' height='50' rx='13' fill='#17324d'/>"
-        "<path d='M13 40V29M22 40V20M31 40V25M40 40V13' stroke='#72d5b7' stroke-width='4' stroke-linecap='round'/>"
-        "<path d='M11 44h34M12 17l8-5 8 6 12-9' fill='none' stroke='#ff9d6e' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'/></svg>"
-    )
-    document = f"""<!doctype html>
-<html lang='zh-CN'><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'>
-<title>EchoMem 正式多租户压测套件</title>
-<style>
-:root{{--bg:#f3f6f7;--paper:#fff;--ink:#17212b;--muted:#6d7b87;--line:#dce4e8;--green:#177b63;--amber:#9b6b16;--amber-bg:#fff7df}}
-*{{box-sizing:border-box}}body{{margin:0;background:var(--bg);color:var(--ink);font:14px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC",sans-serif}}
-.page{{max-width:1500px;margin:auto;padding:28px 20px 60px}}.top{{display:flex;align-items:center;gap:14px;margin-bottom:18px}}.logo{{width:52px;height:52px}}
-h1{{margin:0;font-size:25px}}h2{{font-size:18px;margin:0 0 10px}}.muted,small{{color:var(--muted)}}.section{{background:var(--paper);border:1px solid var(--line);padding:18px 19px;margin-top:12px}}
-.notice{{padding:12px 14px;background:var(--amber-bg);border-left:4px solid var(--amber);color:#6d5116;margin-bottom:12px}}
-.scroll{{overflow:auto}}table{{width:100%;border-collapse:collapse;font-size:12px;white-space:nowrap}}th,td{{padding:9px 8px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}}th{{background:#fafbfc;color:var(--muted)}}a{{color:#286aa6}}
-</style></head><body><main class='page'><header class='top'>{icon}<div><h1>EchoMem 正式多租户压测套件</h1><small>真实 HTTP / 真实模型 · {html.escape(manifest.get('created_at', ''))}</small></div></header>
-<section class='section'><div class='notice'><b>重要边界：</b>本套件的策略控制压测端准入，不自动等同于 EchoMem 内部限流。只有服务端提供队列、429、Retry-After 和执行时间遥测，才能确认服务端调度。</div>
-<p>正式结果要求每次运行使用独立认证租户。当前套件包含单租户基线、四租户均衡、Commit 压力、Search 压力和长稳态场景；每个场景在同一套真实并发模式下重复执行，保留全部逐请求 CSV、原始 /metrics 和独立报告。</p></section>
-<section class='section'><h2>运行配置</h2><p class='muted'>服务：<code>{html.escape(str(manifest.get('base_url')))}</code> · 重复轮次：{html.escape(str(manifest.get('repeats')))} · 客户端调度策略：关闭</p>
-<div class='scroll'><table><thead><tr><th>场景</th><th>轮次</th><th>策略</th><th>状态</th><th>Commit 完成</th><th>Commit 平均</th><th>Commit P95</th><th>Commit P99</th><th>Search 成功</th><th>Search 平均</th><th>Search P95</th><th>最大队列</th><th>隔离</th><th>详情</th></tr></thead><tbody>{''.join(rows)}</tbody></table></div></section>
-<section class='section'><h2>跨轮次聚合数据</h2><p class='muted'>这里直接合并每轮 CSV 的请求级数据，避免只看单轮均值。延迟单位为秒；延迟数使用各轮配置的阈值。</p>
-<div class='scroll'><table><thead><tr><th>场景</th><th>策略</th><th>轮次</th><th>Commit 完成/提交</th><th>Commit 平均</th><th>Commit P50</th><th>Commit P90</th><th>Commit P95</th><th>Commit P99</th><th>Commit 最大</th><th>Commit 延迟数</th><th>Search 成功/提交</th><th>Search 平均</th><th>Search P50</th><th>Search P90</th><th>Search P95</th><th>Search P99</th><th>Search 最大</th><th>Search 延迟数</th><th>429</th></tr></thead><tbody>{''.join(aggregate_rows) or '<tr><td colspan=20>没有可聚合数据</td></tr>'}</tbody></table></div>
-{''.join(aggregate_details)}</section>
-<section class='section'><h2>原始套件清单</h2><p class='muted'>完整参数与每轮输出目录记录在 <code>suite.json</code>。报告中的延迟单位为秒；失败请求不会被隐藏。</p></section>
-</main></body></html>"""
-    output_path.write_text(document, encoding="utf-8")
 
 
 def fmt_seconds(value: Any) -> str:
@@ -899,35 +1095,16 @@ def main() -> int:
             "retries; 0 derives it from workload duration and commit timeout."
         ),
     )
-    parser.add_argument("--auth-header", default=os.getenv("ECHOMEM_AUTH_HEADER", "X-API-Key"))
     parser.add_argument(
         "--allow-shared-identity",
         action="store_true",
         help="Allow an exploratory shared credential; isolation/fairness remain inconclusive.",
     )
-    parser.add_argument("--commit-workers", type=int, default=8)
     parser.add_argument("--commit-timeout-s", type=float, default=120.0)
     parser.add_argument("--commit-max-attempts", type=int, default=3)
     parser.add_argument("--commit-retry-backoff-s", type=float, default=2.0)
-    parser.add_argument("--commit-retry-max-backoff-s", type=float, default=30.0)
-    parser.add_argument("--search-workers", type=int, default=32)
-    parser.add_argument("--search-admission-capacity", type=int, default=0)
-    parser.add_argument("--commit-admission-capacity", type=int, default=0)
-    parser.add_argument("--admission-capacity", type=int, default=0)
-    parser.add_argument("--pid", type=int, default=0)
     parser.add_argument("--reset-command", default="", help="Optional command run before every case")
     parser.add_argument("--no-server-metrics", action="store_true")
-    parser.add_argument("--fault-plan", default="", help="Optional real fault/recovery/cursor plan")
-    parser.add_argument("--fault-out-dir", default="")
-    parser.add_argument("--fault-auth-key", default=os.getenv("ECHOMEM_AUTH_KEY", ""))
-    parser.add_argument("--k6-summary", default="")
-    parser.add_argument("--k6-runner-dir", default="")
-    parser.add_argument("--k6-request-stream", default="")
-    parser.add_argument(
-        "--capability-probe",
-        default="",
-        help="Existing capability_probe.json to include in suite evidence",
-    )
     parser.add_argument(
         "--preflight-config",
         default=os.getenv("ECHOMEM_CONFIG", ""),
@@ -958,21 +1135,12 @@ def main() -> int:
         parser.error(
             f"--profile {args.profile} requires --preflight-config with the actual EchoMem config.json"
         )
-    preflight_errors: list[str] = []
+    preflight_result: dict[str, Any] | None = None
     if args.preflight_config:
-        preflight_errors = validate_real_model_config(
-            args.preflight_config,
-            expected_embedding_dimensions=1024 if args.profile in {"report6", "complete"} else None,
-        )
-        if preflight_errors:
+        preflight_result = run_preflight(args.preflight_config, timeout_s=30.0)
+        if not preflight_result["ok"]:
             parser.error(
-                "real-model preflight failed:\n- " + "\n- ".join(preflight_errors)
-            )
-    if args.preflight_config:
-        model_errors = validate_real_model_config(args.preflight_config)
-        if model_errors:
-            parser.error(
-                "real-model preflight failed:\n- " + "\n- ".join(model_errors)
+                f"real-model preflight failed: {preflight_result['error']}"
             )
 
     tenant_path = Path(args.tenant_config).expanduser().resolve()
@@ -982,9 +1150,10 @@ def main() -> int:
         parser.error(
             f"tenant config has {len(all_tenants)} tenants, but selected scenarios require {required_tenants}"
         )
-    root = Path(args.out_dir or f"results/stress/formal_{datetime.now().strftime('%Y%m%d_%H%M%S')}")
+    args.identity_independent = _identity_is_independent(all_tenants)
+    root = Path(args.out_dir or f"results/performance/formal_{datetime.now().strftime('%Y%m%d_%H%M%S')}")
     root.mkdir(parents=True, exist_ok=True)
-    runner = Path(__file__).with_name("runner.py")
+    runner = RUNNER
     config_dir = root / "_tenant_configs"
     config_dir.mkdir(exist_ok=True)
     config_paths: dict[int, Path] = {}
@@ -1002,7 +1171,6 @@ def main() -> int:
                 "included": args.profile in {"report6", "complete"},
                 "scenario_count": len(report6_scenarios()) if args.profile in {"report6", "complete"} else 0,
                 "scenarios": sorted(report6_scenarios()) if args.profile in {"report6", "complete"} else [],
-                "fault_plan_supplied": bool(args.fault_plan),
             },
             "pr421": {
                 "name": "EchoMem PR421 可量化验收与调度指标方案",
@@ -1026,28 +1194,20 @@ def main() -> int:
             if args.preflight_config
             else ""
         ),
-        "preflight": {
-            "status": "PASS" if args.preflight_config else "NOT_RUN",
-            "config": (
-                str(Path(args.preflight_config).expanduser().resolve())
-                if args.preflight_config
-                else ""
-            ),
-            "checks": {
-                "llm_provider_model": "real",
-                "embedding_provider_model": "real",
-                "embedding_dimensions": 1024 if args.profile == "report6" else "not_required",
-                "api_key_values": "not_recorded",
-            },
-            "errors": preflight_errors,
-        },
+        "preflight": (
+            {
+                **preflight_result,
+                "config": str(Path(args.preflight_config).expanduser().resolve()),
+            }
+            if preflight_result is not None
+            else {"status": "NOT_RUN", "config": "", "engines_checked": 0, "engines": [], "digest": ""}
+        ),
         "reset_command": args.reset_command,
         "client_admission_enabled": False,
         "server_observation_mode": True,
         "runs": [],
     }
-    # Use a deterministic order so a rerun is easy to compare. The service
-    # reset hook is the mechanism for keeping the data/index boundary fixed.
+    # 用确定性顺序执行，便于重跑对比；服务端重置钩子负责固定数据/索引边界。
     for scenario in scenario_names:
         case = scenario_catalog[scenario]
         for repetition in range(1, args.repeats + 1):
@@ -1080,78 +1240,6 @@ def main() -> int:
                     json.dumps(manifest, ensure_ascii=False, indent=2) + "\n",
                     encoding="utf-8",
                 )
-    if args.fault_plan:
-        fault_out = Path(args.fault_out_dir or (root / "fault-suite"))
-        fault_command = [
-            sys.executable,
-            str(Path(__file__).with_name("fault_suite.py")),
-            "--plan", str(Path(args.fault_plan).expanduser().resolve()),
-            "--out-dir", str(fault_out),
-            "--base-url", args.base_url,
-            "--auth-key", args.fault_auth_key,
-            "--auth-header", args.auth_header,
-        ]
-        completed = subprocess.run(fault_command, capture_output=True, text=True, check=False)
-        fault_manifest = {
-            "path": str(fault_out / "fault-suite.json"),
-            "returncode": completed.returncode,
-            "stdout": completed.stdout[-4000:],
-            "stderr": completed.stderr[-4000:],
-        }
-        fault_path = fault_out / "fault-suite.json"
-        if fault_path.exists():
-            try:
-                fault_manifest.update(json.loads(fault_path.read_text(encoding="utf-8")))
-            except json.JSONDecodeError:
-                pass
-        manifest["fault_suite"] = fault_manifest
-
-    if args.k6_summary and args.k6_runner_dir:
-        k6_output = root / "k6-reconciliation.json"
-        k6_command = [
-            sys.executable,
-            str(Path(__file__).with_name("k6_reconcile.py")),
-            "--k6-summary", str(Path(args.k6_summary).expanduser().resolve()),
-            "--runner-dir", str(Path(args.k6_runner_dir).expanduser().resolve()),
-            "--out", str(k6_output),
-        ]
-        if args.k6_request_stream:
-            k6_command.extend([
-                "--k6-request-stream",
-                str(Path(args.k6_request_stream).expanduser().resolve()),
-            ])
-        completed = subprocess.run(k6_command, capture_output=True, text=True, check=False)
-        k6_manifest = {
-            "path": str(k6_output),
-            "returncode": completed.returncode,
-            "stdout": completed.stdout[-4000:],
-            "stderr": completed.stderr[-4000:],
-        }
-        if k6_output.exists():
-            try:
-                k6_manifest.update(json.loads(k6_output.read_text(encoding="utf-8")))
-            except json.JSONDecodeError:
-                pass
-        manifest["k6_reconciliation"] = k6_manifest
-
-    if args.capability_probe:
-        capability_path = Path(args.capability_probe).expanduser().resolve()
-        if capability_path.is_file():
-            try:
-                manifest["capability_probe"] = json.loads(
-                    capability_path.read_text(encoding="utf-8")
-                )
-                manifest["capability_probe_path"] = str(capability_path)
-            except json.JSONDecodeError as exc:
-                manifest["capability_probe"] = {
-                    "status": "INCONCLUSIVE",
-                    "reason": f"invalid capability probe JSON: {exc}",
-                }
-        else:
-            manifest["capability_probe"] = {
-                "status": "INCONCLUSIVE",
-                "reason": "capability probe file does not exist",
-            }
 
     acceptance = evaluate_pr421_acceptance(manifest)
     manifest["acceptance"] = acceptance
@@ -1203,10 +1291,7 @@ def main() -> int:
             "scenarios": scenario_names,
             "repeats": args.repeats,
             "policies": list(POLICIES),
-            "commit_workers": args.commit_workers,
             "commit_timeout_s": args.commit_timeout_s,
-            "search_workers": args.search_workers,
-            "client_admission": "disabled",
         },
         "details": {
             "run_count": len(manifest["runs"]),

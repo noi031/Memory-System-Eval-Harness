@@ -11,6 +11,7 @@ external-deployment (static identity) guard. No real server is touched.
 from __future__ import annotations
 
 import argparse
+import io
 import json
 import os
 import re
@@ -25,6 +26,7 @@ from performance.loadgen import (
     LoadGenerator,
     RequestRecord,
     classify_error,
+    extract_reason_code,
     is_anchor_query,
     mix_token_sequence,
     retry_decision,
@@ -42,7 +44,9 @@ from performance.metrics_calc import (
     evaluate_features,
     fairness_measurements,
     fault_injection_summary,
+    hot_tenant_summary,
     injected_bytes_series,
+    isolation_probe_summary,
     isolation_summary,
     percentile,
     percentiles,
@@ -51,6 +55,7 @@ from performance.metrics_calc import (
     retry_summary,
     rss_normalized_series,
     rss_trend_mb_per_min,
+    saturation_summary,
     search_quality_summary,
     summarize_records,
     tenant_fairness,
@@ -74,9 +79,11 @@ from performance.perf_preflight import (
     run_preflight,
 )
 from performance.prepare import (
+    TenantContext,
     TenantPreparer,
     _query_fragments,
     load_locomo_seed_batches,
+    load_tenant_specs,
     seed_tenant_from_conversations,
 )
 from performance.report import (
@@ -89,6 +96,7 @@ from performance.report import (
 )
 from performance.run_stress import _resolve_args
 from performance.scenarios import (
+    SceneRun,
     expand_matrix,
     parse_concurrency_steps,
     parse_mix_ratio,
@@ -315,6 +323,53 @@ class ScenarioMatrixTests(unittest.TestCase):
                 burst_window_s=1.0,
             )
 
+    def test_expand_matrix_single_shot_scenarios(self) -> None:
+        # S/H/K/I 为单发场景：各只产出一个 SceneRun，追加在 A/B/C/D 展开之后。
+        runs = expand_matrix(
+            scenario_ids=["A", "S", "H", "K", "I"],
+            concurrency_steps=[1, 4],
+            mix_ratios=[(8, 1)],
+            duration_s=60.0,
+            burst_commits=32,
+            burst_window_s=10.0,
+            barrier_commits=128,
+        )
+        keys = [run.key for run in runs]
+        self.assertEqual(keys, ["A@1", "A@4", "S@1", "H@1", "K@1", "I@1"])
+        s = runs[2]
+        self.assertEqual(s.scene_id, "S")
+        self.assertEqual(s.burst_commits, 128)  # S 的 burst_commits 用 barrier 参数
+        self.assertEqual(s.barrier_commits, 128)
+        self.assertEqual(s.barrier_distribution, "uniform")
+        h = runs[3]
+        self.assertEqual(h.scene_id, "H")
+        # 无 explicit counts 时 H 回退到 CLI 传入的 barrier 参数
+        self.assertEqual(h.barrier_commits, 128)
+        self.assertEqual(h.barrier_distribution, "uniform")
+
+    def test_expand_matrix_single_shot_h_explicit_counts(self) -> None:
+        runs = expand_matrix(
+            scenario_ids=["H"],
+            concurrency_steps=[4],
+            mix_ratios=[(8, 1)],
+            duration_s=120.0,
+            burst_commits=32,
+            burst_window_s=10.0,
+            barrier_commits=0,
+            barrier_tenant_counts=[200, 20, 20, 20],
+            barrier_waves=2,
+            barrier_cooldown_s=5.0,
+        )
+        self.assertEqual(len(runs), 1)
+        h = runs[0]
+        self.assertEqual(h.scene_id, "H")
+        self.assertEqual(h.key, "H@4")
+        self.assertEqual(h.barrier_commits, 260)  # explicit 计数总和
+        self.assertEqual(h.barrier_distribution, "explicit")
+        self.assertEqual(h.barrier_tenant_counts, [200, 20, 20, 20])
+        self.assertEqual(h.barrier_waves, 2)
+        self.assertEqual(h.barrier_cooldown_s, 5.0)
+
 
 class LoadgenTests(unittest.TestCase):
     def test_mix_token_sequence(self) -> None:
@@ -362,6 +417,7 @@ class FakeMemClient:
         self.commit_failures_left = 0  # 抛 503 的次数（之后成功）
         self.commit_429_left = 0  # 抛 429+Retry-After 的次数
         self.commit_400 = False  # 抛 400（不可重试）
+        self.commit_reason_code = ""  # 429 响应头附加的 reason_code
         self.archive_status = "completed"
         self.search_short_circuit = False  # 普通查询短路空响应
         self.anchor_short_circuit = False  # 锚词查询短路空响应
@@ -399,6 +455,8 @@ class FakeMemClient:
             self.commit_429_left -= 1
             exc = urllib.error.HTTPError("http://x", 429, "limited", None, None)
             exc.headers = {"Retry-After": self.retry_after_s}
+            if self.commit_reason_code:
+                exc.headers["x-reason-code"] = self.commit_reason_code
             raise exc
         self.commit_calls += 1
         return "archive-1"
@@ -736,6 +794,16 @@ class RunStressArgsTests(unittest.TestCase):
             seed_source="synthetic",
             dataset_path="",
             sample_filter="conv-30",
+            tenant_config="",
+            commit_rpm=0.0,
+            commit_barrier=False,
+            commit_barrier_count=128,
+            commit_tenant_distribution="uniform",
+            commit_zipf_exponent=2.0,
+            commit_tenant_counts="",
+            commit_barrier_waves=1,
+            commit_barrier_cooldown_s=0.0,
+            isolation_markers_per_tenant=5,
         )
         base.update(overrides)
         return argparse.Namespace(**base)
@@ -950,6 +1018,10 @@ class FeatureVerdictTests(unittest.TestCase):
         result = evaluate_features(self._base_summary())
         self.assertEqual(result["overall"], "PASS")
         for key, entry in result["features"].items():
+            if key in ("tenant_isolation", "saturation_contract", "hot_tenant_fairness"):
+                # 新增特性未运行对应场景（S/H/I）时按 not_run 处理，不参与总体 PASS
+                self.assertEqual(entry["verdict"], "not_run", key)
+                continue
             self.assertEqual(entry["verdict"], "PASS", key)
         # 每个特性都带量化 measurements
         commit_meas = result["features"]["commit_guarantee"]["measurements"]
@@ -1923,3 +1995,463 @@ class ErrorTypeTests(unittest.TestCase):
         result = evaluate_features(summary)
         self.assertEqual(result["features"]["isolation_granularity"]["verdict"], "FAIL")
         self.assertEqual(result["overall"], "FAIL")
+
+
+class RetryContractTests(unittest.TestCase):
+    """逐请求 retry 契约：reason_code 提取 / commit_submit 携带 / retry_summary 扩展。"""
+
+    @staticmethod
+    def _http_error(code: int = 429, headers=None, body: str | None = None):
+        fp = io.BytesIO(body.encode("utf-8")) if body is not None else None
+        exc = urllib.error.HTTPError("http://x", code, "msg", None, fp)
+        if headers:
+            exc.headers = headers
+        return exc
+
+    def test_extract_reason_code_from_header(self) -> None:
+        exc = self._http_error(headers={"X-Reason-Code": "rate_limited"})
+        self.assertEqual(extract_reason_code(exc), "rate_limited")
+
+    def test_extract_reason_code_from_body_top_level(self) -> None:
+        exc = self._http_error(body='{"reason_code": "quota_exceeded"}')
+        self.assertEqual(extract_reason_code(exc), "quota_exceeded")
+
+    def test_extract_reason_code_from_error_nested(self) -> None:
+        exc = self._http_error(body='{"error": {"errorCode": "rate_limited"}}')
+        self.assertEqual(extract_reason_code(exc), "rate_limited")
+
+    def test_extract_reason_code_from_meta_nested(self) -> None:
+        exc = self._http_error(body='{"meta": {"reasonCode": "quota"}}')
+        self.assertEqual(extract_reason_code(exc), "quota")
+
+    def test_extract_reason_code_not_found(self) -> None:
+        exc = self._http_error(body='{"message": "just a message"}')
+        self.assertEqual(extract_reason_code(exc), "")
+        self.assertEqual(extract_reason_code(RuntimeError("boom")), "")
+
+    def test_commit_submit_failure_carries_retry_contract(self) -> None:
+        client = FakeMemClient()
+        client.commit_429_left = 1
+        client.retry_after_s = "2"
+        client.commit_reason_code = "rate_limited"
+        result = run_write_transaction(
+            client,
+            scene_key="B@1", step_conc=1, tenant_idx=0, seq=1,
+            messages_per_session=3, commit_poll_timeout_s=30.0,
+            commit_retry_max=2, commit_retry_backoff_s=0.01,
+        )
+        submit = [rec for rec in result.records if rec.op == "commit_submit"][0]
+        self.assertTrue(result.ok)
+        self.assertEqual(submit.retry_after_s, 2.0)
+        self.assertEqual(submit.reason_code, "rate_limited")
+
+    def test_commit_submit_success_carries_last_retry_contract(self) -> None:
+        # 重试后成功的提交同样记录最后一次失败尝试的 retry 契约字段
+        client = FakeMemClient()
+        client.commit_429_left = 1
+        client.retry_after_s = "1"
+        client.commit_reason_code = "rate_limited"
+        result = run_write_transaction(
+            client,
+            scene_key="B@1", step_conc=1, tenant_idx=0, seq=1,
+            messages_per_session=2, commit_poll_timeout_s=30.0,
+            commit_retry_max=2, commit_retry_backoff_s=0.01,
+        )
+        submit = [rec for rec in result.records if rec.op == "commit_submit"][0]
+        self.assertTrue(submit.final_success)
+        self.assertEqual(submit.retry_after_s, 1.0)
+        self.assertEqual(submit.reason_code, "rate_limited")
+
+    def test_retry_summary_includes_retry_after_and_reason_codes(self) -> None:
+        client = FakeMemClient()
+        client.commit_429_left = 1
+        client.retry_after_s = "2"
+        client.commit_reason_code = "rate_limited"
+        result = run_write_transaction(
+            client,
+            scene_key="B@1", step_conc=1, tenant_idx=0, seq=1,
+            messages_per_session=3, commit_poll_timeout_s=30.0,
+            commit_retry_max=2, commit_retry_backoff_s=0.01,
+        )
+        summary = retry_summary(result.records)
+        self.assertEqual(summary["retry_after_s"]["max"], 2.0)
+        self.assertEqual(summary["reason_codes"], {"rate_limited": 1})
+
+
+class BarrierTests(unittest.TestCase):
+    """commit barrier：租户分布（uniform/zipf/explicit）与并发 commit 记录。"""
+
+    @staticmethod
+    def _tenant(idx: int) -> TenantContext:
+        client = FakeMemClient()
+        return TenantContext(
+            idx=idx, tenant_id=f"t{idx}", user_id=f"u{idx}", auth_key="k", client=client
+        )
+
+    def _run(self, scene: SceneRun, tenant_count: int):
+        gen = LoadGenerator()
+        tenants = [self._tenant(i) for i in range(tenant_count)]
+        records = gen.run_commit_barrier(scene, tenants, messages_per_session=2)
+        return records
+
+    def _submit_counts(self, records):
+        counts: dict[int, int] = {}
+        for rec in records:
+            if rec.op == "commit_submit":
+                counts[rec.tenant_idx] = counts.get(rec.tenant_idx, 0) + 1
+        return counts
+
+    def test_uniform_distribution(self) -> None:
+        scene = SceneRun("S", 1, 60.0, barrier_commits=10, barrier_distribution="uniform")
+        counts = self._submit_counts(self._run(scene, 2))
+        self.assertEqual(counts, {0: 5, 1: 5})
+
+    def test_uniform_remainder_to_first(self) -> None:
+        scene = SceneRun("S", 1, 60.0, barrier_commits=10, barrier_distribution="uniform")
+        counts = self._submit_counts(self._run(scene, 3))
+        self.assertEqual(counts, {0: 4, 1: 3, 2: 3})
+
+    def test_zipf_distribution(self) -> None:
+        scene = SceneRun(
+            "S", 1, 60.0, barrier_commits=10,
+            barrier_distribution="zipf", barrier_zipf_exponent=2.0,
+        )
+        counts = self._submit_counts(self._run(scene, 2))
+        self.assertEqual(counts, {0: 8, 1: 2})
+
+    def test_explicit_distribution(self) -> None:
+        scene = SceneRun(
+            "H", 1, 60.0, barrier_commits=10,
+            barrier_distribution="explicit", barrier_tenant_counts=[7, 3],
+        )
+        counts = self._submit_counts(self._run(scene, 2))
+        self.assertEqual(counts, {0: 7, 1: 3})
+
+    def test_explicit_count_length_mismatch_raises(self) -> None:
+        scene = SceneRun(
+            "H", 1, 60.0, barrier_commits=10,
+            barrier_distribution="explicit", barrier_tenant_counts=[7],
+        )
+        with self.assertRaises(ValueError):
+            self._run(scene, 2)
+
+    def test_explicit_count_sum_mismatch_raises(self) -> None:
+        scene = SceneRun(
+            "H", 1, 60.0, barrier_commits=10,
+            barrier_distribution="explicit", barrier_tenant_counts=[8, 3],
+        )
+        with self.assertRaises(ValueError):
+            self._run(scene, 2)
+
+    def test_non_positive_commits_raises(self) -> None:
+        scene = SceneRun("S", 1, 60.0, barrier_commits=0)
+        with self.assertRaises(ValueError):
+            self._run(scene, 2)
+
+    def test_barrier_records_shape(self) -> None:
+        scene = SceneRun("S", 1, 60.0, barrier_commits=4, barrier_distribution="uniform")
+        records = self._run(scene, 2)
+        ops = [rec.op for rec in records]
+        self.assertEqual(ops.count("open"), 4)
+        self.assertEqual(ops.count("add"), 4 * 2)  # 每会话 2 条消息
+        self.assertEqual(ops.count("commit_submit"), 4)
+        self.assertEqual(ops.count("commit_done"), 4)
+        submits = [rec for rec in records if rec.op == "commit_submit"]
+        self.assertTrue(all(rec.extra == "barrier" for rec in submits))
+        self.assertTrue(all(rec.status == "ok" for rec in submits))
+
+
+class IsolationProbeSummaryTests(unittest.TestCase):
+    """isolation_probe_summary：全符合→PASS / 跨租户假阳性→FAIL / 无记录→INCONCLUSIVE。"""
+
+    @staticmethod
+    def _probe(writer: int, reader: int, found: bool, expected: bool, status: str = "ok"):
+        return RequestRecord(
+            scene_key="I@1", step_conc=1, tenant_idx=reader, op="isolation_probe",
+            stage_ms=10.0, status=status, error_type="", ts_ms=0.0,
+            extra=json.dumps({
+                "writer": writer, "reader": reader,
+                "same_tenant": writer == reader,
+                "marker_found": found, "expected": expected,
+                "latency_ms": 10.0,
+            }),
+        )
+
+    def test_all_matching_passes(self) -> None:
+        records = [
+            self._probe(0, 0, True, True),    # 同租户命中
+            self._probe(0, 1, False, False),  # 跨租户不命中
+            self._probe(1, 1, True, True),
+            self._probe(1, 0, False, False),
+        ]
+        summary = isolation_probe_summary(records)
+        self.assertEqual(summary["verdict"], "PASS")
+        self.assertEqual(summary["same_tenant_hit_rate"], 1.0)
+        self.assertEqual(summary["cross_tenant_false_positive_rate"], 0.0)
+
+    def test_cross_false_positive_fails(self) -> None:
+        records = [
+            self._probe(0, 0, True, True),
+            self._probe(0, 1, True, False),  # 跨租户假阳性
+        ]
+        summary = isolation_probe_summary(records)
+        self.assertEqual(summary["verdict"], "FAIL")
+        self.assertEqual(summary["invalid_probe_count"], 1)
+
+    def test_no_records_inconclusive(self) -> None:
+        summary = isolation_probe_summary([])
+        self.assertEqual(summary["verdict"], "INCONCLUSIVE")
+
+    def test_interrupted_probe_inconclusive(self) -> None:
+        records = [
+            self._probe(0, 0, True, True),
+            self._probe(0, 1, False, False, status="error"),
+        ]
+        summary = isolation_probe_summary(records)
+        self.assertEqual(summary["verdict"], "INCONCLUSIVE")
+
+
+class SaturationSummaryTests(unittest.TestCase):
+    """saturation_summary：429/503 拒绝样本的 Retry-After / reason_code 契约。"""
+
+    @staticmethod
+    def _rec(op, status, error_type="", retry_after=None, reason="", stage=10.0):
+        return RequestRecord(
+            scene_key="S@1", step_conc=1, tenant_idx=0, op=op,
+            stage_ms=stage, status=status, error_type=error_type, ts_ms=0.0,
+            retry_after_s=retry_after, reason_code=reason,
+        )
+
+    def test_pass_when_all_rejections_carry_contract(self) -> None:
+        records = [
+            self._rec("read", "ok"),
+            self._rec("commit_submit", "error", "http_4xx", retry_after=1.0, reason="rate_limited"),
+            self._rec("commit_submit", "error", "http_4xx", retry_after=2.0, reason="rate_limited"),
+        ]
+        summary = saturation_summary(records)
+        self.assertEqual(summary["verdict"], "PASS")
+        self.assertEqual(summary["rejected_total"], 2)
+        self.assertEqual(summary["retry_after_present"], 2)
+        self.assertEqual(summary["reason_code_present"], 2)
+        self.assertAlmostEqual(summary["rejection_rate"], 2 / 3, places=5)
+
+    def test_fail_when_reason_code_missing(self) -> None:
+        records = [
+            self._rec("commit_submit", "error", "http_4xx", retry_after=1.0),
+        ]
+        summary = saturation_summary(records)
+        self.assertEqual(summary["verdict"], "FAIL")
+
+    def test_fail_when_retry_after_missing(self) -> None:
+        records = [
+            self._rec("commit_submit", "error", "http_4xx", reason="rate_limited"),
+        ]
+        summary = saturation_summary(records)
+        self.assertEqual(summary["verdict"], "FAIL")
+
+    def test_inconclusive_without_rejections(self) -> None:
+        records = [
+            self._rec("read", "ok"),
+            self._rec("read", "error", "timeout"),
+            self._rec("commit_submit", "error", "http_4xx"),  # 无 retry_after/reason → 非拒绝
+        ]
+        summary = saturation_summary(records)
+        self.assertEqual(summary["verdict"], "INCONCLUSIVE")
+        self.assertEqual(summary["rejected_total"], 0)
+
+    def test_rejection_latency_percentiles(self) -> None:
+        records = [
+            self._rec("read", "ok"),
+            self._rec("commit_submit", "error", "http_4xx", retry_after=1.0, reason="x", stage=100.0),
+            self._rec("commit_submit", "error", "http_4xx", retry_after=1.0, reason="x", stage=200.0),
+            self._rec("commit_submit", "error", "http_4xx", retry_after=1.0, reason="x", stage=300.0),
+        ]
+        summary = saturation_summary(records)
+        self.assertEqual(summary["rejection_p50_ms"], 200.0)
+        self.assertEqual(summary["rejection_p95_ms"], 290.0)
+
+
+class HotTenantSummaryTests(unittest.TestCase):
+    """hot_tenant_summary：旁观租户 commit P50 散布（1.50 阈值）。"""
+
+    @staticmethod
+    def _commit(tenant: int, stage: float, count: int = 1):
+        return [
+            RequestRecord(
+                scene_key="H@1", step_conc=1, tenant_idx=tenant, op="commit_submit",
+                stage_ms=stage, status="ok", error_type="", ts_ms=0.0,
+            )
+            for _ in range(count)
+        ]
+
+    def test_fair_ratio_passes(self) -> None:
+        records = (
+            self._commit(0, 100.0, count=100) +  # 热租户（提交数 ≥ 总 1/4）
+            self._commit(1, 100.0, count=10) +   # 旁观
+            self._commit(2, 140.0, count=10)     # 旁观
+        )
+        summary = hot_tenant_summary(records)
+        self.assertEqual(summary["verdict"], "PASS")
+        self.assertEqual(summary["bystander_p50_ratio"], 1.4)
+
+    def test_ratio_boundary_1_50_passes(self) -> None:
+        records = (
+            self._commit(0, 100.0, count=100) +
+            self._commit(1, 100.0, count=10) +
+            self._commit(2, 150.0, count=10)
+        )
+        summary = hot_tenant_summary(records)
+        self.assertEqual(summary["verdict"], "PASS")
+        self.assertEqual(summary["bystander_p50_ratio"], 1.5)
+
+    def test_unfair_ratio_fails(self) -> None:
+        records = (
+            self._commit(0, 100.0, count=100) +
+            self._commit(1, 100.0, count=10) +
+            self._commit(2, 200.0, count=10)
+        )
+        summary = hot_tenant_summary(records)
+        self.assertEqual(summary["verdict"], "FAIL")
+
+    def test_single_bystander_passes(self) -> None:
+        records = self._commit(0, 100.0, count=100) + self._commit(1, 300.0, count=10)
+        summary = hot_tenant_summary(records)
+        self.assertEqual(summary["verdict"], "PASS")
+
+    def test_insufficient_data_inconclusive(self) -> None:
+        self.assertEqual(hot_tenant_summary([])["verdict"], "INCONCLUSIVE")
+
+
+class TenantSpecsTests(unittest.TestCase):
+    """tenants.json 独立凭据：env 解析 / 缺 env / keys_independent。"""
+
+    def _write(self, tmp: Path, payload) -> Path:
+        path = Path(tmp) / "tenants.json"
+        path.write_text(json.dumps(payload), encoding="utf-8")
+        return path
+
+    def test_load_tenant_specs_resolves_env_keys(self) -> None:
+        payload = {
+            "tenants": [
+                {"tenant_id": "t1", "user_id": "u1", "auth_key_env": "PERF_KEY_1"},
+                {"tenant_id": "t2", "user_id": "u2", "auth_key_env": "PERF_KEY_2"},
+            ]
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            path = self._write(Path(tmp), payload)
+            with mock.patch.dict(os.environ, {"PERF_KEY_1": "k1", "PERF_KEY_2": "k2"}, clear=False):
+                specs = load_tenant_specs(path)
+        self.assertEqual([s["auth_key"] for s in specs], ["k1", "k2"])
+        self.assertEqual([s["tenant_id"] for s in specs], ["t1", "t2"])
+
+    def test_load_tenant_specs_inline_key_preferred(self) -> None:
+        payload = {
+            "tenants": [
+                {"tenant_id": "t1", "user_id": "u1", "auth_key": "inline", "auth_key_env": "PERF_MISSING_ENV"},
+            ]
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            path = self._write(Path(tmp), payload)
+            specs = load_tenant_specs(path)  # 内联优先，不读缺失的 env
+        self.assertEqual(specs[0]["auth_key"], "inline")
+
+    def test_load_tenant_specs_missing_env_raises(self) -> None:
+        payload = {
+            "tenants": [{"tenant_id": "t1", "user_id": "u1", "auth_key_env": "PERF_NO_SUCH_ENV"}]
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            path = self._write(Path(tmp), payload)
+            with self.assertRaises(ValueError) as ctx:
+                load_tenant_specs(path)
+        self.assertIn("PERF_NO_SUCH_ENV", str(ctx.exception))
+
+    def test_load_tenant_specs_empty_raises(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = self._write(Path(tmp), {"tenants": []})
+            with self.assertRaises(ValueError):
+                load_tenant_specs(path)
+            missing = self._write(Path(tmp), {"other": 1})
+            with self.assertRaises(ValueError):
+                load_tenant_specs(missing)
+
+    def test_keys_independent(self) -> None:
+        independent = TenantPreparer(
+            "http://x", tenant_specs=[{"auth_key": "a"}, {"auth_key": "b"}]
+        )
+        self.assertTrue(independent.keys_independent())
+        duplicate = TenantPreparer(
+            "http://x", tenant_specs=[{"auth_key": "a"}, {"auth_key": "a"}]
+        )
+        self.assertFalse(duplicate.keys_independent())
+        empty = TenantPreparer("http://x", tenant_specs=[{"auth_key": ""}])
+        self.assertFalse(empty.keys_independent())
+        # 非 config 模式（provision 天然独立）
+        self.assertTrue(TenantPreparer("http://x").keys_independent())
+
+
+class NewFeatureVerdictTests(unittest.TestCase):
+    """evaluate_features 新增特性：tenant_isolation / saturation_contract / hot_tenant_fairness。"""
+
+    @staticmethod
+    def _summary(**extra) -> dict:
+        base = {
+            "config": {"degradation_threshold": 2.0, "no_metrics": True},
+            "server": {"metrics_available": False},
+            "commit_durability": {},
+            "degradation": {},
+            "tenant_fairness": {},
+            "resources": {},
+        }
+        base.update(extra)
+        return base
+
+    def test_features_not_run_without_data(self) -> None:
+        result = evaluate_features(self._summary())
+        self.assertEqual(result["features"]["tenant_isolation"]["verdict"], "not_run")
+        self.assertEqual(result["features"]["saturation_contract"]["verdict"], "not_run")
+        self.assertEqual(result["features"]["hot_tenant_fairness"]["verdict"], "not_run")
+        self.assertEqual(result["overall"], "INCONCLUSIVE")  # 其余特性无数据
+
+    def test_tenant_isolation_fail_propagates(self) -> None:
+        summary = self._summary()
+        summary["isolation_probe"] = {
+            "probe_count": 10, "expected_probe_count": 10,
+            "invalid_probe_count": 2, "verdict": "FAIL",
+            "reason": "2 条隔离探针命中与预期不符",
+        }
+        result = evaluate_features(summary)
+        self.assertEqual(result["features"]["tenant_isolation"]["verdict"], "FAIL")
+        self.assertEqual(result["overall"], "FAIL")
+
+    def test_tenant_isolation_pass_becomes_inconclusive(self) -> None:
+        summary = self._summary()
+        summary["isolation_probe"] = {
+            "probe_count": 10, "expected_probe_count": 10,
+            "invalid_probe_count": 0, "verdict": "PASS", "reason": "全部符合",
+        }
+        result = evaluate_features(summary)
+        self.assertEqual(result["features"]["tenant_isolation"]["verdict"], "INCONCLUSIVE")
+
+    def test_saturation_contract_maps_verdict(self) -> None:
+        summary = self._summary()
+        summary["saturation"] = {
+            "verdict": "PASS", "reason": "全部带 Retry-After 与 reason_code",
+            "rejected_total": 2,
+        }
+        result = evaluate_features(summary)
+        self.assertEqual(result["features"]["saturation_contract"]["verdict"], "PASS")
+        summary["saturation"]["verdict"] = "FAIL"
+        result = evaluate_features(summary)
+        self.assertEqual(result["features"]["saturation_contract"]["verdict"], "FAIL")
+        self.assertEqual(result["overall"], "FAIL")
+
+    def test_hot_tenant_fairness_maps_verdict(self) -> None:
+        summary = self._summary()
+        summary["hot_tenant"] = {
+            "verdict": "PASS", "reason": "旁观租户公平", "bystander_p50_ratio": 1.2,
+        }
+        result = evaluate_features(summary)
+        self.assertEqual(result["features"]["hot_tenant_fairness"]["verdict"], "PASS")
+        summary["hot_tenant"]["verdict"] = "FAIL"
+        result = evaluate_features(summary)
+        self.assertEqual(result["features"]["hot_tenant_fairness"]["verdict"], "FAIL")

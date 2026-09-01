@@ -25,7 +25,9 @@ import argparse
 import json
 import logging
 import sys
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor, wait
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -36,7 +38,7 @@ if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
 from backends.echomem.client import EchoMemClient
-from performance.loadgen import LoadGenerator, SceneResult
+from performance.loadgen import LoadGenerator, RequestRecord, SceneResult
 from performance.metrics_calc import (
     FEATURE_LABELS,
     RSS_LEAK_SLOPE_MB_PER_MIN,
@@ -47,12 +49,15 @@ from performance.metrics_calc import (
     error_type_validation,
     evaluate_features,
     fault_injection_summary,
+    hot_tenant_summary,
     injected_bytes_series,
+    isolation_probe_summary,
     isolation_summary,
     reconcile_messages,
     retry_summary,
     rss_normalized_series,
     rss_trend_mb_per_min,
+    saturation_summary,
     search_quality_summary,
     summarize_records,
     tenant_fairness,
@@ -76,6 +81,7 @@ from performance.perf_preflight import run_preflight
 from performance.prepare import (
     TenantPreparer,
     load_locomo_seed_batches,
+    load_tenant_specs,
 )
 from performance.report import (
     build_html,
@@ -172,7 +178,9 @@ def build_parser() -> argparse.ArgumentParser:
         default="A,B,C,D",
         help=(
             "场景: A=纯读基线, B=纯写注入, C=读写混合, D=注入洪峰, "
-            "F=故障注入(mock provider) (逗号分隔, 可按需过滤如 A,D)"
+            "F=故障注入(mock provider), S=饱和(commit barrier over reads), "
+            "H=热租户偏斜(explicit barrier), K=容量(定速率混合), "
+            "I=N×N 隔离探针 (逗号分隔, 可按需过滤如 A,D)"
         ),
     )
     g.add_argument(
@@ -223,6 +231,64 @@ def build_parser() -> argparse.ArgumentParser:
         default=20,
         help="B 场景尾段消息对账的会话数上限 (默认 20)",
     )
+    g = parser.add_argument_group("Formal load")
+    g.add_argument(
+        "--tenant-config",
+        default="",
+        help="租户凭据 JSON 路径（tenants 数组，每租户独立 auth_key；优先于 --auth-mode/--tenants）",
+    )
+    g.add_argument(
+        "--commit-rpm",
+        type=float,
+        default=0.0,
+        help="commit 固定速率（每分钟 commit 数；>0 时对写事务限速，K 场景用）",
+    )
+    g.add_argument(
+        "--commit-barrier",
+        action="store_true",
+        help="启用 commit barrier 场景（S/H 的 commit 风暴）",
+    )
+    g.add_argument(
+        "--commit-barrier-count",
+        type=int,
+        default=128,
+        help="S 场景 commit barrier 的 commit 总数",
+    )
+    g.add_argument(
+        "--commit-tenant-distribution",
+        choices=["uniform", "zipf", "explicit"],
+        default="uniform",
+        help="commit barrier 的租户分布 (S 场景; H 固定 explicit)",
+    )
+    g.add_argument(
+        "--commit-zipf-exponent",
+        type=float,
+        default=2.0,
+        help="zipf 分布的指数 (rank 1..N 权重 1/rank^s)",
+    )
+    g.add_argument(
+        "--commit-tenant-counts",
+        default="",
+        help="explicit 分布: 逗号分隔的每租户 commit 数（H 场景）",
+    )
+    g.add_argument(
+        "--commit-barrier-waves",
+        type=int,
+        default=1,
+        help="H 场景 commit barrier 波数",
+    )
+    g.add_argument(
+        "--commit-barrier-cooldown-s",
+        type=float,
+        default=0.0,
+        help="H 场景波间冷却秒数",
+    )
+    g.add_argument(
+        "--isolation-markers-per-tenant",
+        type=int,
+        default=5,
+        help="I 场景每租户 marker 数",
+    )
     g = parser.add_argument_group("Observation")
     g.add_argument("--metrics-interval-s", type=float, default=2.0, help="/metrics 采样间隔 (秒)")
     g.add_argument("--cool-down-s", type=float, default=15.0, help="压测结束后的冷却采样时长 (秒)")
@@ -255,10 +321,10 @@ def build_parser() -> argparse.ArgumentParser:
 def _resolve_args(args: argparse.Namespace) -> dict[str, Any]:
     """Normalize CLI args; apply --quick overrides and basic validation."""
     scenarios = [part.strip().upper() for part in str(args.scenarios).split(",") if part.strip()]
-    known = {"A", "B", "C", "D", "F"}
+    known = {"A", "B", "C", "D", "F", "S", "H", "K", "I"}
     unknown = [sid for sid in scenarios if sid not in known]
     if unknown:
-        raise ValueError(f"--scenarios 未知场景: {', '.join(unknown)} (可选 A,B,C,D,F)")
+        raise ValueError(f"--scenarios 未知场景: {', '.join(unknown)} (可选 A,B,C,D,F,S,H,K,I)")
     mix_ratios = parse_mix_ratios([part.strip() for part in str(args.mix_ratios).split(",")])
     concurrency_steps = parse_concurrency_steps(args.concurrency_steps)
     if args.quick:
@@ -268,6 +334,26 @@ def _resolve_args(args: argparse.Namespace) -> dict[str, Any]:
         args.duration_s = max(5.0, args.duration_s / 4)
     if args.tenants < 1:
         raise ValueError("--tenants 必须 >= 1")
+    commit_tenant_counts: list[int] | None = None
+    if str(args.commit_tenant_counts or "").strip():
+        try:
+            commit_tenant_counts = [
+                int(part.strip())
+                for part in str(args.commit_tenant_counts).split(",")
+                if part.strip()
+            ]
+        except ValueError as exc:
+            raise ValueError(
+                f"--commit-tenant-counts 需为逗号分隔的整数: {args.commit_tenant_counts}"
+            ) from exc
+        if not commit_tenant_counts or any(count < 0 for count in commit_tenant_counts):
+            raise ValueError("--commit-tenant-counts 需为非负整数列表")
+    tenant_specs: list[dict[str, Any]] | None = None
+    if str(args.tenant_config or "").strip():
+        try:
+            tenant_specs = load_tenant_specs(args.tenant_config)
+        except FileNotFoundError as exc:
+            raise ValueError(f"--tenant-config 文件不存在: {args.tenant_config}") from exc
     seed_dataset_path: str | None = None
     if args.seed_source == "locomo":
         dataset_path = (
@@ -297,6 +383,8 @@ def _resolve_args(args: argparse.Namespace) -> dict[str, Any]:
         "mix_ratios": mix_ratios,
         "rps": args.rps if args.mode == "fixed-rps" else None,
         "seed_dataset_path": seed_dataset_path,
+        "commit_tenant_counts": commit_tenant_counts,
+        "tenant_specs": tenant_specs,
     }
 
 
@@ -329,6 +417,63 @@ def _scene_metrics(
     return {**scene.to_dict(), "window_s": [round(t0, 3), round(t1, 3)], "resource": entry}
 
 
+def _run_special_scene(
+    gen: LoadGenerator,
+    scene: SceneRun,
+    tenants: list[Any],
+    messages_per_session: int,
+) -> SceneResult:
+    """执行 S/H/K 特殊场景（commit barrier 家族），返回 SceneResult。
+
+    S: 读线程打满 + 一次性 commit barrier（饱和）
+    H: 多波 commit barrier（explicit 分布），波间 cooldown（热租户偏斜）
+    K: 读+写线程按 --rps / --commit-rpm 固定速率（容量）
+    """
+    started_wall = time.time()
+    records: list[Any] = []
+    if scene.scene_id == "S":
+        stop = threading.Event()
+        workers = max(1, len(tenants) * scene.per_tenant_conc)
+        futures: list[Any] = []
+        with ThreadPoolExecutor(
+            max_workers=workers, thread_name_prefix="perf-load"
+        ) as pool:
+            for index in range(workers):
+                tenant = tenants[index % len(tenants)]
+                futures.append(
+                    pool.submit(
+                        gen._read_loop,
+                        stop,
+                        tenant,
+                        scene_key=scene.key,
+                        step_conc=scene.per_tenant_conc,
+                    )
+                )
+            barrier_records = gen.run_commit_barrier(scene, tenants, messages_per_session)
+            time.sleep(scene.duration_s)
+            stop.set()
+            wait(futures)
+        for future in futures:
+            records.extend(future.result())
+        records.extend(barrier_records)
+    elif scene.scene_id == "H":
+        waves = max(1, scene.barrier_waves)
+        for wave in range(waves):
+            records.extend(
+                gen.run_commit_barrier(scene, tenants, messages_per_session)
+            )
+            if wave + 1 < waves and scene.barrier_cooldown_s > 0:
+                time.sleep(scene.barrier_cooldown_s)
+    else:  # K: 定速率混合（读 rps / 写 commit-rpm），复用常规 run_scene 混合路径
+        result = gen.run_scene(scene, tenants, messages_per_session)
+        records.extend(result.records)
+    return SceneResult(
+        scene_key=scene.key,
+        records=records,
+        wall_s=time.time() - started_wall,
+    )
+
+
 def _run_all_scenes(
     args: argparse.Namespace,
     resolved: dict[str, Any],
@@ -338,10 +483,11 @@ def _run_all_scenes(
 ) -> dict[str, Any]:
     """Execute the matrix; returns per-scene summaries + full records.
 
-    Scene F (fault injection) is an independent flow and is excluded from
-    the concurrency matrix; it runs separately in ``main``.
+    Scene F (fault injection) and I (N×N isolation probe) are independent
+    flows and are excluded from the concurrency matrix; they run separately
+    in ``main``. S/H/K run inside the matrix via ``_run_special_scene``.
     """
-    matrix_ids = [sid for sid in resolved["scenario_ids"] if sid != "F"]
+    matrix_ids = [sid for sid in resolved["scenario_ids"] if sid not in ("F", "I")]
     runs = expand_matrix(
         scenario_ids=matrix_ids,
         concurrency_steps=resolved["concurrency_steps"],
@@ -349,6 +495,12 @@ def _run_all_scenes(
         duration_s=args.duration_s,
         burst_commits=args.burst_commits,
         burst_window_s=args.burst_window_s,
+        barrier_commits=args.commit_barrier_count,
+        barrier_distribution=args.commit_tenant_distribution,
+        barrier_zipf_exponent=args.commit_zipf_exponent,
+        barrier_tenant_counts=resolved.get("commit_tenant_counts"),
+        barrier_waves=args.commit_barrier_waves,
+        barrier_cooldown_s=args.commit_barrier_cooldown_s,
     )
     if not runs:
         raise ValueError("场景矩阵为空: --scenarios 过滤后没有可运行的场景")
@@ -369,7 +521,12 @@ def _run_all_scenes(
             first_t0 = t0
         logger.info("===> 场景 %s (%s) 并发/租户=%d 时长=%.0fs", scene.key, name, scene.per_tenant_conc, scene.duration_s)
         try:
-            result: SceneResult = generator.run_scene(scene, tenants, args.messages_per_session)
+            if scene.scene_id in ("S", "H", "K"):
+                result: SceneResult = _run_special_scene(
+                    generator, scene, tenants, args.messages_per_session
+                )
+            else:
+                result = generator.run_scene(scene, tenants, args.messages_per_session)
         except BaseException as exc:  # noqa: BLE001 - 场景失败不中断矩阵，失败场景记入报告
             logger.exception("场景 %s 执行失败（继续后续场景）", scene.key)
             scenes[scene.key] = {
@@ -831,6 +988,7 @@ def main() -> None:
             tenants=args.tenants,
             timeout_s=args.timeout_s,
             label_prefix="perf",
+            tenant_specs=resolved.get("tenant_specs"),
         )
         try:
             tenants = preparer.prepare(
@@ -860,13 +1018,28 @@ def main() -> None:
             timeout_s=args.timeout_s,
             commit_poll_timeout_s=args.commit_poll_timeout_s,
             rps=resolved["rps"] or None,
+            commit_rpm=args.commit_rpm,
             commit_retry_max=args.commit_retry_max,
             commit_retry_backoff_s=args.commit_retry_backoff_s,
         )
 
         try:
             try:
+                # -- 场景 I: N×N 隔离探针（矩阵之前的一次性步骤，同 F 的独立流） ---
+                isolation_probe_records: list[Any] = []
+                if "I" in resolved["scenario_ids"]:
+                    logger.info("===> 场景 I N×N 隔离探针（矩阵之前执行）")
+                    isolation_probe_records, isolation_probe_run = (
+                        generator.run_nxn_isolation_probe(
+                            tenants,
+                            markers_per_tenant=args.isolation_markers_per_tenant,
+                        )
+                    )
+                    logger.info("    I 探针摘要: %s", isolation_probe_run)
+
                 all_data = _run_all_scenes(args, resolved, generator, tenants, monitor)
+                if isolation_probe_records:
+                    all_data["records"] = isolation_probe_records + all_data["records"]
 
                 # -- 场景 F: 故障注入（mock provider，独立流程，不并入并发矩阵） -----
                 fault_result: dict[str, Any] | None = None
@@ -977,6 +1150,9 @@ def main() -> None:
                 "tenant_fairness": fairness,
                 "commit_latency": commit_completion_latency(all_data["records"]),
                 "write_retry": retry_summary(all_data["records"]),
+                "saturation": saturation_summary(all_data["records"]),
+                "hot_tenant": hot_tenant_summary(all_data["records"]),
+                "isolation_probe": isolation_probe_summary(all_data["records"]),
                 "reconciliation": reconcile_messages(all_data["reconciliation_data"]),
                 "search_quality": search_quality_summary(
                     all_data["records"],

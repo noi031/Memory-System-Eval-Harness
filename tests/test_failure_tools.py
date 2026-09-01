@@ -6,12 +6,10 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from stress.echomem.cursor_reconcile import reconcile
-from stress.echomem.cursor_reconcile import values_from_payload
-from stress.echomem.capability_probe import classify_probe, run as run_capability
-from stress.echomem.fault_injection import NOT_IMPLEMENTED, run_control
-from stress.echomem.k6_reconcile import reconcile as reconcile_k6
-from stress.echomem.k6_reconcile import k6_request_rows
+from performance.probes.cursor_reconcile import reconcile
+from performance.probes.cursor_reconcile import values_from_payload
+from performance.probes.capability_probe import classify_probe, run as run_capability
+from performance.probes.fault_injection import NOT_IMPLEMENTED, run_control
 
 
 class FailureToolTests(unittest.TestCase):
@@ -66,36 +64,6 @@ class FailureToolTests(unittest.TestCase):
             timeout_s = 1
 
         self.assertEqual("INCONCLUSIVE", run_control(Args())["status"])
-
-    def test_k6_reconcile_rejects_missing_runner_evidence(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            summary = root / "k6.json"
-            summary.write_text(json.dumps({"real_http": True}), encoding="utf-8")
-            result = reconcile_k6(summary, root / "run")
-            self.assertEqual("INCONCLUSIVE", result["status"])
-
-    def test_k6_request_stream_is_parsed_for_request_ids(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            stream = Path(directory) / "k6.json"
-            stream.write_text(
-                json.dumps({
-                    "type": "Point",
-                    "data": {
-                        "metric": "http_reqs",
-                        "tags": {
-                            "request_id": "k6-search-a-1-0",
-                            "operation": "search",
-                            "tenant": "a",
-                        },
-                    },
-                }) + "\n"
-                + json.dumps({"type": "Point", "data": {"metric": "http_req_duration"}}) + "\n",
-                encoding="utf-8",
-            )
-            parsed = k6_request_rows(stream)
-            self.assertEqual(1, len(parsed))
-            self.assertEqual("k6-search-a-1-0", parsed[0]["request_id"])
 
     def test_cursor_reconcile_compares_message_set(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

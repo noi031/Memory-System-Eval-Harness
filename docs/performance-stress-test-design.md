@@ -1,7 +1,10 @@
 # 性能压力测试模块设计意图（performance/）
 
 > 本文件是 `performance/` 模块的设计意图文档：目标、接口、行为约束与边界条件。
-> 对应的单元测试为 `tests/test_performance.py`，两者一一对应、协同演进。
+> 对应的单元测试为 `tests/test_performance.py`、`tests/test_acceptance.py`、
+> `tests/test_formal_suite.py`、`tests/test_formal_suite_timeout.py`、
+> `tests/test_formal_data_report.py`、`tests/test_failure_tools.py`，
+> 两者一一对应、协同演进。
 
 ## 1. 目标与背景
 
@@ -155,6 +158,80 @@
 种子来源由 `--seed-source` 选择：`locomo` 时入口先 `load_locomo_seed_batches` 再交给 `TenantPreparer.prepare(locomo_batches=...)`，
 `--seed-sessions-per-tenant` / `--messages-per-session` 对 locomo 源不生效（会话数由数据集决定）。
 
+### 3.8 `acceptance.py` — PR421 验收门禁求值器
+
+纯函数求值器，只消费 run_stress 已落盘的 `summary.json` / `requests.csv` 等制品，
+不碰在线服务。缺失的服务端证据绝不从客户端计时推断；需要 EchoMem 控制面但当前
+不可用的能力明确标 `INCONCLUSIVE` / `NOT_IMPLEMENTED`，评审状态（
+`PR28_REVIEW_RESOLUTION`）与实测 gate 分离记录。
+
+- `evaluate_pr421_acceptance(manifest) -> dict`：8 个 gate（search 成功率 /
+  report6 质量 / search 隔离 / 租户公平 / commit 完成 / 拒绝 / hot tenant /
+  容量阶梯），每个 gate 输出 verdict（`PASS` / `FAIL` / `INCONCLUSIVE` /
+  `NOT_IMPLEMENTED`）+ 依据与数据引用；`overall` 汇总；
+- `build_model_analysis_input(manifest, acceptance) -> dict`：无密钥、无凭据的
+  模型分析输入（secret-free），供评审方直接消费。
+
+### 3.9 `formal_suite.py` — 正式多租户验收套件编排
+
+可重复的真实多租户压测验收套件。套件只负责编排：每个 case 由 `run_stress.py`
+子进程（`RUNNER`）执行，产物落到 case 的 `run/` 子目录；套件叠加场景/轮次元数据，
+并把 run_stress 原生产物推导成验收求值器消费的契约摘要（`summary.json` /
+`commit_results.csv` / `search_results.csv`）。只有每次运行都使用独立租户凭据时
+（`_identity_is_independent`）才允许做出上线结论；共享凭据仅用于探索，隔离/公平
+保持 INCONCLUSIVE。
+
+- `SCENARIO_PROFILES`：三档场景目录——`report6`（PR397/report(6) 矩阵）、
+  `pr421`（PR421 验收，默认）、`complete`（两者全跑）；
+- `run_case(...)`：单 case 执行——可选 reset 命令、子进程超时（超时杀进程组）、
+  逐请求 CSV 规范化、契约摘要推导、产物落盘；
+- `aggregate_runs(...)`：多轮结果聚合（分位/吞吐/错误）；
+- `main()`：参数校验（未知场景、`--repeats < 1`、report6/complete 必须给
+  `--preflight-config`、租户数不足直接拒绝）→ 逐 case 执行（`FORMAL_PROGRESS`
+  进度行）→ `evaluate_pr421_acceptance` + `build_model_analysis_input` 落盘 →
+  `suite.html` 数据报告 → `summary.json` 套件总结；退出码 0=PASS/INCONCLUSIVE，
+  2=FAIL。
+
+### 3.10 `formal_data_report.py` — 套件数据报告
+
+从 `suite.json` 渲染自包含 `suite.html` 数据报告：逐 case 状态徽章、数值明细、
+时间分桶、跨 run 分组；缺失服务端证据保持可见（不推断成功）。纯 stdlib，
+含 argparse `__main__`（`python -m performance.formal_data_report <suite.json> <out.html>`）。
+
+### 3.11 `probes/` — 故障 / 恢复 / 限流 / 对账探针
+
+探针是独立 CLI 工具，直接以 urllib 访问真实 EchoMem HTTP 服务，不依赖压测
+runner。每个探针只在部署方显式提供故障/恢复控制（命令、HTTP 端点、容器、PID）
+时才执行真实操作，否则如实上报 `INCONCLUSIVE`；显式 HTTP 404 是「未实现」的
+唯一证据，探针不得把自身缺少适配器当成对 EchoMem 能力的否定。
+
+| 探针 | 职责 |
+|---|---|
+| `limit_failure_probe.py` | 真实限流/失败探针：不合成 429/5xx，使用真实租户凭据与真实依赖 |
+| `limit_failure_sweep.py` | 有界负载阶梯扫描（`--levels`）+ 恢复观测 |
+| `concurrent_commit_cases.py` | 同一真实 session 上并发 commit 行为 |
+| `missing_cases.py` | PR397 缺失用例（可经真实 API 观测的部分）；不从两次成功 HTTP 推断幂等 |
+| `fault_injection.py` | 显式真实故障控制（命令/HTTP/容器）+ 防篡改时间线；无控制则 INCONCLUSIVE |
+| `fault_suite.py` | 按 `--plan` 编排故障 / 恢复 / 光标对账 case 的子进程编排 |
+| `recovery.py` | 真实进程/容器 kill-9 恢复观测 |
+| `commit_recovery_probe.py` | commit 中途被杀时的恢复观测（保守：丢失响应/无 cursor 端点记 INCONCLUSIVE） |
+| `disconnect_recovery_probe.py` | 真实客户端断开处理与有界资源恢复 |
+| `cursor_reconcile.py` | 已接受 commit 与真实 cursor/message-set API 对账 |
+| `capability_probe.py` | 可选 EchoMem 契约探测（仅显式 404 证明未实现，其余 INCONCLUSIVE） |
+
+### 3.12 `probes/_client.py` — 探针共享 HTTP 客户端
+
+探针共用同一份真实 HTTP 客户端与租户规格解析（`EchoMemHTTP`、
+`TenantSpec` / `load_tenant_specs`、`HttpResult`、`extract_archive` 等），保证
+各探针在同一套鉴权（`X-Auth-Key`）与响应契约下运行；仅标准库，不依赖压测 runner。
+
+### 3.13 配置示例
+
+- `tenants.example.json`：provision 模式租户凭据示例（4 租户，`auth_key_env`
+  指向环境变量名，前缀 `ECHOMEM_TENANT_*_KEY`）；
+- `instance-profiles.example.json`：机器规格 profile 矩阵示例（供容量阶梯 case
+  引用，`tenant_config` 指向 `performance/tenants-*.server.json` 形态）。
+
 ## 4. 指标定义
 
 | 指标 | 数据来源 | 统计方法 |
@@ -193,7 +270,9 @@
 | 疑似内存泄漏 | RSS 斜率 ≥ 5 MB/min（`resources.rss_trend.slope_mb_per_min`） | 3 |
 | 读劣化/锁竞争/请求堆积 | 见上方 D 场景信号 | 1（search 优先） |
 
-## 5. 测试对应关系（tests/test_performance.py）
+## 5. 测试对应关系
+
+### 5.1 压测核心（tests/test_performance.py）
 
 | 设计意图条目 | 测试 |
 |---|---|
@@ -220,6 +299,31 @@
 | 报告区块完整性（方法/场景/指标字典 + 支撑事实可见） | `ReportTests.test_build_html_contains_sections` |
 | 报告再生成时间线重建（gauge 求和 / CPU 帧差） | `ReportTests.test_chart_series_from_metrics_csv` |
 | 报告再生成入口（从制品重建 report.html） | `ReportTests.test_regenerate_report` |
+
+### 5.2 验收与正式套件（tests/test_acceptance.py、tests/test_formal_suite*.py、tests/test_formal_data_report.py）
+
+| 设计意图条目 | 测试 |
+|---|---|
+| acceptance：缺测量 INCONCLUSIVE、unavailable 显式 | `AcceptanceTests.test_missing_measurements_are_inconclusive_and_unavailable_are_explicit` |
+| acceptance：report6 质量 gate 拒绝空 marker 结果 | `AcceptanceTests.test_report6_quality_gate_rejects_empty_marker_results` |
+| acceptance：模型分析输入 secret-free 且保留验收结论 | `AcceptanceTests.test_model_input_is_secret_free_and_preserves_acceptance` |
+| acceptance：HTML 验收矩阵 / 评审状态渲染 | `AcceptanceTests.test_html_renders_acceptance_matrix` / `test_html_renders_review_resolution_when_present` |
+| acceptance：饱和无拒绝不判通过 / 拒绝须有 reason_code | `AcceptanceTests.test_saturation_without_rejections_does_not_claim_contract_pass` / `test_saturation_rejection_requires_reason_code` |
+| acceptance：无效基线不产生劣化通过 / 标签违规不算覆盖通过 | `AcceptanceTests.test_report4_invalid_baseline_cannot_produce_degradation_pass` / `test_metric_label_violation_is_not_a_coverage_pass` |
+| acceptance：公平性用 commit 完成吞吐 / 评审状态对模型可见 | `AcceptanceTests.test_fairness_uses_commit_completion_throughput` / `test_review_resolution_is_explicit_and_model_visible` |
+| formal_suite：场景目录（report6 / pr421 / complete）与容量阶梯 | `Report6ScenarioTests`（目录/容量点/混合比例/D 洪峰/instance-profile 一致性） |
+| formal_suite：case 命令映射 / 契约摘要 / CSV 规范化 | `FormalSuiteAdapterTests` |
+| formal_suite：子进程超时与进程组终止 | `FormalSuiteTimeoutTests` |
+| formal_data_report：数值明细 + 缺失服务端证据可见 | `FormalDataReportTests` |
+
+### 5.3 探针（tests/test_failure_tools.py）
+
+| 设计意图条目 | 测试 |
+|---|---|
+| capability 探针：404→NOT_IMPLEMENTED、未配置→INCONCLUSIVE | `FailureToolTests.test_capability_probe_classifies_404_as_not_implemented_and_unconfigured_as_inconclusive` |
+| cursor 对账：嵌套 operation/archive 提取 | `FailureToolTests.test_cursor_payload_extracts_nested_operation_and_archive` |
+| fault 控制：无真实控制→INCONCLUSIVE | `FailureToolTests.test_fault_control_without_real_control_is_inconclusive` |
+| cursor 对账：消息集比对 | `FailureToolTests.test_cursor_reconcile_compares_message_set` |
 
 ## 6. 使用示例
 
@@ -249,7 +353,38 @@ python performance/run_stress.py --tenants 8 --seed-source locomo \
 
 # 报告再生成：对已有运行重建增强版 report.html（无需重跑压测）
 python -m performance.report performance/results/<ts>
+
+# 正式验收套件（默认 pr421 场景目录，3 轮，每 case 独立 run_stress 子进程）
+python -m performance.formal_suite \
+  --base-url http://127.0.0.1:8010 \
+  --tenant-config performance/tenants.example.json \
+  --profile pr421 --repeats 3
+
+# report6 + pr421 全目录（需真实 EchoMem config.json 做 preflight）
+python -m performance.formal_suite --profile complete \
+  --preflight-config /path/to/echomem/config.json \
+  --tenant-config performance/tenants.example.json \
+  --out-dir results/performance/formal_capacity
+
+# 单独渲染套件数据报告（suite.json → suite.html）
+python -m performance.formal_data_report \
+  results/performance/formal_<ts>/suite.json suite.html
+
+# 探针（示例）：真实限流阶梯扫描 / 故障编排 / 光标对账
+python performance/probes/limit_failure_sweep.py \
+  --base-url http://127.0.0.1:8010 --tenant-config performance/tenants.example.json \
+  --session-root <session_root> --out-dir results/performance/probes
+python performance/probes/fault_suite.py \
+  --plan fault-plan.json --out-dir results/performance/probes \
+  --base-url http://127.0.0.1:8010
+python performance/probes/cursor_reconcile.py \
+  --commit-csv commit_results.csv --out reconcile.json \
+  --base-url http://127.0.0.1:8010
 ```
 
 结果写入 `performance/results/<ts>/`：`summary.json` / `requests.csv` /
-`metrics_samples.csv` / `report.html` / `config.json`。
+`metrics_samples.csv` / `report.html` / `config.json`。正式套件结果写入
+`results/performance/formal_<ts>/`：`suite.json`（清单 + 逐 case 摘要 +
+验收结论）、`acceptance.json`、`model_analysis_input.json`、`summary.json`
+（套件总结）、`suite.html`（数据报告），每个 case 的 `run/` 保留 run_stress
+原生产物。

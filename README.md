@@ -113,6 +113,12 @@ performance/                 # 性能压测（多租户并发读写、注入/检
   scenarios.py               #   场景矩阵（A 纯读 / B 纯写 / C 混合 / D 洪峰）
   metrics_calc.py            #   统计纯函数
   report.py                  #   产物与自包含 HTML 报告
+  acceptance.py              #   PR421 验收门禁求值器（纯函数，消费已落盘制品）
+  formal_suite.py            #   正式多租户验收套件编排（子进程跑 run_stress）
+  formal_data_report.py      #   套件数据报告（suite.json → suite.html）
+  probes/                    #   故障/恢复/限流/对账探针（独立 CLI，真实 HTTP）
+  tenants.example.json       #   租户凭据示例
+  instance-profiles.example.json  # 机器规格 profile 示例
   results/                   #   运行结果
 shared/                      # 共享基础设施
   eval_base.py               #   EvalConfig / EvalRun / CLI arg helpers
@@ -507,9 +513,38 @@ python performance/run_stress.py --tenants 8 --seed-source locomo \
 commit 成功保证）· `C` 读写混合（多档 read:write）· `D` 注入洪峰（读持续 +
 突发 K 个 commit，检出 search-commit 干扰与读写数据倾斜）。
 
+`performance/` 还提供两条互补路径（设计见
+`docs/performance-stress-test-design.md` §3.8–3.12）：
+
+- **正式验收套件**（`formal_suite.py`）：以子进程方式逐 case 重跑
+  `run_stress.py`（`report6` / `pr421` / `complete` 三档场景目录），把原生产物
+  推导成 `acceptance.py` 验收门禁（8 个 gate：search 成功率 / report6 质量 /
+  隔离 / 公平 / commit 完成 / 拒绝 / hot tenant / 容量阶梯）消费的契约摘要，
+  产出 `suite.json` / `acceptance.json` / `model_analysis_input.json` /
+  `suite.html`。只有每次运行都用独立租户凭据才允许做出上线结论。
+- **故障 / 恢复 / 限流 / 对账探针**（`probes/`）：独立 CLI，直接以真实 HTTP
+  访问 EchoMem；只在部署方显式提供故障/恢复控制时才执行真实操作，否则如实上报
+  `INCONCLUSIVE`，显式 404 是「未实现」的唯一证据。
+
+```bash
+# 正式验收套件（默认 pr421 场景目录，3 轮）
+python -m performance.formal_suite \
+  --base-url http://127.0.0.1:8010 \
+  --tenant-config performance/tenants.example.json --repeats 3
+
+# 探针：真实限流阶梯扫描
+python performance/probes/limit_failure_sweep.py \
+  --base-url http://127.0.0.1:8010 \
+  --tenant-config performance/tenants.example.json \
+  --session-root <session_root> --out-dir results/performance/probes
+```
+
 结果写入 `performance/results/<ts>/`：`summary.json`（按场景×并发档分节的延迟/
 吞吐/错误/资源/劣化倍数）、`requests.csv`（逐请求）、`metrics_samples.csv`
-（服务端采样时序）、`report.html`（自包含报告）。
+（服务端采样时序）、`report.html`（自包含报告）。正式套件结果写入
+`results/performance/formal_<ts>/`：`suite.json` / `acceptance.json` /
+`model_analysis_input.json` / `summary.json` / `suite.html`，每个 case 的
+`run/` 保留 run_stress 原生产物。
 
 | 参数 | 说明 | 默认 |
 |---|---|---|

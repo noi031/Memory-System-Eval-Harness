@@ -24,9 +24,9 @@ from pathlib import Path
 from typing import Any
 
 try:
-    from .runner import EchoMemHTTP
+    from ._client import EchoMemHTTP
 except ImportError:
-    from runner import EchoMemHTTP
+    from _client import EchoMemHTTP
 
 
 PASS = "PASS"

@@ -65,7 +65,7 @@ def request(
     headers = {
         "Content-Type": "application/json",
         "Accept": "application/json",
-        "X-API-Key": os.environ.get(tenant["auth_key_env"], ""),
+        "X-Auth-Key": os.environ.get(tenant["auth_key_env"], ""),
     }
     data = json.dumps(body).encode("utf-8")
     row: dict[str, Any] = {
@@ -118,7 +118,7 @@ def commit_request(
     headers = {
         "Content-Type": "application/json",
         "Accept": "application/json",
-        "X-API-Key": os.environ.get(tenant["auth_key_env"], ""),
+        "X-Auth-Key": os.environ.get(tenant["auth_key_env"], ""),
     }
     message_id = f"limit-probe-{uuid.uuid4().hex}"
     message_body = {
@@ -224,7 +224,7 @@ def create_sessions(
         headers = {
             "Content-Type": "application/json",
             "Accept": "application/json",
-            "X-API-Key": os.environ.get(tenant["auth_key_env"], ""),
+            "X-Auth-Key": os.environ.get(tenant["auth_key_env"], ""),
         }
         body = {
             "agent_id": "echomem-limit-failure-probe",

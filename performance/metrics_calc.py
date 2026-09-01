@@ -7,6 +7,8 @@ conventions match `dynamic/metrics.py` and `scripts/compare_memory_backends.py`
 
 from __future__ import annotations
 
+import json
+from collections import Counter
 from typing import Any, Iterable
 
 from performance.loadgen import RequestRecord, is_anchor_query
@@ -408,6 +410,9 @@ FEATURE_LABELS: dict[str, str] = {
     "error_type": "特性8 服务端错误类型正确性",
     "fault_injection": "特性9 故障注入（mock provider）",
     "preflight": "特性10 模型与配置预检门禁",
+    "tenant_isolation": "特性11 租户隔离（N×N marker 探针）",
+    "saturation_contract": "特性12 饱和拒绝契约（429/503 Retry-After + reason_code）",
+    "hot_tenant_fairness": "特性13 热租户旁观公平性",
 }
 
 # 判定分层：每特性结论携带证据类型（real 真实容量 / mock 可控故障语义）。
@@ -771,6 +776,49 @@ def evaluate_features(summary: dict[str, Any]) -> dict[str, Any]:
         )
     features["preflight"]["measurements"] = preflight
 
+    # -- 特性11: 租户隔离（N×N marker 探针，FAIL 传播；否则 INCONCLUSIVE） ------
+    isolation_probe = summary.get("isolation_probe") or {}
+    if not isolation_probe:
+        features["tenant_isolation"] = _verdict(
+            "not_run", "未运行 I 场景（N×N 隔离探针）"
+        )
+    elif isolation_probe.get("verdict") == "FAIL":
+        features["tenant_isolation"] = _verdict(
+            "FAIL",
+            f"{isolation_probe.get('invalid_probe_count')} 条隔离探针命中与预期不符，"
+            f"租户隔离失效",
+        )
+    else:
+        # 单次探针 PASS 不足以证明隔离（如 key 未验证互异），保守判数据不足
+        features["tenant_isolation"] = _verdict(
+            "INCONCLUSIVE", "隔离探针结果不足以判定租户隔离"
+        )
+    features["tenant_isolation"]["measurements"] = isolation_probe
+
+    # -- 特性12: 饱和拒绝契约（429/503 拒绝必须带 Retry-After + reason_code） ----
+    saturation = summary.get("saturation") or {}
+    if not saturation:
+        features["saturation_contract"] = _verdict(
+            "not_run", "未运行 S 场景（commit barrier 饱和）"
+        )
+    else:
+        features["saturation_contract"] = _verdict(
+            saturation.get("verdict"), saturation.get("reason") or ""
+        )
+    features["saturation_contract"]["measurements"] = saturation
+
+    # -- 特性13: 热租户旁观公平性 ---------------------------------------------
+    hot_tenant = summary.get("hot_tenant") or {}
+    if not hot_tenant:
+        features["hot_tenant_fairness"] = _verdict(
+            "not_run", "未运行 H 场景（热租户偏斜）"
+        )
+    else:
+        features["hot_tenant_fairness"] = _verdict(
+            hot_tenant.get("verdict"), hot_tenant.get("reason") or ""
+        )
+    features["hot_tenant_fairness"]["measurements"] = hot_tenant
+
     verdicts = [entry["verdict"] for entry in features.values()]
     overall = merge_verdicts(verdicts)
 
@@ -819,10 +867,16 @@ def retry_summary(records: list[RequestRecord]) -> dict[str, Any]:
     ``first_attempt_rate`` is the raw submission success without retries;
     ``final_success_rate`` is the success after retries. Both are reported
     because the SLO accounting keeps the two denominators separate.
+    ``retry_after_s`` aggregates the Retry-After of commit-stage 429 samples;
+    ``reason_codes`` is the per-reason counter (descending by count).
     """
     submits = [rec for rec in records if rec.op == "commit_submit"]
     if not submits:
-        return {"submit_total": 0}
+        return {
+            "submit_total": 0,
+            "retry_after_s": None,
+            "reason_codes": {},
+        }
     total = len(submits)
     retried = [rec for rec in submits if rec.retried]
     first_ok = sum(1 for rec in submits if not rec.retried and rec.status == "ok")
@@ -833,6 +887,14 @@ def retry_summary(records: list[RequestRecord]) -> dict[str, Any]:
     for rec in retried:
         if rec.error_type:
             retried_errors[rec.error_type] = retried_errors.get(rec.error_type, 0) + 1
+    # 提交阶段 429 样本的 Retry-After（retry_after_s 非空即带 Retry-After 头）
+    retry_after_values = [rec.retry_after_s for rec in submits if rec.retry_after_s is not None]
+    retry_after_s: dict[str, float] | None = None
+    if retry_after_values:
+        retry_after_s = {
+            "avg": round(sum(retry_after_values) / len(retry_after_values), 3),
+            "max": round(max(retry_after_values), 3),
+        }
     return {
         "submit_total": total,
         "retried_total": len(retried),
@@ -844,6 +906,178 @@ def retry_summary(records: list[RequestRecord]) -> dict[str, Any]:
         "retried_final_ok": sum(1 for rec in retried if rec.status == "ok"),
         "retried_errors": retried_errors,
         "retry_wait_ms": _op_stats(waits) if waits else None,
+        "retry_after_s": retry_after_s,
+        "reason_codes": dict(Counter(rec.reason_code for rec in submits if rec.reason_code).most_common()),
+    }
+
+
+def isolation_probe_summary(records: list[RequestRecord]) -> dict[str, Any]:
+    """N×N 隔离探针摘要：从 op="isolation_probe" 记录解析 extra JSON。
+
+    verdict: "PASS"（invalid==0 且 probe_count==expected 且无中断）/
+    "FAIL"（invalid>0 或条数不符）/ "INCONCLUSIVE"（数据不足，如无探针记录）。
+    中断（存在 error 探针记录）时无法确定期望条数，判数据不足。
+    """
+    probes = [rec for rec in records if rec.op == "isolation_probe"]
+    if not probes:
+        return {
+            "probe_count": 0,
+            "expected_probe_count": None,
+            "invalid_probe_count": None,
+            "same_tenant_hit_rate": None,
+            "cross_tenant_false_positive_rate": None,
+            "verdict": "INCONCLUSIVE",
+            "reason": "无隔离探针记录（未运行 I 场景）",
+        }
+    infos: list[dict[str, Any]] = []
+    interrupted = False
+    for rec in probes:
+        if rec.status == "error":
+            interrupted = True
+            continue
+        try:
+            info = json.loads(rec.extra or "")
+        except ValueError:
+            info = {}
+        if isinstance(info, dict):
+            infos.append(info)
+    invalid = sum(
+        1
+        for info in infos
+        if bool(info.get("marker_found")) != bool(info.get("expected"))
+    )
+    same = [info for info in infos if info.get("same_tenant")]
+    cross = [info for info in infos if not info.get("same_tenant")]
+    same_hit_rate = (
+        round(sum(1 for info in same if info.get("marker_found")) / len(same), 5)
+        if same
+        else None
+    )
+    cross_fp_rate = (
+        round(sum(1 for info in cross if info.get("marker_found")) / len(cross), 5)
+        if cross
+        else None
+    )
+    expected = len(probes) if not interrupted else None
+    if invalid > 0:
+        verdict, reason = "FAIL", f"{invalid} 条探针命中与预期不符"
+    elif interrupted:
+        verdict, reason = "INCONCLUSIVE", "探针执行中断，数据不足"
+    elif expected is None or len(probes) != expected:
+        verdict, reason = "FAIL", "探针条数与期望不符"
+    else:
+        verdict, reason = "PASS", "全部同租户命中、跨租户不命中"
+    return {
+        "probe_count": len(probes),
+        "expected_probe_count": expected,
+        "invalid_probe_count": invalid,
+        "same_tenant_hit_rate": same_hit_rate,
+        "cross_tenant_false_positive_rate": cross_fp_rate,
+        "verdict": verdict,
+        "reason": reason,
+    }
+
+
+def saturation_summary(records: list[RequestRecord]) -> dict[str, Any]:
+    """饱和拒绝契约：429/503 拒绝样本必须携带 Retry-After 与 reason_code。
+
+    拒绝样本 = commit_submit/read 的 http_4xx 错误中带 retry_after_s 或
+    reason_code 的记录。verdict: "PASS"（有拒绝样本且全部带两字段）/
+    "FAIL"（有拒绝样本但缺字段）/ "INCONCLUSIVE"（无拒绝样本）。
+    """
+    ops = ("commit_submit", "read")
+    success = sum(1 for rec in records if rec.op in ops and rec.status == "ok")
+    rejected = [
+        rec
+        for rec in records
+        if rec.op in ops
+        and rec.status == "error"
+        and rec.error_type == "http_4xx"
+        and (rec.retry_after_s is not None or rec.reason_code != "")
+    ]
+    total = success + len(rejected)
+    retry_after_present = sum(1 for rec in rejected if rec.retry_after_s is not None)
+    reason_code_present = sum(1 for rec in rejected if rec.reason_code != "")
+    stages = sorted(rec.stage_ms for rec in rejected)
+    result: dict[str, Any] = {
+        "rejected_total": len(rejected),
+        "total": total,
+        "rejection_rate": round(len(rejected) / total, 5) if total else None,
+        "retry_after_present": retry_after_present,
+        "reason_code_present": reason_code_present,
+        "rejection_p50_ms": percentile(stages, 0.5),
+        "rejection_p95_ms": percentile(stages, 0.95),
+    }
+    if not rejected:
+        result["verdict"] = "INCONCLUSIVE"
+        result["reason"] = "无 429/503 拒绝样本"
+    elif retry_after_present == len(rejected) and reason_code_present == len(rejected):
+        result["verdict"] = "PASS"
+        result["reason"] = (
+            f"{len(rejected)} 个拒绝样本均携带 Retry-After 与 reason_code"
+        )
+    else:
+        result["verdict"] = "FAIL"
+        result["reason"] = (
+            f"拒绝样本缺 Retry-After 或 reason_code "
+            f"({len(rejected) - retry_after_present} 缺 retry_after, "
+            f"{len(rejected) - reason_code_present} 缺 reason_code)"
+        )
+    return result
+
+
+def hot_tenant_summary(records: list[RequestRecord]) -> dict[str, Any]:
+    """热租户旁观公平性：旁观租户（提交数 < 总提交数 1/4）commit P50 的散布。
+
+    ``bystander_p50_ratio`` 是旁观租户 P50 的 max/min。verdict: "PASS"
+    （ratio <= 1.50 或仅 1 个旁观租户）/ "FAIL"（>1.50）/
+    "INCONCLUSIVE"（数据不足或无旁观租户）。
+    """
+    submits = [
+        rec for rec in records if rec.op == "commit_submit" and rec.status == "ok"
+    ]
+    if not submits:
+        return {
+            "per_tenant_p50_ms": {},
+            "bystander_p50_ratio": None,
+            "verdict": "INCONCLUSIVE",
+            "reason": "无 commit_submit 成功记录",
+        }
+    per_tenant: dict[int, list[float]] = {}
+    for rec in submits:
+        per_tenant.setdefault(rec.tenant_idx, []).append(rec.stage_ms)
+    p50 = {
+        tenant_idx: percentile(sorted(stages), 0.5)
+        for tenant_idx, stages in per_tenant.items()
+    }
+    threshold = len(submits) / 4.0
+    bystander_p50 = [
+        p50[tenant_idx]
+        for tenant_idx, stages in per_tenant.items()
+        if len(stages) < threshold and p50[tenant_idx] is not None
+    ]
+    ratio = None
+    if len(bystander_p50) >= 2:
+        ratio = round(max(bystander_p50) / min(bystander_p50), 3)
+    if not bystander_p50:
+        verdict, reason = "INCONCLUSIVE", "无旁观租户（各租户提交数均 ≥ 总提交数 1/4）"
+    elif len(bystander_p50) == 1:
+        verdict, reason = "PASS", "仅 1 个旁观租户，无可比散布"
+    elif ratio is not None and ratio <= 1.50:
+        verdict, reason = (
+            "PASS",
+            f"旁观租户 commit P50 max/min 比 {ratio}x ≤ 1.50x",
+        )
+    else:
+        verdict, reason = (
+            "FAIL",
+            f"旁观租户 commit P50 max/min 比 {ratio}x > 1.50x",
+        )
+    return {
+        "per_tenant_p50_ms": p50,
+        "bystander_p50_ratio": ratio,
+        "verdict": verdict,
+        "reason": reason,
     }
 
 

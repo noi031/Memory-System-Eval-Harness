@@ -64,7 +64,7 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--base-url", required=True)
     parser.add_argument("--auth-key", default="")
-    parser.add_argument("--auth-header", default="X-API-Key")
+    parser.add_argument("--auth-header", default="X-Auth-Key")
     parser.add_argument("--tenant", default="stress-a")
     parser.add_argument("--pid", type=int, default=0)
     parser.add_argument("--requests", type=int, default=32)

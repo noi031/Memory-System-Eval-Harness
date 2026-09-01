@@ -12,11 +12,13 @@ from __future__ import annotations
 
 import hashlib
 import itertools
+import json
 import logging
 import socket
 import threading
 import time
 import urllib.error
+import uuid
 from concurrent.futures import ThreadPoolExecutor, wait
 from dataclasses import dataclass, field
 from typing import Any
@@ -51,6 +53,57 @@ def _retry_after_seconds(exc: BaseException) -> float | None:
         return max(0.0, float(raw))
     except ValueError:
         return None  # HTTP-date form unsupported; fall back to client backoff
+
+
+# 服务端拒绝原因在响应中的别名（header 按小写匹配，payload 按原样匹配）。
+_REASON_CODE_ALIASES = (
+    "reason_code",
+    "reasonCode",
+    "error_code",
+    "errorCode",
+    "x-reason-code",
+)
+_REASON_CODE_HEADER_ALIASES = tuple(alias.lower() for alias in _REASON_CODE_ALIASES)
+
+
+def extract_reason_code(exc: BaseException) -> str:
+    """从失败响应提取服务端拒绝原因（reason_code）。
+
+    对 ``HTTPError`` 先查 ``.headers``（小写 key 匹配别名 reason_code /
+    reasonCode / error_code / errorCode / x-reason-code），再尝试解析
+    ``exc.read()`` 的 JSON body（顶层 + ``error``/``meta`` 嵌套对象）。
+    找不到返回 ""；非 HTTPError 返回 ""。
+    """
+    if not isinstance(exc, urllib.error.HTTPError):
+        return ""
+    headers = getattr(exc, "headers", None) or getattr(exc, "hdrs", None)
+    if headers is not None:
+        for key, value in headers.items():
+            if str(key).lower() in _REASON_CODE_HEADER_ALIASES and str(value or "").strip():
+                return str(value)
+    try:
+        body = exc.read()
+    except Exception:
+        return ""
+    if not body:
+        return ""
+    try:
+        payload = json.loads(body)
+    except (ValueError, TypeError):
+        return ""
+    if not isinstance(payload, dict):
+        return ""
+    candidates: list[dict[str, Any]] = [payload]
+    for key in ("error", "meta"):
+        nested = payload.get(key)
+        if isinstance(nested, dict):
+            candidates.append(nested)
+    for candidate in candidates:
+        for alias in _REASON_CODE_ALIASES:
+            value = candidate.get(alias)
+            if value is not None and str(value).strip():
+                return str(value)
+    return ""
 
 
 def retry_decision(
@@ -102,6 +155,9 @@ class RequestRecord:
     retried: bool = False
     retry_total_wait_ms: float = 0.0
     final_success: bool = False
+    # -- per-request retry contract (commit_submit) ----------------------
+    retry_after_s: float | None = None  # 最后一次失败尝试的 HTTP 429 Retry-After（秒）
+    reason_code: str = ""  # 失败响应中的服务端拒绝原因（payload/header 别名提取）
     # -- message-level reconciliation (add) ------------------------------
     message_id: str = ""
     content_hash: str = ""
@@ -132,6 +188,8 @@ class RequestRecord:
             "retried": self.retried,
             "retry_total_wait_ms": round(self.retry_total_wait_ms, 3),
             "final_success": self.final_success,
+            "retry_after_s": self.retry_after_s,
+            "reason_code": self.reason_code,
             "message_id": self.message_id,
             "content_hash": self.content_hash,
             "content_bytes": self.content_bytes,
@@ -276,6 +334,8 @@ def run_write_transaction(
     attempts = 0
     retried = False
     total_wait_ms = 0.0
+    last_retry_after_s: float | None = None
+    last_reason_code = ""
     while True:
         attempts += 1
         try:
@@ -283,6 +343,9 @@ def run_write_transaction(
             break
         except Exception as exc:
             error_type = classify_error(exc)
+            # 记录最后一次失败尝试的 retry 契约字段（429 Retry-After / reason_code）
+            last_retry_after_s = _retry_after_seconds(exc)
+            last_reason_code = extract_reason_code(exc)
             retryable, wait_s = retry_decision(
                 exc,
                 max_retries=commit_retry_max,
@@ -298,6 +361,8 @@ def run_write_transaction(
                     retry_count=attempts - 1,
                     retried=retried,
                     retry_total_wait_ms=total_wait_ms,
+                    retry_after_s=last_retry_after_s,
+                    reason_code=last_reason_code,
                 )
                 return result
             retried = True
@@ -312,6 +377,8 @@ def run_write_transaction(
         retried=retried,
         retry_total_wait_ms=total_wait_ms,
         final_success=True,
+        retry_after_s=last_retry_after_s,
+        reason_code=last_reason_code,
     )
     result.archive_id = archive_id
 
@@ -339,7 +406,7 @@ def run_write_transaction(
 
 
 class RateLimiter:
-    """Minimal thread-safe fixed-rate gate (used for read ops only)."""
+    """Minimal thread-safe fixed-rate gate (read / commit rate limiting)."""
 
     def __init__(self, rps: float) -> None:
         if rps <= 0:
@@ -370,6 +437,19 @@ class SceneResult:
 AnchorWrite = tuple[int, str, str]  # (tenant_idx, session_id, anchor)
 
 
+@dataclass
+class PreparedWrite:
+    """One barrier session ready to commit: opened, messages added, not committed."""
+
+    client: EchoMemClient
+    tenant_idx: int
+    session_id: str
+    message_ids: list[str]
+    content_hashes: list[str]
+    anchor: str
+    archive_id: str = ""
+
+
 class LoadGenerator:
     """Executes one :class:`SceneRun` at a time over prepared tenants."""
 
@@ -381,6 +461,7 @@ class LoadGenerator:
         commit_poll_timeout_s: float = 120.0,
         commit_poll_interval_s: float = 0.2,
         rps: float | None = None,
+        commit_rpm: float = 0.0,
         commit_retry_max: int = 0,
         commit_retry_backoff_s: float = 0.5,
     ) -> None:
@@ -389,10 +470,15 @@ class LoadGenerator:
         self.commit_poll_timeout_s = commit_poll_timeout_s
         self.commit_poll_interval_s = commit_poll_interval_s
         self.rate_limiter = RateLimiter(rps) if rps else None
+        self.commit_rate_limiter = (
+            RateLimiter(commit_rpm / 60.0) if commit_rpm > 0 else None
+        )
         self.commit_retry_max = commit_retry_max
         self.commit_retry_backoff_s = commit_retry_backoff_s
         self._last_write_anchors: list[AnchorWrite] = []
         self._reconciliation_candidates: list[tuple[int, str, list[str], list[str], str]] = []
+        # commit barrier 准备阶段产生的 add 记录（run_commit_barrier 持有其引用）
+        self._barrier_prep_records: list[RequestRecord] = []
 
     # -- single operations ------------------------------------------------
 
@@ -489,6 +575,8 @@ class LoadGenerator:
         records: list[RequestRecord] = []
         anchors: list[AnchorWrite] = []
         while not stop.is_set():
+            if self.commit_rate_limiter is not None:
+                self.commit_rate_limiter.acquire()
             seq = next(seq_counter)
             result = run_write_transaction(
                 tenant.client,
@@ -736,6 +824,542 @@ class LoadGenerator:
                     )
                 )
         return records
+
+    # -- commit barrier（预提交会话 + 并发 commit 风暴） --------------------
+
+    def _barrier_tenant_counts(self, scene: SceneRun, tenant_count: int) -> list[int]:
+        """按 ``scene.barrier_distribution`` 把 ``barrier_commits`` 分给各租户。
+
+        uniform: 均分（余数给前几个）；zipf: rank 1..N 权重 1/rank^s 归一后
+        按比例取整（余数补首位）；explicit: 直接用 ``barrier_tenant_counts``
+        （长度必须 == 租户数，总和即 barrier_commits）。
+        """
+        total = scene.barrier_commits
+        distribution = scene.barrier_distribution
+        if tenant_count < 1:
+            raise ValueError("commit barrier 需要至少一个租户")
+        if distribution == "uniform":
+            base, remainder = divmod(total, tenant_count)
+            return [base + (1 if index < remainder else 0) for index in range(tenant_count)]
+        if distribution == "zipf":
+            exponent = scene.barrier_zipf_exponent
+            weights = [1.0 / (rank ** exponent) for rank in range(1, tenant_count + 1)]
+            weight_sum = sum(weights)
+            counts = [int(total * weight / weight_sum) for weight in weights]
+            counts[0] += total - sum(counts)
+            return counts
+        if distribution == "explicit":
+            counts = list(scene.barrier_tenant_counts or [])
+            if len(counts) != tenant_count:
+                raise ValueError(
+                    f"explicit barrier 分布需要 {tenant_count} 个租户计数，"
+                    f"实际 {len(counts)}"
+                )
+            if sum(counts) != total:
+                raise ValueError(
+                    f"explicit barrier 计数总和 {sum(counts)} != "
+                    f"barrier_commits {total}"
+                )
+            return counts
+        raise ValueError(f"unknown barrier distribution: {distribution}")
+
+    def prepare_write_sessions(
+        self,
+        tenant: TenantContext,
+        count: int,
+        messages_per_session: int,
+        *,
+        scene_key: str,
+        step_conc: int,
+        extra: str = "",
+    ) -> list[PreparedWrite]:
+        """为单个租户准备 count 个「已 open + 已 add 消息、未 commit」的会话。
+
+        内容与 :func:`run_write_transaction` 一致（末条携带 PERFTAIL 锚词，
+        其余消息唯一）。每个会话 open + 逐条 add，add 记录（op="add"，
+        status/error_type 同现有）写入 ``self._barrier_prep_records``；
+        open/add 失败时给该 session 记录 error 并跳过（不 abort 整体）。
+        """
+        prepared: list[PreparedWrite] = []
+        records = self._barrier_prep_records
+        seq_counter = itertools.count()
+        for _ in range(count):
+            seq = next(seq_counter)
+            anchor = f"{WRITE_ANCHOR_PREFIX}-{tenant.idx}-{seq}"
+            session_id = ""
+            try:
+                session_id = tenant.client.open_session(title="perf-barrier-prep")
+            except Exception as exc:
+                records.append(
+                    RequestRecord(
+                        scene_key=scene_key,
+                        step_conc=step_conc,
+                        tenant_idx=tenant.idx,
+                        op="open",
+                        stage_ms=0.0,
+                        status="error",
+                        error_type=classify_error(exc),
+                        ts_ms=time.time() * 1000,
+                        extra=extra,
+                    )
+                )
+                continue
+            records.append(
+                RequestRecord(
+                    scene_key=scene_key,
+                    step_conc=step_conc,
+                    tenant_idx=tenant.idx,
+                    op="open",
+                    stage_ms=0.0,
+                    status="ok",
+                    error_type="",
+                    ts_ms=time.time() * 1000,
+                    session_id=session_id,
+                    extra=extra,
+                )
+            )
+            message_ids: list[str] = []
+            content_hashes: list[str] = []
+            failed = False
+            for msg_idx in range(messages_per_session):
+                last = msg_idx == messages_per_session - 1
+                content = (
+                    f"压测写入会话消息 {anchor}-{msg_idx}"
+                    if last
+                    else f"压测写入会话消息-{msg_idx}"
+                )
+                started = time.perf_counter()
+                try:
+                    resp = tenant.client.add_message(session_id, "user", content)
+                except Exception as exc:
+                    records.append(
+                        RequestRecord(
+                            scene_key=scene_key,
+                            step_conc=step_conc,
+                            tenant_idx=tenant.idx,
+                            op="add",
+                            stage_ms=(time.perf_counter() - started) * 1000,
+                            status="error",
+                            error_type=classify_error(exc),
+                            ts_ms=time.time() * 1000,
+                            session_id=session_id,
+                            extra=extra,
+                        )
+                    )
+                    failed = True
+                    break
+                message_id = (
+                    str(
+                        resp.get("message_id")
+                        or resp.get("id")
+                        or resp.get("msg_id")
+                        or ""
+                    )
+                    if isinstance(resp, dict)
+                    else ""
+                )
+                message_ids.append(message_id)
+                content_hashes.append(_content_hash(content))
+                records.append(
+                    RequestRecord(
+                        scene_key=scene_key,
+                        step_conc=step_conc,
+                        tenant_idx=tenant.idx,
+                        op="add",
+                        stage_ms=(time.perf_counter() - started) * 1000,
+                        status="ok",
+                        error_type="",
+                        ts_ms=time.time() * 1000,
+                        session_id=session_id,
+                        extra=extra,
+                        message_id=message_id,
+                        content_hash=_content_hash(content),
+                        content_bytes=len(content.encode("utf-8")),
+                    )
+                )
+            if failed:
+                continue
+            prepared.append(
+                PreparedWrite(
+                    client=tenant.client,
+                    tenant_idx=tenant.idx,
+                    session_id=session_id,
+                    message_ids=message_ids,
+                    content_hashes=content_hashes,
+                    anchor=anchor,
+                )
+            )
+        return prepared
+
+    def run_commit_barrier(
+        self,
+        scene: SceneRun,
+        tenants: list[TenantContext],
+        messages_per_session: int,
+    ) -> list[RequestRecord]:
+        """对所有 PreparedWrite 并发 commit，并轮询完成。
+
+        1. 按 ``scene.barrier_distribution`` 计算每租户 commit 数；
+        2. ``prepare_write_sessions`` 准备全部会话（计时窗外）；
+        3. 线程池（max_workers=min(总 commit 数, 64)）并发 commit_session，
+           每条 op="commit_submit" 记录（含 retry_after_s/reason_code/extra="barrier"）；
+        4. 对所有成功 commit 轮询完成（op="commit_done"）。
+        """
+        if scene.barrier_commits <= 0:
+            raise ValueError("barrier_commits must be > 0")
+        records: list[RequestRecord] = []
+        self._barrier_prep_records = records
+        try:
+            counts = self._barrier_tenant_counts(scene, len(tenants))
+            prepared: list[PreparedWrite] = []
+            for tenant, count in zip(tenants, counts):
+                prepared.extend(
+                    self.prepare_write_sessions(
+                        tenant,
+                        count,
+                        messages_per_session,
+                        scene_key=scene.key,
+                        step_conc=scene.per_tenant_conc,
+                        extra="barrier",
+                    )
+                )
+
+            total = sum(counts)
+
+            def submit(pre: PreparedWrite) -> None:
+                started = time.perf_counter()
+                try:
+                    archive_id = pre.client.commit_session(pre.session_id)
+                except Exception as exc:
+                    records.append(
+                        RequestRecord(
+                            scene_key=scene.key,
+                            step_conc=scene.per_tenant_conc,
+                            tenant_idx=pre.tenant_idx,
+                            op="commit_submit",
+                            stage_ms=(time.perf_counter() - started) * 1000,
+                            status="error",
+                            error_type=classify_error(exc),
+                            ts_ms=time.time() * 1000,
+                            session_id=pre.session_id,
+                            extra="barrier",
+                            retry_after_s=_retry_after_seconds(exc),
+                            reason_code=extract_reason_code(exc),
+                        )
+                    )
+                    return
+                pre.archive_id = archive_id
+                records.append(
+                    RequestRecord(
+                        scene_key=scene.key,
+                        step_conc=scene.per_tenant_conc,
+                        tenant_idx=pre.tenant_idx,
+                        op="commit_submit",
+                        stage_ms=(time.perf_counter() - started) * 1000,
+                        status="ok",
+                        error_type="",
+                        ts_ms=time.time() * 1000,
+                        session_id=pre.session_id,
+                        extra="barrier",
+                        retry_after_s=None,
+                        reason_code="",
+                    )
+                )
+
+            with ThreadPoolExecutor(
+                max_workers=min(total, 64), thread_name_prefix="perf-barrier"
+            ) as pool:
+                futures = [pool.submit(submit, pre) for pre in prepared]
+                for future in futures:
+                    future.result()
+
+            for pre in prepared:
+                if not pre.archive_id:
+                    continue
+                started = time.perf_counter()
+                try:
+                    commit = pre.client.poll_commit(
+                        pre.session_id,
+                        pre.archive_id,
+                        timeout_s=self.commit_poll_timeout_s,
+                        poll_interval_s=self.commit_poll_interval_s,
+                    )
+                except Exception as exc:
+                    records.append(
+                        RequestRecord(
+                            scene_key=scene.key,
+                            step_conc=scene.per_tenant_conc,
+                            tenant_idx=pre.tenant_idx,
+                            op="commit_done",
+                            stage_ms=(time.perf_counter() - started) * 1000,
+                            status="error",
+                            error_type=classify_error(exc),
+                            ts_ms=time.time() * 1000,
+                            session_id=pre.session_id,
+                            extra="barrier",
+                        )
+                    )
+                    continue
+                if commit.status == "completed":
+                    records.append(
+                        RequestRecord(
+                            scene_key=scene.key,
+                            step_conc=scene.per_tenant_conc,
+                            tenant_idx=pre.tenant_idx,
+                            op="commit_done",
+                            stage_ms=commit.elapsed_s * 1000,
+                            status="ok",
+                            error_type="",
+                            ts_ms=time.time() * 1000,
+                            session_id=pre.session_id,
+                            extra="barrier",
+                        )
+                    )
+                elif commit.status == "timeout":
+                    records.append(
+                        RequestRecord(
+                            scene_key=scene.key,
+                            step_conc=scene.per_tenant_conc,
+                            tenant_idx=pre.tenant_idx,
+                            op="commit_done",
+                            stage_ms=commit.elapsed_s * 1000,
+                            status="error",
+                            error_type="commit_timeout",
+                            ts_ms=time.time() * 1000,
+                            session_id=pre.session_id,
+                            extra="barrier",
+                        )
+                    )
+                else:
+                    records.append(
+                        RequestRecord(
+                            scene_key=scene.key,
+                            step_conc=scene.per_tenant_conc,
+                            tenant_idx=pre.tenant_idx,
+                            op="commit_done",
+                            stage_ms=commit.elapsed_s * 1000,
+                            status="error",
+                            error_type="commit_failed",
+                            ts_ms=time.time() * 1000,
+                            session_id=pre.session_id,
+                            extra="barrier",
+                        )
+                    )
+        finally:
+            self._barrier_prep_records = []
+        return records
+
+    # -- N×N 隔离探针 ------------------------------------------------------
+
+    def run_nxn_isolation_probe(
+        self,
+        tenants: list[TenantContext],
+        markers_per_tenant: int = 5,
+    ) -> tuple[list[RequestRecord], dict[str, Any]]:
+        """N×N 租户隔离探针：每个 writer 写私有 marker，验证同租户命中/跨租户不命中。
+
+        语义照搬 stress ``run_isolation_probe``：每个 (writer, marker, reader)
+        三元组做一次精确 marker 查询，同租户期望命中（可重试 2 次、间隔 1s），
+        跨租户期望不命中（1 次）。写阶段失败记环境错误记录并继续下一租户。
+        返回 (records, summary_dict)。
+        """
+        records: list[RequestRecord] = []
+        marker_count = max(1, int(markers_per_tenant))
+
+        def env_error(tenant_idx: int, reason: str, error_type: str = "other") -> None:
+            records.append(
+                RequestRecord(
+                    scene_key="I@1",
+                    step_conc=1,
+                    tenant_idx=tenant_idx,
+                    op="isolation_probe",
+                    stage_ms=0.0,
+                    status="error",
+                    error_type=error_type,
+                    ts_ms=time.time() * 1000,
+                    extra=json.dumps({"reason": reason}),
+                )
+            )
+
+        if len(tenants) < 2:
+            return records, {
+                "status": "INCONCLUSIVE",
+                "reason": "requires at least two tenants",
+                "probe_count": 0,
+                "markers_per_tenant": marker_count,
+                "expected_probe_count": 0,
+                "invalid_probe_count": 0,
+                "same_tenant_hits": 0,
+                "same_tenant_total": 0,
+                "cross_tenant_false_positives": 0,
+                "cross_tenant_total": 0,
+            }
+
+        writers: dict[int, dict[str, Any]] = {}
+        for tenant in tenants:
+            writer = tenant.idx
+            client = tenant.client
+            markers = [
+                f"echomem-isolation-{writer}-{uuid.uuid4().hex}"
+                for _ in range(marker_count)
+            ]
+            try:
+                session_id = client.open_session(title="perf-isolation-writer")
+            except Exception as exc:
+                env_error(writer, f"writer {writer} open_session failed", classify_error(exc))
+                continue
+            try:
+                for marker in markers:
+                    client.add_message(
+                        session_id, "user", f"Tenant {writer} private marker {marker}"
+                    )
+            except Exception as exc:
+                env_error(writer, f"writer {writer} add_message failed", classify_error(exc))
+                continue
+            try:
+                archive_id = client.commit_session(session_id)
+            except Exception as exc:
+                env_error(writer, f"writer {writer} commit failed", classify_error(exc))
+                continue
+            try:
+                commit = client.poll_commit(
+                    session_id,
+                    archive_id,
+                    timeout_s=self.commit_poll_timeout_s,
+                    poll_interval_s=self.commit_poll_interval_s,
+                )
+            except Exception as exc:
+                env_error(writer, f"writer {writer} poll failed", classify_error(exc))
+                continue
+            if commit.status != "completed":
+                env_error(writer, f"writer {writer} commit not completed: {commit.status}")
+                continue
+            writers[writer] = {"markers": markers, "session_id": session_id}
+
+        for writer, writer_data in writers.items():
+            for marker in writer_data["markers"]:
+                for reader_tenant in tenants:
+                    reader = reader_tenant.idx
+                    same_tenant = writer == reader
+                    attempts = 2 if same_tenant else 1
+                    found = False
+                    latency_ms = 0.0
+                    try:
+                        for attempt in range(attempts):
+                            started = time.perf_counter()
+                            items, _ = reader_tenant.client.search_with_meta(
+                                marker, top_k=5, agent_id="", timeout_s=self.timeout_s
+                            )
+                            latency_ms = (time.perf_counter() - started) * 1000
+                            found = any(
+                                marker in (item.content or "") or marker in (item.uri or "")
+                                for item in items
+                            )
+                            if found or attempt + 1 >= attempts:
+                                break
+                            time.sleep(1.0)
+                    except Exception as exc:
+                        records.append(
+                            RequestRecord(
+                                scene_key="I@1",
+                                step_conc=1,
+                                tenant_idx=reader,
+                                op="isolation_probe",
+                                stage_ms=latency_ms,
+                                status="error",
+                                error_type=classify_error(exc),
+                                ts_ms=time.time() * 1000,
+                                session_id=writer_data["session_id"],
+                                extra=json.dumps(
+                                    {
+                                        "writer": writer,
+                                        "reader": reader,
+                                        "same_tenant": same_tenant,
+                                        "marker_found": False,
+                                        "expected": same_tenant,
+                                        "latency_ms": round(latency_ms, 3),
+                                    }
+                                ),
+                            )
+                        )
+                        continue
+                    records.append(
+                        RequestRecord(
+                            scene_key="I@1",
+                            step_conc=1,
+                            tenant_idx=reader,
+                            op="isolation_probe",
+                            stage_ms=latency_ms,
+                            status="ok",
+                            error_type="",
+                            ts_ms=time.time() * 1000,
+                            session_id=writer_data["session_id"],
+                            extra=json.dumps(
+                                {
+                                    "writer": writer,
+                                    "reader": reader,
+                                    "same_tenant": same_tenant,
+                                    "marker_found": found,
+                                    "expected": same_tenant,
+                                    "latency_ms": round(latency_ms, 3),
+                                }
+                            ),
+                        )
+                    )
+
+        invalid = 0
+        same_hits = 0
+        same_total = 0
+        cross_fp = 0
+        cross_total = 0
+        for rec in records:
+            if rec.status != "ok":
+                continue
+            try:
+                info = json.loads(rec.extra or "")
+            except ValueError:
+                continue
+            if not isinstance(info, dict):
+                continue
+            found = bool(info.get("marker_found"))
+            expected = bool(info.get("expected"))
+            if found != expected:
+                invalid += 1
+            if info.get("same_tenant"):
+                same_total += 1
+                same_hits += 1 if found else 0
+            else:
+                cross_total += 1
+                cross_fp += 1 if found else 0
+        expected_probe_count = len(writers) * len(tenants) * marker_count
+        interrupted = any(rec.status == "error" for rec in records)
+        if interrupted:
+            status = "INCONCLUSIVE"
+        elif invalid or len(records) != expected_probe_count:
+            status = "FAIL"
+        else:
+            status = "PASS"
+        summary_dict: dict[str, Any] = {
+            "status": status,
+            "reason": (
+                "探针执行中断"
+                if interrupted
+                else (
+                    f"{invalid} 条探针命中与预期不符"
+                    if invalid
+                    else "全部同租户命中、跨租户不命中"
+                )
+            ),
+            "probe_count": len(records),
+            "markers_per_tenant": marker_count,
+            "expected_probe_count": expected_probe_count,
+            "invalid_probe_count": invalid,
+            "same_tenant_hits": same_hits,
+            "same_tenant_total": same_total,
+            "cross_tenant_false_positives": cross_fp,
+            "cross_tenant_total": cross_total,
+        }
+        return records, summary_dict
 
     # -- message-level reconciliation --------------------------------------
 

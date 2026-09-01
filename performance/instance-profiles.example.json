@@ -3,7 +3,7 @@
     {
       "name": "4U8G",
       "base_url": "http://127.0.0.1:8010",
-      "tenant_config": "stress/echomem/tenants-32.server.json",
+      "tenant_config": "performance/tenants-32.server.json",
       "preflight_config": "/etc/echomem/4u8g/config.json",
       "resource_profile": {
         "cpu": "4 vCPU",
@@ -14,7 +14,7 @@
     {
       "name": "8U16G",
       "base_url": "http://127.0.0.1:8010",
-      "tenant_config": "stress/echomem/tenants-32.server.json",
+      "tenant_config": "performance/tenants-32.server.json",
       "preflight_config": "/etc/echomem/8u16g/config.json",
       "resource_profile": {
         "cpu": "8 vCPU",

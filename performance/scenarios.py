@@ -5,9 +5,15 @@ Scenarios:
     B  pure-write injection (open -> add -> commit submit -> commit done)
     C  mixed read/write at configurable read:write ratios
     D  injection burst on top of sustained reads (detects write/read coupling)
+    S  saturation: commit barrier fired over sustained reads
+    H  hot-tenant skew: explicit-distribution commit barrier (multi-wave)
+    K  capacity: rate-based mixed read/write at fixed rps / commit-rpm
+    I  N×N isolation marker probe (independent one-shot, not part of matrix)
 
 ``expand_matrix`` expands (concurrency steps x scenarios x mix ratios) into
 an ordered list of :class:`SceneRun` during which server metrics stay running.
+S/H/K/I are single-shot scenes: one run each, appended after the A/B/C/D
+matrix.
 """
 
 from __future__ import annotations
@@ -15,13 +21,17 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
-SCENARIO_IDS = ("A", "B", "C", "D")
+SCENARIO_IDS = ("A", "B", "C", "D", "S", "H", "K", "I")
 
 SCENARIO_NAMES: dict[str, str] = {
     "A": "pure-read baseline",
     "B": "pure-write injection",
     "C": "mixed read/write",
     "D": "injection burst over reads",
+    "S": "saturation (commit barrier over reads)",
+    "H": "hot-tenant skew (explicit barrier)",
+    "K": "capacity (rate-based mixed at tenant count)",
+    "I": "N×N isolation marker probe",
 }
 
 
@@ -39,6 +49,13 @@ class SceneRun:
     mix: tuple[int, int] | None = None  # (read, write) ratio, scene C only
     burst_commits: int = 0  # scene D only
     burst_window_s: float = 0.0  # scene D only
+    # -- commit barrier (scenes S/H, also carried by K) -------------------
+    barrier_commits: int = 0  # 本场景 commit barrier 的 commit 总数
+    barrier_distribution: str = "uniform"  # uniform | zipf | explicit
+    barrier_zipf_exponent: float = 1.0  # zipf 分布的指数
+    barrier_tenant_counts: list[int] | None = None  # explicit 分布的每租户计数
+    barrier_waves: int = 1  # H 场景 barrier 波数
+    barrier_cooldown_s: float = 0.0  # H 场景波间冷却秒数
 
     @property
     def key(self) -> str:
@@ -55,6 +72,12 @@ class SceneRun:
             "mix": f"{self.mix[0]}:{self.mix[1]}" if self.mix else None,
             "burst_commits": self.burst_commits,
             "burst_window_s": self.burst_window_s,
+            "barrier_commits": self.barrier_commits,
+            "barrier_distribution": self.barrier_distribution,
+            "barrier_zipf_exponent": self.barrier_zipf_exponent,
+            "barrier_tenant_counts": self.barrier_tenant_counts,
+            "barrier_waves": self.barrier_waves,
+            "barrier_cooldown_s": self.barrier_cooldown_s,
         }
 
 
@@ -90,10 +113,18 @@ def expand_matrix(
     duration_s: float,
     burst_commits: int,
     burst_window_s: float,
+    barrier_commits: int = 0,
+    barrier_distribution: str = "uniform",
+    barrier_zipf_exponent: float = 1.0,
+    barrier_tenant_counts: list[int] | None = None,
+    barrier_waves: int = 1,
+    barrier_cooldown_s: float = 0.0,
 ) -> list[SceneRun]:
     """Expand the scenario matrix into an ordered list of runs.
 
     Order: scenario-major, concurrency-minor (A@1, A@4, ... C:8:1@1, ...).
+    S/H/K/I are single-shot scenes: each id yields exactly one run at the
+    first concurrency step, appended after the A/B/C/D matrix.
     """
     unknown = [sid for sid in scenario_ids if sid not in SCENARIO_IDS]
     if unknown:
@@ -121,4 +152,47 @@ def expand_matrix(
                         burst_window_s=burst_window_s,
                     )
                 )
+
+    # 单发场景（S/H/K/I）：每个 id 只产出一个 SceneRun，追加在矩阵之后。
+    single_conc = concurrency_steps[0] if concurrency_steps else 1
+    for sid in scenario_ids:
+        if sid == "S":
+            runs.append(
+                SceneRun(
+                    "S",
+                    single_conc,
+                    duration_s,
+                    burst_commits=barrier_commits or burst_commits,
+                    burst_window_s=burst_window_s,
+                    barrier_commits=barrier_commits,
+                    barrier_distribution=barrier_distribution,
+                    barrier_zipf_exponent=barrier_zipf_exponent,
+                    barrier_waves=barrier_waves,
+                    barrier_cooldown_s=barrier_cooldown_s,
+                )
+            )
+        elif sid == "H":
+            counts = list(barrier_tenant_counts) if barrier_tenant_counts else None
+            if counts is not None:
+                h_commits = sum(counts)
+                h_distribution = "explicit"
+            else:
+                h_commits = barrier_commits
+                h_distribution = barrier_distribution
+            runs.append(
+                SceneRun(
+                    "H",
+                    single_conc,
+                    duration_s,
+                    barrier_commits=h_commits,
+                    barrier_distribution=h_distribution,
+                    barrier_tenant_counts=counts,
+                    barrier_waves=barrier_waves,
+                    barrier_cooldown_s=barrier_cooldown_s,
+                )
+            )
+        elif sid == "K":
+            runs.append(SceneRun("K", single_conc, duration_s))
+        elif sid == "I":
+            runs.append(SceneRun("I", single_conc, duration_s))
     return runs

@@ -17,9 +17,9 @@ from pathlib import Path
 from typing import Any
 
 try:
-    from .runner import EchoMemHTTP, extract_archive, load_tenant_specs, status_from
+    from ._client import EchoMemHTTP, extract_archive, load_tenant_specs, status_from
 except ImportError:
-    from runner import EchoMemHTTP, extract_archive, load_tenant_specs, status_from
+    from _client import EchoMemHTTP, extract_archive, load_tenant_specs, status_from
 
 PASS = "PASS"
 FAIL = "FAIL"
@@ -301,7 +301,7 @@ def main() -> int:
     parser.add_argument("--base-url", required=True)
     parser.add_argument("--tenant-config", required=True, type=Path)
     parser.add_argument("--out", required=True, type=Path)
-    parser.add_argument("--auth-header", default="X-API-Key")
+    parser.add_argument("--auth-header", default="X-Auth-Key")
     args = parser.parse_args()
     specs = load_tenant_specs(args.tenant_config)
     cases: list[dict[str, Any]] = []

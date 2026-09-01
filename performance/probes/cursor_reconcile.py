@@ -252,7 +252,7 @@ def main() -> int:
         default="echo://sessions/{session}/current/commit_cursor.json",
     )
     parser.add_argument("--auth-key", default="")
-    parser.add_argument("--auth-header", default="X-API-Key")
+    parser.add_argument("--auth-header", default="X-Auth-Key")
     parser.add_argument("--timeout-s", type=float, default=10)
     parser.add_argument("--strict", action="store_true", help="Require archive/operation identities when present in CSV")
     parser.add_argument("--out", required=True, type=Path)

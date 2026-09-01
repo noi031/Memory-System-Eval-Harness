@@ -48,7 +48,7 @@ def main() -> int:
         default="echo://sessions/{session}/current/commit_cursor.json",
     )
     parser.add_argument("--auth-key", default="")
-    parser.add_argument("--auth-header", default="X-API-Key")
+    parser.add_argument("--auth-header", default="X-Auth-Key")
     args = parser.parse_args()
     plan = json.loads(args.plan.read_text(encoding="utf-8"))
     args.out_dir.mkdir(parents=True, exist_ok=True)

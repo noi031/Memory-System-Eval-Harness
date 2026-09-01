@@ -7,13 +7,22 @@ import argparse
 import json
 from pathlib import Path
 
-from limit_failure_probe import (
-    create_sessions,
-    discover_sessions,
-    load_tenants,
-    run_wave,
-    write_report,
-)
+try:
+    from .limit_failure_probe import (
+        create_sessions,
+        discover_sessions,
+        load_tenants,
+        run_wave,
+        write_report,
+    )
+except ImportError:
+    from limit_failure_probe import (
+        create_sessions,
+        discover_sessions,
+        load_tenants,
+        run_wave,
+        write_report,
+    )
 
 
 def main() -> int:

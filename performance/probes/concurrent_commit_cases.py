@@ -13,9 +13,9 @@ from pathlib import Path
 from typing import Any
 
 try:
-    from .runner import EchoMemHTTP, extract_archive, load_tenant_specs, status_from
+    from ._client import EchoMemHTTP, extract_archive, load_tenant_specs, status_from
 except ImportError:
-    from runner import EchoMemHTTP, extract_archive, load_tenant_specs, status_from
+    from _client import EchoMemHTTP, extract_archive, load_tenant_specs, status_from
 
 
 def now() -> str:
@@ -137,7 +137,7 @@ def main() -> int:
     parser.add_argument("--out", required=True, type=Path)
     parser.add_argument("--concurrency", type=int, default=8)
     parser.add_argument("--timeout-s", type=float, default=120)
-    parser.add_argument("--auth-header", default="X-API-Key")
+    parser.add_argument("--auth-header", default="X-Auth-Key")
     args = parser.parse_args()
 
     specs = load_tenant_specs(args.tenant_config)

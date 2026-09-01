@@ -592,7 +592,6 @@ def evaluate_pr421_acceptance(manifest: dict[str, Any]) -> dict[str, Any]:
             observed=(result or {}).get("summary") or (result or {}).get("recovered"),
         )
 
-    k6_result = manifest.get("k6_reconciliation") or {}
     capability_checks = {
         str(item.get("name")): item
         for item in (manifest.get("capability_probe") or {}).get("checks") or []
@@ -615,13 +614,6 @@ def evaluate_pr421_acceptance(manifest: dict[str, Any]) -> dict[str, Any]:
         )
 
     unavailable = [
-        _result(
-            "k6 native load reconciliation",
-            str(k6_result.get("status") or INCONCLUSIVE),
-            evidence=k6_result.get("path", "k6-reconciliation.json"),
-            reason=k6_result.get("reason") or "未提供 k6 summary 与 runner 证据",
-            observed=k6_result.get("runner_total_requests"),
-        ),
         capability_gate(
             "cursor/message-set",
             INCONCLUSIVE,
