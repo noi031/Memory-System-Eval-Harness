@@ -59,6 +59,12 @@ def parse_engine_configs(path: str | Path) -> list[dict[str, Any]]:
 
             def visit(value: Any, path_parts: tuple[str, ...] = ()) -> None:
                 if isinstance(value, dict):
+                    # Optional model branches such as recall.model.rerank can
+                    # remain in the native config while disabled.  A disabled
+                    # branch is not part of the effective runtime and must not
+                    # block a real-model preflight on a missing credential.
+                    if value.get("enabled") is False:
+                        return
                     if value.get("api_base") and value.get("model"):
                         candidates.append((
                             ".".join(path_parts) or "engine",

@@ -1931,6 +1931,36 @@ class PreflightTests(unittest.TestCase):
         self.assertEqual({item["kind"] for item in engines}, {"llm", "embedding"})
         self.assertNotIn("fake-vlm", {item["model"] for item in engines})
 
+    def test_parse_native_config_skips_disabled_optional_model_branch(self) -> None:
+        path = self._write_config(
+            {
+                "model": {
+                    "llm": {
+                        "provider": "openai_compatible",
+                        "api_base": "https://llm.example/v1",
+                        "api_key_env": "LLM_KEY",
+                        "model": "real-llm",
+                    }
+                },
+                "recall": {
+                    "model": {
+                        "rerank": {
+                            "enabled": False,
+                            "provider": "dashscope",
+                            "api_base": "https://rerank.example/v1",
+                            "api_key_env": "RERANK_KEY",
+                            "model": "rerank-model",
+                        }
+                    }
+                },
+            }
+        )
+        try:
+            engines = parse_engine_configs(path)
+        finally:
+            os.unlink(path)
+        self.assertEqual([item["id"] for item in engines], ["model.llm"])
+
     def test_config_digest_stable(self) -> None:
         self.assertEqual(config_digest([{"a": 1}]), config_digest([{"a": 1}]))
         self.assertNotEqual(config_digest([{"a": 1}]), config_digest([{"a": 2}]))
