@@ -527,11 +527,6 @@ def _build_case_command(
         str(RUNNER),
         "--echomem-url",
         args.base_url,
-        # formal_suite receives pre-provisioned credentials.  Explicitly
-        # select static auth so run_stress does not fall back to its default
-        # self-provisioning mode and discard those credentials.
-        "--auth-mode",
-        "static",
         "--tenants",
         str(case["tenants"]),
         "--duration-s",
@@ -556,6 +551,8 @@ def _build_case_command(
         # X-Auth-Key is sent. The local workspace has no key registry, so
         # passing a synthetic tenant-config key would make every request 401.
         cmd += [
+            "--auth-mode",
+            "static",
             "--tenant-id",
             str(getattr(args, "local_tenant_id", "local")),
             "--user-id",
