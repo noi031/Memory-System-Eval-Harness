@@ -527,6 +527,11 @@ def _build_case_command(
         str(RUNNER),
         "--echomem-url",
         args.base_url,
+        # formal_suite receives pre-provisioned credentials.  Explicitly
+        # select static auth so run_stress does not fall back to its default
+        # self-provisioning mode and discard those credentials.
+        "--auth-mode",
+        "static",
         "--tenant-config",
         str(config_path),
         "--tenants",
