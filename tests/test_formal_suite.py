@@ -187,6 +187,7 @@ class FormalSuiteAdapterTests(unittest.TestCase):
             command = self._command(case, output)
             self.assertEqual("S", self._flag_value(command, "--scenarios"))
             self.assertEqual("4", self._flag_value(command, "--seed-sessions-per-tenant"))
+            self.assertEqual("4", self._flag_value(command, "--barrier-prepare-concurrency"))
             self.assertEqual("160", self._flag_value(command, "--commit-barrier-count"))
             self.assertEqual("zipf", self._flag_value(command, "--commit-tenant-distribution"))
             self.assertEqual("2.0", self._flag_value(command, "--commit-zipf-exponent"))

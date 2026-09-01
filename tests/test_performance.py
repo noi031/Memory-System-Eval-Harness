@@ -786,6 +786,8 @@ class RunStressArgsTests(unittest.TestCase):
             quick=False,
             duration_s=60.0,
             tenants=1,
+            seed_concurrency=4,
+            barrier_prepare_concurrency=4,
             burst_commits=8,
             mode="max-throughput",
             rps=0.0,

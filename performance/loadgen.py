@@ -464,6 +464,7 @@ class LoadGenerator:
         commit_rpm: float = 0.0,
         commit_retry_max: int = 0,
         commit_retry_backoff_s: float = 0.5,
+        barrier_prepare_concurrency: int = 4,
     ) -> None:
         self.top_k = top_k
         self.timeout_s = timeout_s
@@ -475,6 +476,9 @@ class LoadGenerator:
         )
         self.commit_retry_max = commit_retry_max
         self.commit_retry_backoff_s = commit_retry_backoff_s
+        if barrier_prepare_concurrency < 1:
+            raise ValueError("barrier_prepare_concurrency must be >= 1")
+        self.barrier_prepare_concurrency = barrier_prepare_concurrency
         self._last_write_anchors: list[AnchorWrite] = []
         self._reconciliation_candidates: list[tuple[int, str, list[str], list[str], str]] = []
         # commit barrier 准备阶段产生的 add 记录（run_commit_barrier 持有其引用）
@@ -873,6 +877,59 @@ class LoadGenerator:
         step_conc: int,
         extra: str = "",
     ) -> list[PreparedWrite]:
+        """并发准备 barrier 会话；每个 worker 内仍按会话串行写入。"""
+        if count <= 1 or self.barrier_prepare_concurrency <= 1:
+            return self._prepare_write_sessions_serial(
+                tenant,
+                count,
+                messages_per_session,
+                scene_key=scene_key,
+                step_conc=step_conc,
+                extra=extra,
+                start_seq=0,
+            )
+        chunk_size = max(
+            1,
+            (count + self.barrier_prepare_concurrency - 1)
+            // self.barrier_prepare_concurrency,
+        )
+        chunks = [
+            (start, min(chunk_size, count - start))
+            for start in range(0, count, chunk_size)
+        ]
+        with ThreadPoolExecutor(
+            max_workers=min(self.barrier_prepare_concurrency, len(chunks)),
+            thread_name_prefix="perf-barrier-prep",
+        ) as pool:
+            futures = [
+                pool.submit(
+                    self._prepare_write_sessions_serial,
+                    tenant,
+                    chunk_count,
+                    messages_per_session,
+                    scene_key=scene_key,
+                    step_conc=step_conc,
+                    extra=extra,
+                    start_seq=start,
+                )
+                for start, chunk_count in chunks
+            ]
+            prepared: list[PreparedWrite] = []
+            for future in futures:
+                prepared.extend(future.result())
+            return prepared
+
+    def _prepare_write_sessions_serial(
+        self,
+        tenant: TenantContext,
+        count: int,
+        messages_per_session: int,
+        *,
+        scene_key: str,
+        step_conc: int,
+        extra: str = "",
+        start_seq: int = 0,
+    ) -> list[PreparedWrite]:
         """为单个租户准备 count 个「已 open + 已 add 消息、未 commit」的会话。
 
         内容与 :func:`run_write_transaction` 一致（末条携带 PERFTAIL 锚词，
@@ -882,7 +939,7 @@ class LoadGenerator:
         """
         prepared: list[PreparedWrite] = []
         records = self._barrier_prep_records
-        seq_counter = itertools.count()
+        seq_counter = itertools.count(start_seq)
         for _ in range(count):
             seq = next(seq_counter)
             anchor = f"{WRITE_ANCHOR_PREFIX}-{tenant.idx}-{seq}"

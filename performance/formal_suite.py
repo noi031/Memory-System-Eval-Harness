@@ -551,6 +551,8 @@ def _build_case_command(
         str(args.commit_max_attempts),
         "--commit-retry-backoff-s",
         str(args.commit_retry_backoff_s),
+        "--barrier-prepare-concurrency",
+        "4",
     ]
     if getattr(args, "local_auth_mode", False):
         # EchoMem local auth resolves the configured default identity when no

@@ -173,6 +173,12 @@ def build_parser() -> argparse.ArgumentParser:
         default=4,
         help="种子数据的租户级并发数（不计入压测窗口，默认 4）",
     )
+    g.add_argument(
+        "--barrier-prepare-concurrency",
+        type=int,
+        default=4,
+        help="commit barrier 未提交 session 准备并发数（默认 4）",
+    )
     g = parser.add_argument_group("Load")
     g.add_argument(
         "--concurrency-steps",
@@ -342,6 +348,8 @@ def _resolve_args(args: argparse.Namespace) -> dict[str, Any]:
         raise ValueError("--tenants 必须 >= 1")
     if args.seed_concurrency < 1:
         raise ValueError("--seed-concurrency 必须 >= 1")
+    if args.barrier_prepare_concurrency < 1:
+        raise ValueError("--barrier-prepare-concurrency 必须 >= 1")
     commit_tenant_counts: list[int] | None = None
     if str(args.commit_tenant_counts or "").strip():
         try:
@@ -1030,6 +1038,7 @@ def main() -> None:
             commit_rpm=args.commit_rpm,
             commit_retry_max=args.commit_retry_max,
             commit_retry_backoff_s=args.commit_retry_backoff_s,
+            barrier_prepare_concurrency=args.barrier_prepare_concurrency,
         )
 
         try:
