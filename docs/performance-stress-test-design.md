@@ -366,6 +366,11 @@ python -m performance.formal_suite --profile complete \
   --tenant-config performance/tenants.example.json \
   --out-dir results/performance/formal_capacity
 
+4U8G 单实例的常规验收使用 `performance/run_4u8g_complete.sh`。它执行
+PR397/report(6) 与 PR421 场景的完整并集，默认单轮、只使用 4U8G，不执行
+长稳态 `soak`，也不启动 4U16G。`suite.json` 会记录实际场景列表和每个
+case 的状态；`suite.html` 会保留逐 case 结果，不能把未执行场景混入总体结论。
+
 # 单独渲染套件数据报告（suite.json → suite.html）
 python -m performance.formal_data_report \
   results/performance/formal_<ts>/suite.json suite.html

@@ -539,6 +539,17 @@ python performance/probes/limit_failure_sweep.py \
   --session-root <session_root> --out-dir results/performance/probes
 ```
 
+单实例 4U8G 的完整验收使用 `performance/run_4u8g_complete.sh`；默认单轮执行
+PR397/report(6) 与 PR421 的完整场景并集，不执行 `soak`，也不启动 4U16G：
+
+```bash
+export ECHOMEM_BASE_URL=http://127.0.0.1:8010
+export ECHOMEM_CONFIG=/etc/echomem/4u8g/config.json
+export STRESS_TENANT_CONFIG=/opt/echomem-stress/tenants-32.generated.json
+export STRESS_OUTPUT_DIR=/opt/echomem-stress/results/4u8g-complete-$(date +%Y%m%d_%H%M%S)
+./performance/run_4u8g_complete.sh
+```
+
 结果写入 `performance/results/<ts>/`：`summary.json`（按场景×并发档分节的延迟/
 吞吐/错误/资源/劣化倍数）、`requests.csv`（逐请求）、`metrics_samples.csv`
 （服务端采样时序）、`report.html`（自包含报告）。正式套件结果写入
