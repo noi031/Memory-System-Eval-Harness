@@ -8,8 +8,8 @@ Two identity modes:
                           mode against an internet-deployed EchoMem that
                           does not allow self-service tenant creation.
 
-Seed data is injected serially at low concurrency and is NOT part of the
-measured load; it only guarantees the retrieval index has real content.
+Seed data is injected with bounded tenant-level concurrency and is NOT part of
+the measured load; it only guarantees the retrieval index has real content.
 Each seeded message carries a unique anchor token that later serves as a
 searchable query and as a write-read consistency probe.
 """
@@ -20,6 +20,7 @@ import json
 import logging
 import os
 import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -377,6 +378,7 @@ class TenantPreparer:
         timeout_s: float = 10.0,
         label_prefix: str = "perf",
         tenant_specs: list[dict[str, Any]] | None = None,
+        seed_concurrency: int = 4,
     ) -> None:
         if tenants < 1:
             raise ValueError("tenants must be >= 1")
@@ -389,6 +391,9 @@ class TenantPreparer:
         self.tenants = tenants
         self.timeout_s = timeout_s
         self.label_prefix = label_prefix
+        if seed_concurrency < 1:
+            raise ValueError("seed_concurrency must be >= 1")
+        self.seed_concurrency = seed_concurrency
         # --tenant-config 独立凭据：非空时优先于 auth_mode，--tenants 忽略
         self.tenant_specs = tenant_specs
         self._provisioned: list[tuple[int, EchoMemClient]] = []
@@ -405,7 +410,7 @@ class TenantPreparer:
         *,
         locomo_batches: list[list[dict[str, Any]]] | None = None,
     ) -> list[TenantContext]:
-        """Provision/bind identities and seed all tenants serially.
+        """Provision/bind identities and seed tenants with bounded parallelism.
 
         ``locomo_batches`` 非空时用真实会话灌入每个租户（全部租户共享
         同一批会话，复制式多租户布局），否则用合成锚词消息。
@@ -414,7 +419,8 @@ class TenantPreparer:
         if self.tenant_specs:
             # --tenant-config 独立凭据模式：逐条构造客户端并灌种。
             # 不向 _provisioned 记录（config 凭据不归本 preparer 清理）。
-            for idx, spec in enumerate(self.tenant_specs):
+            def seed_spec(item: tuple[int, dict[str, Any]]) -> TenantContext:
+                idx, spec = item
                 client = EchoMemClient(
                     self.base_url,
                     auth_key=str(spec.get("auth_key") or ""),
@@ -424,16 +430,24 @@ class TenantPreparer:
                     timeout_s=self.timeout_s,
                     max_retries=0,
                 )
-                contexts.append(
-                    self._seed_one(
-                        client,
-                        idx,
-                        seed_sessions,
-                        messages_per_session,
-                        commit_poll_timeout_s,
-                        locomo_batches,
-                    )
+                return self._seed_one(
+                    client,
+                    idx,
+                    seed_sessions,
+                    messages_per_session,
+                    commit_poll_timeout_s,
+                    locomo_batches,
                 )
+
+            with ThreadPoolExecutor(
+                max_workers=min(self.seed_concurrency, len(self.tenant_specs)),
+                thread_name_prefix="stress-seed",
+            ) as pool:
+                futures = [
+                    pool.submit(seed_spec, item)
+                    for item in enumerate(self.tenant_specs)
+                ]
+                contexts.extend(future.result() for future in futures)
             return contexts
         if self.auth_mode == "provision":
             stamp = int(time.time())

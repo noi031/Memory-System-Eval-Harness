@@ -532,6 +532,10 @@ python -m performance.formal_suite \
   --base-url http://127.0.0.1:8010 \
   --tenant-config performance/tenants.example.json --repeats 3
 
+种子数据准备默认按最多 4 个租户并行执行，以缩短真实模型 commit 的准备时间；
+种子阶段不计入压测窗口。可通过 `--seed-concurrency N` 调整，正式负载阶段仍
+按场景配置独立控制并发。
+
 # 探针：真实限流阶梯扫描
 python performance/probes/limit_failure_sweep.py \
   --base-url http://127.0.0.1:8010 \

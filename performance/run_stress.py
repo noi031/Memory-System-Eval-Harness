@@ -167,6 +167,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     g.add_argument("--seed-sessions-per-tenant", type=int, default=5, help="每租户种子 session 数 (locomo 源时由数据集会话数决定)")
     g.add_argument("--messages-per-session", type=int, default=10, help="每个 session 的消息条数 (写事务也用它)")
+    g.add_argument(
+        "--seed-concurrency",
+        type=int,
+        default=4,
+        help="种子数据的租户级并发数（不计入压测窗口，默认 4）",
+    )
     g = parser.add_argument_group("Load")
     g.add_argument(
         "--concurrency-steps",
@@ -334,6 +340,8 @@ def _resolve_args(args: argparse.Namespace) -> dict[str, Any]:
         args.duration_s = max(5.0, args.duration_s / 4)
     if args.tenants < 1:
         raise ValueError("--tenants 必须 >= 1")
+    if args.seed_concurrency < 1:
+        raise ValueError("--seed-concurrency 必须 >= 1")
     commit_tenant_counts: list[int] | None = None
     if str(args.commit_tenant_counts or "").strip():
         try:
@@ -989,6 +997,7 @@ def main() -> None:
             timeout_s=args.timeout_s,
             label_prefix="perf",
             tenant_specs=resolved.get("tenant_specs"),
+            seed_concurrency=args.seed_concurrency,
         )
         try:
             tenants = preparer.prepare(
