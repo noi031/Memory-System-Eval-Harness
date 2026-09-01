@@ -522,6 +522,12 @@ def _build_case_command(
     的字段不映射 CLI。
     """
     per_tenant_conc = int(case.get("per_tenant_concurrency") or 1)
+    # Barrier 场景会在 run_stress 内部另外准备精确数量的未提交会话。
+    # ``sessions_per_tenant`` 只用于 warm-up；将它设置成 barrier 总数会在
+    # 正式压测前额外提交数百个真实模型请求，并可能耗尽 case timeout。
+    seed_sessions = int(case.get("sessions_per_tenant", 5))
+    if case.get("commit_barrier"):
+        seed_sessions = min(seed_sessions, 4)
     cmd = [
         sys.executable,
         str(RUNNER),
@@ -536,7 +542,7 @@ def _build_case_command(
         "--out-dir",
         str(output / "run"),
         "--seed-sessions-per-tenant",
-        str(case.get("sessions_per_tenant", 5)),
+        str(seed_sessions),
         "--messages-per-session",
         str(case.get("messages_per_session", 10)),
         "--commit-poll-timeout-s",

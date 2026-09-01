@@ -180,11 +180,13 @@ class FormalSuiteAdapterTests(unittest.TestCase):
             "commit_barrier_count": 160,
             "commit_tenant_distribution": "zipf",
             "commit_zipf_exponent": 2.0,
+            "sessions_per_tenant": 40,
         }
         with tempfile.TemporaryDirectory() as directory:
             output = Path(directory) / "out"
             command = self._command(case, output)
             self.assertEqual("S", self._flag_value(command, "--scenarios"))
+            self.assertEqual("4", self._flag_value(command, "--seed-sessions-per-tenant"))
             self.assertEqual("160", self._flag_value(command, "--commit-barrier-count"))
             self.assertEqual("zipf", self._flag_value(command, "--commit-tenant-distribution"))
             self.assertEqual("2.0", self._flag_value(command, "--commit-zipf-exponent"))

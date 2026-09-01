@@ -120,6 +120,11 @@ performance/                 # 性能压测（多租户并发读写、注入/检
   tenants.example.json       #   租户凭据示例
   instance-profiles.example.json  # 机器规格 profile 示例
   results/                   #   运行结果
+
+正式套件的 barrier 场景会在正式提交屏障前只执行少量 seed warm-up；
+屏障本身会按场景配置单独准备精确数量的未提交 session。不要把
+`sessions_per_tenant` 配成 barrier 提交总数，否则真实模型 seed 会占满
+case timeout，导致正式 barrier 尚未开始就生成 `NO_SUMMARY`。
 shared/                      # 共享基础设施
   eval_base.py               #   EvalConfig / EvalRun / CLI arg helpers
   llm_client.py              #   LLM 客户端 (OpenAI 兼容, urllib)
