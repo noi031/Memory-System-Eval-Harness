@@ -1080,6 +1080,11 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Run formal real multi-tenant stress suite")
     parser.add_argument("--base-url", default=os.getenv("ECHOMEM_BASE_URL", "http://127.0.0.1:8010"))
     parser.add_argument("--tenant-config", required=True)
+    parser.add_argument(
+        "--local-auth",
+        action="store_true",
+        help="Use the single local identity from config.json instead of tenant credentials.",
+    )
     parser.add_argument("--out-dir", default="")
     parser.add_argument(
         "--profile",
@@ -1170,7 +1175,9 @@ def main() -> int:
     except (OSError, json.JSONDecodeError):
         runtime_config = {}
     auth_config = runtime_config.get("auth") if isinstance(runtime_config, dict) else {}
-    args.local_auth_mode = isinstance(auth_config, dict) and auth_config.get("mode") == "local"
+    # Do not infer the wire authentication mode from config.json. A deployment
+    # may keep a local workspace config while exposing API-key identities.
+    args.local_auth_mode = bool(args.local_auth)
     args.local_tenant_id = (
         str(auth_config.get("default_tenant_id") or "local")
         if isinstance(auth_config, dict)
