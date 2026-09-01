@@ -31,6 +31,8 @@ CSV_HEADERS = [
     "retried",
     "retry_total_wait_ms",
     "final_success",
+    "retry_after_s",
+    "reason_code",
     "message_id",
     "content_hash",
     "content_bytes",
