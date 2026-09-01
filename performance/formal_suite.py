@@ -532,8 +532,6 @@ def _build_case_command(
         # self-provisioning mode and discard those credentials.
         "--auth-mode",
         "static",
-        "--tenant-config",
-        str(config_path),
         "--tenants",
         str(case["tenants"]),
         "--duration-s",
@@ -553,6 +551,18 @@ def _build_case_command(
         "--commit-retry-backoff-s",
         str(args.commit_retry_backoff_s),
     ]
+    if getattr(args, "local_auth_mode", False):
+        # EchoMem local auth resolves the configured default identity when no
+        # X-Auth-Key is sent. The local workspace has no key registry, so
+        # passing a synthetic tenant-config key would make every request 401.
+        cmd += [
+            "--tenant-id",
+            str(getattr(args, "local_tenant_id", "local")),
+            "--user-id",
+            str(getattr(args, "local_user_id", "local_user")),
+        ]
+    else:
+        cmd += ["--tenant-config", str(config_path)]
     if case.get("search_rps"):
         cmd += ["--mode", "fixed-rps", "--rps", str(case["search_rps"])]
     if case.get("commit_rpm"):
@@ -1156,6 +1166,24 @@ def main() -> int:
             f"tenant config has {len(all_tenants)} tenants, but selected scenarios require {required_tenants}"
         )
     args.identity_independent = _identity_is_independent(all_tenants)
+    try:
+        runtime_config = json.loads(
+            Path(args.preflight_config).expanduser().read_text(encoding="utf-8")
+        ) if args.preflight_config else {}
+    except (OSError, json.JSONDecodeError):
+        runtime_config = {}
+    auth_config = runtime_config.get("auth") if isinstance(runtime_config, dict) else {}
+    args.local_auth_mode = isinstance(auth_config, dict) and auth_config.get("mode") == "local"
+    args.local_tenant_id = (
+        str(auth_config.get("default_tenant_id") or "local")
+        if isinstance(auth_config, dict)
+        else "local"
+    )
+    args.local_user_id = (
+        str(auth_config.get("default_user_id") or "local_user")
+        if isinstance(auth_config, dict)
+        else "local_user"
+    )
     root = Path(args.out_dir or f"results/performance/formal_{datetime.now().strftime('%Y%m%d_%H%M%S')}")
     root.mkdir(parents=True, exist_ok=True)
     runner = RUNNER
