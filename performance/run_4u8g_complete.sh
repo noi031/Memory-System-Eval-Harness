@@ -5,6 +5,7 @@ set -euo pipefail
 # The soak case is deliberately opt-in; this command is the bounded
 # acceptance run used before a longer stability experiment.
 root_dir="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
+cd "$root_dir"
 base_url="${ECHOMEM_BASE_URL:-http://127.0.0.1:8010}"
 tenant_config="${STRESS_TENANT_CONFIG:?set STRESS_TENANT_CONFIG to an independent-tenant JSON file}"
 preflight_config="${ECHOMEM_CONFIG:?set ECHOMEM_CONFIG to the actual EchoMem config.json}"
