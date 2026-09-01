@@ -38,30 +38,87 @@ REQUIRED_FIELDS = ("id", "kind", "api_base", "model")
 
 
 def parse_engine_configs(path: str | Path) -> list[dict[str, Any]]:
-    """Load and normalize engine configs from a JSON file."""
+    """Load and normalize flat or native EchoMem nested engine configs.
+
+    EchoMem's ``configs/config.example.json`` stores providers below
+    ``model``, ``engine.configs`` and ``recall.model`` rather than under a
+    top-level ``engines`` array. Official runs must preflight that exact
+    file, so discover provider-shaped mappings recursively while retaining
+    the original flat ``engines`` format for compatibility.
+    """
     raw = json.loads(Path(path).read_text(encoding="utf-8"))
     if isinstance(raw, dict):
-        entries = raw.get("engines") or [raw]
+        entries = raw.get("engines")
+        if entries:
+            candidates = [
+                (str(entry.get("id") or f"engine-{index}"), entry)
+                for index, entry in enumerate(entries)
+            ]
+        else:
+            candidates = []
+
+            def visit(value: Any, path_parts: tuple[str, ...] = ()) -> None:
+                if isinstance(value, dict):
+                    if value.get("api_base") and value.get("model"):
+                        candidates.append((
+                            ".".join(path_parts) or "engine",
+                            value,
+                        ))
+                    for key, child in value.items():
+                        visit(child, (*path_parts, str(key)))
+                elif isinstance(value, list):
+                    for index, child in enumerate(value):
+                        visit(child, (*path_parts, str(index)))
+
+            visit(raw)
+            if not candidates:
+                candidates = [("engine", raw)]
     elif isinstance(raw, list):
-        entries = raw
+        candidates = [
+            (str(entry.get("id") or f"engine-{index}"), entry)
+            for index, entry in enumerate(raw)
+        ]
     else:
         raise ValueError("engine config 必须是 JSON 对象或对象数组")
     engines: list[dict[str, Any]] = []
-    for entry in entries:
+    seen: set[tuple[str, str, str, str]] = set()
+    for candidate_id, entry in candidates:
         if not isinstance(entry, dict):
             raise ValueError("engine config 条目必须是 JSON 对象")
-        for field in REQUIRED_FIELDS:
-            if not str(entry.get(field) or "").strip():
-                raise ValueError(f"engine config 缺字段: {field}")
+        # Native EchoMem configs also contain fake VLM and model-only
+        # templates. They are not real provider endpoints and must not make
+        # a real-model preflight fail.
+        if not str(entry.get("api_base") or "").strip():
+            continue
+        if not str(entry.get("model") or "").strip():
+            continue
+        provider = str(entry.get("provider") or "").lower()
+        if provider in {"fake", "mock"}:
+            continue
+        explicit_kind = str(entry.get("kind") or "").lower()
+        kind = explicit_kind if explicit_kind in {"llm", "embedding"} else ("embedding" if any(
+            token in candidate_id.lower()
+            for token in ("embedding", "vector", "query_embedding")
+        ) else "llm")
+        engine_id = str(entry.get("id") or candidate_id)
+        api_key_env = str(entry.get("api_key_env") or "")
+        api_base = str(entry["api_base"]).rstrip("/")
+        model = str(entry["model"])
+        identity = (engine_id, kind, api_key_env, api_base + "\0" + model)
+        if identity in seen:
+            continue
+        seen.add(identity)
         engines.append(
             {
-                "id": str(entry["id"]),
-                "kind": str(entry.get("kind") or "llm").lower(),
-                "api_key_env": str(entry.get("api_key_env") or ""),
-                "api_base": str(entry["api_base"]).rstrip("/"),
-                "model": str(entry["model"]),
+                "id": engine_id,
+                "kind": kind,
+                "api_key_env": api_key_env,
+                "api_base": api_base,
+                "model": model,
             }
         )
+    if not engines and raw and isinstance(raw, (dict, list)):
+        raise ValueError("engine config 未发现可预检的真实 provider endpoint")
     return engines
 
 

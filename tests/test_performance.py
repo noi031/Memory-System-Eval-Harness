@@ -1885,6 +1885,52 @@ class PreflightTests(unittest.TestCase):
         finally:
             os.unlink(path)
 
+    def test_parse_native_echomem_nested_config(self) -> None:
+        path = self._write_config(
+            {
+                "model": {
+                    "llm": {
+                        "provider": "openai_compatible",
+                        "api_base": "https://llm.example/v1",
+                        "api_key_env": "LLM_KEY",
+                        "model": "real-llm",
+                    },
+                    "embedding": {
+                        "provider": "openai_compatible",
+                        "api_base": "https://embed.example/v1",
+                        "api_key_env": "EMBED_KEY",
+                        "model": "real-embed",
+                    },
+                    "vlm": {
+                        "provider": "fake",
+                        "api_base": "",
+                        "model": "fake-vlm",
+                    },
+                },
+                "engine": {
+                    "configs": {
+                        "atomic_engine": {
+                            "model": {
+                                "llm": {
+                                    "provider": "openai_compatible",
+                                    "api_base": "https://llm.example/v1",
+                                    "api_key_env": "LLM_KEY",
+                                    "model": "real-llm",
+                                }
+                            }
+                        }
+                    }
+                },
+            }
+        )
+        try:
+            engines = parse_engine_configs(path)
+        finally:
+            os.unlink(path)
+        self.assertEqual(len(engines), 3)
+        self.assertEqual({item["kind"] for item in engines}, {"llm", "embedding"})
+        self.assertNotIn("fake-vlm", {item["model"] for item in engines})
+
     def test_config_digest_stable(self) -> None:
         self.assertEqual(config_digest([{"a": 1}]), config_digest([{"a": 1}]))
         self.assertNotEqual(config_digest([{"a": 1}]), config_digest([{"a": 2}]))
