@@ -384,7 +384,7 @@ def _resolve_args(args: argparse.Namespace) -> dict[str, Any]:
         except FileNotFoundError as exc:
             raise ValueError(f"--tenant-config 文件不存在: {args.tenant_config}") from exc
     seed_dataset_path: str | None = None
-    if args.seed_source == "locomo" and not args.skip_seed:
+    if args.seed_source == "locomo" and not getattr(args, "skip_seed", False):
         dataset_path = (
             Path(args.dataset_path)
             if args.dataset_path

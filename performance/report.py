@@ -26,6 +26,7 @@ CSV_HEADERS = [
     "error_type",
     "ts_ms",
     "session_id",
+    "archive_id",
     "extra",
     "retry_count",
     "retried",
