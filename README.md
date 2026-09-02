@@ -838,7 +838,7 @@ python3 -m performance.objective_suite \
 `--quick` 只做 bounded smoke，并默认跳过真实模型灌种，专门快速验证调度、延迟和
 可观测性链路；因此不能用它证明记忆质量。需要把已有租户记忆也纳入测试时，可加
 `--quick-include-seed`。单场景默认最多运行 30 秒、总墙钟 180 秒、barrier 最多
-16 个 Commit，可按机器和目标调整：
+4 个 Commit；Commit 默认单次最多等待 30 秒、不重试，可按机器和目标调整：
 
 ```bash
 python3 -m performance.objective_suite \

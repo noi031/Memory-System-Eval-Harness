@@ -38,9 +38,14 @@ INCONCLUSIVE = "INCONCLUSIVE"
 PASS = "PASS"
 FAIL = "FAIL"
 
+# The quick matrix is intended to return actionable black-box observations
+# on a real model within a bounded window.  The report4/report6 A/B/D cases
+# duplicate the same read/write/barrier signals and are too expensive when
+# every real Commit is polled to completion.  Full acceptance still uses the
+# complete catalog; quick mode is explicitly a smoke/diagnostic run.
 QUICK_SCENARIOS = (
-    "A@1,B@1,D@1,baseline,mixed,commit-barrier,saturation,"
-    "tenant-skew,search-priority-blackbox,capacity-2,capacity-4"
+    "baseline,tenant-skew,search-priority-blackbox,"
+    "saturation,capacity-2,capacity-4"
 )
 
 
@@ -604,8 +609,19 @@ def main() -> int:
     parser.add_argument("--quick", action="store_true", help="bounded smoke matrix")
     parser.add_argument("--scenarios", default="", help="覆盖场景列表，逗号分隔")
     parser.add_argument("--quick-duration-cap-s", type=float, default=30.0)
-    parser.add_argument("--quick-case-timeout-s", type=float, default=180.0)
-    parser.add_argument("--quick-barrier-count-cap", type=int, default=16)
+    parser.add_argument("--quick-case-timeout-s", type=float, default=120.0)
+    parser.add_argument(
+        "--quick-barrier-count-cap",
+        type=int,
+        default=4,
+        help=(
+            "quick 模式的 barrier Commit 上限；这是有界诊断值，不代表完整验收负载。"
+            "完整套件请显式传 --barrier-count-cap 0"
+        ),
+    )
+    parser.add_argument("--quick-commit-timeout-s", type=float, default=30.0)
+    parser.add_argument("--quick-commit-max-attempts", type=int, default=1)
+    parser.add_argument("--quick-commit-retry-backoff-s", type=float, default=0.0)
     parser.add_argument(
         "--quick-include-seed",
         action="store_true",
@@ -684,6 +700,10 @@ def main() -> int:
                         "--duration-cap-s", str(args.quick_duration_cap_s),
                         "--case-timeout-s", str(args.quick_case_timeout_s),
                         "--barrier-count-cap", str(args.quick_barrier_count_cap),
+                        "--commit-timeout-s", str(args.quick_commit_timeout_s),
+                        "--commit-max-attempts", str(args.quick_commit_max_attempts),
+                        "--commit-retry-backoff-s",
+                        str(args.quick_commit_retry_backoff_s),
                     ]
                 if args.quick and not args.quick_include_seed:
                     command += ["--skip-seed", "--seed-sessions-per-tenant", "0"]
