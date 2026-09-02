@@ -31,6 +31,7 @@ from performance.acceptance import (
     evaluate_pr421_acceptance,
 )
 from performance.perf_preflight import run_preflight
+from performance.probes.auth_preflight import run as run_auth_preflight
 
 
 # 正式运行复现在线客户端。压测端不施加 FIFO、优先级、lane 或租户公平调度。
@@ -1344,6 +1345,35 @@ def main() -> int:
         parser.error(
             f"tenant config has {len(all_tenants)} tenants, but selected scenarios require {required_tenants}"
         )
+    auth_preflight_result: dict[str, Any] = {
+        "status": "SKIPPED",
+        "reason": "local auth mode does not use tenant credentials",
+    }
+    if not args.local_auth:
+        auth_preflight_result = run_auth_preflight(
+            args.base_url,
+            tenant_path,
+            timeout_s=5.0,
+            tenant_count=required_tenants,
+        )
+        if auth_preflight_result["status"] != "PASS":
+            root = Path(
+                args.out_dir
+                or f"results/performance/formal_auth_error_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+            )
+            root.mkdir(parents=True, exist_ok=True)
+            (root / "auth-preflight.json").write_text(
+                json.dumps(auth_preflight_result, ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8",
+            )
+            print(
+                "AUTH_PREFLIGHT_FAILED "
+                f"status={auth_preflight_result['status']} "
+                f"passed={auth_preflight_result['passed']} "
+                f"failed={auth_preflight_result['failed']} "
+                f"out={root}"
+            )
+            return 3
     args.identity_independent = _identity_is_independent(all_tenants)
     try:
         runtime_config = json.loads(
@@ -1417,6 +1447,7 @@ def main() -> int:
             if preflight_result is not None
             else {"status": "NOT_RUN", "config": "", "engines_checked": 0, "engines": [], "digest": ""}
         ),
+        "auth_preflight": auth_preflight_result,
         "reset_command": args.reset_command,
         "reuse_existing_data": args.reuse_existing_data,
         "client_admission_enabled": False,

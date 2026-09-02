@@ -124,6 +124,9 @@ def _server_observability(
             "server_queue_depth", "server_active_workers"
         } else value
     return result
+
+
+@dataclass
 class TenantSpec:
     """One independently authenticated tenant for a real isolation run."""
 

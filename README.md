@@ -554,6 +554,12 @@ queued/wait/exec/rejected 四元组。旧报告只有单维 Jain、单一指标�
 `history`、archive 和 `echo://sessions/{session}/current/commit_cursor.json`；
 没有显式幂等键时，报告会把“消息已持久化”和“重复提交幂等”分开判定。
 
+正式压测会先执行真实租户鉴权门禁：对本轮选中的租户调用
+`POST /api/sessions/open`。任何一个租户返回 `401`、连接失败或配置缺失，
+都会在场景启动前生成 `auth-preflight.json` 并停止本轮，不再输出“0 请求”的
+伪压测数据。该文件只保留租户名、状态码、耗时和 key 的 SHA-256 前缀，不保存密钥。
+如果部署使用单一本地身份，可显式传入 `--local-auth`。
+
 - **正式验收套件**（`formal_suite.py`）：以子进程方式逐 case 重跑
   `run_stress.py`（`report6` / `pr421` / `complete` 三档场景目录），把原生产物
   推导成 `acceptance.py` 验收门禁（8 个 gate：search 成功率 / report6 质量 /
