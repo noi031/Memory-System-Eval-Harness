@@ -8,6 +8,7 @@ from pathlib import Path
 from performance.objective_suite import (
     QUICK_SCENARIOS,
     _first_completed_commit_csv,
+    _acquire_output_lock,
     _materialize_fault_plan,
     load_profiles,
     objective_statuses,
@@ -143,6 +144,16 @@ class ObjectiveSuiteTests(unittest.TestCase):
                 "http://127.0.0.1:18187/health",
                 payload["recovery"]["health_url"],
             )
+
+    def test_output_lock_rejects_second_writer(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            first = _acquire_output_lock(root)
+            try:
+                with self.assertRaisesRegex(RuntimeError, "already locked"):
+                    _acquire_output_lock(root)
+            finally:
+                first.close()
 
 
 if __name__ == "__main__":

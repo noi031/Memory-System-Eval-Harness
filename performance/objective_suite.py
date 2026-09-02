@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import argparse
 import csv
+import errno
+import fcntl
 import html
 import json
 import os
@@ -601,6 +603,24 @@ code{{background:#f0f3f5;padding:2px 4px}}.scroll{{overflow:auto}}
     path.write_text(doc, encoding="utf-8")
 
 
+def _acquire_output_lock(out_dir: Path):
+    """Prevent two objective jobs from writing the same evidence tree."""
+    lock_path = out_dir / ".objective-suite.lock"
+    handle = lock_path.open("a+", encoding="utf-8")
+    try:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError as exc:
+        handle.close()
+        if exc.errno in {errno.EACCES, errno.EAGAIN}:
+            raise RuntimeError(
+                f"objective output directory is already locked: {out_dir}"
+            ) from exc
+        raise
+    handle.write(f"pid={os.getpid()}\n")
+    handle.flush()
+    return handle
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Run EchoMem objective acceptance suite")
     parser.add_argument("--profiles", required=True, type=Path)
@@ -638,6 +658,12 @@ def main() -> int:
         parser.error("没有匹配的 profile")
 
     args.out_dir.mkdir(parents=True, exist_ok=True)
+    output_lock = None
+    if not args.skip_run:
+        try:
+            output_lock = _acquire_output_lock(args.out_dir)
+        except RuntimeError as exc:
+            parser.error(str(exc))
     output_profiles: list[dict[str, Any]] = []
     for profile in profiles:
         name = str(profile["name"])
