@@ -308,8 +308,11 @@ def main() -> int:
     parser.add_argument("--tenant-config", required=True, type=Path)
     parser.add_argument("--out", required=True, type=Path)
     parser.add_argument("--auth-header", default="X-Auth-Key")
+    parser.add_argument("--max-tenants", type=int, default=0)
     args = parser.parse_args()
     specs = load_tenant_specs(args.tenant_config)
+    if args.max_tenants > 0:
+        specs = specs[: args.max_tenants]
     cases: list[dict[str, Any]] = []
     for spec in specs:
         client = EchoMemHTTP(

@@ -110,6 +110,26 @@ class ObjectiveSuiteTests(unittest.TestCase):
             _preserve_probe_status(execution, {"status": "INCONCLUSIVE"})["status"],
         )
 
+    def test_profile_can_enable_blackbox_probes(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            path = root / "profiles.json"
+            path.write_text(
+                json.dumps({
+                    "profiles": [{
+                        "name": "4U8G",
+                        "missing_cases": {"enabled": True, "max_tenants": 1},
+                        "concurrent_commit": {
+                            "enabled": True, "concurrency": 4, "timeout_s": 120
+                        },
+                    }]
+                }),
+                encoding="utf-8",
+            )
+            profile = load_profiles(path)[0]
+            self.assertTrue(profile["missing_cases"]["enabled"])
+            self.assertEqual(4, profile["concurrent_commit"]["concurrency"])
+
     def test_probe_pass_failure_status_is_preserved(self) -> None:
         execution = {"status": "FAIL", "returncode": 2}
         self.assertEqual(

@@ -417,6 +417,57 @@ def _run_configured_probes(
             ),
         }
 
+    # PR397 also ships standalone black-box probes. Wire them into the common
+    # entry point so "configured" means "actually executed", while keeping
+    # their tenant/count bounds in the profile for quick server runs.
+    missing = profile.get("missing_cases")
+    if isinstance(missing, dict) and missing.get("enabled", True):
+        output = profile_dir / "missing-cases.json"
+        command = [
+            sys.executable,
+            "-m",
+            "performance.probes.missing_cases",
+            "--base-url", base_url,
+            "--tenant-config", str(tenant_path),
+            "--out", str(output),
+        ]
+        for key, flag in (("max_tenants", "--max-tenants"), ("auth_header", "--auth-header")):
+            _add_option(command, flag, missing.get(key))
+        execution = run_command(
+            command, timeout_s=min(timeout_s, 300 if quick else 900), redact_values=redact
+        )
+        commands["missing_cases"] = execution
+        payload = read_json(output)
+        _preserve_probe_status(execution, payload)
+        if payload:
+            artifacts["missing_cases"] = {**payload, "path": str(output)}
+
+    concurrent = profile.get("concurrent_commit")
+    if isinstance(concurrent, dict) and concurrent.get("enabled", True):
+        output = profile_dir / "concurrent-commit.json"
+        command = [
+            sys.executable,
+            "-m",
+            "performance.probes.concurrent_commit_cases",
+            "--base-url", base_url,
+            "--tenant-config", str(tenant_path),
+            "--out", str(output),
+        ]
+        for key, flag in (
+            ("concurrency", "--concurrency"),
+            ("timeout_s", "--timeout-s"),
+            ("auth_header", "--auth-header"),
+        ):
+            _add_option(command, flag, concurrent.get(key))
+        execution = run_command(
+            command, timeout_s=min(timeout_s, 300 if quick else 900), redact_values=redact
+        )
+        commands["concurrent_commit"] = execution
+        payload = read_json(output)
+        _preserve_probe_status(execution, payload)
+        if payload:
+            artifacts["concurrent_commit"] = {**payload, "path": str(output)}
+
     sweep_artifacts, sweep_commands = _run_limit_failure_sweep(
         profile,
         profile_dir=profile_dir,
@@ -706,6 +757,8 @@ def render_report(result: dict[str, Any], path: Path) -> None:
         for key, label in (
             ("capability_probe", "能力探针"),
             ("blackbox_contract_probe", "黑盒契约探针"),
+            ("missing_cases", "PR397 黑盒一致性探针"),
+            ("concurrent_commit", "并发 Commit 探针"),
             ("limit_failure_sweep", "真实限流阶梯"),
             ("commit_recovery", "Commit 崩溃恢复探针"),
             ("fault_suite", "故障套件"),

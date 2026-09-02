@@ -354,10 +354,13 @@ SCENARIO_PROFILES = {
     "complete": complete_scenarios(),
 }
 
-# A bounded single-instance profile for the actual 4U8G deployment.  It
-# covers the measurable black-box gates without silently implying that a
-# second machine size, kill-9 control, or dependency fault controller exists.
-FOUR_U8G_SCENARIOS = {
+# A bounded single-instance profile for the actual 4U8G deployment.  The
+# machine profile is independent from the tenant count: 4U8G can exercise
+# the eight-tenant PR397 matrix when the deployment has eight independent
+# credentials.  Keep soak opt-in, but do not silently drop PR397 from the
+# routine black-box run.
+FOUR_U8G_SCENARIOS = dict(report6_scenarios())
+FOUR_U8G_SCENARIOS.update({
     name: SCENARIOS[name]
     for name in (
         "baseline",
@@ -370,7 +373,7 @@ FOUR_U8G_SCENARIOS = {
         "capacity-4",
         "capacity-8",
     )
-}
+})
 FOUR_U8G_SCENARIOS["fairness-bounded"] = {
     "label": "四租户均衡 Commit/Search 公平性（短窗口）",
     "tenants": 4,
@@ -1600,9 +1603,19 @@ def main() -> int:
         "plan_sources": {
             "pr397": {
                 "name": "EchoMem PR397 / report(6) 故障发现与真实多租户压测方案",
-                "included": args.profile in {"report6", "complete"},
-                "scenario_count": len(report6_scenarios()) if args.profile in {"report6", "complete"} else 0,
-                "scenarios": sorted(report6_scenarios()) if args.profile in {"report6", "complete"} else [],
+                "included": args.profile in {"report6", "4u8g", "complete"},
+                "scenario_count": (
+                    len(report6_scenarios())
+                    if args.profile in {"report6", "complete"}
+                    else len(report6_scenarios())
+                    if args.profile == "4u8g"
+                    else 0
+                ),
+                "scenarios": (
+                    sorted(report6_scenarios())
+                    if args.profile in {"report6", "4u8g", "complete"}
+                    else []
+                ),
             },
             "pr421": {
                 "name": "EchoMem PR421 可量化验收与调度指标方案",
@@ -1761,7 +1774,9 @@ def main() -> int:
             "plan_sources": (
                 ["PR397/report(6)", "PR421"] if args.profile == "complete"
                 else ["PR397/report(6)"] if args.profile == "report6"
-                else ["PR421"] if args.profile in {"pr421", "4u8g"}
+                else ["PR397/report(6)", "PR421"]
+                if args.profile == "4u8g"
+                else ["PR421"] if args.profile == "pr421"
                 else ["report(4)"]
             ),
             "scenarios": scenario_names,

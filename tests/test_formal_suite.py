@@ -21,7 +21,8 @@ from performance.formal_suite import (
 
 class Report6ScenarioTests(unittest.TestCase):
     def test_4u8g_profile_is_bounded_single_instance_catalog(self) -> None:
-        self.assertEqual(
+        self.assertTrue(set(report6_scenarios()) <= set(FOUR_U8G_SCENARIOS))
+        self.assertTrue(
             {
                 "baseline",
                 "mixed",
@@ -33,8 +34,8 @@ class Report6ScenarioTests(unittest.TestCase):
                 "capacity-2",
                 "capacity-4",
                 "capacity-8",
-            },
-            set(FOUR_U8G_SCENARIOS),
+            }
+            <= set(FOUR_U8G_SCENARIOS)
         )
         self.assertNotIn("soak", FOUR_U8G_SCENARIOS)
 

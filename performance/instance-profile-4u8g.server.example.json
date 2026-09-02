@@ -11,6 +11,15 @@
         "health_path": "/health",
         "metrics_path": "/metrics"
       },
+      "missing_cases": {
+        "enabled": true,
+        "max_tenants": 1
+      },
+      "concurrent_commit": {
+        "enabled": true,
+        "concurrency": 4,
+        "timeout_s": 120
+      },
       "commit_recovery": {
         "container": "echomem-pr449-fresh-4u8g",
         "tenant": "tenant_deebbe563763",

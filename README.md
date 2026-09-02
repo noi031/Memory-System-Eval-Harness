@@ -913,6 +913,13 @@ profile 中配置 `capability_probe`、`commit_recovery`、`fault_plan` 后，�
 执行真实 HTTP 能力探针、Commit 中途 kill-9 恢复探针和故障套件，并把每个检查项写入
 HTML 明细。可从 `performance/instance-profiles.example.json` 与
 `performance/fault-plan.example.json` 复制后按实际服务地址、租户和容器名修改。
+另外，profile 可配置 `missing_cases` 和 `concurrent_commit`，入口会自动执行
+PR397 的写后可见性/持久化对账、Commit 状态机、冷暖 Search，以及并发 Commit
+探针；这些检查直接调用 EchoMem 已有 HTTP 接口，不需要修改 EchoMem。建议 quick
+先把 `max_tenants` 设为 `1`、并发设为 `4`，正式验收再扩大租户和并发窗口。
+探针结果会写入 profile 目录下的 `missing-cases.json`、`concurrent-commit.json`
+并同步展示在 `objective-suite.html`；探针自身没有足够证据时仍显示
+`INCONCLUSIVE`，不会被包装成 PASS。
 没有真实故障控制端点时，故障项必须显示 `INCONCLUSIVE`，不能用测试平台自身缺少
 适配器来判定 EchoMem 未实现。
 报告文件为 `suite.html`，逐请求和资源时序通常位于各场景的 `run/` 目录。
