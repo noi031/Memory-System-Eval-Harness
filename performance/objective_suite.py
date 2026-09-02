@@ -130,11 +130,40 @@ def _first_completed_commit_csv(formal_root: Path) -> tuple[Path, str] | None:
     return None
 
 
-def _resolve_auth_key(tenant_config: Path) -> tuple[str, str]:
+def _resolve_auth_key(
+    tenant_config: Path,
+    tenant_selector: str = "",
+) -> tuple[str, str]:
+    """Resolve credentials for the tenant that produced the evidence.
+
+    ``commit_results.csv`` historically stored either a zero-based tenant
+    index or the tenant id.  Falling back to the first configured key makes a
+    valid session look like an HTTP 400 when the completed row belongs to a
+    different tenant, so selection must follow the evidence row.
+    """
     try:
         payload = read_json(tenant_config)
-        item = (payload.get("tenants") or [])[0]
-        if not isinstance(item, dict):
+        entries = payload.get("tenants") or []
+        if not isinstance(entries, list) or not entries:
+            return "", ""
+        item: dict[str, Any] | None = None
+        selector = str(tenant_selector or "").strip()
+        if selector.isdigit():
+            index = int(selector)
+            if 0 <= index < len(entries) and isinstance(entries[index], dict):
+                item = entries[index]
+        if item is None:
+            for candidate in entries:
+                if (
+                    isinstance(candidate, dict)
+                    and str(candidate.get("tenant_id") or candidate.get("id") or "").strip()
+                    == selector
+                ):
+                    item = candidate
+                    break
+        if item is None and not selector and isinstance(entries[0], dict):
+            item = entries[0]
+        if item is None:
             return "", ""
         direct = str(item.get("auth_key") or "")
         env_name = str(item.get("auth_key_env") or "")
@@ -197,12 +226,11 @@ def _run_configured_probes(
     tenant_path = Path(
         _resolve_profile_path(str(profile.get("tenant_config") or ""), profiles_path)
     )
-    auth_key, auth_key_env = _resolve_auth_key(tenant_path)
-    redact = {auth_key} if auth_key else set()
-
     commit_artifact = _first_completed_commit_csv(formal_root)
     commit_csv = commit_artifact[0] if commit_artifact else None
     tenant_index = commit_artifact[1] if commit_artifact else ""
+    auth_key, auth_key_env = _resolve_auth_key(tenant_path, tenant_index)
+    redact = {auth_key} if auth_key else set()
 
     capability = profile.get("capability_probe")
     if isinstance(capability, dict):
