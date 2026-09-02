@@ -71,7 +71,13 @@ def values_from_payload(payload: dict[str, Any]) -> tuple[set[str], set[str], se
     def visit(value: Any, list_context: str = "") -> None:
         if isinstance(value, list):
             for item in value:
-                if isinstance(item, dict) and list_context in {"messages", "items", "message_ids"}:
+                if isinstance(item, dict) and list_context in {
+                    "messages",
+                    "items",
+                    "message_ids",
+                    "committed_message_ids",
+                    "source_turn_ids",
+                }:
                     message = item.get("message_id") or item.get("messageId") or item.get("id")
                     if message:
                         message_ids.add(str(message))
@@ -81,7 +87,13 @@ def values_from_payload(payload: dict[str, Any]) -> tuple[set[str], set[str], se
                         archive_ids.add(str(archive))
                     if operation:
                         operation_ids.add(str(operation))
-                elif not isinstance(item, (dict, list)) and list_context in {"message_ids", "messages", "items"}:
+                elif not isinstance(item, (dict, list)) and list_context in {
+                    "message_ids",
+                    "messages",
+                    "items",
+                    "committed_message_ids",
+                    "source_turn_ids",
+                }:
                     if item not in (None, ""):
                         message_ids.add(str(item))
                 visit(item, list_context)
@@ -94,7 +106,13 @@ def values_from_payload(payload: dict[str, Any]) -> tuple[set[str], set[str], se
                 archive_ids.add(str(item))
             elif normalized in {"operation_id", "operationId"} and item not in (None, ""):
                 operation_ids.add(str(item))
-            if normalized in {"message_ids", "messages", "items"}:
+            if normalized in {
+                "message_ids",
+                "messages",
+                "items",
+                "committed_message_ids",
+                "source_turn_ids",
+            }:
                 visit(item, normalized)
             else:
                 visit(item, "")

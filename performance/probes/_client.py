@@ -452,3 +452,27 @@ def extract_archive(payload: dict[str, Any]) -> str:
         result = {}
     return str(payload.get("archive_id") or payload.get("task_id") or result.get("archive_id") or result.get("task_id") or payload.get("id") or "")
 
+
+def extract_message(payload: dict[str, Any]) -> dict[str, Any]:
+    """Extract the server-assigned message object from an add-message response."""
+    candidates: list[Any] = [payload]
+    for key in ("message", "result", "data"):
+        value = payload.get(key)
+        if isinstance(value, dict):
+            candidates.append(value)
+    for candidate in candidates:
+        if not isinstance(candidate, dict):
+            continue
+        message_id = (
+            candidate.get("id")
+            or candidate.get("message_id")
+            or candidate.get("messageId")
+        )
+        if message_id not in (None, ""):
+            return {
+                "id": str(message_id),
+                "role": candidate.get("role"),
+                "content": candidate.get("content"),
+                "metadata": candidate.get("metadata") or {},
+            }
+    return {}

@@ -27,9 +27,11 @@ from typing import Any
 from urllib.parse import quote
 
 try:
-    from ._client import EchoMemHTTP
+    from ._client import EchoMemHTTP, extract_message
+    from .cursor_reconcile import values_from_payload
 except ImportError:
-    from _client import EchoMemHTTP
+    from _client import EchoMemHTTP, extract_message
+    from cursor_reconcile import values_from_payload
 
 
 PASS = "PASS"
@@ -77,6 +79,39 @@ def health(url: str, timeout_s: float) -> dict[str, Any]:
             "elapsed_s": time.monotonic() - started,
             "error": str(exc),
         }
+
+
+def archive_ids_from_payload(payload: dict[str, Any]) -> set[str]:
+    """Collect archive IDs from summaries without assuming one response shape."""
+    found: set[str] = set()
+
+    def visit(value: Any) -> None:
+        if isinstance(value, dict):
+            for key, item in value.items():
+                if key in {"archive_id", "archiveId", "commit_id", "commitId"} and item:
+                    found.add(str(item))
+                visit(item)
+        elif isinstance(value, list):
+            for item in value:
+                visit(item)
+
+    visit(payload)
+    return found
+
+
+def decode_fs_read_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    """Unwrap the JSON document returned by EchoMem's /fs/read endpoint."""
+    result = payload.get("result")
+    if not isinstance(result, dict):
+        return payload
+    text = result.get("text")
+    if not isinstance(text, str) or not text:
+        return payload
+    try:
+        decoded = json.loads(text)
+    except json.JSONDecodeError:
+        return payload
+    return decoded if isinstance(decoded, dict) else payload
 
 
 def _docker_engine_post(path: str) -> tuple[int, str]:
@@ -220,13 +255,14 @@ def main() -> int:
 
     session_id, _ = client.open_session(args.tenant, f"pr421-recovery-{uuid.uuid4().hex[:10]}")
     marker = f"pr421-recovery-marker-{uuid.uuid4().hex}"
-    message_ids = []
+    client_message_ids: list[str] = []
+    message_records: list[dict[str, Any]] = []
     for index in range(max(1, args.messages)):
-        message_id = f"recovery-{uuid.uuid4().hex}"
-        message_ids.append(message_id)
+        client_message_id = f"recovery-{uuid.uuid4().hex}"
+        client_message_ids.append(client_message_id)
         response = client.add_message(
             session_id,
-            message_id,
+            client_message_id,
             (
                 f"Real Commit recovery probe {marker}; message {index}. "
                 + ("payload-" + marker + " ") * max(1, args.content_chars // (len(marker) + 9))
@@ -244,6 +280,12 @@ def main() -> int:
             args.out.write_text(json.dumps(result, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
             print(json.dumps(result, ensure_ascii=False))
             return 2
+        server_message = extract_message(response.payload)
+        message_records.append({
+            "client_request_id": client_message_id,
+            "server_message_id": server_message.get("id", ""),
+            "response": response.payload,
+        })
 
     commit_box: dict[str, Any] = {}
 
@@ -288,18 +330,62 @@ def main() -> int:
     )
     result["session_id"] = session_id
     result["marker"] = marker
-    result["message_ids"] = message_ids
+    # Reconciliation must use EchoMem's durable IDs. The client value is only
+    # metadata used to correlate a request; it is not the persisted message ID.
+    result["client_message_ids"] = client_message_ids
+    result["message_records"] = message_records
+    result["message_ids"] = [
+        item["server_message_id"]
+        for item in message_records
+        if item.get("server_message_id")
+    ]
     result["archive_id"] = archive_id
     result["commit_response_result"] = commit_payload
 
     if not recovered:
         result.update({"status": FAIL, "reason": "service did not recover within timeout"})
-    elif not archive_id:
-        result.update({
-            "status": INCONCLUSIVE,
-            "reason": "Commit response was lost before archive_id was observed; replay cannot be identified",
-        })
     else:
+        # A kill can drop the HTTP response even when EchoMem accepted the
+        # operation. Discover the matching archive by its unique marker before
+        # declaring the recovery probe inconclusive.
+        if not archive_id:
+            archives_response = client.request(
+                "GET", f"/api/sessions/{session_id}/archives?limit=200"
+            )
+            candidate_ids = archive_ids_from_payload(archives_response.payload)
+            for candidate_id in sorted(candidate_ids):
+                candidate = client.get_archive(session_id, candidate_id)
+                if marker in json.dumps(candidate.payload, ensure_ascii=False, default=str):
+                    archive_id = candidate_id
+                    result["archive_discovery"] = {
+                        "status_code": archives_response.status_code,
+                        "candidate_archive_ids": sorted(candidate_ids),
+                        "matched_archive_id": archive_id,
+                    }
+                    break
+            if not archive_id:
+                result["archive_discovery"] = {
+                    "status_code": archives_response.status_code,
+                    "candidate_archive_ids": sorted(candidate_ids),
+                    "matched_archive_id": "",
+                }
+        result["archive_id"] = archive_id
+        if not archive_id:
+            result.update({
+                "status": INCONCLUSIVE,
+                "reason": (
+                    "service recovered but the Commit response was lost and no "
+                    "archive containing the unique marker could be identified"
+                ),
+            })
+            result["finished_at"] = now()
+            args.out.parent.mkdir(parents=True, exist_ok=True)
+            args.out.write_text(
+                json.dumps(result, ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8",
+            )
+            print(json.dumps(result, ensure_ascii=False))
+            return 2
         terminal = []
         deadline = time.monotonic() + max(1.0, args.recovery_timeout_s)
         while time.monotonic() < deadline:
@@ -338,19 +424,89 @@ def main() -> int:
             "payload": memories.payload,
             "error": memories.error,
         }
+        expected_message_ids = set(result["message_ids"])
+        source_payloads: dict[str, dict[str, Any]] = {
+            "history": history.payload if isinstance(history.payload, dict) else {},
+            "archive": (
+                client.get_archive(session_id, str(archive_id)).payload
+                if archive_id
+                else {}
+            ),
+            "commit_memories": memories.payload if isinstance(memories.payload, dict) else {},
+        }
+        cursor_response = client.fs_read(
+            f"echo://sessions/{session_id}/current/commit_cursor.json"
+        )
+        source_payloads["commit_cursor"] = (
+            decode_fs_read_payload(cursor_response.payload)
+            if isinstance(cursor_response.payload, dict)
+            else {}
+        )
+        source_ids = {
+            source: sorted(values_from_payload(source_payload)[0])
+            for source, source_payload in source_payloads.items()
+        }
+        observed_ids = set().union(*(set(ids) for ids in source_ids.values()))
+        missing_ids = sorted(expected_message_ids - observed_ids)
+        complete_sources = [
+            source for source, ids in source_ids.items()
+            if expected_message_ids and expected_message_ids <= set(ids)
+        ]
+        reconciliation_status = (
+            PASS
+            if expected_message_ids and not missing_ids
+            else INCONCLUSIVE
+            if not expected_message_ids
+            else FAIL
+        )
+        result["message_reconciliation"] = {
+            "status": reconciliation_status,
+            "expected_server_message_ids": sorted(expected_message_ids),
+            "observed_by_source": source_ids,
+            "missing_server_message_ids": missing_ids,
+            "complete_sources": complete_sources,
+            "cursor_status_code": cursor_response.status_code,
+        }
+        cursor_status = (
+            PASS
+            if expected_message_ids and expected_message_ids <= set(source_ids["commit_cursor"])
+            else INCONCLUSIVE
+            if not expected_message_ids or cursor_response.status_code == 404
+            else FAIL
+        )
+        cursor_reason = (
+            "all server-assigned message IDs were present in commit_cursor.json"
+            if cursor_status == PASS
+            else "cursor endpoint unavailable or did not expose all server-assigned message IDs"
+        )
         result["cursor_reconciliation"] = {
+            "status": cursor_status,
+            "reason": cursor_reason,
+            "expected_server_message_ids": sorted(expected_message_ids),
+        }
+        result["idempotency_reconciliation"] = {
             "status": INCONCLUSIVE,
-            "reason": "EchoMem cursor/message-set export endpoint was not configured",
+            "reason": (
+                "this probe kills the service during one Commit request; the "
+                "public request did not provide a replay/idempotency key"
+            ),
         }
         result["status"] = (
             PASS
-            if final_state == "completed" and history.status_code and history.status_code < 400
+            if (
+                final_state == "completed"
+                and reconciliation_status == PASS
+                and history.status_code
+                and history.status_code < 400
+            )
             else FAIL
             if final_state in {"failed", "error", "cancelled"}
             else INCONCLUSIVE
         )
         result["reason"] = (
-            "service recovered and Commit reached terminal state, but exact replay/idempotency is not provable"
+            "service recovered, Commit reached completed, and all server-assigned "
+            "message IDs were found in durable readback; replay idempotency is "
+            "a separate unverified property"
             if result["status"] == PASS
             else "Commit did not reach a terminal completed state within the recovery window"
         )

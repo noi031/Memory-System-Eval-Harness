@@ -46,7 +46,13 @@ def message_ids_from_payload(payload: Any) -> set[str]:
         if isinstance(value, dict):
             containers.append(value)
     for item in containers:
-        for key in ("messages", "message_ids", "items", "committed_message_ids"):
+        for key in (
+            "messages",
+            "message_ids",
+            "items",
+            "committed_message_ids",
+            "source_turn_ids",
+        ):
             values = item.get(key) if isinstance(item, dict) else None
             if not isinstance(values, list):
                 continue

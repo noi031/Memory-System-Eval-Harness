@@ -9,6 +9,8 @@ from pathlib import Path
 
 from performance.probes.cursor_reconcile import reconcile
 from performance.probes.cursor_reconcile import values_from_payload
+from performance.probes._client import extract_message
+from performance.probes.commit_recovery_probe import decode_fs_read_payload
 from performance.probes.capability_probe import classify_probe, run as run_capability
 from performance.probes.capability_probe import request as capability_request
 from performance.probes.blackbox_contract_probe import request as blackbox_request
@@ -85,6 +87,51 @@ class FailureToolTests(unittest.TestCase):
         self.assertEqual({"m1"}, messages)
         self.assertEqual({"a1"}, archives)
         self.assertEqual({"o1"}, operations)
+
+    def test_cursor_payload_extracts_committed_message_ids(self) -> None:
+        messages, archives, operations = values_from_payload({
+            "committed_message_ids": ["msg_001", "msg_002"],
+        })
+        self.assertEqual({"msg_001", "msg_002"}, messages)
+        self.assertEqual(set(), archives)
+        self.assertEqual(set(), operations)
+
+    def test_extract_message_uses_server_assigned_id(self) -> None:
+        self.assertEqual(
+            {
+                "id": "msg_001",
+                "role": "user",
+                "content": "hello",
+                "metadata": {"stress_message_id": "recovery-001"},
+            },
+            extract_message({
+                "message": {
+                    "id": "msg_001",
+                    "role": "user",
+                    "content": "hello",
+                    "metadata": {"stress_message_id": "recovery-001"},
+                }
+            }),
+        )
+
+    def test_extract_message_does_not_treat_client_metadata_as_persisted_id(self) -> None:
+        self.assertEqual(
+            {},
+            extract_message({
+                "status": "ok",
+                "metadata": {"stress_message_id": "recovery-001"},
+            }),
+        )
+
+    def test_recovery_probe_unwraps_fs_read_cursor_document(self) -> None:
+        self.assertEqual(
+            {"committed_message_ids": ["msg_001"]},
+            decode_fs_read_payload({
+                "result": {
+                    "text": '{"committed_message_ids": ["msg_001"]}',
+                }
+            }),
+        )
 
     def test_fault_control_without_real_control_is_inconclusive(self) -> None:
         class Args:
