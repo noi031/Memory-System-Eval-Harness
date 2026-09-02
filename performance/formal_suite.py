@@ -777,6 +777,7 @@ def _write_case_csvs(output: Path, rows: list[dict[str, str]]) -> None:
             {
                 "tenant": row.get("tenant_idx") or "",
                 "session_id": session_id,
+                "archive_id": row.get("archive_id") or "",
                 "status": status,
                 "end_to_end_s": f"{end_to_end:.3f}" if end_to_end is not None else "",
                 "queue_wait_s": "",
@@ -790,6 +791,7 @@ def _write_case_csvs(output: Path, rows: list[dict[str, str]]) -> None:
             handle,
             fieldnames=[
                 "tenant", "session_id", "status", "end_to_end_s",
+                "archive_id",
                 "queue_wait_s", "admission_wait_s", "admission_queue_depth", "request_id",
             ],
         )

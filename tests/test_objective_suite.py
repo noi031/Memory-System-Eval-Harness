@@ -7,8 +7,10 @@ from pathlib import Path
 
 from performance.objective_suite import (
     QUICK_SCENARIOS,
+    _first_completed_commit_csv,
     load_profiles,
     objective_statuses,
+    run_command,
     render_report,
 )
 
@@ -25,6 +27,17 @@ class ObjectiveSuiteTests(unittest.TestCase):
         self.assertIn("capacity-2", QUICK_SCENARIOS)
         self.assertNotIn("soak", QUICK_SCENARIOS)
 
+    def test_first_completed_commit_csv_finds_real_artifact(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            csv_path = root / "case" / "commit_results.csv"
+            csv_path.parent.mkdir()
+            csv_path.write_text(
+                "tenant,session_id,archive_id,status\n0,s1,a1,completed\n",
+                encoding="utf-8",
+            )
+            self.assertEqual((csv_path, "0"), _first_completed_commit_csv(root))
+
     def test_missing_evidence_stays_inconclusive(self) -> None:
         objectives = objective_statuses(
             {"profile_name": "4U8G", "runs": []},
@@ -40,6 +53,15 @@ class ObjectiveSuiteTests(unittest.TestCase):
             render_report({"created_at": "now", "profiles": []}, path)
             self.assertTrue(path.is_file())
             self.assertIn("七项目标", path.read_text(encoding="utf-8"))
+
+    def test_run_command_redacts_secret_values(self) -> None:
+        result = run_command(
+            ["python3", "-c", "print('ok')", "secret-value"],
+            timeout_s=10,
+            redact_values={"secret-value"},
+        )
+        self.assertEqual("PASS", result["status"])
+        self.assertNotIn("secret-value", " ".join(result["command"]))
 
 
 if __name__ == "__main__":

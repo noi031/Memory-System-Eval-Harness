@@ -9,8 +9,10 @@ reported as INCONCLUSIVE instead of being silently skipped.
 from __future__ import annotations
 
 import argparse
+import csv
 import html
 import json
+import os
 import shlex
 import subprocess
 import sys
@@ -46,8 +48,21 @@ def load_profiles(path: Path) -> list[dict[str, Any]]:
     return [item for item in profiles if isinstance(item, dict) and item.get("name")]
 
 
-def run_command(command: list[str], *, timeout_s: float) -> dict[str, Any]:
+def run_command(
+    command: list[str],
+    *,
+    timeout_s: float,
+    redact_values: set[str] | None = None,
+) -> dict[str, Any]:
     started = datetime.now(timezone.utc)
+    redact_values = redact_values or set()
+
+    def safe_command() -> list[str]:
+        return [
+            "***configured***" if item in redact_values else item
+            for item in command
+        ]
+
     try:
         completed = subprocess.run(
             command,
@@ -59,7 +74,7 @@ def run_command(command: list[str], *, timeout_s: float) -> dict[str, Any]:
         return {
             "status": "PASS" if completed.returncode == 0 else "FAIL",
             "returncode": completed.returncode,
-            "command": [item if "key" not in item.lower() else "***" for item in command],
+            "command": safe_command(),
             "stdout": completed.stdout[-12000:],
             "stderr": completed.stderr[-12000:],
             "elapsed_s": (datetime.now(timezone.utc) - started).total_seconds(),
@@ -68,7 +83,7 @@ def run_command(command: list[str], *, timeout_s: float) -> dict[str, Any]:
         return {
             "status": "TIMEOUT",
             "returncode": 124,
-            "command": command,
+            "command": safe_command(),
             "stdout": str(exc.stdout or "")[-12000:],
             "stderr": str(exc.stderr or "")[-12000:],
             "elapsed_s": (datetime.now(timezone.utc) - started).total_seconds(),
@@ -81,6 +96,37 @@ def read_json(path: Path) -> dict[str, Any]:
         return payload if isinstance(payload, dict) else {}
     except (OSError, json.JSONDecodeError):
         return {}
+
+
+def _first_completed_commit_csv(formal_root: Path) -> tuple[Path, str] | None:
+    candidates = sorted(formal_root.glob("**/commit_results.csv"))
+    for path in candidates:
+        try:
+            with path.open(newline="", encoding="utf-8") as handle:
+                rows = list(csv.DictReader(handle))
+        except (OSError, csv.Error):
+            continue
+        for row in rows:
+            if (
+                str(row.get("status") or "").lower()
+                in {"completed", "complete", "success", "succeeded"}
+                and row.get("archive_id")
+            ):
+                return path, str(row.get("tenant") or "")
+    return None
+
+
+def _resolve_auth_key(tenant_config: Path) -> tuple[str, str]:
+    try:
+        payload = read_json(tenant_config)
+        item = (payload.get("tenants") or [])[0]
+        if not isinstance(item, dict):
+            return "", ""
+        direct = str(item.get("auth_key") or "")
+        env_name = str(item.get("auth_key_env") or "")
+        return direct or os.getenv(env_name, ""), env_name
+    except (OSError, IndexError, TypeError):
+        return "", ""
 
 
 def acceptance_by_name(suite: dict[str, Any]) -> dict[str, dict[str, Any]]:
@@ -306,10 +352,65 @@ def main() -> int:
                     suite_path = candidates[-1]
 
         suite = read_json(suite_path)
+        formal_root = profile_dir / "formal"
+        probe_result: dict[str, Any] = {}
+        commit_artifact = _first_completed_commit_csv(formal_root)
+        tenant_config_path = Path(str(profile.get("tenant_config") or "")).expanduser()
+        if commit_artifact and tenant_config_path.is_file():
+            commit_csv, tenant_index = commit_artifact
+            tenant_payload = read_json(tenant_config_path)
+            tenants = tenant_payload.get("tenants") or []
+            try:
+                tenant_item = tenants[int(tenant_index)]
+            except (IndexError, TypeError, ValueError):
+                tenant_item = tenants[0] if tenants else {}
+            direct = str(tenant_item.get("auth_key") or "") if isinstance(tenant_item, dict) else ""
+            env_name = str(tenant_item.get("auth_key_env") or "") if isinstance(tenant_item, dict) else ""
+            auth_key = direct or os.getenv(env_name, "")
+            auth_key_env = env_name
+            probe_path = profile_dir / "blackbox-contract-probe.json"
+            probe_command = [
+                sys.executable,
+                "-m",
+                "performance.probes.blackbox_contract_probe",
+                "--base-url",
+                str(profile.get("base_url") or "http://127.0.0.1:8010"),
+                "--commit-csv",
+                str(commit_csv),
+                "--auth-key",
+                auth_key,
+                "--auth-key-env",
+                auth_key_env,
+                "--tenant",
+                tenant_index,
+                "--out",
+                str(probe_path),
+            ]
+            probe_execution = run_command(
+                probe_command,
+                timeout_s=min(args.timeout_s, 180),
+                redact_values={auth_key} if auth_key else set(),
+            )
+            probe_result = read_json(probe_path)
+            command_result["blackbox_probe"] = {
+                **probe_execution,
+                "artifact": str(probe_path),
+                "commit_csv": str(commit_csv),
+                "tenant": tenant_index,
+            }
+            if probe_result:
+                suite = {**suite, "blackbox_contract_probe": probe_result}
+        elif not commit_csv:
+            command_result["blackbox_probe"] = {
+                "status": "INCONCLUSIVE",
+                "reason": "本轮没有完成 Commit，无法从真实 session 启动黑盒契约探测",
+            }
+
         output_profiles.append({
             **profile,
             "name": name,
             "suite": str(suite_path),
+            "blackbox_contract_probe": probe_result,
             "command": command_result,
             "objectives": objective_statuses(
                 {**suite, "profile_name": name},

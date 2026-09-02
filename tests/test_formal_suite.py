@@ -396,7 +396,8 @@ class FormalSuiteAdapterTests(unittest.TestCase):
                 commit_rows = list(csv.DictReader(handle))
             self.assertEqual(
                 [
-                    "tenant", "session_id", "status", "end_to_end_s", "queue_wait_s",
+                    "tenant", "session_id", "status", "end_to_end_s", "archive_id",
+                    "queue_wait_s",
                     "admission_wait_s", "admission_queue_depth", "request_id",
                 ],
                 list(commit_rows[0].keys()),

@@ -149,6 +149,7 @@ class RequestRecord:
     error_type: str  # "" | timeout | http_4xx | http_5xx | connection | other
     ts_ms: float
     session_id: str = ""
+    archive_id: str = ""
     extra: str = ""  # e.g. "burst"
     # -- write retry instrumentation (commit_submit) ---------------------
     retry_count: int = 0
@@ -183,6 +184,7 @@ class RequestRecord:
             "error_type": self.error_type,
             "ts_ms": round(self.ts_ms, 3),
             "session_id": self.session_id,
+            "archive_id": self.archive_id,
             "extra": self.extra,
             "retry_count": self.retry_count,
             "retried": self.retried,
@@ -373,6 +375,7 @@ def run_write_transaction(
         "commit_submit",
         (time.perf_counter() - started) * 1000,
         "ok",
+        archive_id=archive_id,
         retry_count=attempts - 1,
         retried=retried,
         retry_total_wait_ms=total_wait_ms,

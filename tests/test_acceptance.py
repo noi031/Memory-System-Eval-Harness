@@ -112,7 +112,7 @@ class AcceptanceTests(unittest.TestCase):
             document = output.read_text(encoding="utf-8")
             self.assertIn("PR28 检视意见闭环", document)
             self.assertIn("Commit barrier and tenant distributions", document)
-            self.assertIn("NOT_IMPLEMENTED", document)
+        self.assertIn("PARTIAL", document)
 
     def test_saturation_without_rejections_does_not_claim_contract_pass(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -261,7 +261,7 @@ class AcceptanceTests(unittest.TestCase):
     def test_review_resolution_is_explicit_and_model_visible(self):
         acceptance = evaluate_pr421_acceptance({"runs": []})
         statuses = {item["status"] for item in PR28_REVIEW_RESOLUTION}
-        self.assertTrue({"RESOLVED", "PARTIAL", "NOT_IMPLEMENTED"} <= statuses)
+        self.assertTrue({"RESOLVED", "PARTIAL"} <= statuses)
         self.assertEqual(PR28_REVIEW_RESOLUTION, acceptance["pr28_review_resolution"])
         model_input = build_model_analysis_input(
             {"scenarios": [], "repeats": 0},

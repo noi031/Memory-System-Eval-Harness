@@ -68,11 +68,11 @@ PR28_REVIEW_RESOLUTION = [
     },
     {
         "item": "Incident regression and full capacity ladder",
-        # This is a harness coverage item, not a claim that EchoMem lacks the
-        # capability. Runtime capability probes use INCONCLUSIVE until the
-        # target provides external evidence.
-        "status": NOT_IMPLEMENTED,
-        "evidence": "S7-S10 and complete 2/4/8/16/32 resource profiles are not implemented in the harness",
+        # The capacity ladder is now in formal_suite. Incident-specific
+        # controls still require an explicit deployment plan, so this is a
+        # platform limitation rather than an EchoMem defect.
+        "status": "PARTIAL",
+        "evidence": "formal_suite capacity-2/4/8/16/32; incident controls require deployment plan",
     },
     {
         "item": "Persistence reconciliation judge",
