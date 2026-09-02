@@ -204,6 +204,7 @@ def _capacity(suite: dict[str, Any]) -> dict[str, Any]:
     timeout_levels = []
     hot_user_candidates: list[int] = []
     activity_by_level: dict[str, dict[str, Any]] = {}
+    activity_missing_levels: list[int] = []
     for run in _suite_runs(suite):
         scenario = str(run.get("scenario") or "")
         metrics = (_run_summary(run).get("metrics") or {})
@@ -215,6 +216,17 @@ def _capacity(suite: dict[str, Any]) -> dict[str, Any]:
             activity = (_run_summary(run).get("details") or {}).get("user_activity")
             if isinstance(activity, dict):
                 activity_by_level[str(level)] = activity
+            active_users = (
+                int(activity.get("active_user_count") or 0)
+                if isinstance(activity, dict)
+                else 0
+            )
+            hot_requests = (
+                int((activity.get("hot_user_proxy") or {}).get("request_count") or 0)
+                if isinstance(activity, dict)
+                else 0
+            )
+            activity_observed = active_users > 0 and hot_requests > 0
             if str(run.get("status")) != "completed":
                 if str(run.get("status") or "").upper() == "TIMEOUT":
                     # A real load case that exceeded its bounded wall-clock
@@ -236,7 +248,12 @@ def _capacity(suite: dict[str, Any]) -> dict[str, Any]:
                 int(search.get("submitted") or 0) > 0
                 and float(search.get("success_rate") or 0) >= 0.99
             ):
-                valid_levels.append(level)
+                if activity_observed:
+                    valid_levels.append(level)
+                else:
+                    # A successful HTTP workload without distinct user
+                    # identity evidence cannot support a DAU/hot-user claim.
+                    activity_missing_levels.append(level)
             else:
                 # A completed but unsuccessful higher capacity point is the
                 # boundary evidence needed to claim the previous point as a
@@ -274,6 +291,7 @@ def _capacity(suite: dict[str, Any]) -> dict[str, Any]:
             "valid_capacity_levels": sorted(set(valid_levels)),
             "invalid_capacity_levels": sorted(set(invalid_levels)),
             "timeout_capacity_levels": sorted(set(timeout_levels)),
+            "activity_missing_levels": sorted(set(activity_missing_levels)),
             "capacity_boundary_levels": sorted(set(boundary_levels)),
             "max_completed_active_user_proxy": max_valid_level,
             "max_hot_user_proxy": max(hot_user_candidates, default=None),
@@ -300,7 +318,12 @@ def _capacity(suite: dict[str, Any]) -> dict[str, Any]:
             else (
                 "只有成功容量档位，缺少更高一档真实失败/超时边界；目前只能报告容量下界"
                 if valid_levels
-                else "有容量场景，但没有实际完成的有效容量级别"
+                else (
+                    "有成功 Search，但缺少 active_user_count/hot_user_proxy 证据；"
+                    "不能把租户请求数当作 DAU/热用户量"
+                    if activity_missing_levels
+                    else "有容量场景，但没有实际完成的有效容量级别"
+                )
             )
         ),
     )

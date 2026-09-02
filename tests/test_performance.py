@@ -1134,6 +1134,7 @@ class SerializationTests(unittest.TestCase):
         row = record.to_csv_row()
         self.assertEqual(row["op"], "read")
         self.assertEqual(row["scene"], "D@4")
+        self.assertIn("http_status", row)
 
 
 class ReportTests(unittest.TestCase):
@@ -2528,6 +2529,27 @@ class TenantSpecsTests(unittest.TestCase):
 
 
 class LoadGeneratorSceneTests(unittest.TestCase):
+    def test_read_error_records_http_status_and_reason_code(self) -> None:
+        generator = LoadGenerator()
+        exc = urllib.error.HTTPError(
+            "http://x", 429, "rate limited", {"Retry-After": "3"}, io.BytesIO(
+                b'{"reason_code":"retrieval_inflight_full"}'
+            )
+        )
+        client = mock.Mock()
+        client.search_with_meta.side_effect = exc
+        record = generator._read_once(
+            client,
+            "PERFANCHOR-0-0-0",
+            scene_key="K@1",
+            step_conc=1,
+            tenant_idx=0,
+        )
+        self.assertEqual(record.error_type, "http_4xx")
+        self.assertEqual(record.http_status, 429)
+        self.assertEqual(record.reason_code, "retrieval_inflight_full")
+        self.assertEqual(record.to_csv_row()["http_status"], 429)
+
     def test_rate_based_mixed_scene_keeps_read_worker_at_single_tenant(self) -> None:
         generator = LoadGenerator(rps=2.0, commit_rpm=2.0)
         scene = SceneRun("K", 1, 1.0)

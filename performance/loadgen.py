@@ -148,6 +148,7 @@ class RequestRecord:
     status: str  # ok | error
     error_type: str  # "" | timeout | http_4xx | http_5xx | connection | other
     ts_ms: float
+    http_status: int | None = None
     session_id: str = ""
     archive_id: str = ""
     extra: str = ""  # e.g. "burst"
@@ -182,6 +183,7 @@ class RequestRecord:
             "stage_ms": round(self.stage_ms, 3),
             "status": self.status,
             "error_type": self.error_type,
+            "http_status": self.http_status,
             "ts_ms": round(self.ts_ms, 3),
             "session_id": self.session_id,
             "archive_id": self.archive_id,
@@ -526,6 +528,8 @@ class LoadGenerator:
         real_recall = False
         quality_ok = True
         degraded = False
+        http_status: int | None = None
+        reason_code = ""
         try:
             items, meta = client.search_with_meta(
                 query, top_k=self.top_k, agent_id="", timeout_s=self.timeout_s
@@ -542,6 +546,9 @@ class LoadGenerator:
             )
         except Exception as exc:
             status, error = "error", classify_error(exc)
+            if isinstance(exc, urllib.error.HTTPError):
+                http_status = int(exc.code)
+                reason_code = extract_reason_code(exc)
         if status == "ok" and is_anchor_query(query):
             # A degraded empty result is a capacity artifact (engine skipped /
             # saturated), not a recall defect: only clean empty results are
@@ -556,6 +563,8 @@ class LoadGenerator:
             status=status,
             error_type=error,
             ts_ms=time.time() * 1000,
+            http_status=http_status,
+            reason_code=reason_code,
             query=query,
             hit_count=hit_count,
             real_recall=real_recall,

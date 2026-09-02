@@ -24,6 +24,7 @@ CSV_HEADERS = [
     "stage_ms",
     "status",
     "error_type",
+    "http_status",
     "ts_ms",
     "session_id",
     "archive_id",

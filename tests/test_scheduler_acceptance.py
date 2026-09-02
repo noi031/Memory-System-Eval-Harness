@@ -149,7 +149,13 @@ class SchedulerAcceptanceTests(unittest.TestCase):
                         "metrics": {
                             "search": {"submitted": 4, "success_rate": 1.0},
                             "commit": {"submitted": 0},
-                        }
+                        },
+                        "details": {
+                            "user_activity": {
+                                "active_user_count": 4,
+                                "hot_user_proxy": {"request_count": 4},
+                            }
+                        },
                     },
                 }],
             }
@@ -173,7 +179,13 @@ class SchedulerAcceptanceTests(unittest.TestCase):
                             "metrics": {
                                 "search": {"submitted": 4, "success_rate": 1.0},
                                 "commit": {"submitted": 0},
-                            }
+                            },
+                            "details": {
+                                "user_activity": {
+                                    "active_user_count": 4,
+                                    "hot_user_proxy": {"request_count": 4},
+                                }
+                            },
                         },
                     },
                     {
@@ -205,7 +217,13 @@ class SchedulerAcceptanceTests(unittest.TestCase):
                             "metrics": {
                                 "search": {"submitted": 4, "success_rate": 1.0},
                                 "commit": {"submitted": 2, "success_rate": 0.0},
-                            }
+                            },
+                            "details": {
+                                "user_activity": {
+                                    "active_user_count": 4,
+                                    "hot_user_proxy": {"request_count": 4},
+                                }
+                            },
                         },
                     },
                     {
@@ -236,7 +254,13 @@ class SchedulerAcceptanceTests(unittest.TestCase):
                         "summary": {
                             "metrics": {
                                 "search": {"submitted": 4, "success_rate": 1.0},
-                            }
+                            },
+                            "details": {
+                                "user_activity": {
+                                    "active_user_count": 4,
+                                    "hot_user_proxy": {"request_count": 4},
+                                }
+                            },
                         },
                     },
                     {
@@ -256,6 +280,29 @@ class SchedulerAcceptanceTests(unittest.TestCase):
         check = next(item for item in result["checks"] if item["name"] == "DAU / 最大热用户容量")
         self.assertEqual(PASS, check["status"])
         self.assertEqual([8], check["observed"]["timeout_capacity_levels"])
+
+    def test_capacity_success_without_user_activity_is_inconclusive(self) -> None:
+        result = evaluate(
+            {
+                "instance_profile": "4U8G",
+                "runs": [{
+                    "scenario": "capacity-4",
+                    "status": "completed",
+                    "summary": {
+                        "metrics": {
+                            "search": {"submitted": 4, "success_rate": 1.0},
+                            "commit": {"submitted": 0},
+                        }
+                    },
+                }],
+            }
+        )
+        check = next(
+            item for item in result["checks"]
+            if item["name"] == "DAU / 最大热用户容量"
+        )
+        self.assertEqual(INCONCLUSIVE, check["status"])
+        self.assertEqual([4], check["observed"]["activity_missing_levels"])
 
     def test_multi_spec_needs_two_completed_profiles(self) -> None:
         result = evaluate(

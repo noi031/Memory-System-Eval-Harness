@@ -73,12 +73,17 @@ def summarize_records(records: list[RequestRecord], *, wall_s: float) -> dict[st
     """
     groups: dict[tuple[str, str], list[float]] = {}
     errors: dict[tuple[str, str], dict[str, int]] = {}
+    http_statuses: dict[tuple[str, str], dict[str, int]] = {}
     for rec in records:
         key = (rec.scene_key, rec.op)
         groups.setdefault(key, []).append(rec.stage_ms)
         if rec.error_type:
             counter = errors.setdefault(key, {})
             counter[rec.error_type] = counter.get(rec.error_type, 0) + 1
+        if rec.http_status is not None:
+            counter = http_statuses.setdefault(key, {})
+            status = str(rec.http_status)
+            counter[status] = counter.get(status, 0) + 1
 
     summary: dict[str, dict[str, Any]] = {}
     for key, stages in groups.items():
@@ -90,6 +95,7 @@ def summarize_records(records: list[RequestRecord], *, wall_s: float) -> dict[st
         entry["errors_total"] = sum(err.values())
         entry["error_rate"] = round(sum(err.values()) / count, 5) if count else None
         entry["error_breakdown"] = err
+        entry["http_status_breakdown"] = http_statuses.get(key, {})
         summary.setdefault(scene_key, {})[op] = entry
     return summary
 
