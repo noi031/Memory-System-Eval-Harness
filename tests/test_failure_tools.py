@@ -139,11 +139,19 @@ class FailureToolTests(unittest.TestCase):
         def run(scenario: str, counts: dict[str, int]) -> dict[str, object]:
             return {
                 "scenario": scenario,
+                "status": "completed",
                 "summary": {
                     "metrics": {
                         "fairness": {
                             "commit_completed_per_tenant": counts,
-                        }
+                        },
+                        "per_tenant": {
+                            tenant: {
+                                "commit": {"completed": count},
+                                "search": {"latency": {"p95_s": 1.0}},
+                            }
+                            for tenant, count in counts.items()
+                        },
                     }
                 },
             }

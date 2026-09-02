@@ -26,6 +26,7 @@ class SchedulerAcceptanceTests(unittest.TestCase):
                 "runs": [
                     {
                         "scenario": "search-priority-blackbox",
+                        "status": "completed",
                         "summary": {
                             "metrics": {
                                 "search": {"latency": {"p95_s": 1.2}},
@@ -58,12 +59,168 @@ class SchedulerAcceptanceTests(unittest.TestCase):
         check = next(item for item in result["checks"] if item["name"] == "Search 优先于 Commit")
         self.assertEqual(PASS, check["status"])
 
+    def test_priority_does_not_accept_running_case(self) -> None:
+        result = evaluate(
+            {
+                "runs": [
+                    {
+                        "scenario": "search-priority-blackbox",
+                        "status": "running",
+                        "summary": {
+                            "metrics": {
+                                "search": {"latency": {"p95_s": 1.2}},
+                                "commit": {"submitted": 128},
+                            }
+                        },
+                    }
+                ]
+            }
+        )
+        check = next(item for item in result["checks"] if item["name"] == "Search 优先于 Commit")
+        self.assertEqual(INCONCLUSIVE, check["status"])
+
+    def test_priority_fails_when_completed_case_exceeds_search_p95_target(self) -> None:
+        result = evaluate(
+            {
+                "runs": [{
+                    "scenario": "search-priority-blackbox",
+                    "status": "completed",
+                    "summary": {
+                        "metrics": {
+                            "search": {"latency": {"p95_s": 5.01}},
+                            "commit": {"submitted": 128},
+                        }
+                    },
+                }]
+            }
+        )
+        check = next(item for item in result["checks"] if item["name"] == "Search 优先于 Commit")
+        self.assertEqual("FAIL", check["status"])
+
+    def test_capacity_requires_successful_measurement(self) -> None:
+        result = evaluate(
+            {
+                "instance_profile": "4U8G",
+                "runs": [{
+                    "scenario": "capacity-8",
+                    "status": "completed",
+                    "summary": {
+                        "metrics": {
+                            "search": {"submitted": 8, "success_rate": 0.8},
+                            "commit": {"submitted": 8, "success_rate": 1.0},
+                        }
+                    },
+                }],
+            }
+        )
+        check = next(item for item in result["checks"] if item["name"] == "DAU / 最大热用户容量")
+        self.assertEqual(INCONCLUSIVE, check["status"])
+
+    def test_multi_spec_needs_two_completed_profiles(self) -> None:
+        result = evaluate(
+            {
+                "instance_profiles": [
+                    {"name": "4U8G", "status": "completed"},
+                    {"name": "8U16G", "status": "planned"},
+                ]
+            }
+        )
+        check = next(item for item in result["checks"] if item["name"] == "多规格实例调度配置")
+        self.assertEqual(INCONCLUSIVE, check["status"])
+
+    def test_legacy_commit_only_fairness_is_inconclusive(self) -> None:
+        result = evaluate(
+            {
+                "acceptance": {
+                    "checks": [{
+                        "name": "Tenant fairness (Jain)",
+                        "status": PASS,
+                        "observed": 1.0,
+                    }]
+                }
+            }
+        )
+        check = next(item for item in result["checks"] if item["name"] == "Commit/Search 公平性 Jain")
+        self.assertEqual(INCONCLUSIVE, check["status"])
+
     def test_recovery_requires_real_evidence(self) -> None:
         result = evaluate(
             {"runs": []},
             recovery={"status": "PASS", "recovered": True, "replay_rate": 1.0},
         )
         check = next(item for item in result["checks"] if item["name"] == "Commit kill-9 恢复与重放")
+        self.assertEqual(INCONCLUSIVE, check["status"])
+
+    def test_recovery_fails_when_same_key_is_not_marked_replayed(self) -> None:
+        result = evaluate(
+            {"runs": []},
+            recovery={
+                "status": "INCONCLUSIVE",
+                "recovered": True,
+                "message_set_reconciled": True,
+                "cursor_reconciliation": {"status": PASS},
+                "idempotency_reconciliation": {"status": "FAIL"},
+            },
+        )
+        check = next(item for item in result["checks"] if item["name"] == "Commit kill-9 恢复与重放")
+        self.assertEqual("FAIL", check["status"])
+
+    def test_recovery_requires_both_cursor_and_message_reconciliation(self) -> None:
+        result = evaluate(
+            {"runs": []},
+            recovery={
+                "status": PASS,
+                "recovered": True,
+                "replay_verified": True,
+                "cursor_reconciliation": {"status": PASS},
+                "message_set_reconciled": False,
+                "idempotency_reconciliation": {"status": PASS},
+            },
+        )
+        check = next(item for item in result["checks"] if item["name"] == "Commit kill-9 恢复与重放")
+        self.assertEqual(INCONCLUSIVE, check["status"])
+
+    def test_observability_requires_each_tenant_and_lane_quartet(self) -> None:
+        lanes = ("http_interactive", "http_background", "http_global", "tenant_rate_limit", "commit")
+        per_tenant = {
+            tenant: {
+                "per_lane": {
+                    lane: {
+                        "queued": True,
+                        "wait": True,
+                        "exec": True,
+                        "rejected": True,
+                    }
+                    for lane in lanes
+                }
+            }
+            for tenant in ("a", "b")
+        }
+        result = evaluate(
+            {"runs": [{
+                "summary": {
+                    "details": {
+                        "pr421_metric_coverage": {
+                            "missing": [],
+                            "per_tenant_quartets": per_tenant,
+                        }
+                    }
+                },
+                "status": "completed",
+            }]},
+            capability={
+                "checks": [{
+                    "name": "Prometheus B7 metrics",
+                    "present": {
+                        "lane_queued": True,
+                        "lane_wait": True,
+                        "lane_exec": True,
+                        "lane_rejected": True,
+                    },
+                }]
+            },
+        )
+        check = next(item for item in result["checks"] if item["name"] == "分层/分租户调度可观测性")
         self.assertEqual(PASS, check["status"])
 
     def test_fairness_can_be_derived_from_run_summaries(self) -> None:
@@ -72,6 +229,7 @@ class SchedulerAcceptanceTests(unittest.TestCase):
                 "runs": [
                     {
                         "scenario": "search-priority-blackbox",
+                        "status": "completed",
                         "summary": {
                             "metrics": {
                                 "fairness": {
@@ -79,7 +237,21 @@ class SchedulerAcceptanceTests(unittest.TestCase):
                                         "a": 2,
                                         "b": 2,
                                         "c": 1,
-                                    }
+                                    },
+                                },
+                                "per_tenant": {
+                                    "a": {
+                                        "commit": {"completed": 2},
+                                        "search": {"latency": {"p95_s": 1.0}},
+                                    },
+                                    "b": {
+                                        "commit": {"completed": 2},
+                                        "search": {"latency": {"p95_s": 1.0}},
+                                    },
+                                    "c": {
+                                        "commit": {"completed": 1},
+                                        "search": {"latency": {"p95_s": 1.0}},
+                                    },
                                 }
                             }
                         },

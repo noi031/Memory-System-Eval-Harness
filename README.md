@@ -540,6 +540,14 @@ python -m performance.scheduler_acceptance \
 缺少故障控制、重启控制或多规格实测时，报告保留 `INCONCLUSIVE`，不会
 根据客户端延迟或 HTTP 200 推断 EchoMem 已实现对应保证。
 
+本次 PR29 的专项验收口径已收紧：容量项必须有真实完成请求且 Search/Commit
+成功率达标；多规格必须有至少两种规格的实际运行记录；公平性必须同时有逐租户
+Commit 完成吞吐和 Search P95，取两者 Jain 的较小值；Search 优先级只接受已完成的
+洪泛场景，并直接检查 Search P95 是否不超过 5 秒；恢复项必须同时通过消息集合、
+cursor 和幂等重放对账；可观测性必须验证至少两个租户在每个预期 lane 上都有
+queued/wait/exec/rejected 四元组。旧报告只有单维 Jain、单一指标族或“配置已写入”
+的结果，会保留为 `INCONCLUSIVE`，不会被误判为通过。
+
 恢复对账必须使用 EchoMem `POST /messages` 返回的服务端消息 `id`（例如
 `msg_*`）；压测脚本生成的 `recovery-*` 只作为请求关联字段，不能当作持久化
 消息 ID。`Commit` 返回 `completed` 只证明事务到达终态，仍需另外核对

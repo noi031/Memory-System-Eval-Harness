@@ -48,6 +48,70 @@ def _result(name: str, status: str, target: Any, observed: Any, reason: str) -> 
     }
 
 
+def _jain(values: list[float]) -> float | None:
+    values = [value for value in values if value >= 0]
+    if len(values) < 2 or sum(value * value for value in values) <= 0:
+        return None
+    total = sum(values)
+    return (total * total) / (len(values) * sum(value * value for value in values))
+
+
+def _per_tenant_metrics(suite: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    """Merge one run's per-tenant metrics without mixing unlike workloads."""
+    candidate_scenarios = (
+        "tenant-skew",
+        "search-priority-blackbox",
+        "commit-barrier",
+        "mixed",
+    )
+    runs_by_scenario = {
+        scenario: [
+            run for run in _suite_runs(suite)
+            if str(run.get("scenario") or "") == scenario
+            and str(run.get("status") or "") == "completed"
+        ]
+        for scenario in candidate_scenarios
+    }
+    selected_scenario = next(
+        (
+            scenario
+            for scenario in candidate_scenarios
+            if any(
+                isinstance((_run_summary(run).get("metrics") or {}).get("per_tenant"), dict)
+                for run in runs_by_scenario[scenario]
+            )
+        ),
+        "",
+    )
+    runs = runs_by_scenario[selected_scenario] if selected_scenario else []
+    merged: dict[str, dict[str, Any]] = {}
+    for run in runs:
+        metrics = _run_summary(run).get("metrics") or {}
+        for tenant, data in (metrics.get("per_tenant") or {}).items():
+            if not isinstance(data, dict):
+                continue
+            entry = merged.setdefault(
+                str(tenant),
+                {"commit_completed": 0, "search_p95_s": []},
+            )
+            commit = data.get("commit") or {}
+            entry["commit_completed"] += int(commit.get("completed") or 0)
+            search = data.get("search") or {}
+            search_latency = search.get("latency") or {}
+            value = search_latency.get("p95_s")
+            try:
+                if float(value) > 0:
+                    entry["search_p95_s"].append(float(value))
+            except (TypeError, ValueError):
+                pass
+    for entry in merged.values():
+        values = entry.pop("search_p95_s", [])
+        entry["search_p95_s"] = (
+            sum(values) / len(values) if values else None
+        )
+    return merged
+
+
 def _suite_runs(suite: dict[str, Any]) -> list[dict[str, Any]]:
     runs = suite.get("runs")
     return [item for item in runs if isinstance(item, dict)] if isinstance(runs, list) else []
@@ -95,7 +159,34 @@ def _capacity(suite: dict[str, Any]) -> dict[str, Any]:
         and str(run.get("status") or "") == "completed"
         and str(run.get("scenario")).split("-", 1)[1].isdigit()
     )
-    status = PASS if profile and completed_levels else INCONCLUSIVE
+    valid_levels = []
+    hot_user_candidates: list[int] = []
+    for run in _suite_runs(suite):
+        scenario = str(run.get("scenario") or "")
+        metrics = (_run_summary(run).get("metrics") or {})
+        if scenario.startswith("capacity-"):
+            if str(run.get("status")) != "completed":
+                continue
+            search = metrics.get("search") or {}
+            commit = metrics.get("commit") or {}
+            if (
+                int(search.get("submitted") or 0) > 0
+                and float(search.get("success_rate") or 0) >= 0.99
+                and (
+                    int(commit.get("submitted") or 0) == 0
+                    or float(commit.get("success_rate") or 0) >= 0.99
+                )
+            ):
+                valid_levels.append(int(scenario.split("-", 1)[1]))
+        elif scenario == "tenant-skew" and str(run.get("status")) == "completed":
+            submitted = [
+                int((data.get("commit") or {}).get("submitted") or 0)
+                for data in (metrics.get("per_tenant") or {}).values()
+                if isinstance(data, dict)
+            ]
+            if submitted:
+                hot_user_candidates.append(max(submitted))
+    status = PASS if profile and valid_levels else INCONCLUSIVE
     return _result(
         "DAU / 最大热用户容量",
         status,
@@ -103,11 +194,13 @@ def _capacity(suite: dict[str, Any]) -> dict[str, Any]:
         {
             "capacity_levels": levels,
             "completed_capacity_levels": completed_levels,
-            "max_completed_active_user_proxy": max(completed_levels, default=None),
+            "valid_capacity_levels": sorted(set(valid_levels)),
+            "max_completed_active_user_proxy": max(valid_levels, default=None),
+            "max_hot_user_proxy": max(hot_user_candidates, default=None),
             "instance_profile": profile,
         },
         (
-            "已记录实际规格和完成的容量阶梯；该值是压测活跃用户代理上限，不等于业务 DAU"
+            "已记录实际规格、有效容量阶梯和热租户负载；数值是压测代理上限，不直接等于业务 DAU"
             if status == PASS
             else "有容量场景，但没有实际完成的容量级别或实例规格证据"
         ),
@@ -119,19 +212,25 @@ def _multi_spec(suite: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(profiles, list):
         profiles = []
     target = "配置可切换并实际执行至少两种实例规格"
-    if len(profiles) < 2:
+    completed = [
+        item for item in profiles
+        if isinstance(item, dict)
+        and str(item.get("status") or "").lower()
+        in {"completed", "pass", "passed"}
+    ]
+    if len(completed) < 2:
         return _result(
             "多规格实例调度配置",
             INCONCLUSIVE,
             target,
-            {"profiles": profiles},
-            "本轮只运行 4U8G，无法证明 4U16G/16U32G/32U/64G 配置也能调度",
+            {"profiles": profiles, "completed_profiles": completed},
+            "本轮没有至少两种规格的实际运行结果；只有配置文件不能证明调度生效",
         )
     return _result(
         "多规格实例调度配置",
         PASS,
         target,
-        {"profiles": profiles},
+        {"profiles": profiles, "completed_profiles": completed},
         "至少两种规格均有实际运行记录",
     )
 
@@ -176,7 +275,15 @@ def _fairness(suite: dict[str, Any]) -> dict[str, Any]:
     acceptance = suite.get("acceptance") if isinstance(suite.get("acceptance"), dict) else {}
     checks = acceptance.get("checks") if isinstance(acceptance.get("checks"), list) else []
     check = next((item for item in checks if item.get("name") == "Tenant fairness (Jain)"), None)
-    if not isinstance(check, dict) or check.get("observed") in (None, ""):
+    # A legacy acceptance record only contains Commit throughput. It cannot
+    # satisfy the current two-dimensional Commit + Search target.
+    observed_check = check.get("observed") if isinstance(check, dict) else None
+    has_two_dimensional_check = (
+        isinstance(observed_check, dict)
+        and observed_check.get("commit_jain") is not None
+        and observed_check.get("search_latency_jain") is not None
+    )
+    if not has_two_dimensional_check:
         # Fairness is a within-workload statistic. Never add completion
         # counts from capacity, priority, and skew scenarios together: their
         # denominators and admission windows differ. Prefer the bounded
@@ -231,20 +338,39 @@ def _fairness(suite: dict[str, Any]) -> dict[str, Any]:
                 except (TypeError, ValueError):
                     continue
                 counts[str(tenant)] = counts.get(str(tenant), 0) + max(0, count)
-        values = [float(value) for value in counts.values() if value > 0]
-        if len(values) >= 2 and sum(values) > 0:
-            jain = (sum(values) ** 2) / (len(values) * sum(value ** 2 for value in values))
+        tenant_metrics = _per_tenant_metrics(suite)
+        commit_values = [
+            float(item["commit_completed"])
+            for item in tenant_metrics.values()
+            if item["commit_completed"] >= 0
+        ]
+        search_values = [
+            1.0 / float(item["search_p95_s"])
+            for item in tenant_metrics.values()
+            if item.get("search_p95_s") and float(item["search_p95_s"]) > 0
+        ]
+        commit_jain = _jain(commit_values)
+        search_jain = _jain(search_values)
+        if (
+            commit_jain is not None
+            and search_jain is not None
+            and len(tenant_metrics) >= 2
+            and len(commit_values) >= 2
+            and len(search_values) >= 2
+        ):
+            combined = min(commit_jain, search_jain)
             return _result(
                 "Commit/Search 公平性 Jain",
-                PASS if jain >= 0.90 else FAIL,
+                PASS if combined >= 0.90 else FAIL,
                 0.90,
                 {
-                    "jain": round(jain, 4),
-                    "completed_per_tenant": counts,
-                    "runs_with_fairness": run_count,
+                    "commit_jain": round(commit_jain, 4),
+                    "search_latency_jain": round(search_jain, 4),
+                    "jain": round(combined, 4),
+                    "tenants": tenant_metrics,
                     "scenario": selected_scenario or "mixed",
                 },
-                "按独立租户最终完成 Commit 数计算 Jain 指数",
+                "同时按 Commit 完成吞吐和 Search P95 的倒数计算 Jain，取两者较小值",
             )
         return _result(
             "Commit/Search 公平性 Jain",
@@ -255,16 +381,29 @@ def _fairness(suite: dict[str, Any]) -> dict[str, Any]:
                 "runs_with_fairness": run_count,
                 "scenario": selected_scenario or "mixed",
             },
-            "没有至少两个租户的有效 Commit 完成吞吐样本",
+            "需要至少两个租户同时具备 Commit 完成吞吐和 Search P95，才能计算双维公平性",
         )
     observed = check.get("observed")
+    if has_two_dimensional_check:
+        return _result(
+            "Commit/Search 公平性 Jain",
+            check.get("status", INCONCLUSIVE),
+            0.90,
+            observed,
+            check.get("reason", "同时按 Commit 吞吐和 Search 延迟计算公平性"),
+        )
     try:
         value = float(observed)
     except (TypeError, ValueError):
         value = None
     return _result(
         "Commit/Search 公平性 Jain",
-        check.get("status", INCONCLUSIVE) if value is not None else INCONCLUSIVE,
+        check.get("status", INCONCLUSIVE)
+        if value is not None
+        and isinstance(check.get("observed"), dict)
+        and check["observed"].get("commit_jain") is not None
+        and check["observed"].get("search_latency_jain") is not None
+        else INCONCLUSIVE,
         0.90,
         observed,
         check.get("reason", "按逐租户完成吞吐计算"),
@@ -281,13 +420,22 @@ def _priority(suite: dict[str, Any]) -> dict[str, Any]:
             {},
             "未运行 search-priority-blackbox 场景",
         )
+    completed_runs = [run for run in runs if str(run.get("status") or "") == "completed"]
+    if not completed_runs:
+        return _result(
+            "Search 优先于 Commit",
+            INCONCLUSIVE,
+            "Search P95 <= 5s 且有同到达窗口证据",
+            {"runs": len(runs), "completed_runs": 0},
+            "场景存在但没有已完成的真实运行结果",
+        )
     p95_values = [
         _metric(_run_summary(run), "metrics", "search", "latency", "p95_s")
-        for run in runs
+        for run in completed_runs
     ]
     commit_counts = [
         _metric(_run_summary(run), "metrics", "commit", "submitted")
-        for run in runs
+        for run in completed_runs
     ]
     commit_counts = [
         int(value) for value in commit_counts
@@ -298,7 +446,7 @@ def _priority(suite: dict[str, Any]) -> dict[str, Any]:
             "Search 优先于 Commit",
             INCONCLUSIVE,
             5.0,
-            {"runs": len(runs), "commit_submitted": 0},
+            {"runs": len(completed_runs), "commit_submitted": 0},
             "场景存在但没有 Commit 洪泛样本，不能证明 Search 优先级",
         )
     values = [float(value) for value in p95_values if isinstance(value, (int, float))]
@@ -307,7 +455,7 @@ def _priority(suite: dict[str, Any]) -> dict[str, Any]:
             "Search 优先于 Commit",
             INCONCLUSIVE,
             5.0,
-            {"runs": len(runs)},
+            {"runs": len(completed_runs)},
             "场景运行了，但没有 Search P95 数据",
         )
     worst = max(values)
@@ -339,23 +487,44 @@ def _recovery(recovery: dict[str, Any]) -> dict[str, Any]:
         rate = None
     cursor = recovery.get("cursor_reconciliation")
     cursor_proven = isinstance(cursor, dict) and str(cursor.get("status")) == PASS
-    message_set_proven = bool(
-        recovery.get("message_set_reconciled")
-        or recovery.get("replay_verified")
-        or recovery.get("replay_rate") is not None
+    message_set_proven = bool(recovery.get("message_set_reconciled"))
+    replay_proven = bool(recovery.get("replay_verified"))
+    idempotency = recovery.get("idempotency_reconciliation")
+    idempotency_status = (
+        str(idempotency.get("status") or INCONCLUSIVE)
+        if isinstance(idempotency, dict)
+        else INCONCLUSIVE
     )
+    # A completed archive after restart proves durability only. The target
+    # explicitly includes replay, so a generic kill/restart probe without a
+    # stable idempotency key must remain inconclusive.
+    replay_evidence = replay_proven or idempotency_status == PASS
     passed = (
         status == PASS
         and (rate is None or rate >= 1.0)
         and recovery.get("recovered") is not False
-        and (cursor_proven or message_set_proven)
+        and cursor_proven
+        and message_set_proven
+        and replay_evidence
     )
+    if idempotency_status == FAIL:
+        verdict = FAIL
+        reason = "服务恢复且消息对账通过，但同一幂等键未返回 replayed=true"
+    elif passed:
+        verdict = PASS
+        reason = "服务恢复、Commit 完成、消息集合对账和幂等重放均通过"
+    elif status in {FAIL, INCONCLUSIVE}:
+        verdict = status
+        reason = "恢复、消息对账或幂等重放证据不完整/失败"
+    else:
+        verdict = INCONCLUSIVE
+        reason = "恢复、消息对账或幂等重放证据不完整/失败"
     return _result(
         "Commit kill-9 恢复与重放",
-        PASS if passed else status if status in {FAIL, INCONCLUSIVE} else FAIL,
+        verdict,
         1.0,
         recovery,
-        "服务恢复、Commit 完成且消息集合对账通过" if passed else "恢复或重放证据不完整/失败",
+        reason,
     )
 
 
@@ -373,7 +542,36 @@ def _observability(capability: dict[str, Any], suite: dict[str, Any]) -> dict[st
         for run in _suite_runs(suite)
     ]
     coverage = [item for item in coverage if isinstance(item, dict)]
-    if missing and not coverage:
+    expected_lanes = {
+        "http_interactive",
+        "http_background",
+        "http_global",
+        "tenant_rate_limit",
+        "commit",
+    }
+    complete_tenant_lanes: dict[str, list[str]] = {}
+    for item in coverage:
+        for tenant, data in (item.get("per_tenant_quartets") or {}).items():
+            if not isinstance(data, dict):
+                continue
+            lane_map = data.get("per_lane") or {}
+            if isinstance(lane_map, dict):
+                complete_tenant_lanes[str(tenant)] = sorted(
+                    lane for lane, quartet in lane_map.items()
+                    if isinstance(quartet, dict)
+                    and all(bool(quartet.get(key)) for key in (
+                        "queued", "wait", "exec", "rejected"
+                    ))
+                )
+            elif all(bool(data.get(key)) for key in (
+                "queued", "wait", "exec", "rejected"
+            )):
+                complete_tenant_lanes[str(tenant)] = list(data.get("lanes") or [])
+    tenants_with_all_lanes = sorted(
+        tenant for tenant, lanes in complete_tenant_lanes.items()
+        if expected_lanes.issubset(set(lanes))
+    )
+    if (missing or len(tenants_with_all_lanes) < 2) and not coverage:
         return _result(
             "分层/分租户调度可观测性",
             INCONCLUSIVE,
@@ -381,13 +579,22 @@ def _observability(capability: dict[str, Any], suite: dict[str, Any]) -> dict[st
             {"missing": missing},
             "没有完整的 Prometheus B7 指标覆盖证据",
         )
-    observed = {"missing": missing, "coverage_samples": len(coverage)}
+    observed = {
+        "missing": missing,
+        "coverage_samples": len(coverage),
+        "complete_tenant_lanes": complete_tenant_lanes,
+        "tenants_with_all_lanes": tenants_with_all_lanes,
+    }
     return _result(
         "分层/分租户调度可观测性",
-        PASS if not missing else INCONCLUSIVE,
-        "四类指标均存在且标签符合 bounded-label 契约",
+        PASS if not missing and len(tenants_with_all_lanes) >= 2 else INCONCLUSIVE,
+        "四类指标均存在，且至少两个租户覆盖全部预期 lane",
         observed,
-        "四类 lane 指标均有服务端证据" if not missing else "指标部分存在，不能完整验收",
+        (
+            "四类 lane 指标均有服务端证据，且至少两个租户覆盖全部预期 lane"
+            if not missing and len(tenants_with_all_lanes) >= 2
+            else "指标族或每租户/每 lane 四元组覆盖不足，不能完整验收"
+        ),
     )
 
 

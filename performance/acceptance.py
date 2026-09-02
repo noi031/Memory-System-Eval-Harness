@@ -180,13 +180,31 @@ def _target_coverage(manifest: dict[str, Any]) -> dict[str, Any]:
         for item in coverages
         for violation in (item.get("bounded_label_violations") or [])
     ]
+    per_tenant_coverage = [
+        item.get("per_tenant_quartets") or {}
+        for item in coverages
+        if isinstance(item.get("per_tenant_quartets"), dict)
+    ]
+    tenants_with_quartets = sorted({
+        str(tenant)
+        for coverage in per_tenant_coverage
+        for tenant, families in coverage.items()
+        if isinstance(families, dict)
+        and all(bool(families.get(family)) for family in (
+            "queued", "wait", "exec", "rejected"
+        ))
+    })
     present = sorted({
         str(key)
         for item in coverages
         for key, value in (item.get("present") or {}).items()
         if value
     })
-    status = PASS if not missing and not label_violations else INCONCLUSIVE
+    status = (
+        PASS
+        if not missing and not label_violations and len(tenants_with_quartets) >= 2
+        else INCONCLUSIVE
+    )
     return _result(
         "B7 lane/fan-out metrics",
         status,
@@ -195,15 +213,16 @@ def _target_coverage(manifest: dict[str, Any]) -> dict[str, Any]:
             "present": present,
             "missing": missing,
             "bounded_label_violations": label_violations,
+            "tenants_with_complete_quartets": tenants_with_quartets,
         },
         evidence="details.pr421_metric_coverage",
         reason=(
-            "全部指标族均有服务端证据"
+            "全部指标族均有服务端证据，且至少两个租户都有完整四元组"
             if status == PASS
             else (
                 "指标标签不符合 bounded-label 契约，不能证明服务端 lane/fan-out 行为"
                 if label_violations and not missing
-                else "指标族未完整暴露，不能证明服务端 lane/fan-out 行为"
+                else "指标族或每租户四元组覆盖不足，不能证明每层每租户可观测"
             )
         ),
     )

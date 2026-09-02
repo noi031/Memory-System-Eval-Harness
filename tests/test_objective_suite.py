@@ -47,6 +47,36 @@ class ObjectiveSuiteTests(unittest.TestCase):
         self.assertTrue(all(item["status"] == "INCONCLUSIVE" for item in objectives if item["id"] != "O2"))
         self.assertEqual("PASS", next(item["status"] for item in objectives if item["id"] == "O2"))
 
+    def test_recovery_objective_requires_idempotency_evidence(self) -> None:
+        suite = {
+            "profile_name": "4U8G",
+            "commit_recovery": {
+                "status": "PASS",
+                "message_reconciliation": {"status": "PASS"},
+                "cursor_reconciliation": {"status": "PASS"},
+            },
+        }
+        objectives = objective_statuses(
+            suite,
+            recovery_configured=True,
+            metrics_configured=False,
+        )
+        self.assertEqual(
+            "INCONCLUSIVE",
+            next(item["status"] for item in objectives if item["id"] == "O6"),
+        )
+
+        suite["commit_recovery"]["idempotency_reconciliation"] = {"status": "PASS"}
+        objectives = objective_statuses(
+            suite,
+            recovery_configured=True,
+            metrics_configured=False,
+        )
+        self.assertEqual(
+            "PASS",
+            next(item["status"] for item in objectives if item["id"] == "O6"),
+        )
+
     def test_render_report(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "report.html"

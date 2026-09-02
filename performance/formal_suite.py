@@ -666,6 +666,15 @@ def _derive_case_summary(run_dir: Path, identity_independent: bool) -> dict[str,
     for tenant_idx in sorted({str(row.get("tenant_idx") or "") for row in rows}):
         if not tenant_idx:
             continue
+        tenant_reads = [
+            value for value in (
+                _ms_to_s(row.get("stage_ms"))
+                for row in reads
+                if str(row.get("tenant_idx") or "") == tenant_idx
+                and row.get("status") == "ok"
+            )
+            if value is not None
+        ]
         tenant_ok_commits = [
             row for row in ok_commits if str(row.get("tenant_idx") or "") == tenant_idx
         ]
@@ -677,21 +686,54 @@ def _derive_case_summary(run_dir: Path, identity_independent: bool) -> dict[str,
             )
             if value is not None
         ]
-        if not tenant_ok_commits and not tenant_done_stages:
+        if not tenant_ok_commits and not tenant_done_stages and not tenant_reads:
             continue
         commit_entry: dict[str, Any] = {}
         if tenant_ok_commits:
             commit_entry["submitted"] = len(tenant_ok_commits)
+            commit_entry["completed"] = sum(
+                1
+                for row in ok_dones
+                if str(row.get("tenant_idx") or "") == tenant_idx
+            )
         if tenant_done_stages:
             commit_entry["completion"] = {
                 "p50_s": round(percentile(tenant_done_stages, 50), 3)
             }
-        per_tenant[tenant_idx] = {"commit": commit_entry}
+        search_entry: dict[str, Any] = {}
+        if tenant_reads:
+            search_entry = {
+                "submitted": sum(
+                    1
+                    for row in reads
+                    if str(row.get("tenant_idx") or "") == tenant_idx
+                ),
+                "succeeded": len(tenant_reads),
+                "latency": {
+                    "p50_s": round(percentile(tenant_reads, 50), 3),
+                    "p95_s": round(percentile(tenant_reads, 95), 3),
+                },
+            }
+        per_tenant[tenant_idx] = {
+            "commit": commit_entry,
+            "search": search_entry,
+        }
 
     details: dict[str, Any] = {
         "identity_mode": "independent_auth_keys" if identity_independent else "shared",
         "quality_seed": [],
+        "native_status": native.get("status"),
     }
+    for key in (
+        "degradation",
+        "isolation",
+        "search_quality",
+        "commit_durability",
+        "reconciliation",
+        "resources",
+    ):
+        if isinstance(native.get(key), dict):
+            details[key] = native[key]
     metrics_path = run_dir / "metrics_samples.csv"
     if metrics_path.is_file():
         metrics_rows = _read_requests_csv(metrics_path)
@@ -720,6 +762,63 @@ def _derive_case_summary(run_dir: Path, identity_independent: bool) -> dict[str,
                 "missing": [family for family in families if family not in observed],
                 "bounded_label_violations": _bounded_label_violations(metrics_rows),
             }
+            per_tenant_quartets: dict[str, dict[str, Any]] = {}
+            for row in metrics_rows:
+                metric_name = str(row.get("metric") or "")
+                family = next(
+                    (
+                        candidate
+                        for candidate in families
+                        if metric_name == candidate
+                        or metric_name.startswith(f"{candidate}_")
+                    ),
+                    None,
+                )
+                if family not in PR421_ACCEPTANCE_TARGETS["lane_metric_families"]:
+                    continue
+                try:
+                    labels = json.loads(row.get("labels") or "{}")
+                except json.JSONDecodeError:
+                    labels = {}
+                if not isinstance(labels, dict):
+                    continue
+                tenant = labels.get("tenant_id") or labels.get("tenant")
+                if tenant in (None, ""):
+                    continue
+                short = {
+                    "echomem_lane_queued": "queued",
+                    "echomem_lane_wait_seconds": "wait",
+                    "echomem_lane_exec_seconds": "exec",
+                    "echomem_lane_rejected_total": "rejected",
+                }[family]
+                entry = per_tenant_quartets.setdefault(
+                    str(tenant),
+                    {
+                        "queued": False,
+                        "wait": False,
+                        "exec": False,
+                        "rejected": False,
+                        "lanes": set(),
+                        "per_lane": {},
+                    },
+                )
+                entry[short] = True
+                if labels.get("lane") not in (None, ""):
+                    lane = str(labels["lane"])
+                    entry["lanes"].add(lane)
+                    lane_entry = entry["per_lane"].setdefault(
+                        lane,
+                        {
+                            "queued": False,
+                            "wait": False,
+                            "exec": False,
+                            "rejected": False,
+                        },
+                    )
+                    lane_entry[short] = True
+            for entry in per_tenant_quartets.values():
+                entry["lanes"] = sorted(entry["lanes"])
+            details["pr421_metric_coverage"]["per_tenant_quartets"] = per_tenant_quartets
 
     def _percentile(values: list[float], p: float) -> float | None:
         value = percentile(values, p)

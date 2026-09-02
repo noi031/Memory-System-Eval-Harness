@@ -527,12 +527,15 @@ def main() -> int:
                 else "same-key Commit replay did not return the original archive with replayed=true"
             ),
         }
+        idempotency_status = result["idempotency_reconciliation"]["status"]
         result["status"] = (
-            PASS
+            FAIL
+            if idempotency_status == FAIL
+            else PASS
             if (
                 final_state == "completed"
                 and reconciliation_status == PASS
-                and result["idempotency_reconciliation"]["status"] == PASS
+                and idempotency_status == PASS
                 and history.status_code
                 and history.status_code < 400
             )
@@ -541,10 +544,11 @@ def main() -> int:
             else INCONCLUSIVE
         )
         result["reason"] = (
-            "service recovered, Commit reached completed, and all server-assigned "
-            "message IDs were found in durable readback; replay idempotency is "
-            "a separate unverified property"
+            "same idempotency key returned the original archive with replayed=true, "
+            "and all server-assigned message IDs were found in durable readback"
             if result["status"] == PASS
+            else "same idempotency key returned the original archive but replayed was false"
+            if idempotency_status == FAIL
             else "Commit did not reach a terminal completed state within the recovery window"
         )
 

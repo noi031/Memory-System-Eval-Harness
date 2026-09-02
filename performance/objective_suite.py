@@ -20,6 +20,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+try:
+    from .scheduler_acceptance import evaluate as evaluate_scheduler_acceptance
+except ImportError:
+    from scheduler_acceptance import evaluate as evaluate_scheduler_acceptance
+
 OBJECTIVES = [
     ("O1", "单实例最大用户量 / 热用户量"),
     ("O2", "多规格实例调度与 config"),
@@ -320,6 +325,42 @@ def objective_statuses(
     blackbox = suite.get("blackbox_contract_probe") or {}
     recovery = suite.get("commit_recovery") or {}
     fault_suite = suite.get("fault_suite") or {}
+    capability = suite.get("capability_probe") or {}
+
+    recovery_for_scheduler = dict(recovery)
+    message_reconciliation = recovery_for_scheduler.get("message_reconciliation")
+    if (
+        "message_set_reconciled" not in recovery_for_scheduler
+        and isinstance(message_reconciliation, dict)
+    ):
+        recovery_for_scheduler["message_set_reconciled"] = (
+            str(message_reconciliation.get("status") or "") == PASS
+        )
+    if (
+        "replay_verified" not in recovery_for_scheduler
+        and isinstance(recovery_for_scheduler.get("idempotency_reconciliation"), dict)
+    ):
+        recovery_for_scheduler["replay_verified"] = (
+            str(
+                recovery_for_scheduler["idempotency_reconciliation"].get("status") or ""
+            )
+            == PASS
+        )
+    strict_acceptance = evaluate_scheduler_acceptance(
+        suite,
+        capability=capability,
+        recovery=recovery_for_scheduler,
+        fault=fault_suite,
+    )
+    strict_by_name = {
+        str(item.get("name")): item
+        for item in strict_acceptance.get("checks") or []
+        if isinstance(item, dict) and item.get("name")
+    }
+
+    def strict(name: str, fallback: str = INCONCLUSIVE) -> dict[str, Any]:
+        item = strict_by_name.get(name)
+        return item if isinstance(item, dict) else {"status": fallback}
 
     def status(name: str, fallback: str = "INCONCLUSIVE") -> str:
         return str((checks.get(name) or {}).get("status") or fallback)
@@ -344,10 +385,12 @@ def objective_statuses(
     )
     recovery_reconcile = recovery.get("message_reconciliation") or {}
     cursor_reconcile = recovery.get("cursor_reconciliation") or {}
+    idempotency_reconcile = recovery.get("idempotency_reconciliation") or {}
     recovery_statuses = [
         str(recovery.get("status") or INCONCLUSIVE),
         str(recovery_reconcile.get("status") or INCONCLUSIVE),
         str(cursor_reconcile.get("status") or INCONCLUSIVE),
+        str(idempotency_reconcile.get("status") or INCONCLUSIVE),
     ]
 
     # O1 is a capacity ladder. It is a measured upper bound for active test
@@ -363,13 +406,9 @@ def objective_statuses(
         {
             "id": "O1",
             "name": OBJECTIVES[0][1],
-            "status": "PASS" if capacity_ok else "INCONCLUSIVE",
-            "reason": (
-                "容量阶梯场景全部完成；结果表示压测窗口内可承载上限，不等同于业务 DAU"
-                if capacity_ok
-                else "未完成 capacity-2/4/8/16/32 容量阶梯"
-            ),
-            "evidence": "suite.runs[scenario=capacity-*]",
+            "status": strict("DAU / 最大热用户容量")["status"],
+            "reason": strict("DAU / 最大热用户容量").get("reason", ""),
+            "evidence": "scheduler_acceptance: DAU / 最大热用户容量",
         },
         {
             "id": "O2",
@@ -385,96 +424,37 @@ def objective_statuses(
         {
             "id": "O3",
             "name": OBJECTIVES[2][1],
-            "status": (
-                (
-                    FAIL
-                    if FAIL in fault_cases
-                    else INCONCLUSIVE
-                    if not fault_has_search_observation or INCONCLUSIVE in fault_cases
-                    else PASS
-                )
-                if fault_suite.get("cases")
-                and fault_has_search_observation
-                else status("Search P95 isolation ratio")
-            ),
-            "reason": (
-                "已执行真实故障探针，并包含旁观租户 Search P95 观测"
-                if fault_has_search_observation
-                and fault_cases
-                and all(item == PASS for item in fault_cases)
-                else "故障探针包含失败，需要检查故障窗口与旁观租户 Search P95 数据"
-                if fault_has_search_observation
-                and FAIL in fault_cases
-                else "故障套件已执行，但没有旁观租户 Search P95 证据，不能判定隔离性"
-                if fault_suite.get("cases")
-                else "需要 baseline 与单租户故障/压力窗口的有效 Search P95 成对数据"
-            ),
-            "evidence": (
-                str(fault_suite.get("path") or "fault-suite.json")
-                if fault_suite.get("cases")
-                else "acceptance: Search P95 isolation ratio"
-            ),
+            "status": strict("单租户故障隔离")["status"],
+            "reason": strict("单租户故障隔离").get("reason", ""),
+            "evidence": "scheduler_acceptance: 单租户故障隔离",
         },
         {
             "id": "O4",
             "name": OBJECTIVES[3][1],
-            "status": status("Tenant fairness (Jain)"),
-            "reason": "需要至少两个独立认证租户的稳态 Commit 吞吐样本",
-            "evidence": "acceptance: Tenant fairness (Jain)",
+            "status": strict("Commit/Search 公平性 Jain")["status"],
+            "reason": strict("Commit/Search 公平性 Jain").get("reason", ""),
+            "evidence": "scheduler_acceptance: Commit/Search 公平性 Jain",
         },
         {
             "id": "O5",
             "name": OBJECTIVES[4][1],
-            "status": status("Search success rate"),
-            "reason": "优先级场景必须同时产生有效 Search 与 Commit 洪泛证据",
-            "evidence": "search-priority-blackbox + acceptance: Search success rate",
+            "status": strict("Search 优先于 Commit")["status"],
+            "reason": strict("Search 优先于 Commit").get("reason", ""),
+            "evidence": "scheduler_acceptance: Search 优先于 Commit",
         },
         {
             "id": "O6",
             "name": OBJECTIVES[5][1],
-            "status": (
-                (
-                    FAIL
-                    if FAIL in recovery_statuses
-                    else INCONCLUSIVE
-                    if INCONCLUSIVE in recovery_statuses
-                    else PASS
-                )
-                if recovery_configured
-                else "INCONCLUSIVE"
-            ),
-            "reason": (
-                "真实重启、Commit 终态、消息集合和 cursor 对账均通过"
-                if recovery_configured and all(item == PASS for item in recovery_statuses)
-                else "真实重启已执行，但 Commit 终态或消息/cursor 对账未全部通过"
-                if recovery_configured
-                else "未配置真实 PID/container 重启控制，不能证明崩溃恢复重放"
-            ),
-            "evidence": "recovery plan + cursor/message-set reconciliation",
+            "status": strict("Commit kill-9 恢复与重放")["status"],
+            "reason": strict("Commit kill-9 恢复与重放").get("reason", ""),
+            "evidence": "scheduler_acceptance: Commit kill-9 恢复与重放",
         },
         {
             "id": "O7",
             "name": OBJECTIVES[6][1],
-            "status": (
-                str(
-                    next(
-                        (
-                            item.get("status")
-                            for item in blackbox.get("checks", [])
-                            if item.get("name") == "metrics"
-                        ),
-                        status("B7 lane/fan-out metrics"),
-                    )
-                )
-                if metrics_configured
-                else "INCONCLUSIVE"
-            ),
-            "reason": (
-                "已采集 /metrics 四元组及 fan-out 指标"
-                if metrics_configured
-                else "未启用服务端 /metrics 采集"
-            ),
-            "evidence": "metrics_samples.csv + acceptance: B7 lane/fan-out metrics",
+            "status": strict("分层/分租户调度可观测性")["status"],
+            "reason": strict("分层/分租户调度可观测性").get("reason", ""),
+            "evidence": "scheduler_acceptance: 分层/分租户调度可观测性",
         },
     ]
 

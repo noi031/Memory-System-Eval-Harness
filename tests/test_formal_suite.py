@@ -390,7 +390,20 @@ class FormalSuiteAdapterTests(unittest.TestCase):
                 derived["metrics"]["fairness"]["commit_completed_per_tenant"],
             )
             self.assertEqual(
-                {"0": {"commit": {"submitted": 2, "completion": {"p50_s": 3.0}}}},
+                {
+                    "0": {
+                        "commit": {
+                            "submitted": 2,
+                            "completed": 2,
+                            "completion": {"p50_s": 3.0},
+                        },
+                        "search": {
+                            "submitted": 3,
+                            "succeeded": 2,
+                            "latency": {"p50_s": 0.2, "p95_s": 0.29},
+                        },
+                    }
+                },
                 derived["metrics"]["per_tenant"],
             )
             self.assertEqual("independent_auth_keys", derived["details"]["identity_mode"])
