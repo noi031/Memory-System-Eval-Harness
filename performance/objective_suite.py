@@ -431,7 +431,13 @@ def _run_configured_probes(
             "--tenant-config", str(tenant_path),
             "--out", str(output),
         ]
-        for key, flag in (("max_tenants", "--max-tenants"), ("auth_header", "--auth-header")):
+        for key, flag in (
+            ("max_tenants", "--max-tenants"),
+            ("auth_header", "--auth-header"),
+            ("commit_timeout_s", "--commit-timeout-s"),
+            ("search_timeout_s", "--search-timeout-s"),
+            ("visibility_timeout_s", "--visibility-timeout-s"),
+        ):
             _add_option(command, flag, missing.get(key))
         execution = run_command(
             command, timeout_s=min(timeout_s, 300 if quick else 900), redact_values=redact

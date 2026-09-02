@@ -128,7 +128,14 @@ def poll_commit(
     }
 
 
-def run_consistency(client: EchoMemHTTP, tenant: str) -> dict[str, Any]:
+def run_consistency(
+    client: EchoMemHTTP,
+    tenant: str,
+    *,
+    commit_timeout_s: float,
+    search_timeout_s: float,
+    visibility_timeout_s: float,
+) -> dict[str, Any]:
     marker = f"pr397-consistency-{tenant}-{uuid.uuid4().hex}"
     session_id, _ = client.open_session(tenant, f"pr397-consistency-{tenant}")
     message_id = f"message-{uuid.uuid4().hex}"
@@ -151,7 +158,7 @@ def run_consistency(client: EchoMemHTTP, tenant: str) -> dict[str, Any]:
             "finished_at": now(),
         })
         return result
-    state = poll_commit(client, session_id, archive_id, timeout_s=120, interval_s=1)
+    state = poll_commit(client, session_id, archive_id, timeout_s=commit_timeout_s, interval_s=1)
     result["commit_state"] = state
     if state["status"] != PASS:
         result.update({"status": state["status"], "finished_at": now()})
@@ -210,11 +217,15 @@ def run_consistency(client: EchoMemHTTP, tenant: str) -> dict[str, Any]:
     }
     commit_completed_monotonic = time.monotonic()
     first_visible_s: float | None = None
-    deadline = time.monotonic() + 60
+    deadline = time.monotonic() + visibility_timeout_s
     searches: list[dict[str, Any]] = []
     while time.monotonic() < deadline:
         search_started = time.monotonic()
-        response = client.search(session_id, f"Return the exact marker {marker}", timeout_s=40)
+        response = client.search(
+            session_id,
+            f"Return the exact marker {marker}",
+            timeout_s=search_timeout_s,
+        )
         payload = response.payload if isinstance(response.payload, dict) else {}
         visible = has_marker(payload, marker)
         searches.append({
@@ -254,7 +265,12 @@ def run_consistency(client: EchoMemHTTP, tenant: str) -> dict[str, Any]:
     return result
 
 
-def run_state_machine(client: EchoMemHTTP, tenant: str) -> dict[str, Any]:
+def run_state_machine(
+    client: EchoMemHTTP,
+    tenant: str,
+    *,
+    commit_timeout_s: float,
+) -> dict[str, Any]:
     session_id, _ = client.open_session(tenant, f"pr397-state-{tenant}")
     client.add_message(session_id, f"message-{uuid.uuid4().hex}", f"state-machine-{uuid.uuid4().hex}")
     commit = client.commit(session_id)
@@ -265,7 +281,9 @@ def run_state_machine(client: EchoMemHTTP, tenant: str) -> dict[str, Any]:
             "tenant": tenant,
             "reason": "accepted Commit did not return archive_id",
         }
-    result = poll_commit(client, session_id, archive_id, timeout_s=120, interval_s=0.5)
+    result = poll_commit(
+        client, session_id, archive_id, timeout_s=commit_timeout_s, interval_s=0.5
+    )
     states = result.get("states") or []
     regressions = [
         {"from": previous, "to": current, "index": index}
@@ -283,13 +301,20 @@ def run_state_machine(client: EchoMemHTTP, tenant: str) -> dict[str, Any]:
     return result
 
 
-def run_cold_warm(client: EchoMemHTTP, tenant: str) -> dict[str, Any]:
+def run_cold_warm(
+    client: EchoMemHTTP,
+    tenant: str,
+    *,
+    search_timeout_s: float,
+) -> dict[str, Any]:
     session_id, _ = client.open_session(tenant, f"pr397-cold-warm-{tenant}")
     latencies: list[float] = []
     statuses: list[int | None] = []
     for index in range(4):
         started = time.monotonic()
-        response = client.search(session_id, f"cold-warm probe {index}", timeout_s=40)
+        response = client.search(
+            session_id, f"cold-warm probe {index}", timeout_s=search_timeout_s
+        )
         latencies.append(time.monotonic() - started)
         statuses.append(response.status_code)
     return {
@@ -309,6 +334,9 @@ def main() -> int:
     parser.add_argument("--out", required=True, type=Path)
     parser.add_argument("--auth-header", default="X-Auth-Key")
     parser.add_argument("--max-tenants", type=int, default=0)
+    parser.add_argument("--commit-timeout-s", type=float, default=120)
+    parser.add_argument("--search-timeout-s", type=float, default=40)
+    parser.add_argument("--visibility-timeout-s", type=float, default=60)
     args = parser.parse_args()
     specs = load_tenant_specs(args.tenant_config)
     if args.max_tenants > 0:
@@ -325,9 +353,32 @@ def main() -> int:
             auth_header=args.auth_header,
         )
         try:
-            cases.append({"kind": "write-after-read", "result": run_consistency(client, spec.tenant_id)})
-            cases.append({"kind": "commit-state-machine", "result": run_state_machine(client, spec.tenant_id)})
-            cases.append({"kind": "cold-warm-search", "result": run_cold_warm(client, spec.tenant_id)})
+            cases.append({
+                "kind": "write-after-read",
+                "result": run_consistency(
+                    client,
+                    spec.tenant_id,
+                    commit_timeout_s=args.commit_timeout_s,
+                    search_timeout_s=args.search_timeout_s,
+                    visibility_timeout_s=args.visibility_timeout_s,
+                ),
+            })
+            cases.append({
+                "kind": "commit-state-machine",
+                "result": run_state_machine(
+                    client,
+                    spec.tenant_id,
+                    commit_timeout_s=args.commit_timeout_s,
+                ),
+            })
+            cases.append({
+                "kind": "cold-warm-search",
+                "result": run_cold_warm(
+                    client,
+                    spec.tenant_id,
+                    search_timeout_s=args.search_timeout_s,
+                ),
+            })
         except Exception as exc:
             cases.append({
                 "kind": "runtime",
