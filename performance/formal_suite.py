@@ -514,6 +514,39 @@ def _bounded_label_violations(metrics_rows: list[dict[str, str]]) -> list[dict[s
     return violations
 
 
+def _scale_explicit_tenant_counts(
+    counts: list[int],
+    total_cap: int,
+) -> list[int]:
+    """Scale an explicit distribution without exceeding a bounded barrier."""
+    if total_cap <= 0 or sum(counts) <= total_cap:
+        return counts
+    if not counts:
+        return []
+    if total_cap < len(counts):
+        return [1 if index < total_cap else 0 for index in range(len(counts))]
+    total = sum(counts)
+    scaled = [max(1, (count * total_cap) // total) for count in counts]
+    while sum(scaled) > total_cap:
+        index = max(
+            (idx for idx, value in enumerate(scaled) if value > 1),
+            key=lambda idx: (scaled[idx], -idx),
+            default=None,
+        )
+        if index is None:
+            break
+        scaled[index] -= 1
+    fractions = [
+        (count * total_cap / total) - ((count * total_cap) // total)
+        for count in counts
+    ]
+    while sum(scaled) < total_cap:
+        index = max(range(len(counts)), key=lambda idx: (fractions[idx], -idx))
+        scaled[index] += 1
+        fractions[index] = -1.0
+    return scaled
+
+
 def _build_case_command(
     args: argparse.Namespace,
     case: dict[str, Any],
@@ -620,7 +653,12 @@ def _build_case_command(
             if case.get("commit_zipf_exponent"):
                 cmd += ["--commit-zipf-exponent", str(case["commit_zipf_exponent"])]
             if case.get("commit_tenant_counts"):
-                cmd += ["--commit-tenant-counts", ",".join(map(str, case["commit_tenant_counts"]))]
+                counts = list(map(int, case["commit_tenant_counts"]))
+                if barrier_count_cap > 0:
+                    counts = _scale_explicit_tenant_counts(
+                        counts, barrier_count_cap
+                    )
+                cmd += ["--commit-tenant-counts", ",".join(map(str, counts))]
     else:
         cmd += ["--scenarios", "K"]
     return cmd

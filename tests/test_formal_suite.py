@@ -11,6 +11,7 @@ from performance.formal_suite import (
     SCENARIOS,
     _build_case_command,
     _derive_case_summary,
+    _scale_explicit_tenant_counts,
     _write_case_csvs,
     complete_scenarios,
     report6_scenarios,
@@ -18,6 +19,16 @@ from performance.formal_suite import (
 
 
 class Report6ScenarioTests(unittest.TestCase):
+    def test_explicit_tenant_counts_respect_barrier_cap(self) -> None:
+        self.assertEqual(
+            [1, 1, 1, 1],
+            _scale_explicit_tenant_counts([200, 20, 20, 20], 4),
+        )
+        self.assertEqual(
+            [13, 1, 1, 1],
+            _scale_explicit_tenant_counts([200, 20, 20, 20], 16),
+        )
+
     def test_complete_contains_both_plan_catalogs(self) -> None:
         scenarios = complete_scenarios()
 
