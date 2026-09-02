@@ -768,14 +768,16 @@ echo $! >"$STRESS_OUTPUT_DIR/launcher.pid"
 `STRESS_CASE_TIMEOUT_S=0` 表示按场景时长 + Commit 轮询预算自动计算；只有诊断时
 才建议手动设置较小的超时。超时会记录为 `TIMEOUT`，不会伪装成 EchoMem 的业务失败。
 
-服务器没有 Python 依赖时，使用 runner 镜像，并确保工作目录为 `/harness`：
+服务器系统 Python 低于 3.9，或没有 Harness 依赖时，必须使用 runner 镜像。
+该镜像的默认 entrypoint 是旧版 `runner.py`，执行 PR29 的完整套件时要显式覆盖
+entrypoint 为 `bash`，否则参数会被旧 runner 吃掉：
 
 ```bash
 python3 performance/prepare_docker_env.py \
   /opt/echomem-stress/tenant_keys.env \
   /opt/echomem-stress/tenant_keys.docker.env
 
-docker run --rm --network host \
+docker run --rm --network host --entrypoint bash \
   --env-file /opt/echomem-stress/tenant_keys.docker.env \
   --env-file /opt/echomem-stress/formal-run.env \
   -v /opt/Memory-System-Eval-Harness:/harness \
@@ -786,8 +788,22 @@ docker run --rm --network host \
   -e STRESS_TENANT_CONFIG=/opt/echomem-stress/tenants-32.json \
   -e STRESS_OUTPUT_DIR=/opt/echomem-stress/results/4u8g-docker-$(date +%Y%m%d_%H%M%S) \
   echomem-stress-runner:latest \
-  bash -lc 'export STRESS_CASE_TIMEOUT_S=180; export STRESS_COMMIT_TIMEOUT_S=600; ./performance/run_4u8g_complete.sh'
+  -lc 'export STRESS_CASE_TIMEOUT_S=180 STRESS_COMMIT_TIMEOUT_S=600; ./performance/run_4u8g_complete.sh'
 ```
+
+如果镜像有不同的 entrypoint，仍要确保最终执行的是 `/harness/performance/run_4u8g_complete.sh`：
+
+```bash
+docker run --rm --network host --entrypoint bash \
+  -v /opt/Memory-System-Eval-Harness:/harness \
+  -v /opt/echomem-stress:/opt/echomem-stress \
+  -w /harness echomem-stress-runner:latest \
+  -lc 'pwd; python --version; export STRESS_CASE_TIMEOUT_S=180 STRESS_COMMIT_TIMEOUT_S=600; ./performance/run_4u8g_complete.sh'
+```
+
+注意：脚本会在发送任何业务请求前检查 Python 版本；系统 Python 3.6 会直接退出，
+并标记为测试平台运行时错误。进入正式压测前还会执行真实租户鉴权预检，若 32 个
+租户中只有 1 个通过，只能做单租户诊断，不能宣称多租户公平、隔离或容量结果。
 
 `--env-file` 只能接受 `NAME=value`，不能直接传入包含 `export` 的 shell
 文件；上面的转换命令只读取赋值，不执行其中的 shell 代码，也不会打印变量值。
