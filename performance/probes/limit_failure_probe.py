@@ -56,6 +56,21 @@ def response_reason_code(raw: str) -> str:
     return ""
 
 
+def response_error_detail(raw: str) -> str:
+    """Keep a short, redaction-free service error explanation for audit."""
+    try:
+        payload = json.loads(raw) if raw else {}
+    except json.JSONDecodeError:
+        return raw[:500]
+    if not isinstance(payload, dict):
+        return str(payload)[:500]
+    for key in ("detail", "message", "error", "code", "reason_code"):
+        value = payload.get(key)
+        if value not in (None, ""):
+            return str(value)[:500]
+    return ""
+
+
 def header_reason_code(headers: Any) -> str:
     for key in ("X-Reason-Code", "X-Reason", "Reason-Code"):
         value = headers.get(key, "")
@@ -70,6 +85,16 @@ def auth_key(tenant: dict[str, str]) -> str:
     if direct:
         return direct
     return os.environ.get(str(tenant.get("auth_key_env") or ""), "")
+
+
+def error_class(status_code: int | None) -> str:
+    if status_code is None:
+        return "transport_error"
+    if 400 <= status_code < 500:
+        return "request_or_admission_4xx"
+    if 500 <= status_code < 600:
+        return "server_error"
+    return ""
 
 
 def quantile(values: list[float], p: float) -> float | None:
@@ -215,10 +240,12 @@ def request(
         with urllib.request.urlopen(req, timeout=timeout_s) as response:
             raw = response.read().decode("utf-8", errors="replace")
             row["status_code"] = response.status
+            row["error_class"] = error_class(response.status)
             row["retry_after"] = response.headers.get("Retry-After", "")
             row["reason_code"] = (
                 header_reason_code(response.headers) or response_reason_code(raw)
             )
+            row["error_detail"] = response_error_detail(raw)
             row["body_size"] = len(raw)
             try:
                 payload = json.loads(raw)
@@ -231,15 +258,18 @@ def request(
                 row["result_count"] = None
     except urllib.error.HTTPError as exc:
         row["status_code"] = exc.code
+        row["error_class"] = error_class(exc.code)
         row["retry_after"] = exc.headers.get("Retry-After", "")
         raw = exc.read().decode("utf-8", errors="replace")
         row["reason_code"] = (
             header_reason_code(exc.headers) or response_reason_code(raw)
         )
         row["error"] = f"HTTP {exc.code}"
+        row["error_detail"] = response_error_detail(raw)
         row["body_size"] = len(raw)
     except Exception as exc:
         row["status_code"] = None
+        row["error_class"] = error_class(None)
         row["error"] = f"{type(exc).__name__}: {exc}"
     row["elapsed_s"] = time.monotonic() - started
     return row
@@ -296,23 +326,29 @@ def commit_request(
         with urllib.request.urlopen(commit_req, timeout=timeout_s) as response:
             raw = response.read().decode("utf-8", errors="replace")
             row["status_code"] = response.status
+            row["error_class"] = error_class(response.status)
             row["retry_after"] = response.headers.get("Retry-After", "")
             row["reason_code"] = (
                 header_reason_code(response.headers) or response_reason_code(raw)
             )
+            row["error_detail"] = response_error_detail(raw)
             row["body_size"] = len(raw)
     except urllib.error.HTTPError as exc:
         row["status_code"] = exc.code
+        row["error_class"] = error_class(exc.code)
         row["retry_after"] = exc.headers.get("Retry-After", "")
         raw = exc.read().decode("utf-8", errors="replace")
         row["reason_code"] = (
             header_reason_code(exc.headers) or response_reason_code(raw)
         )
         row["error"] = f"HTTP {exc.code}"
+        row["error_detail"] = response_error_detail(raw)
         row["body_size"] = len(raw)
     except Exception as exc:
         row["status_code"] = None
+        row["error_class"] = error_class(None)
         row["error"] = f"{type(exc).__name__}: {exc}"
+        row["error_detail"] = ""
     row["elapsed_s"] = time.monotonic() - started
     return row
 
@@ -533,15 +569,17 @@ def write_report(
         bad_rows = "".join(
             f"<tr><td>{esc(row.get('tenant'))}</td><td>{esc(row.get('status_code') or 'transport')}</td>"
             f"<td>{float(row.get('elapsed_s') or 0):.3f}s</td>"
-            f"<td>{esc(row.get('retry_after'))}</td><td>{esc(row.get('error'))}</td></tr>"
+            f"<td>{esc(row.get('retry_after'))}</td><td>{esc(row.get('reason_code'))}</td>"
+            f"<td>{esc(row.get('error'))}</td><td>{esc(row.get('error_detail'))}</td></tr>"
             for row in bad
-        ) or "<tr><td colspan='5'>没有 HTTP/transport 错误；不代表业务质量成功。</td></tr>"
+        ) or "<tr><td colspan='7'>没有 HTTP/transport 错误；不代表业务质量成功。</td></tr>"
         sections.append(
             f"<section><h2>{esc(kind)} 详细失败样本</h2>"
             f"<p>错误数 {errors}/{len(group)}，P50 {quantile(times,.5):.3f}s，"
             f"P95 {quantile(times,.95):.3f}s，最大 {max(times):.3f}s。</p>"
             "<div class='scroll'><table><thead><tr><th>租户</th><th>状态</th>"
-            "<th>耗时</th><th>Retry-After</th><th>错误</th></tr></thead>"
+            "<th>耗时</th><th>Retry-After</th><th>reason_code</th><th>错误</th>"
+            "<th>服务端详情</th></tr></thead>"
             f"<tbody>{bad_rows}</tbody></table></div></section>"
         )
     manifest["finished_at"] = iso_now()

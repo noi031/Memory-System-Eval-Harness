@@ -17,7 +17,13 @@ from performance.objective_suite import (
     run_command,
     render_report,
 )
-from performance.probes.limit_failure_probe import auth_key, load_tenants, metrics_coverage
+from performance.probes.limit_failure_probe import (
+    auth_key,
+    error_class,
+    load_tenants,
+    metrics_coverage,
+    response_error_detail,
+)
 from performance.formal_suite import SCENARIOS
 
 
@@ -128,6 +134,15 @@ class ObjectiveSuiteTests(unittest.TestCase):
                 [{"tenant_id": "a", "user_id": "u", "auth_key_env": "", "auth_key": "key-a"}],
                 load_tenants(path),
             )
+
+    def test_limit_probe_preserves_error_class_and_detail(self) -> None:
+        self.assertEqual("request_or_admission_4xx", error_class(400))
+        self.assertEqual("server_error", error_class(503))
+        self.assertEqual("transport_error", error_class(None))
+        self.assertEqual(
+            "invalid session",
+            response_error_detail(json.dumps({"detail": "invalid session"})),
+        )
 
     def test_recovery_objective_requires_idempotency_evidence(self) -> None:
         suite = {
