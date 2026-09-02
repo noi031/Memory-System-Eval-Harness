@@ -674,13 +674,6 @@ def _observability(capability: dict[str, Any], suite: dict[str, Any]) -> dict[st
         for run in _suite_runs(suite)
     ]
     coverage = [item for item in coverage if isinstance(item, dict)]
-    expected_lanes = {
-        "recall_engine",
-        "recall_intent_llm",
-        "recall_query_embedding",
-        "recall_rerank",
-        "commit",
-    }
     lane_quartets: dict[str, dict[str, bool]] = {}
     fanout_engines: dict[str, dict[str, bool]] = {}
     legacy_tenant_lanes: dict[str, list[str]] = {}
@@ -719,18 +712,26 @@ def _observability(capability: dict[str, Any], suite: dict[str, Any]) -> dict[st
             "queued", "wait", "exec", "rejected"
         ))
     )
+    # The active EchoMem configuration determines which scheduler lanes are
+    # real for this run. Disabled optional engines must not be reported as
+    # missing, while a run with no lane observations remains inconclusive.
+    expected_lanes = set(lane_quartets)
     missing_lanes = sorted(expected_lanes - set(complete_lanes))
     complete_fanout_engines = sorted(
         engine for engine, observations in fanout_engines.items()
         if observations.get("exec") and observations.get("skipped")
     )
-    if missing and not coverage:
+    if (missing or not expected_lanes) and not coverage:
         return _result(
             "分层/分租户调度可观测性",
             INCONCLUSIVE,
             "每个实际 lane 有 queued/wait/exec/rejected 四元组，且有 fan-out 证据",
             {"missing": missing},
-            "没有完整的 Prometheus B7 指标覆盖证据",
+            (
+                "没有采到任何实际 lane 的 Prometheus B7 覆盖证据"
+                if not expected_lanes
+                else "没有完整的 Prometheus B7 指标覆盖证据"
+            ),
         )
     observed = {
         "missing": missing,
