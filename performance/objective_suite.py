@@ -341,7 +341,11 @@ def main() -> int:
                     str(profile_dir / "formal"),
                 ]
                 if scenarios:
-                    command += ["--scenarios", scenarios, "--duration-cap-s", "30"]
+                    command += [
+                        "--scenarios", scenarios,
+                        "--duration-cap-s", "30",
+                        "--barrier-count-cap", "16",
+                    ]
                 command_result["run"] = run_command(command, timeout_s=args.timeout_s)
                 formal_root = profile_dir / "formal"
                 candidates = []

@@ -514,6 +514,7 @@ def _build_case_command(
     config_path: Path,
     output: Path,
     duration_s: float,
+    barrier_count_cap: int = 0,
 ) -> list[str]:
     """把 stress case 字典映射为 run_stress CLI 参数。
 
@@ -581,18 +582,21 @@ def _build_case_command(
     if args.no_server_metrics:
         cmd += ["--no-metrics"]
     if case.get("commit_barrier"):
+        barrier_count = int(case.get("commit_barrier_count", 32))
+        if barrier_count_cap > 0:
+            barrier_count = min(barrier_count, barrier_count_cap)
         # 洪峰窗口（report6 D：waves 为 1 且存在 burst 窗口）→ D 场景。
         if case.get("commit_burst_window_s") and not (case.get("commit_barrier_waves") or 1) > 1:
             cmd += [
                 "--scenarios", "D",
-                "--burst-commits", str(case.get("commit_barrier_count", 32)),
+                "--burst-commits", str(barrier_count),
                 "--burst-window-s", str(case["commit_burst_window_s"]),
             ]
         # 多波（report4 D：waves > 1）→ H 场景。
         elif (case.get("commit_barrier_waves") or 1) > 1:
             cmd += [
                 "--scenarios", "H", "--commit-barrier",
-                "--commit-barrier-count", str(case["commit_barrier_count"]),
+                "--commit-barrier-count", str(barrier_count),
                 "--commit-barrier-waves", str(case["commit_barrier_waves"]),
                 "--commit-barrier-cooldown-s", str(case.get("commit_barrier_cooldown_s", 0.0)),
             ]
@@ -600,7 +604,7 @@ def _build_case_command(
         else:
             cmd += [
                 "--scenarios", "S", "--commit-barrier",
-                "--commit-barrier-count", str(case["commit_barrier_count"]),
+                "--commit-barrier-count", str(barrier_count),
                 "--commit-tenant-distribution", str(case.get("commit_tenant_distribution", "uniform")),
             ]
             if case.get("commit_zipf_exponent"):
@@ -853,9 +857,16 @@ def run_case(
     case_timeout_s = (
         args.case_timeout_s
         if args.case_timeout_s > 0
-        else duration_s + max(60.0, float(args.commit_timeout_s))
+        else duration_s + max(
+            60.0,
+            float(args.commit_timeout_s),
+            120.0 if case.get("commit_barrier") and not getattr(args, "barrier_count_cap", 0) else 0.0,
+        )
     )
-    command = _build_case_command(args, case, config_path, output, duration_s)
+    barrier_count_cap = int(getattr(args, "barrier_count_cap", 0) or 0)
+    command = _build_case_command(
+        args, case, config_path, output, duration_s, barrier_count_cap
+    )
     if args.reset_command:
         completed_reset = subprocess.run(
             args.reset_command,
@@ -879,6 +890,7 @@ def run_case(
                 "runner_returncode": completed_reset.returncode,
                 "duration_s": duration_s,
                 "case_timeout_s": case_timeout_s,
+                "barrier_count_cap": barrier_count_cap,
                 "output_dir": str(output.resolve()),
                 "summary": {},
             }
@@ -918,6 +930,7 @@ def run_case(
         "runner_returncode": completed.returncode,
         "duration_s": duration_s,
         "case_timeout_s": case_timeout_s,
+        "barrier_count_cap": barrier_count_cap,
         "runner_timeout": timed_out,
         "output_dir": str(output.resolve()),
         "summary": derived,
@@ -1151,6 +1164,15 @@ def main() -> int:
         type=int,
         default=32,
         help="barrier Commit 最大同时在途数，默认 32",
+    )
+    parser.add_argument(
+        "--barrier-count-cap",
+        type=int,
+        default=0,
+        help=(
+            "显式限制每个 barrier 场景的 Commit 数；仅用于 bounded/quick "
+            "诊断，0 表示使用方案原始数量"
+        ),
     )
     parser.add_argument("--reset-command", default="", help="Optional command run before every case")
     parser.add_argument("--no-server-metrics", action="store_true")

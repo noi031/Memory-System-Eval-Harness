@@ -47,6 +47,29 @@ class Report6ScenarioTests(unittest.TestCase):
         self.assertGreater(case["search_rps"], 0)
         self.assertEqual(0.0, case["commit_rpm"])
 
+    def test_barrier_count_cap_bounds_quick_command(self) -> None:
+        args = argparse.Namespace(
+            base_url="http://127.0.0.1:8010",
+            barrier_wave_size=32,
+            local_auth_mode=False,
+            reuse_existing_data=True,
+            preflight_config="",
+            no_server_metrics=False,
+            commit_timeout_s=60.0,
+            commit_max_attempts=0,
+            commit_retry_backoff_s=0.0,
+        )
+        command = _build_case_command(
+            args,
+            SCENARIOS["search-priority-blackbox"],
+            Path("/tmp/tenants.json"),
+            Path("/tmp/out"),
+            30.0,
+            barrier_count_cap=16,
+        )
+        self.assertIn("--commit-barrier-count", command)
+        self.assertEqual("16", command[command.index("--commit-barrier-count") + 1])
+
     def test_complete_capacity_points_are_executable(self) -> None:
         scenarios = complete_scenarios()
 
