@@ -78,6 +78,8 @@ def _per_tenant_metrics(suite: dict[str, Any]) -> dict[str, dict[str, Any]]:
     # protecting Search, not evidence of unfair tenant scheduling.
     candidate_scenarios = (
         "tenant-skew",
+        "tenant-skew-bounded",
+        "fairness-bounded",
         "mixed",
         "commit-barrier",
     )
@@ -311,6 +313,8 @@ def _fairness(suite: dict[str, Any]) -> dict[str, Any]:
             runs_by_scenario.setdefault(str(run.get("scenario") or ""), []).append(run)
         candidate_scenarios = [
             "tenant-skew",
+            "tenant-skew-bounded",
+            "fairness-bounded",
             "mixed",
             "commit-barrier",
             "commit-storm",

@@ -1102,18 +1102,36 @@ class LoadGenerator:
         self._barrier_prep_records = records
         try:
             counts = self._barrier_tenant_counts(scene, len(tenants))
+            # Prepare tenants concurrently.  Preparing the hot tenant first
+            # used to block every bystander tenant, which made the
+            # tenant-skew case look like a service timeout before fairness
+            # could be measured.  The per-tenant helper still bounds its own
+            # session workers; this outer bound prevents an unbounded fan-out.
+            prep_jobs = [
+                (tenant, count)
+                for tenant, count in zip(tenants, counts)
+                if count > 0
+            ]
             prepared: list[PreparedWrite] = []
-            for tenant, count in zip(tenants, counts):
-                prepared.extend(
-                    self.prepare_write_sessions(
-                        tenant,
-                        count,
-                        messages_per_session,
-                        scene_key=scene.key,
-                        step_conc=scene.per_tenant_conc,
-                        extra="barrier",
-                    )
-                )
+            if prep_jobs:
+                with ThreadPoolExecutor(
+                    max_workers=min(len(prep_jobs), self.barrier_prepare_concurrency),
+                    thread_name_prefix="perf-tenant-prep",
+                ) as pool:
+                    futures = [
+                        pool.submit(
+                            self.prepare_write_sessions,
+                            tenant,
+                            count,
+                            messages_per_session,
+                            scene_key=scene.key,
+                            step_conc=scene.per_tenant_conc,
+                            extra="barrier",
+                        )
+                        for tenant, count in prep_jobs
+                    ]
+                    for future in futures:
+                        prepared.extend(future.result())
 
             total = sum(counts)
 

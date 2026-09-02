@@ -35,6 +35,35 @@ def pct(value: float) -> str:
     return f"{value * 100:.2f}%"
 
 
+def response_reason_code(raw: str) -> str:
+    """Extract a bounded server rejection code from a JSON response body."""
+    try:
+        payload = json.loads(raw) if raw else {}
+    except json.JSONDecodeError:
+        return ""
+    if not isinstance(payload, dict):
+        return ""
+    for key in ("reason_code", "reasonCode", "error_code", "errorCode", "code"):
+        value = payload.get(key)
+        if value not in (None, "") and not isinstance(value, (dict, list)):
+            return str(value)
+    error = payload.get("error")
+    if isinstance(error, dict):
+        for key in ("reason_code", "reasonCode", "error_code", "errorCode", "code"):
+            value = error.get(key)
+            if value not in (None, "") and not isinstance(value, (dict, list)):
+                return str(value)
+    return ""
+
+
+def header_reason_code(headers: Any) -> str:
+    for key in ("X-Reason-Code", "X-Reason", "Reason-Code"):
+        value = headers.get(key, "")
+        if value:
+            return str(value)
+    return ""
+
+
 def quantile(values: list[float], p: float) -> float | None:
     if not values:
         return None
@@ -51,6 +80,103 @@ def status_counts(rows: list[dict[str, Any]]) -> dict[str, int]:
         key = str(row.get("status_code") or "transport_error")
         counts[key] = counts.get(key, 0) + 1
     return dict(sorted(counts.items(), key=lambda item: item[0]))
+
+
+def fetch_metrics(
+    base_url: str,
+    tenant: dict[str, str],
+    timeout_s: float,
+) -> dict[str, Any]:
+    """Fetch a real Prometheus snapshot without changing target state."""
+    started = time.monotonic()
+    headers = {
+        "Accept": "text/plain, application/openmetrics-text",
+        "X-Auth-Key": os.environ.get(tenant["auth_key_env"], ""),
+    }
+    req = urllib.request.Request(
+        base_url.rstrip("/") + "/metrics",
+        headers=headers,
+        method="GET",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=timeout_s) as response:
+            return {
+                "status_code": response.status,
+                "elapsed_s": round(time.monotonic() - started, 6),
+                "raw": response.read().decode("utf-8", errors="replace"),
+            }
+    except urllib.error.HTTPError as exc:
+        raw = exc.read().decode("utf-8", errors="replace")
+        return {
+            "status_code": exc.code,
+            "elapsed_s": round(time.monotonic() - started, 6),
+            "raw": raw,
+            "error": f"HTTP {exc.code}",
+        }
+    except Exception as exc:
+        return {
+            "status_code": None,
+            "elapsed_s": round(time.monotonic() - started, 6),
+            "raw": "",
+            "error": f"{type(exc).__name__}: {exc}",
+        }
+
+
+def metrics_coverage(raw: str) -> dict[str, Any]:
+    """Summarize actual metric samples, excluding HELP/TYPE declarations."""
+    families = {
+        "echomem_lane_queued": ("queued", "lane"),
+        "echomem_lane_wait_seconds": ("wait", "lane"),
+        "echomem_lane_exec_seconds": ("exec", "lane"),
+        "echomem_lane_rejected_total": ("rejected", "lane"),
+        "echomem_engine_fanout_exec_seconds": ("exec", "engine"),
+        "echomem_engine_fanout_skipped_total": ("skipped", "engine"),
+    }
+    present: set[str] = set()
+    lane_quartets: dict[str, dict[str, bool]] = {}
+    fanout_engines: dict[str, dict[str, bool]] = {}
+    for line in raw.splitlines():
+        if not line or line.startswith("#"):
+            continue
+        metric_name, _, label_text = line.partition("{")
+        base_name = metric_name
+        for suffix in ("_bucket", "_count", "_sum"):
+            base_name = base_name.removesuffix(suffix)
+        match = next(
+            (
+                (family, short, label_key)
+                for family, (short, label_key) in families.items()
+                if base_name == family
+            ),
+            None,
+        )
+        if match is None:
+            continue
+        family, short, label_key = match
+        present.add(family)
+        marker = f'{label_key}="'
+        label_value = (
+            label_text.split(marker, 1)[1].split('"', 1)[0]
+            if marker in label_text
+            else ""
+        )
+        if not label_value:
+            continue
+        if label_key == "lane":
+            lane_quartets.setdefault(
+                label_value,
+                {"queued": False, "wait": False, "exec": False, "rejected": False},
+            )[short] = True
+        else:
+            fanout_engines.setdefault(
+                label_value, {"exec": False, "skipped": False}
+            )[short] = True
+    return {
+        "present": {family: family in present for family in families},
+        "missing": sorted(set(families) - present),
+        "lane_quartets": lane_quartets,
+        "fanout_engines": fanout_engines,
+    }
 
 
 def request(
@@ -82,6 +208,9 @@ def request(
             raw = response.read().decode("utf-8", errors="replace")
             row["status_code"] = response.status
             row["retry_after"] = response.headers.get("Retry-After", "")
+            row["reason_code"] = (
+                header_reason_code(response.headers) or response_reason_code(raw)
+            )
             row["body_size"] = len(raw)
             try:
                 payload = json.loads(raw)
@@ -95,11 +224,12 @@ def request(
     except urllib.error.HTTPError as exc:
         row["status_code"] = exc.code
         row["retry_after"] = exc.headers.get("Retry-After", "")
+        raw = exc.read().decode("utf-8", errors="replace")
+        row["reason_code"] = (
+            header_reason_code(exc.headers) or response_reason_code(raw)
+        )
         row["error"] = f"HTTP {exc.code}"
-        try:
-            row["body_size"] = len(exc.read())
-        except Exception:
-            row["body_size"] = 0
+        row["body_size"] = len(raw)
     except Exception as exc:
         row["status_code"] = None
         row["error"] = f"{type(exc).__name__}: {exc}"
@@ -159,15 +289,19 @@ def commit_request(
             raw = response.read().decode("utf-8", errors="replace")
             row["status_code"] = response.status
             row["retry_after"] = response.headers.get("Retry-After", "")
+            row["reason_code"] = (
+                header_reason_code(response.headers) or response_reason_code(raw)
+            )
             row["body_size"] = len(raw)
     except urllib.error.HTTPError as exc:
         row["status_code"] = exc.code
         row["retry_after"] = exc.headers.get("Retry-After", "")
+        raw = exc.read().decode("utf-8", errors="replace")
+        row["reason_code"] = (
+            header_reason_code(exc.headers) or response_reason_code(raw)
+        )
         row["error"] = f"HTTP {exc.code}"
-        try:
-            row["body_size"] = len(exc.read())
-        except Exception:
-            row["body_size"] = 0
+        row["body_size"] = len(raw)
     except Exception as exc:
         row["status_code"] = None
         row["error"] = f"{type(exc).__name__}: {exc}"
@@ -475,6 +609,7 @@ def main() -> int:
         "search_sessions": sessions,
     }
     rows: list[dict[str, Any]] = []
+    metrics_before = fetch_metrics(args.base_url, tenants[0], args.timeout_s)
     rows.extend(
         run_wave(
             args.base_url, tenants, sessions, kind="search",
@@ -496,6 +631,25 @@ def main() -> int:
             count=args.open_count, workers=args.workers,
             timeout_s=args.timeout_s, path="/api/sessions/open",
         )
+    )
+    metrics_after = fetch_metrics(args.base_url, tenants[0], args.timeout_s)
+    manifest["metrics_before"] = {
+        key: value for key, value in metrics_before.items() if key != "raw"
+    }
+    manifest["metrics_after"] = {
+        key: value for key, value in metrics_after.items() if key != "raw"
+    }
+    manifest["metrics_coverage_before"] = metrics_coverage(
+        str(metrics_before.get("raw") or "")
+    )
+    manifest["metrics_coverage"] = metrics_coverage(
+        str(metrics_after.get("raw") or "")
+    )
+    (args.out_dir / "metrics-before.txt").write_text(
+        str(metrics_before.get("raw") or ""), encoding="utf-8"
+    )
+    (args.out_dir / "metrics-after.txt").write_text(
+        str(metrics_after.get("raw") or ""), encoding="utf-8"
     )
     write_report(args.out_dir, manifest, rows)
     print(json.dumps(manifest, ensure_ascii=False))

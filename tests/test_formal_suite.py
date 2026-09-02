@@ -28,6 +28,7 @@ class Report6ScenarioTests(unittest.TestCase):
                 "commit-barrier",
                 "saturation",
                 "tenant-skew",
+                "fairness-bounded",
                 "search-priority-blackbox",
                 "capacity-2",
                 "capacity-4",

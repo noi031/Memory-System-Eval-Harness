@@ -447,7 +447,12 @@ def _search_isolation_gate(manifest: dict[str, Any]) -> dict[str, Any]:
 
 
 def _fairness_gate(manifest: dict[str, Any]) -> dict[str, Any]:
-    runs = _runs_for(manifest, "tenant-skew") + _runs_for(manifest, "mixed")
+    runs = (
+        _runs_for(manifest, "tenant-skew")
+        + _runs_for(manifest, "tenant-skew-bounded")
+        + _runs_for(manifest, "fairness-bounded")
+        + _runs_for(manifest, "mixed")
+    )
     values: list[float] = []
     evidence: list[dict[str, Any]] = []
     for run in runs:
@@ -513,19 +518,14 @@ def _commit_completion_gate(manifest: dict[str, Any]) -> dict[str, Any]:
 
 def _rejection_gate(manifest: dict[str, Any]) -> dict[str, Any]:
     runs = _runs_for(manifest, "saturation")
-    if not runs:
-        return _result(
-            "Saturation rejection rate",
-            INCONCLUSIVE,
-            target={"rate_max": 0.05, "latency_max_s": 1.0},
-            reason="未执行 saturation 场景",
-        )
     rejected = total = 0
     rejected_latencies: list[float] = []
     response_fields_complete = True
+    evidence_sources: list[str] = []
     for run in runs:
         output_dir = Path(run.get("output_dir") or "")
         rows = _read_csv(output_dir / "search_results.csv")
+        evidence_sources.append(str(output_dir / "search_results.csv"))
         for row in rows:
             code = _number(row.get("status_code"))
             if code is None:
@@ -540,13 +540,33 @@ def _rejection_gate(manifest: dict[str, Any]) -> dict[str, Any]:
                 # retry hint and the server-provided reason are present.
                 if not row.get("retry_after_s") or not row.get("reason_code"):
                     response_fields_complete = False
+    sweep = manifest.get("limit_failure_sweep")
+    if isinstance(sweep, dict):
+        sweep_path = Path(str(sweep.get("requests_path") or ""))
+        rows = _read_csv(sweep_path)
+        if rows:
+            evidence_sources.append(str(sweep_path))
+        for row in rows:
+            code = _number(row.get("status_code"))
+            if code is None:
+                continue
+            total += 1
+            if int(code) in {429, 503}:
+                rejected += 1
+                latency = _number(row.get("elapsed_s"))
+                if latency is not None:
+                    rejected_latencies.append(latency)
+                if not (
+                    row.get("retry_after") or row.get("retry_after_s")
+                ) or not row.get("reason_code"):
+                    response_fields_complete = False
     if not total:
         return _result(
             "Saturation rejection rate",
             INCONCLUSIVE,
             target={"rate_max": 0.05, "latency_max_s": 1.0},
-            evidence="search_results.csv",
-            reason="saturation 没有有效 Search 响应",
+            evidence=evidence_sources or "search_results.csv",
+            reason="saturation/真实限流阶梯没有有效响应",
         )
     if not rejected:
         return _result(
@@ -554,7 +574,7 @@ def _rejection_gate(manifest: dict[str, Any]) -> dict[str, Any]:
             INCONCLUSIVE,
             target={"rate_max": 0.05, "latency_max_s": 1.0},
             observed={"rejection_rate": 0.0, "responses": total},
-            evidence="search_results.csv",
+            evidence=evidence_sources or "search_results.csv",
             reason="没有实际 429/503 拒绝样本，无法验证 PR421 拒绝响应契约",
         )
     rate = rejected / total
@@ -574,13 +594,13 @@ def _rejection_gate(manifest: dict[str, Any]) -> dict[str, Any]:
         status,
         target={"rate_max": 0.05, "latency_max_s": 1.0},
         observed=observed,
-        evidence="search_results.csv",
+        evidence=evidence_sources or "search_results.csv",
         reason=reason,
     )
 
 
 def _hot_tenant_gate(manifest: dict[str, Any]) -> dict[str, Any]:
-    runs = _runs_for(manifest, "tenant-skew")
+    runs = _runs_for(manifest, "tenant-skew") + _runs_for(manifest, "tenant-skew-bounded")
     ratios: list[float] = []
     evidence: list[dict[str, Any]] = []
     for run in runs:

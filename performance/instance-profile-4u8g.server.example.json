@@ -19,6 +19,15 @@
         "recovery_timeout_s": 180,
         "poll_s": 2
       },
+      "limit_failure_sweep": {
+        "levels": "16,64,128,256",
+        "search_count": 256,
+        "open_count": 128,
+        "commit_count": 128,
+        "workers": 256,
+        "timeout_s": 8,
+        "create_sessions": true
+      },
       "resource_profile": {
         "cpu": "4 vCPU",
         "memory": "8 GiB"

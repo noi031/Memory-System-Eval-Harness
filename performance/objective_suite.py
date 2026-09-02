@@ -211,6 +211,80 @@ def _add_option(command: list[str], flag: str, value: Any) -> None:
         command.extend([flag, str(value)])
 
 
+def _run_limit_failure_sweep(
+    profile: dict[str, Any],
+    *,
+    profile_dir: Path,
+    profiles_path: Path,
+    formal_root: Path,
+    timeout_s: float,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Run an optional real admission sweep after the bounded suite.
+
+    The formal ``saturation`` case measures Search while Commit is busy.  It
+    does not guarantee a queue-full response, so it cannot prove the
+    429/503/Retry-After/reason_code contract by itself.  This separate sweep
+    intentionally drives the public endpoints at explicit worker levels and
+    keeps the raw rows for audit.
+    """
+    config = profile.get("limit_failure_sweep")
+    if not isinstance(config, dict):
+        return {}, {
+            "limit_failure_sweep": {
+                "status": "INCONCLUSIVE",
+                "reason": "profile 未配置真实限流阶梯",
+            }
+        }
+
+    tenant_value = str(profile.get("tenant_config") or "")
+    tenant_path = Path(_resolve_profile_path(tenant_value, profiles_path))
+    output = profile_dir / "limit-failure-sweep"
+    output.mkdir(parents=True, exist_ok=True)
+    command = [
+        sys.executable,
+        "-m",
+        "performance.probes.limit_failure_sweep",
+        "--base-url",
+        str(profile.get("base_url") or "http://127.0.0.1:8010"),
+        "--tenant-config",
+        str(tenant_path),
+        "--out-dir",
+        str(output),
+        "--levels",
+        str(config.get("levels") or "16,64,128,256"),
+        "--timeout-s",
+        str(config.get("timeout_s") or 8.0),
+    ]
+    session_root = str(config.get("session_root") or "").strip()
+    if session_root:
+        resolved_session_root = _resolve_profile_path(session_root, profiles_path)
+        command += ["--session-root", resolved_session_root]
+    else:
+        # New sessions make the sweep independent of whichever formal case
+        # happened to finish first and avoid cross-run session contamination.
+        command += ["--session-root", str(formal_root), "--create-sessions"]
+    for key, flag in (
+        ("search_count", "--search-count"),
+        ("open_count", "--open-count"),
+        ("commit_count", "--commit-count"),
+        ("workers", "--workers"),
+    ):
+        _add_option(command, flag, config.get(key))
+    execution = run_command(command, timeout_s=min(timeout_s, 1800))
+    commands = {"limit_failure_sweep": execution}
+    summary_path = output / "summary.json"
+    payload = read_json(summary_path)
+    if not payload:
+        return {}, commands
+    return {
+        "limit_failure_sweep": {
+            **payload,
+            "path": str(summary_path),
+            "requests_path": str(output / "requests.csv"),
+        }
+    }, commands
+
+
 def _run_configured_probes(
     profile: dict[str, Any],
     *,
@@ -303,6 +377,16 @@ def _run_configured_probes(
                 "无法从真实 session 启动黑盒契约探测"
             ),
         }
+
+    sweep_artifacts, sweep_commands = _run_limit_failure_sweep(
+        profile,
+        profile_dir=profile_dir,
+        profiles_path=profiles_path,
+        formal_root=formal_root,
+        timeout_s=timeout_s,
+    )
+    artifacts.update(sweep_artifacts)
+    commands.update(sweep_commands)
 
     recovery = profile.get("commit_recovery")
     if isinstance(recovery, dict) and tenant_path.is_file():
@@ -572,6 +656,7 @@ def render_report(result: dict[str, Any], path: Path) -> None:
         for key, label in (
             ("capability_probe", "能力探针"),
             ("blackbox_contract_probe", "黑盒契约探针"),
+            ("limit_failure_sweep", "真实限流阶梯"),
             ("commit_recovery", "Commit 崩溃恢复探针"),
             ("fault_suite", "故障套件"),
         ):

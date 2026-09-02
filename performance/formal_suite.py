@@ -371,6 +371,19 @@ FOUR_U8G_SCENARIOS = {
         "capacity-8",
     )
 }
+FOUR_U8G_SCENARIOS["fairness-bounded"] = {
+    "label": "四租户均衡 Commit/Search 公平性（短窗口）",
+    "tenants": 4,
+    "duration_s": 30,
+    "search_rps": 8.0,
+    "commit_rpm": 0.0,
+    "commit_barrier": True,
+    "commit_barrier_count": 32,
+    "commit_tenant_distribution": "uniform",
+    "sessions_per_tenant": 8,
+    "messages_per_session": 1,
+    "fairness_bounded": True,
+}
 SCENARIO_PROFILES["4u8g"] = FOUR_U8G_SCENARIOS
 
 

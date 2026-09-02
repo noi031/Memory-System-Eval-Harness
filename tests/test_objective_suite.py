@@ -16,6 +16,7 @@ from performance.objective_suite import (
     run_command,
     render_report,
 )
+from performance.probes.limit_failure_probe import metrics_coverage
 from performance.formal_suite import SCENARIOS
 
 
@@ -203,6 +204,20 @@ class ObjectiveSuiteTests(unittest.TestCase):
                     _acquire_output_lock(root)
             finally:
                 first.close()
+
+    def test_metrics_coverage_uses_real_samples_not_help_lines(self) -> None:
+        raw = (
+            "# HELP echomem_lane_wait_seconds wait\n"
+            "# TYPE echomem_lane_wait_seconds histogram\n"
+            'echomem_lane_wait_seconds_bucket{lane="recall_engine",le="1"} 1\n'
+            'echomem_lane_rejected_total{lane="recall_engine",reason_code="queue_full"} 1\n'
+            'echomem_engine_fanout_exec_seconds_count{engine="atomic_engine"} 1\n'
+        )
+        coverage = metrics_coverage(raw)
+        self.assertIn("echomem_lane_wait_seconds", coverage["present"])
+        self.assertIn("echomem_lane_rejected_total", coverage["present"])
+        self.assertIn("echomem_engine_fanout_exec_seconds", coverage["present"])
+        self.assertFalse(coverage["present"]["echomem_lane_queued"])
 
 
 if __name__ == "__main__":
