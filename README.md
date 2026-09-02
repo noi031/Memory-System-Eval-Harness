@@ -904,7 +904,9 @@ O1 只有在“Search 成功容量档位 + 更高一档真实失败/超时/资�
 同时存在时才会判定为 PASS；如果所有已跑档位都成功，报告只给出“至少支持到 N”
 的容量下界并标记 `INCONCLUSIVE`，不会把最后一个成功档位冒充最大用户量。O1 的“最大用户量”是压测
 窗口内完成的容量阶梯上限，不直接等同于业务 DAU；O6 必须额外提供真实 container
-重启和 cursor/message-set 对账配置；O7 必须实际抓到服务端 `/metrics` 四元组。
+重启和 cursor/message-set 对账配置，并在 `commit_recovery` 中设置
+`"require_accepted_202": true`，否则没有在崩溃前明确收到 HTTP 202 的操作不能进入恢复验收；
+O7 必须实际抓到服务端 `/metrics` 四元组。
 O4 会在 `search-priority-blackbox`、`tenant-skew` 等候选负载中选择租户覆盖最完整
 的一轮计算公平性，避免 quick 模式的小 barrier 结果遮蔽更完整的真实证据；如果
 该轮仍有租户没有 Commit 或 Search 样本，结果仍会保留为 `FAIL` 或 `INCONCLUSIVE`。

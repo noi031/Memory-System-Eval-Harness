@@ -130,6 +130,15 @@ class ObjectiveSuiteTests(unittest.TestCase):
             self.assertTrue(profile["missing_cases"]["enabled"])
             self.assertEqual(4, profile["concurrent_commit"]["concurrency"])
 
+    def test_recovery_profile_requires_accepted_202(self) -> None:
+        profile_path = (
+            Path(__file__).parents[1]
+            / "performance"
+            / "instance-profile-4u8g.audit.server.example.json"
+        )
+        profile = load_profiles(profile_path)[0]
+        self.assertTrue(profile["commit_recovery"]["require_accepted_202"])
+
     def test_probe_pass_failure_status_is_preserved(self) -> None:
         execution = {"status": "FAIL", "returncode": 2}
         self.assertEqual(
