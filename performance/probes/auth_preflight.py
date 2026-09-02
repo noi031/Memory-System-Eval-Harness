@@ -9,6 +9,7 @@ import os
 import time
 import urllib.error
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -108,21 +109,39 @@ def run(
     tenant_count: int = 0,
 ) -> dict[str, Any]:
     tenants = load_tenant_specs(tenant_config, tenant_count=tenant_count)
-    results = [open_session(base_url, tenant, timeout_s=timeout_s) for tenant in tenants]
+    # Authentication is an independent read-only check per tenant. Running
+    # these checks concurrently keeps a 32-tenant preflight bounded by the
+    # slowest credential instead of the sum of all credential latencies.
+    with ThreadPoolExecutor(max_workers=min(8, max(1, len(tenants)))) as executor:
+        results = list(
+            executor.map(
+                lambda tenant: open_session(
+                    base_url, tenant, timeout_s=timeout_s
+                ),
+                tenants,
+            )
+        )
     failed = [item for item in results if not item["session_opened"]]
+    passed = [item for item in results if item["session_opened"]]
     return {
         "created_at": now(),
         "base_url": base_url,
         "real_http": True,
-        "status": "PASS" if not failed else "ENVIRONMENT_ERROR",
+        "status": "PASS" if not failed else "PARTIAL" if passed else "ENVIRONMENT_ERROR",
         "tenant_count": len(results),
-        "passed": len(results) - len(failed),
+        "passed": len(passed),
         "failed": len(failed),
+        "usable_tenant_ids": [item["tenant_id"] for item in passed],
         "results": results,
         "reason": (
             "all selected tenant credentials can open a real session"
             if not failed
-            else "tenant authentication/configuration failed before workload started"
+            else (
+                f"{len(passed)}/{len(results)} tenant credentials can open a real session; "
+                "only scenarios within the usable tenant count may run"
+                if passed
+                else "tenant authentication/configuration failed before workload started"
+            )
         ),
     }
 

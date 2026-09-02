@@ -406,6 +406,27 @@ def write_subset(path: Path, tenants: list[dict[str, Any]]) -> None:
     )
 
 
+def _usable_tenants(
+    tenants: list[dict[str, Any]],
+    auth_preflight: dict[str, Any],
+) -> list[dict[str, Any]]:
+    """Keep only credentials that passed the real HTTP preflight."""
+    usable_ids = {
+        str(item).strip()
+        for item in auth_preflight.get("usable_tenant_ids") or []
+        if str(item).strip()
+    }
+    return [
+        tenant for tenant in tenants
+        if str(
+            tenant.get("tenant_id")
+            or tenant.get("id")
+            or tenant.get("user_id")
+            or ""
+        ).strip() in usable_ids
+    ]
+
+
 def _identity_is_independent(tenants: list[dict[str, Any]]) -> bool:
     """所有租户都能解析出非空 auth_key 且彼此不同，才算独立认证。"""
     keys: list[str] = []
@@ -1380,6 +1401,14 @@ def main() -> int:
         action="store_true",
         help="Allow an exploratory shared credential; isolation/fairness remain inconclusive.",
     )
+    parser.add_argument(
+        "--allow-partial-tenants",
+        action="store_true",
+        help=(
+            "鉴权预检部分成功时继续执行可用租户范围内的场景；"
+            "需要更多租户的场景会记录为 blocked，不伪造多租户结论"
+        ),
+    )
     parser.add_argument("--commit-timeout-s", type=float, default=120.0)
     parser.add_argument("--commit-max-attempts", type=int, default=3)
     parser.add_argument("--commit-retry-backoff-s", type=float, default=2.0)
@@ -1505,7 +1534,10 @@ def main() -> int:
             timeout_s=5.0,
             tenant_count=required_tenants,
         )
-        if auth_preflight_result["status"] != "PASS":
+        if (
+            auth_preflight_result["status"] != "PASS"
+            and not args.allow_partial_tenants
+        ):
             root = Path(
                 args.out_dir
                 or f"results/performance/formal_auth_error_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
@@ -1522,6 +1554,11 @@ def main() -> int:
                 f"failed={auth_preflight_result['failed']} "
                 f"out={root}"
             )
+            return 3
+    if args.allow_partial_tenants and not args.local_auth:
+        all_tenants = _usable_tenants(all_tenants, auth_preflight_result)
+        if not all_tenants:
+            print("AUTH_PREFLIGHT_FAILED no usable tenants", flush=True)
             return 3
     args.identity_independent = _identity_is_independent(all_tenants)
     try:
@@ -1610,6 +1647,8 @@ def main() -> int:
             else {"status": "NOT_RUN", "config": "", "engines_checked": 0, "engines": [], "digest": ""}
         ),
         "auth_preflight": auth_preflight_result,
+        "allow_partial_tenants": args.allow_partial_tenants,
+        "usable_tenant_count": len(all_tenants),
         "reset_command": args.reset_command,
         "reuse_existing_data": args.reuse_existing_data,
         "skip_seed": args.skip_seed,
@@ -1621,6 +1660,28 @@ def main() -> int:
     # 用确定性顺序执行，便于重跑对比；服务端重置钩子负责固定数据/索引边界。
     for scenario in scenario_names:
         case = scenario_catalog[scenario]
+        if case["tenants"] > len(all_tenants):
+            reason = (
+                f"需要 {case['tenants']} 个通过鉴权的租户，当前只有 "
+                f"{len(all_tenants)} 个可用租户；未发送请求，不能据此判断 EchoMem 功能失败"
+            )
+            for repetition in range(1, args.repeats + 1):
+                for policy in POLICIES:
+                    manifest["runs"].append({
+                        "scenario": scenario,
+                        "repetition": repetition,
+                        "policy": policy,
+                        "status": "blocked",
+                        "blocked_reason": reason,
+                        "required_tenants": case["tenants"],
+                        "usable_tenants": len(all_tenants),
+                    })
+            print(
+                f"FORMAL_BLOCKED scenario={scenario} "
+                f"required_tenants={case['tenants']} usable_tenants={len(all_tenants)}",
+                flush=True,
+            )
+            continue
         for repetition in range(1, args.repeats + 1):
             for policy in POLICIES:
                 completed_runs = len(manifest["runs"])

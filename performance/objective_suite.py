@@ -862,6 +862,8 @@ def main() -> int:
                         command += ["--quick-mode"]
                 if args.quick and not args.quick_include_seed:
                     command += ["--skip-seed", "--seed-sessions-per-tenant", "0"]
+                if bool(profile.get("allow_partial_tenants")):
+                    command += ["--allow-partial-tenants"]
                 command_result["run"] = run_command(command, timeout_s=args.timeout_s)
                 formal_root = profile_dir / "formal"
                 candidates = []

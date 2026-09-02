@@ -567,6 +567,12 @@ queued/wait/exec/rejected 四元组。旧报告只有单维 Jain、单一指标�
 误认为本轮真的重新创建了租户；HTTP 失败会保留状态码、请求路径和截断后的服务响应，
 便于区分凭据错误（401）、接口错误（4xx）、服务异常（5xx）和网络超时。
 这类前置失败应归为测试环境/配置问题，不能直接判定 EchoMem 功能失败。
+如果服务器只注册了部分租户，可以在 profile 中设置
+`"allow_partial_tenants": true`（或给 `formal_suite.py` 传
+`--allow-partial-tenants`）。平台会只运行租户数足够的场景；例如只有 1 个有效租户
+时仍会执行 `baseline`，而 2/4/8 租户场景会记录为 `blocked`，公平性、故障隔离和
+多租户容量保持 `INCONCLUSIVE`。这只是让可运行证据先产出，不会把单租户结果冒充
+多租户通过。
 另外，`--skip-seed` 只表示不重新灌入模型数据，并不会自动从 EchoMem 读取历史查询词。
 正式复用已有记忆时请传入 `--search-queries "关键词1,关键词2"`；若省略，平台会使用
 `hello` 作为 fallback，并在 `summary.json.data_scale.query_source` 标记为
