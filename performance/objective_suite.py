@@ -287,6 +287,8 @@ def main() -> int:
                     preflight_config,
                     "--profile",
                     "complete",
+                    "--instance-profile",
+                    name,
                     "--repeats",
                     "1",
                     "--out-dir",

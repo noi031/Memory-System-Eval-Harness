@@ -138,6 +138,7 @@ class FormalSuiteAdapterTests(unittest.TestCase):
             commit_max_attempts=3,
             commit_retry_backoff_s=2.0,
             barrier_wave_size=32,
+            instance_profile="4U8G",
             preflight_config="",
             no_server_metrics=False,
         )

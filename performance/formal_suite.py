@@ -1112,6 +1112,11 @@ def main() -> int:
             "is the PR421 acceptance suite, and complete runs both catalogs."
         ),
     )
+    parser.add_argument(
+        "--instance-profile",
+        default="",
+        help="实际生效的机器规格名称，例如 4U8G / 8U16G",
+    )
     parser.add_argument("--scenarios", default="")
     parser.add_argument("--repeats", type=int, default=3)
     parser.add_argument(
@@ -1230,6 +1235,7 @@ def main() -> int:
         "created_at": now_iso(),
         "base_url": args.base_url,
         "profile": args.profile,
+        "instance_profile": args.instance_profile,
         "plan_sources": {
             "pr397": {
                 "name": "EchoMem PR397 / report(6) 故障发现与真实多租户压测方案",
@@ -1350,6 +1356,7 @@ def main() -> int:
         "parameters": {
             "tenant_config": str(tenant_path),
             "profile": args.profile,
+            "instance_profile": args.instance_profile,
             "plan_sources": (
                 ["PR397/report(6)", "PR421"] if args.profile == "complete"
                 else ["PR397/report(6)"] if args.profile == "report6"
