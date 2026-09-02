@@ -2540,6 +2540,18 @@ class LoadGeneratorSceneTests(unittest.TestCase):
         self.assertEqual(1, read_loop.call_count)
         self.assertEqual(1, write_loop.call_count)
 
+    def test_capacity_scene_with_zero_commit_rate_is_read_only(self) -> None:
+        generator = LoadGenerator(rps=8.0, commit_rpm=0.0)
+        scene = SceneRun("K", 1, 0.05)
+        tenant = mock.Mock(idx=0)
+        with (
+            mock.patch.object(generator, "_read_loop", return_value=[]) as read_loop,
+            mock.patch.object(generator, "_write_loop", return_value=[]) as write_loop,
+        ):
+            generator.run_scene(scene, [tenant], messages_per_session=1)
+        self.assertEqual(1, read_loop.call_count)
+        self.assertEqual(0, write_loop.call_count)
+
 
 class NewFeatureVerdictTests(unittest.TestCase):
     """evaluate_features 新增特性：tenant_isolation / saturation_contract / hot_tenant_fairness。"""

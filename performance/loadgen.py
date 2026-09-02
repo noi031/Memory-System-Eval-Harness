@@ -667,6 +667,12 @@ class LoadGenerator:
             read_count, write_count = total_workers, 0
         elif scene.scene_id == "B":
             read_count, write_count = 0, total_workers
+        elif scene.scene_id == "K" and self.commit_rate_limiter is None:
+            # K is also used by the capacity ladder.  An explicit
+            # ``--commit-rpm 0`` means Search-only measurement; treating it
+            # as the normal mixed split would still launch writer threads and
+            # make capacity results depend on unrelated Commit timeouts.
+            read_count, write_count = total_workers, 0
         else:  # C
             read_count, write_count = split_threads(total_workers, scene.mix or (1, 1))
         self._last_write_anchors.clear()
