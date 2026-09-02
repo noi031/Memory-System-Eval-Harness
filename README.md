@@ -581,6 +581,198 @@ export STRESS_OUTPUT_DIR=/opt/echomem-stress/results/4u8g-complete-$(date +%Y%m%
 | `--no-metrics` / `--skip-health` | 外网降级：不抓 /metrics、跳过预检 | 关 |
 | `--cleanup-identities` | 压测结束后删除 provision 租户（身份 + 会话/记忆数据全清；static 模式拒绝） | 关 |
 
+## 服务器测试指南
+
+本节用于团队成员在 Linux 服务器上测试已经启动的 EchoMem。推荐把 EchoMem
+和 Harness 放在同一台机器上：EchoMem 只监听 `127.0.0.1:8010`，Harness
+通过本机或 Docker host network 访问，不需要把 EchoMem API 暴露到公网。
+
+### 1. 拉取测试平台
+
+使用测试平台 PR29 的 `v3` 分支：
+
+```bash
+git clone -b v3 git@github.com:noi031/Memory-System-Eval-Harness.git
+cd Memory-System-Eval-Harness
+git rev-parse --short HEAD
+```
+
+已有目录执行：
+
+```bash
+git fetch origin
+git checkout v3
+git pull --ff-only origin v3
+```
+
+测试代码不要在服务器上临时修改；需要修改时先提交到测试平台 PR。
+
+### 2. 启动并检查 EchoMem
+
+EchoMem 必须先启动，Harness 不负责拉起被测服务：
+
+```bash
+cd /opt/echomem
+export ECHOMEM_AUTO_COMMIT_THRESHOLD=20000
+echomem server \
+  --workspace /opt/echomem-stress/workspace \
+  --host 127.0.0.1 \
+  --port 8010
+```
+
+另开终端检查：
+
+```bash
+curl -fsS http://127.0.0.1:8010/health
+curl -fsS http://127.0.0.1:8010/metrics >/dev/null
+```
+
+如果这里失败，先查看 EchoMem 日志，不要直接启动压测。
+
+### 3. 配置真实模型
+
+正式压测禁止使用 `fake-llm` 或 `fake-embedding`。模型 endpoint、模型名和
+API Key 环境变量必须与 EchoMem 的 `config.json` 一致：
+
+```text
+LLM endpoint:       https://dashscope.aliyuncs.com/compatible-mode/v1
+LLM model:          deepseek-v4-flash-0731
+Embedding endpoint: https://dashscope.aliyuncs.com/compatible-mode/v1
+Embedding model:    text-embedding-v3
+MCP:                关闭
+Rerank:             关闭，除非本轮测试明确要求开启
+```
+
+示例环境变量如下，实际变量名以 `config.json` 中的 `api_key_env` 为准：
+
+```bash
+export ECHOMEM_LLM_API_KEY='你的模型 key'
+export ECHOMEM_EMBEDDING_API_KEY='你的模型 key'
+export ECHOMEM_ATOMIC_ENGINE_LLM_API_KEY="$ECHOMEM_LLM_API_KEY"
+export ECHOMEM_EPISODE_ENGINE_LLM_API_KEY="$ECHOMEM_LLM_API_KEY"
+export ECHOMEM_BASE_ENGINE_LLM_API_KEY="$ECHOMEM_LLM_API_KEY"
+export ECHOMEM_MEMORY_UNIT_ENGINE_LLM_API_KEY="$ECHOMEM_LLM_API_KEY"
+export ECHOMEM_INTENT_LLM_API_KEY="$ECHOMEM_LLM_API_KEY"
+export ECHOMEM_MEMROUTER_LLM_API_KEY="$ECHOMEM_LLM_API_KEY"
+```
+
+不要把真实 API Key 写入 Git、README、日志或结果报告。
+
+### 4. 准备独立租户凭据
+
+公平性和隔离测试必须使用不同租户凭据，不能让所有租户共用一个 Key：
+
+```bash
+cp performance/tenants.example.json /opt/echomem-stress/tenants.json
+export ECHOMEM_TENANT_A_KEY='tenant-a 的 key'
+export ECHOMEM_TENANT_B_KEY='tenant-b 的 key'
+export ECHOMEM_TENANT_C_KEY='tenant-c 的 key'
+export ECHOMEM_TENANT_D_KEY='tenant-d 的 key'
+```
+
+`tenants.json` 中的 `auth_key_env` 必须和当前 shell 中的变量对应。缺少独立
+凭据时可以做单租户诊断，但不能据此下多租户公平性或隔离结论。
+
+### 5. 先跑短检查
+
+在完整测试前先跑一个 10 秒基线，确认地址、凭据、模型和工作目录都正确：
+
+```bash
+export ECHOMEM_BASE_URL=http://127.0.0.1:8010
+export ECHOMEM_CONFIG=/opt/echomem-stress/workspace/config.json
+export STRESS_TENANT_CONFIG=/opt/echomem-stress/tenants.json
+export STRESS_OUTPUT_DIR=/opt/echomem-stress/results/smoke-$(date +%Y%m%d_%H%M%S)
+
+python3 -m performance.formal_suite \
+  --base-url "$ECHOMEM_BASE_URL" \
+  --tenant-config "$STRESS_TENANT_CONFIG" \
+  --preflight-config "$ECHOMEM_CONFIG" \
+  --profile pr421 \
+  --scenarios baseline \
+  --repeats 1 \
+  --duration-cap-s 10 \
+  --case-timeout-s 120 \
+  --commit-timeout-s 60 \
+  --out-dir "$STRESS_OUTPUT_DIR"
+```
+
+必须看到：
+
+```text
+FORMAL_PROGRESS 1/1 scenario=baseline repeat=1 policy=server-observe status=completed
+```
+
+### 6. 执行 4U8G 完整测试
+
+默认执行 PR397/report(6) 与 PR421 的 25 个 bounded 场景，单轮、不执行
+7 小时 `soak`，只测试 4U8G：
+
+```bash
+cd /opt/Memory-System-Eval-Harness
+export ECHOMEM_BASE_URL=http://127.0.0.1:8010
+export ECHOMEM_CONFIG=/opt/echomem-stress/workspace/config.json
+export STRESS_TENANT_CONFIG=/opt/echomem-stress/tenants-32.json
+export STRESS_REPEATS=1
+export STRESS_CASE_TIMEOUT_S=180
+export STRESS_COMMIT_TIMEOUT_S=600
+export STRESS_OUTPUT_DIR=/opt/echomem-stress/results/4u8g-$(date +%Y%m%d_%H%M%S)
+mkdir -p "$STRESS_OUTPUT_DIR"
+
+nohup ./performance/run_4u8g_complete.sh \
+  >"$STRESS_OUTPUT_DIR/launcher.log" 2>&1 &
+echo $! >"$STRESS_OUTPUT_DIR/launcher.pid"
+```
+
+`tenant-skew` 会一次提交 260 个 Commit，单场景可能明显慢于普通场景；
+出现异常时使用 `STRESS_CASE_TIMEOUT_S=180`，不要设置成 1800 秒后无人值守。
+
+服务器没有 Python 依赖时，使用 runner 镜像，并确保工作目录为 `/harness`：
+
+```bash
+docker run --rm --network host \
+  --env-file /opt/echomem-stress/formal-run.env \
+  -v /opt/Memory-System-Eval-Harness:/harness \
+  -v /opt/echomem-stress:/opt/echomem-stress \
+  -w /harness \
+  -e ECHOMEM_BASE_URL=http://127.0.0.1:8010 \
+  -e ECHOMEM_CONFIG=/opt/echomem-stress/workspace/config.json \
+  -e STRESS_TENANT_CONFIG=/opt/echomem-stress/tenants-32.json \
+  -e STRESS_OUTPUT_DIR=/opt/echomem-stress/results/4u8g-docker-$(date +%Y%m%d_%H%M%S) \
+  echomem-stress-runner:latest \
+  bash -lc 'export STRESS_CASE_TIMEOUT_S=180; export STRESS_COMMIT_TIMEOUT_S=600; ./performance/run_4u8g_complete.sh'
+```
+
+### 7. 查看进度和结果
+
+```bash
+tail -f "$STRESS_OUTPUT_DIR/launcher.log"
+cat "$STRESS_OUTPUT_DIR/suite.json"
+cat "$STRESS_OUTPUT_DIR/acceptance.json"
+find "$STRESS_OUTPUT_DIR" -name summary.json -type f | sort
+```
+
+最终应确认 `suite.json` 中 25 个场景均有结果；`acceptance.json` 中的
+`PASS`、`FAIL`、`INCONCLUSIVE` 要逐项查看，不能只看总准确率或退出码。
+报告文件为 `suite.html`，逐请求和资源时序通常位于各场景的 `run/` 目录。
+
+### 8. 常见问题
+
+| 现象 | 原因 | 处理 |
+|---|---|---|
+| `Connection refused :8010` | EchoMem 已退出或端口未监听 | 检查 `docker ps` 和 `/health` |
+| `ModuleNotFoundError: performance` | runner 当前目录不是 Harness 根目录 | 使用 `-w /harness` |
+| 长时间停在 `tenant-skew` | 260 个 Commit 屏障等待或服务异常 | 停止本轮，查看场景 `summary.json`，缩短 case timeout 后重跑 |
+| 容器 `exit 137` | 容器被终止，常见于内存压力 | 检查 `docker inspect`、宿主机内存和 RSS 曲线 |
+| `fake-llm` / `fake-embedding` | EchoMem 配置仍是 fake 模型 | 修正 `config.json` 和 `*_API_KEY` |
+| 只有 `suite.json` 没有场景结果 | 首个场景前退出或目标服务不可达 | 查看 `launcher.log` 和 `run/*/summary.json` |
+
+结果建议只保留 3 天：
+
+```bash
+find /opt/echomem-stress/results -mindepth 1 -maxdepth 1 \
+  -type d -mtime +3 -exec rm -rf -- {} +
+```
+
 ## 扩展指南
 
 ### 新增 Agent 插件

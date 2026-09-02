@@ -12,7 +12,7 @@ preflight_config="${ECHOMEM_CONFIG:?set ECHOMEM_CONFIG to the actual EchoMem con
 out_dir="${STRESS_OUTPUT_DIR:-$root_dir/results/performance/4u8g-complete-$(date +%Y%m%d_%H%M%S)}"
 repeats="${STRESS_REPEATS:-1}"
 commit_timeout_s="${STRESS_COMMIT_TIMEOUT_S:-600}"
-case_timeout_s="${STRESS_CASE_TIMEOUT_S:-900}"
+case_timeout_s="${STRESS_CASE_TIMEOUT_S:-180}"
 
 # complete_scenarios() contains 26 cases; omit only the 30-minute soak from
 # the routine 4U8G run. The explicit list is recorded in suite.json.
