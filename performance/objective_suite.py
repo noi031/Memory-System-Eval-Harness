@@ -651,9 +651,24 @@ def main() -> int:
                 candidates.extend(sorted(formal_root.glob("*/suite.json")))
                 if candidates:
                     suite_path = candidates[-1]
+        else:
+            configured_suite = str(
+                profile.get("suite_path") or profile.get("suite") or ""
+            ).strip()
+            if configured_suite:
+                suite_path = Path(configured_suite).expanduser().resolve()
+                command_result["run"] = {
+                    "status": "PASS",
+                    "mode": "read-only-audit",
+                    "reason": "只读取已有 suite.json，不重新发送压测请求",
+                }
 
         suite = read_json(suite_path)
-        formal_root = profile_dir / "formal"
+        formal_root = (
+            suite_path.parent
+            if args.skip_run and suite_path.is_file()
+            else profile_dir / "formal"
+        )
         probe_artifacts, probe_commands = _run_configured_probes(
             profile,
             profile_dir=profile_dir,
@@ -664,12 +679,18 @@ def main() -> int:
         suite = {**suite, **probe_artifacts}
         command_result.update(probe_commands)
 
-        completed_runs = sum(
-            1
-            for item in (suite.get("runs") or [])
-            if isinstance(item, dict)
-            and str(item.get("status") or "") == "completed"
-        )
+        completed_runs = 0
+        for item in suite.get("runs") or []:
+            if not isinstance(item, dict):
+                continue
+            summary = item.get("summary")
+            if not isinstance(summary, dict):
+                continue
+            metrics = summary.get("metrics") if isinstance(summary.get("metrics"), dict) else {}
+            search = metrics.get("search") if isinstance(metrics.get("search"), dict) else {}
+            commit = metrics.get("commit") if isinstance(metrics.get("commit"), dict) else {}
+            if int(search.get("submitted") or 0) > 0 or int(commit.get("submitted") or 0) > 0:
+                completed_runs += 1
         profile_execution_status = (
             "completed"
             if completed_runs > 0

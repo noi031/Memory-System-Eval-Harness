@@ -87,6 +87,22 @@ class ObjectiveSuiteTests(unittest.TestCase):
             self.assertTrue(path.is_file())
             self.assertIn("七项目标", path.read_text(encoding="utf-8"))
 
+    def test_single_profile_does_not_pass_multi_spec(self) -> None:
+        objectives = objective_statuses(
+            {
+                "instance_profiles": [{
+                    "name": "4U8G",
+                    "status": "completed",
+                    "completed_runs": 1,
+                }],
+                "runs": [],
+            },
+            recovery_configured=False,
+            metrics_configured=False,
+        )
+        o2 = next(item for item in objectives if item["id"] == "O2")
+        self.assertEqual("INCONCLUSIVE", o2["status"])
+
     def test_run_command_redacts_secret_values(self) -> None:
         result = run_command(
             ["python3", "-c", "print('ok')", "secret-value"],

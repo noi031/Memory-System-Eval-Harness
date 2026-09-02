@@ -830,6 +830,9 @@ HTML 明细。可从 `performance/instance-profiles.example.json` 与
 没有真实故障控制端点时，故障项必须显示 `INCONCLUSIVE`，不能用测试平台自身缺少
 适配器来判定 EchoMem 未实现。
 报告文件为 `suite.html`，逐请求和资源时序通常位于各场景的 `run/` 目录。
+如果只想重新审计已有结果而不重新发请求，可在 profile 中填写
+`suite_path`，然后执行 `objective_suite.py --skip-run`；该模式只读取
+`suite.json` 和已有探针制品。
 
 ### 8. 常见问题
 

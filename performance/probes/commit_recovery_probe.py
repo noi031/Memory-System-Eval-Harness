@@ -143,14 +143,21 @@ def _docker_engine_post(path: str) -> tuple[int, str]:
 
 
 def kill_and_start(container: str, restart_wait_s: float) -> dict[str, Any]:
-    if shutil.which("docker"):
-        killed = subprocess.run(
-            ["docker", "kill", "--signal", "KILL", container],
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-    else:
+    docker_cli = shutil.which("docker")
+    killed = None
+    if docker_cli:
+        try:
+            killed = subprocess.run(
+                [docker_cli, "kill", "--signal", "KILL", container],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+        except OSError:
+            # Some runner images contain a stale or non-executable docker
+            # shim. Fall back to the mounted Engine socket in that case.
+            docker_cli = None
+    if not docker_cli:
         # The web runner may have the Docker socket mounted without the CLI.
         # Use the Engine HTTP API directly so recovery needs no extra binary.
         encoded = quote(container, safe="")
@@ -160,27 +167,31 @@ def kill_and_start(container: str, restart_wait_s: float) -> dict[str, Any]:
     result: dict[str, Any] = {
         "kill_returncode": (
             killed.returncode
-            if shutil.which("docker")
+            if docker_cli and killed is not None
             else (0 if 200 <= kill_code < 300 else 1)
         ),
         "kill_stderr": (
             killed.stderr[-2000:]
-            if shutil.which("docker")
+            if docker_cli and killed is not None
             else kill_error[-2000:]
         ),
         "killed_at": now(),
-        "control_backend": "docker-cli" if shutil.which("docker") else "docker-engine-api",
+        "control_backend": "docker-cli" if docker_cli else "docker-engine-api",
     }
     if result["kill_returncode"] != 0:
         return result
-    if shutil.which("docker"):
-        started = subprocess.run(
-            ["docker", "start", container],
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-    else:
+    started = None
+    if docker_cli:
+        try:
+            started = subprocess.run(
+                [docker_cli, "start", container],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+        except OSError:
+            docker_cli = None
+    if not docker_cli:
         encoded = quote(container, safe="")
         start_code, start_error = _docker_engine_post(
             f"/containers/{encoded}/start"
@@ -189,12 +200,12 @@ def kill_and_start(container: str, restart_wait_s: float) -> dict[str, Any]:
         {
             "start_returncode": (
                 started.returncode
-                if shutil.which("docker")
+                if docker_cli and started is not None
                 else (0 if 200 <= start_code < 300 else 1)
             ),
             "start_stderr": (
                 started.stderr[-2000:]
-                if shutil.which("docker")
+                if docker_cli and started is not None
                 else start_error[-2000:]
             ),
             "restart_at": now(),
