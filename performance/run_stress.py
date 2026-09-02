@@ -168,6 +168,11 @@ def build_parser() -> argparse.ArgumentParser:
     g.add_argument("--seed-sessions-per-tenant", type=int, default=5, help="每租户种子 session 数 (locomo 源时由数据集会话数决定)")
     g.add_argument("--messages-per-session", type=int, default=10, help="每个 session 的消息条数 (写事务也用它)")
     g.add_argument(
+        "--skip-seed",
+        action="store_true",
+        help="复用已有租户和记忆，只执行压测请求，不重复注入真实模型",
+    )
+    g.add_argument(
         "--seed-concurrency",
         type=int,
         default=4,
@@ -379,7 +384,7 @@ def _resolve_args(args: argparse.Namespace) -> dict[str, Any]:
         except FileNotFoundError as exc:
             raise ValueError(f"--tenant-config 文件不存在: {args.tenant_config}") from exc
     seed_dataset_path: str | None = None
-    if args.seed_source == "locomo":
+    if args.seed_source == "locomo" and not args.skip_seed:
         dataset_path = (
             Path(args.dataset_path)
             if args.dataset_path
@@ -1017,14 +1022,14 @@ def main() -> None:
         )
         try:
             tenants = preparer.prepare(
-                args.seed_sessions_per_tenant,
+                0 if args.skip_seed else args.seed_sessions_per_tenant,
                 args.messages_per_session,
                 args.commit_poll_timeout_s,
                 locomo_batches=(
                     load_locomo_seed_batches(
                         resolved["seed_dataset_path"], args.sample_filter
                     )
-                    if args.seed_source == "locomo"
+                    if args.seed_source == "locomo" and not args.skip_seed
                     else None
                 ),
             )
@@ -1161,6 +1166,7 @@ def main() -> None:
                 "data_scale": {
                     "tenants": len(tenants),
                     "sessions_per_tenant": args.seed_sessions_per_tenant,
+                    "skip_seed": args.skip_seed,
                     "messages_per_session": args.messages_per_session,
                     "queries_per_tenant": [len(tenant.queries) for tenant in tenants],
                     "tenant_details": [tenant.to_dict() for tenant in tenants],

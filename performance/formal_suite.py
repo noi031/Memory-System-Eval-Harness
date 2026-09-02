@@ -570,6 +570,8 @@ def _build_case_command(
         ]
     else:
         cmd += ["--tenant-config", str(config_path)]
+    if getattr(args, "reuse_existing_data", False):
+        cmd += ["--skip-seed"]
     if case.get("search_rps"):
         cmd += ["--mode", "fixed-rps", "--rps", str(case["search_rps"])]
     if case.get("commit_rpm"):
@@ -1151,6 +1153,11 @@ def main() -> int:
     parser.add_argument("--reset-command", default="", help="Optional command run before every case")
     parser.add_argument("--no-server-metrics", action="store_true")
     parser.add_argument(
+        "--reuse-existing-data",
+        action="store_true",
+        help="复用 tenant-config 对应租户的已有记忆，不重复注入真实模型",
+    )
+    parser.add_argument(
         "--preflight-config",
         default=os.getenv("ECHOMEM_CONFIG", ""),
         help="EchoMem config.json to validate before the suite starts",
@@ -1274,6 +1281,7 @@ def main() -> int:
             else {"status": "NOT_RUN", "config": "", "engines_checked": 0, "engines": [], "digest": ""}
         ),
         "reset_command": args.reset_command,
+        "reuse_existing_data": args.reuse_existing_data,
         "client_admission_enabled": False,
         "server_observation_mode": True,
         "runs": [],

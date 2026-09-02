@@ -177,6 +177,24 @@ class FormalSuiteAdapterTests(unittest.TestCase):
             self.assertEqual("4", self._flag_value(command, "--tenants"))
             self.assertEqual(str(output / "run"), self._flag_value(command, "--out-dir"))
 
+    def test_build_case_command_can_reuse_existing_data_without_seed(self) -> None:
+        case = {
+            "tenants": 4,
+            "search_rps": 8.0,
+            "commit_rpm": 0.0,
+            "sessions_per_tenant": 4,
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "out"
+            command = _build_case_command(
+                self._args(reuse_existing_data=True),
+                case,
+                output.parent / "tenants.json",
+                output,
+                15.0,
+            )
+            self.assertIn("--skip-seed", command)
+
     def test_build_case_command_maps_zipf_barrier_to_S(self) -> None:
         case = {
             "tenants": 4,
