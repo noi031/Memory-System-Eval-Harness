@@ -127,9 +127,14 @@ def _per_tenant_metrics(suite: dict[str, Any]) -> dict[str, dict[str, Any]]:
                 continue
             entry = merged.setdefault(
                 str(tenant),
-                {"commit_completed": 0, "search_p95_s": []},
+                {
+                    "commit_submitted": 0,
+                    "commit_completed": 0,
+                    "search_p95_s": [],
+                },
             )
             commit = data.get("commit") or {}
+            entry["commit_submitted"] += int(commit.get("submitted") or 0)
             entry["commit_completed"] += int(commit.get("completed") or 0)
             search = data.get("search") or {}
             search_latency = search.get("latency") or {}
@@ -450,6 +455,44 @@ def _fairness(suite: dict[str, Any]) -> dict[str, Any]:
         scoped_suite = dict(suite)
         scoped_suite["runs"] = selected_runs
         tenant_metrics = _per_tenant_metrics(scoped_suite)
+        # A Jain score over only the tenants that happened to finish a
+        # Commit is misleading: a tenant with no submitted/observed work has
+        # silently disappeared from the denominator.  Fairness requires one
+        # comparable workload window covering every tenant that participated
+        # in the selected scenario.
+        expected_tenants: set[str] = set()
+        observed_tenants: set[str] = set()
+        for run in selected_runs:
+            summary = _run_summary(run)
+            metrics = summary.get("metrics") or {}
+            per_tenant = metrics.get("per_tenant") or {}
+            if isinstance(per_tenant, dict):
+                for tenant, data in per_tenant.items():
+                    if not isinstance(data, dict):
+                        continue
+                    tenant_id = str(tenant)
+                    observed_tenants.add(tenant_id)
+                    search = data.get("search") or {}
+                    commit = data.get("commit") or {}
+                    if (
+                        int(search.get("submitted") or 0) > 0
+                        or int(commit.get("submitted") or 0) > 0
+                    ):
+                        expected_tenants.add(tenant_id)
+            activity = (summary.get("details") or {}).get("user_activity") or {}
+            active_by_tenant = activity.get("active_users_by_tenant")
+            if isinstance(active_by_tenant, dict):
+                expected_tenants.update(str(item) for item in active_by_tenant)
+        missing_tenants = sorted(expected_tenants - set(tenant_metrics))
+        incomplete_tenants = sorted(
+            tenant
+            for tenant in expected_tenants
+            if tenant in tenant_metrics
+            and (
+                int(tenant_metrics[tenant].get("commit_submitted") or 0) <= 0
+                or tenant_metrics[tenant].get("search_p95_s") is None
+            )
+        )
         commit_values = [
             float(item["commit_completed"])
             for item in tenant_metrics.values()
@@ -468,6 +511,8 @@ def _fairness(suite: dict[str, Any]) -> dict[str, Any]:
             and len(tenant_metrics) >= 2
             and len(commit_values) >= 2
             and len(search_values) >= 2
+            and not missing_tenants
+            and not incomplete_tenants
         ):
             combined = min(commit_jain, search_jain)
             return _result(
@@ -480,6 +525,7 @@ def _fairness(suite: dict[str, Any]) -> dict[str, Any]:
                     "jain": round(combined, 4),
                     "tenants": tenant_metrics,
                     "scenario": selected_scenario or "mixed",
+                    "expected_tenants": sorted(expected_tenants),
                 },
                 "同时按 Commit 完成吞吐和 Search P95 的倒数计算 Jain，取两者较小值",
             )
@@ -491,8 +537,17 @@ def _fairness(suite: dict[str, Any]) -> dict[str, Any]:
                 "completed_per_tenant": counts,
                 "runs_with_fairness": run_count,
                 "scenario": selected_scenario or "mixed",
+                "expected_tenants": sorted(expected_tenants),
+                "observed_tenants": sorted(observed_tenants),
+                "missing_tenants": missing_tenants,
+                "incomplete_tenants": incomplete_tenants,
             },
-            "需要至少两个租户同时具备 Commit 完成吞吐和 Search P95，才能计算双维公平性",
+            (
+                "部分租户缺少同一负载窗口的 Commit 提交或 Search P95，"
+                "不能把缺失租户排除后计算公平性"
+                if missing_tenants or incomplete_tenants
+                else "需要至少两个租户同时具备 Commit 完成吞吐和 Search P95，才能计算双维公平性"
+            ),
         )
     observed = check.get("observed")
     if has_two_dimensional_check:

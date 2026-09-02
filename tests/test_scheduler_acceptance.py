@@ -544,16 +544,16 @@ class SchedulerAcceptanceTests(unittest.TestCase):
                                 },
                                 "per_tenant": {
                                     "a": {
-                                        "commit": {"completed": 2},
-                                        "search": {"latency": {"p95_s": 1.0}},
+                                        "commit": {"submitted": 2, "completed": 2},
+                                        "search": {"submitted": 4, "latency": {"p95_s": 1.0}},
                                     },
                                     "b": {
-                                        "commit": {"completed": 2},
-                                        "search": {"latency": {"p95_s": 1.0}},
+                                        "commit": {"submitted": 2, "completed": 2},
+                                        "search": {"submitted": 4, "latency": {"p95_s": 1.0}},
                                     },
                                     "c": {
-                                        "commit": {"completed": 1},
-                                        "search": {"latency": {"p95_s": 1.0}},
+                                        "commit": {"submitted": 1, "completed": 1},
+                                        "search": {"submitted": 4, "latency": {"p95_s": 1.0}},
                                     },
                                 }
                             }
@@ -579,8 +579,8 @@ class SchedulerAcceptanceTests(unittest.TestCase):
                         "fairness": {"commit_completed_per_tenant": tenants},
                         "per_tenant": {
                             tenant: {
-                                "commit": {"completed": count},
-                                "search": {"latency": {"p95_s": 1.0}},
+                                "commit": {"submitted": count, "completed": count},
+                                "search": {"submitted": 4, "latency": {"p95_s": 1.0}},
                             }
                             for tenant, count in tenants.items()
                         },
@@ -602,6 +602,47 @@ class SchedulerAcceptanceTests(unittest.TestCase):
         )
         self.assertEqual(PASS, check["status"])
         self.assertEqual("tenant-skew", check["observed"]["scenario"])
+
+    def test_fairness_does_not_hide_tenant_without_commit_arrival(self) -> None:
+        result = evaluate(
+            {
+                "runs": [{
+                    "scenario": "fairness-bounded",
+                    "status": "completed",
+                    "summary": {
+                        "metrics": {
+                            "fairness": {
+                                "commit_completed_per_tenant": {
+                                    "a": 2,
+                                    "b": 2,
+                                    "c": 0,
+                                },
+                            },
+                            "per_tenant": {
+                                "a": {
+                                    "commit": {"submitted": 2, "completed": 2},
+                                    "search": {"submitted": 4, "latency": {"p95_s": 1.0}},
+                                },
+                                "b": {
+                                    "commit": {"submitted": 2, "completed": 2},
+                                    "search": {"submitted": 4, "latency": {"p95_s": 1.0}},
+                                },
+                                "c": {
+                                    "commit": {"submitted": 0, "completed": 0},
+                                    "search": {"submitted": 4, "latency": {"p95_s": 1.0}},
+                                },
+                            },
+                        },
+                    },
+                }],
+            }
+        )
+        check = next(
+            item for item in result["checks"]
+            if item["name"] == "Commit/Search 公平性 Jain"
+        )
+        self.assertEqual(INCONCLUSIVE, check["status"])
+        self.assertIn("c", check["observed"]["incomplete_tenants"])
 
 
 if __name__ == "__main__":
