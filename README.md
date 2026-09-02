@@ -835,7 +835,23 @@ python3 -m performance.objective_suite \
   --quick
 ```
 
-`--quick` 只做 bounded smoke；正式数据去掉 `--quick`。O1 的“最大用户量”是压测
+`--quick` 只做 bounded smoke，并默认跳过真实模型灌种，专门快速验证调度、延迟和
+可观测性链路；因此不能用它证明记忆质量。需要把已有租户记忆也纳入测试时，可加
+`--quick-include-seed`。单场景默认最多运行 30 秒、总墙钟 180 秒、barrier 最多
+16 个 Commit，可按机器和目标调整：
+
+```bash
+python3 -m performance.objective_suite \
+  --profiles performance/instance-profiles.example.json \
+  --profile 4U8G \
+  --scenarios baseline,mixed,search-priority-blackbox,capacity-2,capacity-4 \
+  --quick-duration-cap-s 60 \
+  --quick-case-timeout-s 300 \
+  --quick-barrier-count-cap 32 \
+  --out-dir results/objective-suite-custom
+```
+
+正式数据去掉 `--quick`。O1 的“最大用户量”是压测
 窗口内完成的容量阶梯上限，不直接等同于业务 DAU；O6 必须额外提供真实 container
 重启和 cursor/message-set 对账配置；O7 必须实际抓到服务端 `/metrics` 四元组。
 报告输出 `objective-suite.json` 和 `objective-suite.html`，不会把缺失证据算成通过。
@@ -849,6 +865,21 @@ HTML 明细。可从 `performance/instance-profiles.example.json` 与
 如果只想重新审计已有结果而不重新发请求，可在 profile 中填写
 `suite_path`，然后执行 `objective_suite.py --skip-run`；该模式只读取
 `suite.json` 和已有探针制品。
+
+快速运行仍显示 `INCONCLUSIVE` 的常见原因不是 EchoMem 一定失败：
+
+| 目标 | 还需要的真实证据 | 归属 |
+|---|---|---|
+| O1 | 至少一档成功的 `capacity-*`，再逐步增加租户直到 SLO 失败 | 测试平台场景与机器资源 |
+| O2 | 至少两种规格实际启动并各自完成同一组场景 | 部署调度与测试平台 profile |
+| O3 | 故障期间旁观租户的前后 Search P95 配对 | EchoMem/部署必须提供真实故障控制，平台负责采集 |
+| O4 | 同一稳态窗口内至少两个租户同时有 Commit 吞吐和 Search P95 | 测试平台负载与独立租户凭据 |
+| O5 | `search-priority-blackbox` 中同时存在 Commit 洪泛和 Search P95 | 测试平台场景，服务端负责实际调度 |
+| O6 | 202 Commit、真实 kill/restart、history/archive/cursor/幂等重放对账 | 部署提供 kill/restart 权限，EchoMem提供既有读接口 |
+| O7 | 每个租户、每个 lane 都采到 queued/wait/exec/rejected 四元组 | EchoMem `/metrics` 暴露完整指标 |
+
+故障计划中的 `${BASE_URL}` 会被替换为 profile 当前地址，并写入运行目录的
+`fault-plan.resolved.json`；不要再把旧服务器端口直接复制到通用示例中。
 
 ### 8. 常见问题
 

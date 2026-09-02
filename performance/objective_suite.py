@@ -144,6 +144,32 @@ def _resolve_profile_path(value: str, profiles_path: Path) -> str:
     return str(path if path.is_absolute() else (profiles_path.parent / path).resolve())
 
 
+def _materialize_fault_plan(
+    plan_path: Path,
+    *,
+    base_url: str,
+    output_path: Path,
+) -> Path:
+    """Resolve the selected service address in a run-local fault plan."""
+    payload = read_json(plan_path)
+
+    def replace(value: Any) -> Any:
+        if isinstance(value, str):
+            return value.replace("${BASE_URL}", base_url.rstrip("/"))
+        if isinstance(value, list):
+            return [replace(item) for item in value]
+        if isinstance(value, dict):
+            return {str(key): replace(item) for key, item in value.items()}
+        return value
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text(
+        json.dumps(replace(payload), ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    return output_path
+
+
 def _add_option(command: list[str], flag: str, value: Any) -> None:
     if value not in (None, ""):
         command.extend([flag, str(value)])
@@ -277,6 +303,12 @@ def _run_configured_probes(
     fault_plan_value = profile.get("fault_plan")
     if fault_plan_value:
         plan_path = Path(_resolve_profile_path(str(fault_plan_value), profiles_path))
+        if plan_path.is_file():
+            plan_path = _materialize_fault_plan(
+                plan_path,
+                base_url=base_url,
+                output_path=profile_dir / "fault-plan.resolved.json",
+            )
         output_dir = profile_dir / "fault-suite"
         output_dir.mkdir(parents=True, exist_ok=True)
         command = [
@@ -570,6 +602,15 @@ def main() -> int:
     parser.add_argument("--profile", default="", help="只运行一个 profile；默认运行全部")
     parser.add_argument("--out-dir", required=True, type=Path)
     parser.add_argument("--quick", action="store_true", help="bounded smoke matrix")
+    parser.add_argument("--scenarios", default="", help="覆盖场景列表，逗号分隔")
+    parser.add_argument("--quick-duration-cap-s", type=float, default=30.0)
+    parser.add_argument("--quick-case-timeout-s", type=float, default=180.0)
+    parser.add_argument("--quick-barrier-count-cap", type=int, default=16)
+    parser.add_argument(
+        "--quick-include-seed",
+        action="store_true",
+        help="quick 默认跳过真实模型灌种；打开后保留灌种",
+    )
     parser.add_argument("--timeout-s", type=float, default=7200.0)
     parser.add_argument("--skip-run", action="store_true", help="只根据已有 suite.json 生成总报告")
     args = parser.parse_args()
@@ -617,7 +658,7 @@ def main() -> int:
                     "reason": "profile 缺少 tenant_config 或 preflight_config",
                 }
             else:
-                scenarios = QUICK_SCENARIOS if args.quick else ""
+                scenarios = args.scenarios or (QUICK_SCENARIOS if args.quick else "")
                 command = [
                     sys.executable,
                     "-m",
@@ -640,9 +681,12 @@ def main() -> int:
                 if scenarios:
                     command += [
                         "--scenarios", scenarios,
-                        "--duration-cap-s", "30",
-                        "--barrier-count-cap", "16",
+                        "--duration-cap-s", str(args.quick_duration_cap_s),
+                        "--case-timeout-s", str(args.quick_case_timeout_s),
+                        "--barrier-count-cap", str(args.quick_barrier_count_cap),
                     ]
+                if args.quick and not args.quick_include_seed:
+                    command += ["--skip-seed", "--seed-sessions-per-tenant", "0"]
                 command_result["run"] = run_command(command, timeout_s=args.timeout_s)
                 formal_root = profile_dir / "formal"
                 candidates = []

@@ -8,6 +8,7 @@ from pathlib import Path
 from performance.objective_suite import (
     QUICK_SCENARIOS,
     _first_completed_commit_csv,
+    _materialize_fault_plan,
     load_profiles,
     objective_statuses,
     run_command,
@@ -111,6 +112,33 @@ class ObjectiveSuiteTests(unittest.TestCase):
         )
         self.assertEqual("PASS", result["status"])
         self.assertNotIn("secret-value", " ".join(result["command"]))
+
+    def test_materialize_fault_plan_uses_selected_base_url(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "fault-plan.json"
+            output = root / "run" / "fault-plan.resolved.json"
+            source.write_text(
+                json.dumps({
+                    "faults": [{"endpoint": "${BASE_URL}/fault/llm-500"}],
+                    "recovery": {"health_url": "${BASE_URL}/health"},
+                }),
+                encoding="utf-8",
+            )
+            _materialize_fault_plan(
+                source,
+                base_url="http://127.0.0.1:18187/",
+                output_path=output,
+            )
+            payload = json.loads(output.read_text(encoding="utf-8"))
+            self.assertEqual(
+                "http://127.0.0.1:18187/fault/llm-500",
+                payload["faults"][0]["endpoint"],
+            )
+            self.assertEqual(
+                "http://127.0.0.1:18187/health",
+                payload["recovery"]["health_url"],
+            )
 
 
 if __name__ == "__main__":

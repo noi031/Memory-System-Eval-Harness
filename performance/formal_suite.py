@@ -462,6 +462,11 @@ def _resolve_run_dir(run_dir: Path) -> Path:
     """
     if (run_dir / "summary.json").is_file():
         return run_dir
+    if not run_dir.is_dir():
+        # A runner can fail before creating its output directory. Keep the
+        # case auditable and let the caller record NO_SUMMARY/ENV_ERROR
+        # instead of aborting the whole multi-case suite.
+        return run_dir
     children = [
         child for child in run_dir.iterdir()
         if child.is_dir() and (child / "summary.json").is_file()
