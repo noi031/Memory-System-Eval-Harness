@@ -521,6 +521,25 @@ commit 成功保证）· `C` 读写混合（多档 read:write）· `D` 注入洪
 `performance/` 还提供两条互补路径（设计见
 `docs/performance-stress-test-design.md` §3.8–3.12）：
 
+### 调度专项七项验收
+
+截图中的调度要求使用 `scheduler_acceptance.py` 单独验收，不把普通
+A/B/C/D 压测结果当作专项结论。它按以下七项分别输出 `PASS`、`FAIL` 或
+`INCONCLUSIVE`：DAU/热租户容量、多规格配置、单租户故障隔离、Jain 公平性、
+Search 优先级、Commit kill-9 恢复重放、分层调度可观测性。
+
+```bash
+python -m performance.scheduler_acceptance \
+  --suite results/performance/formal_<ts>/suite.json \
+  --capability results/performance/probes/capability-probe.json \
+  --recovery results/performance/probes/recovery.json \
+  --fault results/performance/probes/fault-suite.json \
+  --out results/performance/probes/scheduler-acceptance.json
+```
+
+缺少故障控制、重启控制或多规格实测时，报告保留 `INCONCLUSIVE`，不会
+根据客户端延迟或 HTTP 200 推断 EchoMem 已实现对应保证。
+
 - **正式验收套件**（`formal_suite.py`）：以子进程方式逐 case 重跑
   `run_stress.py`（`report6` / `pr421` / `complete` 三档场景目录），把原生产物
   推导成 `acceptance.py` 验收门禁（8 个 gate：search 成功率 / report6 质量 /
