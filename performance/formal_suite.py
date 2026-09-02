@@ -700,7 +700,21 @@ def _derive_case_summary(run_dir: Path, identity_independent: bool) -> dict[str,
                 tuple(PR421_ACCEPTANCE_TARGETS["lane_metric_families"])
                 + tuple(PR421_ACCEPTANCE_TARGETS["fanout_metric_families"])
             )
-            observed = {row.get("metric") for row in metrics_rows}
+            observed = {
+                str(row.get("metric") or "")
+                for row in metrics_rows
+                if row.get("metric")
+            }
+            # Prometheus histograms are exported as *_bucket, *_count and
+            # *_sum samples. Treat any of those samples as evidence that the
+            # corresponding metric family exists.
+            for family in families:
+                if any(
+                    name == family
+                    or name.startswith(f"{family}_")
+                    for name in observed
+                ):
+                    observed.add(family)
             details["pr421_metric_coverage"] = {
                 "present": {family: True for family in families if family in observed},
                 "missing": [family for family in families if family not in observed],

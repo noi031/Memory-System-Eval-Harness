@@ -70,6 +70,28 @@ class Report6ScenarioTests(unittest.TestCase):
         self.assertIn("--commit-barrier-count", command)
         self.assertEqual("16", command[command.index("--commit-barrier-count") + 1])
 
+    def test_histogram_samples_count_as_metric_family_coverage(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "summary.json").write_text(
+                json.dumps({"status": "completed"}), encoding="utf-8"
+            )
+            (root / "metrics_samples.csv").write_text(
+                "ts,metric,labels,value\n"
+                '1,echomem_lane_wait_seconds_bucket,"{}",1\n'
+                '1,echomem_lane_exec_seconds_count,"{}",1\n'
+                '1,echomem_engine_fanout_exec_seconds_sum,"{}",1\n',
+                encoding="utf-8",
+            )
+            result = _derive_case_summary(root, identity_independent=True)
+            coverage = result["details"]["pr421_metric_coverage"]
+            self.assertNotIn("echomem_lane_wait_seconds", coverage["missing"])
+            self.assertNotIn("echomem_lane_exec_seconds", coverage["missing"])
+            self.assertNotIn(
+                "echomem_engine_fanout_exec_seconds",
+                coverage["missing"],
+            )
+
     def test_complete_capacity_points_are_executable(self) -> None:
         scenarios = complete_scenarios()
 
