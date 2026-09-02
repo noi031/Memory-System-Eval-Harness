@@ -750,7 +750,11 @@ def main() -> int:
                     "--preflight-config",
                     preflight_config,
                     "--profile",
-                    "complete",
+                    # A quick run on the single available 4U8G instance uses
+                    # the bounded catalog.  The full catalog includes long
+                    # report(6) and capacity cases that are useful for formal
+                    # acceptance but make a diagnostic run look stuck.
+                    "4u8g" if args.quick and name.upper() == "4U8G" else "complete",
                     "--instance-profile",
                     name,
                     "--repeats",

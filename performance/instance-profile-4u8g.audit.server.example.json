@@ -1,0 +1,19 @@
+{
+  "profiles": [
+    {
+      "name": "4U8G",
+      "base_url": "http://127.0.0.1:18187",
+      "tenant_config": "/config/tenants.json",
+      "preflight_config": "/config/config.json",
+      "metrics_enabled": true,
+      "capability_probe": {
+        "health_path": "/health",
+        "metrics_path": "/metrics"
+      },
+      "resource_profile": {
+        "cpu": "4 vCPU",
+        "memory": "8 GiB"
+      }
+    }
+  ]
+}

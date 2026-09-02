@@ -73,11 +73,13 @@ def _jain(values: list[float]) -> float | None:
 
 def _per_tenant_metrics(suite: dict[str, Any]) -> dict[str, dict[str, Any]]:
     """Merge one run's per-tenant metrics without mixing unlike workloads."""
+    # This helper is used by the fairness gate. Search-priority is intentionally
+    # excluded: its uneven Commit completion is the expected consequence of
+    # protecting Search, not evidence of unfair tenant scheduling.
     candidate_scenarios = (
         "tenant-skew",
-        "search-priority-blackbox",
-        "commit-barrier",
         "mixed",
+        "commit-barrier",
     )
     runs_by_scenario = {
         scenario: [
@@ -301,14 +303,15 @@ def _fairness(suite: dict[str, Any]) -> dict[str, Any]:
     if not has_two_dimensional_check:
         # Fairness is a within-workload statistic. Never add completion
         # counts from capacity, priority, and skew scenarios together: their
-        # denominators and admission windows differ. Prefer the bounded
-        # priority workload, then use one fallback workload at a time.
+        # denominators and admission windows differ. The priority workload is
+        # deliberately excluded because it tests Search admission ahead of
+        # Commit, not equal tenant service.
         runs_by_scenario: dict[str, list[dict[str, Any]]] = {}
         for run in _suite_runs(suite):
             runs_by_scenario.setdefault(str(run.get("scenario") or ""), []).append(run)
         candidate_scenarios = [
-            "search-priority-blackbox",
             "tenant-skew",
+            "mixed",
             "commit-barrier",
             "commit-storm",
         ]
@@ -362,7 +365,12 @@ def _fairness(suite: dict[str, Any]) -> dict[str, Any]:
                 except (TypeError, ValueError):
                     continue
                 counts[str(tenant)] = counts.get(str(tenant), 0) + max(0, count)
-        tenant_metrics = _per_tenant_metrics(suite)
+        # Search and Commit must come from the same workload. Otherwise a
+        # partial priority/barrier run can contribute zero Commit completions
+        # to a different scenario's Search latency denominator.
+        scoped_suite = dict(suite)
+        scoped_suite["runs"] = selected_runs
+        tenant_metrics = _per_tenant_metrics(scoped_suite)
         commit_values = [
             float(item["commit_completed"])
             for item in tenant_metrics.values()

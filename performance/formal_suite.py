@@ -354,6 +354,25 @@ SCENARIO_PROFILES = {
     "complete": complete_scenarios(),
 }
 
+# A bounded single-instance profile for the actual 4U8G deployment.  It
+# covers the measurable black-box gates without silently implying that a
+# second machine size, kill-9 control, or dependency fault controller exists.
+FOUR_U8G_SCENARIOS = {
+    name: SCENARIOS[name]
+    for name in (
+        "baseline",
+        "mixed",
+        "commit-barrier",
+        "saturation",
+        "tenant-skew",
+        "search-priority-blackbox",
+        "capacity-2",
+        "capacity-4",
+        "capacity-8",
+    )
+}
+SCENARIO_PROFILES["4u8g"] = FOUR_U8G_SCENARIOS
+
 
 def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -1317,7 +1336,8 @@ def main() -> int:
         default="pr421",
         help=(
             "Scenario profile; report6 is the PR397/report(6) matrix, pr421 "
-            "is the PR421 acceptance suite, and complete runs both catalogs."
+            "is the PR421 acceptance suite, 4u8g is the bounded single-instance "
+            "black-box run, and complete runs both catalogs."
         ),
     )
     parser.add_argument(
@@ -1383,7 +1403,10 @@ def main() -> int:
     parser.add_argument(
         "--quick-mode",
         action="store_true",
-        help="启用场景定义中的 bounded quick 覆盖（例如容量阶梯不发送后台 Commit）",
+        help=(
+            "启用 bounded quick 覆盖：默认每场景最多 15s、每个 barrier "
+            "最多 8 个 Commit、单轮；例如容量阶梯不发送后台 Commit"
+        ),
     )
     parser.add_argument(
         "--seed-sessions-per-tenant",
@@ -1401,11 +1424,23 @@ def main() -> int:
     )
     args = parser.parse_args()
 
+    if args.quick_mode:
+        # Quick mode is intended to produce actionable evidence quickly.  Do
+        # not leave the scenario's 10-minute/30-minute defaults in effect.
+        args.duration_cap_s = min(args.duration_cap_s or 15.0, 15.0)
+        args.barrier_count_cap = min(args.barrier_count_cap or 8, 8)
+        args.repeats = 1
+
     scenario_catalog = SCENARIO_PROFILES[args.profile]
     default_scenarios = (
         "baseline,mixed,commit-storm,commit-barrier,saturation,tenant-skew,"
         "search-priority-blackbox,search-storm"
         if args.profile == "pr421"
+        else ",".join(
+            name for name in FOUR_U8G_SCENARIOS
+            if name != "soak"
+        )
+        if args.profile == "4u8g"
         else ",".join(
             name for name in scenario_catalog
             if not (args.profile == "complete" and name == "soak")
@@ -1427,7 +1462,7 @@ def main() -> int:
         parser.error("--barrier-wave-size must be >= 1")
     if args.seed_sessions_per_tenant is not None and args.seed_sessions_per_tenant < 0:
         parser.error("--seed-sessions-per-tenant must be >= 0")
-    if args.profile in {"report6", "complete"} and not args.preflight_config:
+    if args.profile in {"report6", "4u8g", "complete"} and not args.preflight_config:
         parser.error(
             f"--profile {args.profile} requires --preflight-config with the actual EchoMem config.json"
         )
@@ -1521,9 +1556,21 @@ def main() -> int:
             },
             "pr421": {
                 "name": "EchoMem PR421 可量化验收与调度指标方案",
-                "included": args.profile in {"pr421", "complete"},
-                "scenario_count": len(SCENARIOS) if args.profile in {"pr421", "complete"} else 0,
-                "scenarios": sorted(SCENARIOS) if args.profile in {"pr421", "complete"} else [],
+                "included": args.profile in {"pr421", "4u8g", "complete"},
+                "scenario_count": (
+                    len(scenario_catalog)
+                    if args.profile in {"pr421", "4u8g"}
+                    else len(SCENARIOS)
+                    if args.profile == "complete"
+                    else 0
+                ),
+                "scenarios": (
+                    sorted(scenario_catalog)
+                    if args.profile in {"pr421", "4u8g"}
+                    else sorted(SCENARIOS)
+                    if args.profile == "complete"
+                    else []
+                ),
                 "acceptance_targets_recorded": True,
             },
         },
@@ -1640,7 +1687,7 @@ def main() -> int:
             "plan_sources": (
                 ["PR397/report(6)", "PR421"] if args.profile == "complete"
                 else ["PR397/report(6)"] if args.profile == "report6"
-                else ["PR421"] if args.profile == "pr421"
+                else ["PR421"] if args.profile in {"pr421", "4u8g"}
                 else ["report(4)"]
             ),
             "scenarios": scenario_names,

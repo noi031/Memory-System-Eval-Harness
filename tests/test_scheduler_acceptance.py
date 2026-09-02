@@ -223,6 +223,32 @@ class SchedulerAcceptanceTests(unittest.TestCase):
         check = next(item for item in result["checks"] if item["name"] == "分层/分租户调度可观测性")
         self.assertEqual(PASS, check["status"])
 
+    def test_fairness_does_not_use_search_priority_partial_commit_counts(self) -> None:
+        result = evaluate(
+            {
+                "runs": [
+                    {
+                        "scenario": "search-priority-blackbox",
+                        "status": "completed",
+                        "summary": {
+                            "metrics": {
+                                "fairness": {
+                                    "commit_completed_per_tenant": {
+                                        "tenant-a": 2,
+                                        "tenant-b": 0,
+                                        "tenant-c": 0,
+                                        "tenant-d": 0,
+                                    }
+                                }
+                            }
+                        },
+                    }
+                ]
+            }
+        )
+        check = next(item for item in result["checks"] if item["name"] == "Commit/Search 公平性 Jain")
+        self.assertEqual(INCONCLUSIVE, check["status"])
+
     def test_observability_accepts_pr421_bounded_lane_and_fanout_evidence(self) -> None:
         lanes = (
             "recall_engine",
@@ -359,12 +385,12 @@ class SchedulerAcceptanceTests(unittest.TestCase):
         )
         self.assertEqual(INCONCLUSIVE, check["status"])
 
-    def test_fairness_can_be_derived_from_run_summaries(self) -> None:
+    def test_fairness_can_be_derived_from_same_workload_run_summaries(self) -> None:
         result = evaluate(
             {
                 "runs": [
                     {
-                        "scenario": "search-priority-blackbox",
+                        "scenario": "mixed",
                         "status": "completed",
                         "summary": {
                             "metrics": {

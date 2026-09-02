@@ -8,6 +8,7 @@ import unittest
 from pathlib import Path
 
 from performance.formal_suite import (
+    FOUR_U8G_SCENARIOS,
     SCENARIOS,
     _build_case_command,
     _derive_case_summary,
@@ -19,6 +20,23 @@ from performance.formal_suite import (
 
 
 class Report6ScenarioTests(unittest.TestCase):
+    def test_4u8g_profile_is_bounded_single_instance_catalog(self) -> None:
+        self.assertEqual(
+            {
+                "baseline",
+                "mixed",
+                "commit-barrier",
+                "saturation",
+                "tenant-skew",
+                "search-priority-blackbox",
+                "capacity-2",
+                "capacity-4",
+                "capacity-8",
+            },
+            set(FOUR_U8G_SCENARIOS),
+        )
+        self.assertNotIn("soak", FOUR_U8G_SCENARIOS)
+
     def test_explicit_tenant_counts_respect_barrier_cap(self) -> None:
         self.assertEqual(
             [1, 1, 1, 1],
