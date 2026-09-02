@@ -157,6 +157,7 @@ SCENARIOS: dict[str, dict[str, Any]] = {
         "duration_s": 300,
         "search_rps": 16.0,
         "commit_rpm": 2.0,
+        "quick_commit_rpm": 0.0,
         "sessions_per_tenant": 2,
         "messages_per_session": 3,
     },
