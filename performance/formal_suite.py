@@ -10,6 +10,7 @@ search_results.csv）。只有每次运行都使用独立租户凭据时才允�
 from __future__ import annotations
 
 import argparse
+from collections import Counter, defaultdict
 import csv
 import json
 import os
@@ -208,7 +209,9 @@ SCENARIOS: dict[str, dict[str, Any]] = {
         "commit_barrier": True,
         "commit_barrier_count": 128,
         "commit_tenant_distribution": "uniform",
-        "quick_barrier_count_cap": 16,
+        # Keep quick mode bounded, but retain enough real Commit arrivals for
+        # the strict Search-priority acceptance gate.
+        "quick_barrier_count_cap": 32,
         "sessions_per_tenant": 32,
         "messages_per_session": 3,
         "blackbox_search_priority": True,
@@ -392,7 +395,9 @@ FOUR_U8G_SCENARIOS["fairness-bounded"] = {
     "sessions_per_tenant": 8,
     "messages_per_session": 1,
     "fairness_bounded": True,
-    "quick_barrier_count_cap": 16,
+    # Fairness needs enough arrivals for every tenant; use the same minimum
+    # bounded sample as the strict priority gate.
+    "quick_barrier_count_cap": 32,
 }
 SCENARIO_PROFILES["4u8g"] = FOUR_U8G_SCENARIOS
 
@@ -414,6 +419,55 @@ def write_subset(path: Path, tenants: list[dict[str, Any]]) -> None:
         json.dumps({"tenants": tenants}, ensure_ascii=False, indent=2) + "\n",
         encoding="utf-8",
     )
+
+
+def _seed_anchor_queries(tenant_count: int) -> str:
+    """Return deterministic queries for synthetic data reused across cases."""
+    return ",".join(
+        f"PERFANCHOR-{index}-0-0" for index in range(max(0, tenant_count))
+    )
+
+
+def _build_seed_warmup_command(
+    args: argparse.Namespace,
+    config_path: Path,
+    output: Path,
+    tenant_count: int,
+) -> list[str]:
+    """Build one real-model seed run shared by quick scheduler cases."""
+    command = [
+        sys.executable,
+        str(RUNNER),
+        "--echomem-url",
+        args.base_url,
+        "--tenants",
+        str(tenant_count),
+        "--duration-s",
+        "1",
+        "--concurrency-steps",
+        "1",
+        "--out-dir",
+        str(output),
+        "--seed-sessions-per-tenant",
+        "1",
+        "--messages-per-session",
+        "3",
+        "--commit-poll-timeout-s",
+        str(args.commit_timeout_s),
+        "--commit-retry-max",
+        str(args.commit_max_attempts),
+        "--commit-retry-backoff-s",
+        str(args.commit_retry_backoff_s),
+        "--tenant-config",
+        str(config_path),
+        "--scenarios",
+        "K",
+    ]
+    if args.preflight_config:
+        command += ["--preflight-config", args.preflight_config]
+    if args.no_server_metrics:
+        command += ["--no-metrics"]
+    return command
 
 
 def _usable_tenants(
@@ -667,7 +721,14 @@ def _build_case_command(
         if getattr(args, "seed_sessions_per_tenant", None) is not None
         else case.get("sessions_per_tenant", 5)
     )
-    if case.get("commit_barrier"):
+    if getattr(args, "quick_mode", False):
+        # Quick mode still needs real memory for hot-cache/search evidence,
+        # but repeating the full seed matrix makes every case spend most of
+        # its wall clock waiting for model-backed Commit extraction. One
+        # warm-up session is enough to establish a non-empty tenant while
+        # keeping the measured workload inside the case timeout.
+        seed_sessions = min(seed_sessions, 1)
+    elif case.get("commit_barrier"):
         seed_sessions = min(seed_sessions, 4)
     cmd = [
         sys.executable,
@@ -732,9 +793,28 @@ def _build_case_command(
         if getattr(args, "quick_mode", False):
             scenario_cap = int(case.get("quick_barrier_count_cap") or 0)
             if scenario_cap > 0:
-                effective_barrier_cap = scenario_cap
+                effective_barrier_cap = min(
+                    effective_barrier_cap or scenario_cap,
+                    scenario_cap,
+                )
         if effective_barrier_cap > 0:
             barrier_count = min(barrier_count, effective_barrier_cap)
+            # A bounded fairness sample must touch every selected tenant.
+            # Merely truncating a uniform barrier can leave tail tenants with
+            # zero Commit completions and turn sample-size reduction into a
+            # false fairness failure.
+            if (
+                case.get("fairness_bounded")
+                and case.get("commit_tenant_distribution") == "uniform"
+            ):
+                tenant_count = max(1, int(case.get("tenants") or 1))
+                barrier_count = max(
+                    barrier_count,
+                    min(
+                        tenant_count,
+                        int(case.get("commit_barrier_count", 0)),
+                    )
+                )
         # 洪峰窗口（report6 D：waves 为 1 且存在 burst 窗口）→ D 场景。
         if case.get("commit_burst_window_s") and not (case.get("commit_barrier_waves") or 1) > 1:
             cmd += [
@@ -811,6 +891,27 @@ def _derive_case_summary(run_dir: Path, identity_independent: bool) -> dict[str,
     if commit_success_rate is None:
         commit_success_rate = completed / commit_submitted if commit_submitted else None
 
+    # A tenant is not a user. Count distinct session identities from measured
+    # requests and expose a separate hot-user proxy for capacity reporting.
+    session_ops: Counter[tuple[str, str]] = Counter()
+    sessions_by_tenant: defaultdict[str, set[str]] = defaultdict(set)
+    for row in rows:
+        tenant = str(row.get("tenant_idx") or "").strip()
+        session = str(row.get("session_id") or "").strip()
+        if not tenant or not session:
+            continue
+        session_ops[(tenant, session)] += 1
+        sessions_by_tenant[tenant].add(session)
+    active_users_by_tenant = {
+        tenant: len(sessions)
+        for tenant, sessions in sorted(sessions_by_tenant.items())
+    }
+    hot_user_identity, hot_user_requests = (
+        max(session_ops.items(), key=lambda item: (item[1], item[0]))
+        if session_ops
+        else (None, 0)
+    )
+
     completed_by_tenant: dict[str, int] = {}
     for row in ok_dones:
         tenant_idx = str(row.get("tenant_idx") or "")
@@ -878,6 +979,19 @@ def _derive_case_summary(run_dir: Path, identity_independent: bool) -> dict[str,
         "identity_mode": "independent_auth_keys" if identity_independent else "shared",
         "quality_seed": [],
         "native_status": native.get("status"),
+        "user_activity": {
+            "active_user_count": sum(active_users_by_tenant.values()),
+            "active_users_by_tenant": active_users_by_tenant,
+            "hot_user_proxy": {
+                "tenant_idx": hot_user_identity[0] if hot_user_identity else None,
+                "session_id": hot_user_identity[1] if hot_user_identity else None,
+                "request_count": hot_user_requests,
+            },
+            "definition": (
+                "active user = distinct (tenant_idx, session_id) observed in this run; "
+                "hot user proxy = maximum measured operations for one such session"
+            ),
+        },
     }
     for key in (
         "degradation",
@@ -1577,7 +1691,10 @@ def main() -> int:
         # Quick mode is intended to produce actionable evidence quickly.  Do
         # not leave the scenario's 10-minute/30-minute defaults in effect.
         args.duration_cap_s = min(args.duration_cap_s or 15.0, 15.0)
-        args.barrier_count_cap = min(args.barrier_count_cap or 8, 8)
+        # A small barrier is only a smoke test and cannot establish O5.
+        # Keep quick mode bounded, but preserve the minimum real Commit flood
+        # required by scheduler_acceptance.
+        args.barrier_count_cap = min(args.barrier_count_cap or 32, 32)
         args.repeats = 1
 
     scenario_catalog = SCENARIO_PROFILES[args.profile]
@@ -1781,6 +1898,64 @@ def main() -> int:
         "runs": [],
     }
     # 用确定性顺序执行，便于重跑对比；服务端重置钩子负责固定数据/索引边界。
+    auto_reuse_seed = (
+        bool(args.quick_mode)
+        and not bool(args.reuse_existing_data)
+        and not bool(args.skip_seed)
+    )
+    seed_ready = bool(args.reuse_existing_data or args.skip_seed)
+    if auto_reuse_seed:
+        max_seed_count = max(
+            int(scenario_catalog[name]["tenants"]) for name in scenario_names
+        )
+        warmup_output = root / "_seed_warmup"
+        warmup_command = _build_seed_warmup_command(
+            args,
+            config_paths[max_seed_count],
+            warmup_output / "run",
+            max_seed_count,
+        )
+        warmup_output.mkdir(parents=True, exist_ok=True)
+        warmup_completed, warmup_timed_out = run_case_process(
+            warmup_command,
+            timeout_s=max(
+                180.0,
+                float(args.case_timeout_s or 0.0),
+                float(args.commit_timeout_s) * 2.0,
+            ),
+        )
+        (warmup_output / "stdout.log").write_text(
+            warmup_completed.stdout, encoding="utf-8"
+        )
+        (warmup_output / "stderr.log").write_text(
+            warmup_completed.stderr, encoding="utf-8"
+        )
+        warmup_run_dir = _resolve_run_dir(warmup_output / "run")
+        warmup_summary = {}
+        if (warmup_run_dir / "summary.json").is_file():
+            try:
+                warmup_summary = json.loads(
+                    (warmup_run_dir / "summary.json").read_text(encoding="utf-8")
+                )
+            except (OSError, json.JSONDecodeError):
+                warmup_summary = {}
+        seed_ready = (
+            not warmup_timed_out
+            and warmup_completed.returncode == 0
+            and str(warmup_summary.get("status") or "") == "completed"
+        )
+        manifest["seed_warmup"] = {
+            "status": "completed" if seed_ready else "failed",
+            "tenant_count": max_seed_count,
+            "command": warmup_command,
+            "returncode": warmup_completed.returncode,
+            "timeout": warmup_timed_out,
+            "output_dir": str(warmup_output.resolve()),
+            "summary": warmup_summary,
+        }
+        if seed_ready:
+            args.reuse_existing_data = True
+            args.search_queries = _seed_anchor_queries(max_seed_count)
     for scenario in scenario_names:
         case = scenario_catalog[scenario]
         if case["tenants"] > len(all_tenants):
@@ -1807,6 +1982,17 @@ def main() -> int:
             continue
         for repetition in range(1, args.repeats + 1):
             for policy in POLICIES:
+                # A quick scheduler/capacity suite should pay the real-model
+                # seed cost once per tenant envelope, not once per scenario.
+                # Reuse is safe when the current case needs no more tenants
+                # than a previously completed seed. Each case still creates
+                # its own sessions/requests and retains separate artifacts.
+                case_reuses_seed = seed_ready
+                previous_reuse = bool(args.reuse_existing_data)
+                previous_queries = str(args.search_queries)
+                if case_reuses_seed:
+                    args.reuse_existing_data = True
+                    args.search_queries = _seed_anchor_queries(int(case["tenants"]))
                 completed_runs = len(manifest["runs"])
                 total_runs = len(scenario_names) * args.repeats * len(POLICIES)
                 print(
@@ -1824,13 +2010,17 @@ def main() -> int:
                     args,
                     case,
                 )
+                run["seed_reused"] = case_reuses_seed
                 manifest["runs"].append(run)
                 print(
                     f"FORMAL_PROGRESS {len(manifest['runs'])}/{total_runs} "
                     f"scenario={scenario} repeat={repetition} policy={policy} "
-                    f"status={run.get('status')}",
+                    f"status={run.get('status')} "
+                    f"seed_reused={str(case_reuses_seed).lower()}",
                     flush=True,
                 )
+                args.reuse_existing_data = previous_reuse
+                args.search_queries = previous_queries
                 (root / "suite.json").write_text(
                     json.dumps(manifest, ensure_ascii=False, indent=2) + "\n",
                     encoding="utf-8",

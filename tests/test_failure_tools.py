@@ -12,6 +12,7 @@ from performance.probes.cursor_reconcile import values_from_payload
 from performance.probes._client import extract_message
 from performance.probes._client import EchoMemHTTP
 from performance.probes.commit_recovery_probe import decode_fs_read_payload
+from performance.probes.commit_recovery_probe import recovery_control_ok
 from performance.scheduler_acceptance import evaluate as evaluate_scheduler_acceptance
 from performance.probes.capability_probe import classify_probe, run as run_capability
 from performance.probes.capability_probe import request as capability_request
@@ -20,6 +21,17 @@ from performance.probes.fault_injection import NOT_IMPLEMENTED, run_control
 
 
 class FailureToolTests(unittest.TestCase):
+    def test_recovery_requires_successful_kill_and_restart(self) -> None:
+        self.assertFalse(
+            recovery_control_ok({"kill_returncode": 1, "start_returncode": 0})
+        )
+        self.assertFalse(
+            recovery_control_ok({"kill_returncode": 0, "start_returncode": 1})
+        )
+        self.assertTrue(
+            recovery_control_ok({"kill_returncode": 0, "start_returncode": 0})
+        )
+
     def test_metrics_probe_preserves_full_prometheus_payload(self) -> None:
         prefix = "# HELP old_metric " + ("x" * 5000)
         raw = prefix + "\nechomem_lane_queued 1\n"

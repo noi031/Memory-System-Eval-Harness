@@ -105,6 +105,40 @@ def _read_csv(path: Path) -> list[dict[str, str]]:
         return list(csv.DictReader(handle))
 
 
+def _is_admission_rejection(row: dict[str, Any]) -> bool:
+    """Recognize an explicit overload rejection, including legacy HTTP 400.
+
+    EchoMem currently reports ``too many ... in flight`` as HTTP 400 on some
+    paths.  That is still useful evidence of admission control, but it must
+    remain distinguishable from the required 429/503 wire contract.
+    """
+    code = _number(row.get("status_code"))
+    if code is not None and int(code) in {429, 503}:
+        return True
+    if str(row.get("error_class") or "").lower() == "admission_rejected":
+        return True
+    text = " ".join(
+        str(row.get(key) or "")
+        for key in ("reason_code", "error_detail", "error", "message")
+    ).lower()
+    return any(
+        marker in text
+        for marker in (
+            "too many",
+            "in flight",
+            "rate limit",
+            "queue full",
+            "overload",
+            "capacity",
+        )
+    )
+
+
+def _has_retry_after(row: dict[str, Any]) -> bool:
+    value = row.get("retry_after_s") or row.get("retry_after")
+    return value not in (None, "")
+
+
 def _result(
     name: str,
     status: str,
@@ -397,7 +431,7 @@ def _search_isolation_gate(manifest: dict[str, Any]) -> dict[str, Any]:
             return _result(
                 "Search P95 isolation ratio",
                 INCONCLUSIVE,
-                target=2.0,
+                target=1.20,
                 evidence="report4 A/C/D paired metrics.search",
                 observed={"invalid_baselines": invalid, "paired_concurrency": [p[0] for p in pairs]},
                 reason="report4 的 A 纯读基线必须先达到 99% Search 成功率，且按同一并发档配对",
@@ -409,11 +443,11 @@ def _search_isolation_gate(manifest: dict[str, Any]) -> dict[str, Any]:
         ratio = max(item["ratio"] for item in ratios)
         return _result(
             "Search P95 isolation ratio",
-            PASS if ratio < 2.0 else FAIL,
-            target=2.0,
+            PASS if ratio <= 1.20 else FAIL,
+            target=1.20,
             observed={"worst_ratio": ratio, "by_concurrency": ratios},
             evidence="report4 A/C/D paired metrics.search.latency.p95_s",
-            reason="只比较同一并发档且成功率至少 99% 的 A 基线与压力场景",
+            reason="只比较同一并发档且成功率至少 99% 的 A 基线与压力场景，按目标要求限制劣化不超过 20%",
         )
 
     baseline = _metric_values(
@@ -521,6 +555,10 @@ def _rejection_gate(manifest: dict[str, Any]) -> dict[str, Any]:
     rejected = total = 0
     rejected_latencies: list[float] = []
     response_fields_complete = True
+    retry_after_complete = True
+    reason_code_complete = True
+    wire_status_complete = True
+    status_breakdown: dict[str, int] = {}
     evidence_sources: list[str] = []
     for run in runs:
         output_dir = Path(run.get("output_dir") or "")
@@ -531,14 +569,22 @@ def _rejection_gate(manifest: dict[str, Any]) -> dict[str, Any]:
             if code is None:
                 continue
             total += 1
-            if int(code) in {429, 503}:
+            if _is_admission_rejection(row):
                 rejected += 1
+                status_key = str(int(code))
+                status_breakdown[status_key] = status_breakdown.get(status_key, 0) + 1
+                if int(code) not in {429, 503}:
+                    wire_status_complete = False
                 latency = _number(row.get("end_to_end_s")) or _number(row.get("elapsed_s"))
                 if latency is not None:
                     rejected_latencies.append(latency)
                 # A rejection is only contract-complete when both the
                 # retry hint and the server-provided reason are present.
-                if not row.get("retry_after_s") or not row.get("reason_code"):
+                if not _has_retry_after(row):
+                    retry_after_complete = False
+                if not row.get("reason_code"):
+                    reason_code_complete = False
+                if not _has_retry_after(row) or not row.get("reason_code"):
                     response_fields_complete = False
     sweep = manifest.get("limit_failure_sweep")
     if isinstance(sweep, dict):
@@ -551,14 +597,20 @@ def _rejection_gate(manifest: dict[str, Any]) -> dict[str, Any]:
             if code is None:
                 continue
             total += 1
-            if int(code) in {429, 503}:
+            if _is_admission_rejection(row):
                 rejected += 1
+                status_key = str(int(code))
+                status_breakdown[status_key] = status_breakdown.get(status_key, 0) + 1
+                if int(code) not in {429, 503}:
+                    wire_status_complete = False
                 latency = _number(row.get("elapsed_s"))
                 if latency is not None:
                     rejected_latencies.append(latency)
-                if not (
-                    row.get("retry_after") or row.get("retry_after_s")
-                ) or not row.get("reason_code"):
+                if not _has_retry_after(row):
+                    retry_after_complete = False
+                if not row.get("reason_code"):
+                    reason_code_complete = False
+                if not _has_retry_after(row) or not row.get("reason_code"):
                     response_fields_complete = False
     if not total:
         return _result(
@@ -579,10 +631,24 @@ def _rejection_gate(manifest: dict[str, Any]) -> dict[str, Any]:
         )
     rate = rejected / total
     max_latency = max(rejected_latencies) if rejected_latencies else None
-    observed = {"rejection_rate": rate, "max_rejection_latency_s": max_latency}
-    if not response_fields_complete and rejected:
-        status = INCONCLUSIVE
-        reason = "存在拒绝响应，但 Retry-After/reason_code 完整性无法证明"
+    observed = {
+        "rejection_rate": rate,
+        "max_rejection_latency_s": max_latency,
+        "rejected": rejected,
+        "status_breakdown": status_breakdown,
+        "wire_status_complete": wire_status_complete,
+        "retry_after_complete": retry_after_complete,
+        "reason_code_complete": reason_code_complete,
+        "response_fields_complete": response_fields_complete,
+    }
+    if not response_fields_complete or not wire_status_complete:
+        status = FAIL
+        problems = []
+        if not wire_status_complete:
+            problems.append("admission 拒绝使用了 HTTP 400 而不是 429/503")
+        if not response_fields_complete:
+            problems.append("缺少 Retry-After 或 reason_code")
+        reason = "；".join(problems)
     elif rate > 0.05 or (max_latency is not None and max_latency > 1.0):
         status = FAIL
         reason = "拒绝率或拒绝响应耗时超过 PR421 门槛"

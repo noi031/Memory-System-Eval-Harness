@@ -594,7 +594,7 @@ queued/wait/exec/rejected 四元组。旧报告只有单维 Jain、单一指标�
 不包含 7 小时 `soak`、第二种实例规格，也不会伪造 kill-9 或依赖故障控制结果。
 
 ```bash
-# 4U8G 快速诊断：每场景最多 15 秒，每个 Commit barrier 最多 8 个请求，单轮
+# 4U8G 快速诊断：每场景最多 15 秒，优先级/公平性 barrier 至少保留 32 个请求，单轮
 python -m performance.formal_suite \
   --profile 4u8g --quick-mode \
   --base-url http://127.0.0.1:8010 \
@@ -876,10 +876,28 @@ python3 -m performance.objective_suite \
   --quick
 ```
 
+服务器如果把 EchoMem 的真实模型凭据放在 Docker env 文件中，评测入口也要加载同一份
+env 文件，保证 formal suite 和探针使用的模型环境与 EchoMem 服务一致：
+
+```bash
+python3 -m performance.objective_suite \
+  --profiles performance/instance-profile-4u8g.audit.server.example.json \
+  --profile 4U8G \
+  --env-file /opt/echomem-stress/formal-run-4u8g.env \
+  --out-dir results/objective-suite-$(date +%Y%m%d_%H%M%S) \
+  --quick
+```
+
+`--env-file` 只读取简单的 `KEY=VALUE`/`export KEY=VALUE` 行，密钥不会写入
+`objective-suite.json`、HTML 或命令记录。`commit_recovery.tenant` 如果已经不在
+当前 `tenant_config` 中，入口会自动选用该配置中的第一个租户，避免动态租户 ID
+更新后仍因旧 profile 名称导致恢复探针在启动阶段失败。
+
 `--quick` 只做 bounded smoke，并默认跳过真实模型灌种，专门快速验证调度、延迟和
 可观测性链路；因此不能用它证明记忆质量。需要把已有租户记忆也纳入测试时，可加
-`--quick-include-seed`。单场景默认最多运行 30 秒、总墙钟 120 秒、barrier 最多
-2 个 Commit；Commit 默认单次最多等待 30 秒、不重试，可按机器和目标调整：
+`--quick-include-seed`。单场景默认最多运行 30 秒、总墙钟 120 秒、barrier 默认最多
+32 个 Commit；Commit 默认单次最多等待 30 秒、不重试，可按机器和目标调整。少于 32 个
+真实 Commit 只能作为 smoke 数据，不能验收 O5 严格优先级：
 
 默认 quick 场景为 `baseline`、`fairness-bounded`、`search-priority-blackbox`、
 `saturation`、`capacity-2`、`capacity-4`、`capacity-8`。它们用于快速拿到单租户基线、
@@ -931,7 +949,10 @@ PR397 的写后可见性/持久化对账、Commit 状态机、冷暖 Search，�
 
 quick 模式默认把容量场景的 Commit 负载设为 0，避免容量测量被后台写入拖住；
 `fairness-bounded`、`search-priority-blackbox`、`saturation` 等需要真实竞争样本的
-场景会使用各自的有界 barrier 上限（当前为 16），不会被全局诊断上限 2 截断。
+场景会使用有界 barrier 上限（默认 32 个 Commit）；少于 32 个只能报告
+`INCONCLUSIVE`，不能验收严格 Search 优先级。quick 模式如果打开真实模型灌种，
+会先为本轮所需的最大租户数执行一次 warm-up，后续场景复用这批已提交记忆，不会每个
+场景重复等待模型抽取；报告中的 `seed_reused=true` 表示该场景使用了复用数据。
 这仍是快速诊断，不替代正式长窗口验收。快速运行仍显示 `INCONCLUSIVE` 的常见原因不是 EchoMem 一定失败：
 
 | 目标 | 还需要的真实证据 | 归属 |

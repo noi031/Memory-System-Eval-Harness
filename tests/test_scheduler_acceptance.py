@@ -59,6 +59,28 @@ class SchedulerAcceptanceTests(unittest.TestCase):
         check = next(item for item in result["checks"] if item["name"] == "Search 优先于 Commit")
         self.assertEqual(PASS, check["status"])
 
+    def test_priority_small_commit_sample_is_inconclusive(self) -> None:
+        result = evaluate(
+            {
+                "runs": [
+                    {
+                        "scenario": "search-priority-blackbox",
+                        "summary": {
+                            "metrics": {
+                                "search": {"latency": {"p95_s": 1.2}},
+                                "commit": {"submitted": 8},
+                            }
+                        },
+                        "status": "completed",
+                    }
+                ]
+            }
+        )
+        check = next(item for item in result["checks"] if item["name"] == "Search 优先于 Commit")
+        self.assertEqual(INCONCLUSIVE, check["status"])
+        self.assertEqual(8, check["observed"]["commit_submitted"])
+        self.assertIn("Commit 到达量不足", check["reason"])
+
     def test_priority_does_not_accept_running_case(self) -> None:
         result = evaluate(
             {

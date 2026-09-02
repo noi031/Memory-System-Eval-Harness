@@ -42,6 +42,11 @@ def main() -> int:
     parser.add_argument("--commit-count", type=int, default=0)
     parser.add_argument("--open-count", type=int, default=0)
     parser.add_argument("--workers", type=int, default=0)
+    parser.add_argument(
+        "--kinds",
+        default="search,commit,open",
+        help="要执行的请求类型，逗号分隔；例如 search,open 可跳过真实 Commit 模型调用",
+    )
     args = parser.parse_args()
 
     tenants = load_tenants(args.tenant_config)
@@ -51,6 +56,17 @@ def main() -> int:
         else discover_sessions(args.session_root, tenants)
     )
     levels = [int(item.strip()) for item in args.levels.split(",") if item.strip()]
+    kinds = [
+        item.strip().lower()
+        for item in args.kinds.split(",")
+        if item.strip()
+    ]
+    unknown_kinds = sorted(set(kinds) - {"search", "commit", "open"})
+    if not kinds or unknown_kinds:
+        parser.error(
+            "kinds must contain one or more of search,commit,open; "
+            f"unknown: {', '.join(unknown_kinds)}"
+        )
     rows = []
     for workers in levels:
         # Keep each level bounded while making the arrival burst visible.
@@ -61,7 +77,7 @@ def main() -> int:
             "commit": args.commit_count if args.commit_count > 0 else default_count,
             "open": args.open_count if args.open_count > 0 else default_count,
         }
-        for kind in ("search", "commit", "open"):
+        for kind in kinds:
             path = "/api/retrieval/search" if kind == "search" else "/api/sessions/open"
             if kind == "commit":
                 path = "/commit"
@@ -104,6 +120,7 @@ def main() -> int:
             "commit": args.commit_count or "auto",
             "open": args.open_count or "auto",
         },
+        "kinds": kinds,
         "timeout_s": args.timeout_s,
         "client_admission": False,
         "recovery_probe": "16 Search requests at 4 workers after the sweep",

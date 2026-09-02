@@ -6,6 +6,7 @@ import unittest
 from pathlib import Path
 
 from performance.acceptance import (
+    FAIL,
     INCONCLUSIVE,
     NOT_IMPLEMENTED,
     PR28_REVIEW_RESOLUTION,
@@ -163,7 +164,37 @@ class AcceptanceTests(unittest.TestCase):
                 item for item in result["checks"]
                 if item["name"] == "Saturation rejection rate"
             )
-            self.assertEqual(INCONCLUSIVE, check["status"])
+            self.assertEqual(FAIL, check["status"])
+
+    def test_saturation_counts_explicit_400_admission_rejection(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            run_dir = root / "saturation" / "repeat-01" / "server-observe"
+            run_dir.mkdir(parents=True)
+            (run_dir / "search_results.csv").write_text(
+                "status_code,end_to_end_s,error_class,retry_after,reason_code,error_detail\n"
+                "200,0.01,,,,\n"
+                "400,0.02,admission_rejected,1,,too many recall requests in flight\n",
+                encoding="utf-8",
+            )
+            result = evaluate_pr421_acceptance(
+                {
+                    "runs": [{
+                        "scenario": "saturation",
+                        "output_dir": str(run_dir),
+                        "summary": {},
+                    }]
+                }
+            )
+            check = next(
+                item for item in result["checks"]
+                if item["name"] == "Saturation rejection rate"
+            )
+            self.assertEqual(FAIL, check["status"])
+            self.assertEqual(1, check["observed"]["rejected"])
+            self.assertEqual({"400": 1}, check["observed"]["status_breakdown"])
+            self.assertFalse(check["observed"]["wire_status_complete"])
+            self.assertTrue(check["observed"]["retry_after_complete"])
 
     def test_report4_invalid_baseline_cannot_produce_degradation_pass(self):
         result = evaluate_pr421_acceptance(

@@ -7,6 +7,7 @@
       "preflight_config": "/etc/echomem/4u8g/config.json",
       "allow_partial_tenants": true,
       "metrics_enabled": true,
+      "quick_include_seed": true,
       "capability_probe": {
         "health_path": "/health",
         "metrics_path": "/metrics",

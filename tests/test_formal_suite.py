@@ -11,7 +11,9 @@ from performance.formal_suite import (
     FOUR_U8G_SCENARIOS,
     SCENARIOS,
     _build_case_command,
+    _build_seed_warmup_command,
     _derive_case_summary,
+    _seed_anchor_queries,
     _scale_explicit_tenant_counts,
     _write_case_csvs,
     complete_scenarios,
@@ -20,6 +22,12 @@ from performance.formal_suite import (
 
 
 class Report6ScenarioTests(unittest.TestCase):
+    def test_seed_anchor_queries_are_deterministic(self) -> None:
+        self.assertEqual(
+            "PERFANCHOR-0-0-0,PERFANCHOR-1-0-0,PERFANCHOR-2-0-0",
+            _seed_anchor_queries(3),
+        )
+
     def test_4u8g_profile_is_bounded_single_instance_catalog(self) -> None:
         self.assertTrue(set(report6_scenarios()) <= set(FOUR_U8G_SCENARIOS))
         self.assertTrue(
@@ -126,7 +134,36 @@ class Report6ScenarioTests(unittest.TestCase):
             30.0,
             barrier_count_cap=2,
         )
-        self.assertEqual("16", command[command.index("--commit-barrier-count") + 1])
+        self.assertEqual("2", command[command.index("--commit-barrier-count") + 1])
+
+    def test_quick_fairness_uses_minimum_fairness_barrier(self) -> None:
+        args = argparse.Namespace(
+            base_url="http://127.0.0.1:8010",
+            barrier_wave_size=32,
+            local_auth_mode=False,
+            reuse_existing_data=True,
+            preflight_config="",
+            no_server_metrics=False,
+            commit_timeout_s=75.0,
+            commit_max_attempts=0,
+            commit_retry_backoff_s=0.0,
+            quick_mode=True,
+        )
+        command = _build_case_command(
+            args,
+            {
+                **FOUR_U8G_SCENARIOS["fairness-bounded"],
+                "quick_barrier_count_cap": 32,
+            },
+            Path("/tmp/tenants.json"),
+            Path("/tmp/out"),
+            15.0,
+            barrier_count_cap=32,
+        )
+        self.assertEqual(
+            "32",
+            command[command.index("--commit-barrier-count") + 1],
+        )
 
     def test_histogram_samples_count_as_metric_family_coverage(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -149,6 +186,28 @@ class Report6ScenarioTests(unittest.TestCase):
                 "echomem_engine_fanout_exec_seconds",
                 coverage["missing"],
             )
+
+    def test_case_summary_reports_active_and_hot_user_proxies(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "summary.json").write_text(
+                json.dumps({"status": "completed"}), encoding="utf-8"
+            )
+            (root / "requests.csv").write_text(
+                "scene,step_conc,tenant_idx,op,stage_ms,status,error_type,ts_ms,"
+                "session_id,archive_id,extra\n"
+                "A@1,1,0,read,100,ok,,1,user-a,,\n"
+                "A@1,1,0,read,120,ok,,2,user-a,,\n"
+                "A@1,1,1,read,110,ok,,3,user-b,,\n"
+                "A@1,1,1,commit_submit,50,ok,,4,user-c,,\n"
+                "A@1,1,1,commit_done,60,ok,,5,user-c,,\n",
+                encoding="utf-8",
+            )
+            derived = _derive_case_summary(root, identity_independent=True)
+            activity = derived["details"]["user_activity"]
+            self.assertEqual(3, activity["active_user_count"])
+            self.assertEqual({"0": 1, "1": 2}, activity["active_users_by_tenant"])
+            self.assertEqual(2, activity["hot_user_proxy"]["request_count"])
 
     def test_complete_capacity_points_are_executable(self) -> None:
         scenarios = complete_scenarios()
@@ -265,6 +324,20 @@ class FormalSuiteAdapterTests(unittest.TestCase):
         self.assertIn(flag, command)
         return command[command.index(flag) + 1]
 
+    def test_seed_warmup_command_uses_real_runner_and_selected_tenants(self) -> None:
+        command = _build_seed_warmup_command(
+            self._args(preflight_config="/tmp/config.json", no_server_metrics=True),
+            Path("/tmp/tenants-4.json"),
+            Path("/tmp/warmup/run"),
+            4,
+        )
+        self.assertIn("run_stress.py", command[1])
+        self.assertEqual("4", self._flag_value(command, "--tenants"))
+        self.assertEqual("1", self._flag_value(command, "--seed-sessions-per-tenant"))
+        self.assertEqual("K", self._flag_value(command, "--scenarios"))
+        self.assertIn("--preflight-config", command)
+        self.assertIn("--no-metrics", command)
+
     def test_build_case_command_maps_rate_based_case_to_K(self) -> None:
         case = {
             "tenants": 4,
@@ -334,6 +407,26 @@ class FormalSuiteAdapterTests(unittest.TestCase):
                 15.0,
             )
             self.assertEqual("0", self._flag_value(command, "--seed-sessions-per-tenant"))
+
+    def test_quick_mode_caps_real_seed_to_one_session(self) -> None:
+        case = {
+            "tenants": 4,
+            "search_rps": 8.0,
+            "sessions_per_tenant": 20,
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "out"
+            command = _build_case_command(
+                self._args(quick_mode=True),
+                case,
+                output.parent / "tenants.json",
+                output,
+                15.0,
+            )
+            self.assertEqual(
+                "1",
+                self._flag_value(command, "--seed-sessions-per-tenant"),
+            )
 
     def test_build_case_command_maps_zipf_barrier_to_S(self) -> None:
         case = {

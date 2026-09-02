@@ -18,6 +18,11 @@ PASS = "PASS"
 FAIL = "FAIL"
 INCONCLUSIVE = "INCONCLUSIVE"
 
+# A small barrier is useful as a smoke test, but it is not a flood.  The
+# priority objective must have enough accepted Commit arrivals to create
+# meaningful contention before a low Search P95 can be called evidence.
+MIN_PRIORITY_COMMIT_FLOOD = 32
+
 PR421_LANES = {
     "recall_engine",
     "recall_intent_llm",
@@ -193,6 +198,7 @@ def _capacity(suite: dict[str, Any]) -> dict[str, Any]:
     invalid_levels = []
     timeout_levels = []
     hot_user_candidates: list[int] = []
+    activity_by_level: dict[str, dict[str, Any]] = {}
     for run in _suite_runs(suite):
         scenario = str(run.get("scenario") or "")
         metrics = (_run_summary(run).get("metrics") or {})
@@ -201,6 +207,9 @@ def _capacity(suite: dict[str, Any]) -> dict[str, Any]:
             if not level_text.isdigit():
                 continue
             level = int(level_text)
+            activity = (_run_summary(run).get("details") or {}).get("user_activity")
+            if isinstance(activity, dict):
+                activity_by_level[str(level)] = activity
             if str(run.get("status")) != "completed":
                 if str(run.get("status") or "").upper() == "TIMEOUT":
                     # A real load case that exceeded its bounded wall-clock
@@ -263,6 +272,21 @@ def _capacity(suite: dict[str, Any]) -> dict[str, Any]:
             "capacity_boundary_levels": sorted(set(boundary_levels)),
             "max_completed_active_user_proxy": max_valid_level,
             "max_hot_user_proxy": max(hot_user_candidates, default=None),
+            "user_activity_by_capacity_level": activity_by_level,
+            "max_measured_active_user_count": max(
+                (
+                    int(item.get("active_user_count") or 0)
+                    for item in activity_by_level.values()
+                ),
+                default=None,
+            ),
+            "max_measured_hot_user_requests": max(
+                (
+                    int(((item.get("hot_user_proxy") or {}).get("request_count") or 0))
+                    for item in activity_by_level.values()
+                ),
+                default=None,
+            ),
             "instance_profile": profile,
         },
         (
@@ -536,6 +560,23 @@ def _priority(suite: dict[str, Any]) -> dict[str, Any]:
             {"runs": len(completed_runs), "commit_submitted": 0},
             "场景存在但没有 Commit 洪泛样本，不能证明 Search 优先级",
         )
+    commit_submitted = sum(commit_counts)
+    if commit_submitted < MIN_PRIORITY_COMMIT_FLOOD:
+        return _result(
+            "Search 优先于 Commit",
+            INCONCLUSIVE,
+            5.0,
+            {
+                "runs": len(completed_runs),
+                "commit_submitted": commit_submitted,
+                "minimum_commit_flood": MIN_PRIORITY_COMMIT_FLOOD,
+            },
+            (
+                "Commit 到达量不足以构成洪泛："
+                f"{commit_submitted} < {MIN_PRIORITY_COMMIT_FLOOD}；"
+                "只能报告 Search P95，不能验收严格优先级"
+            ),
+        )
     values = [float(value) for value in p95_values if isinstance(value, (int, float))]
     if not values:
         return _result(
@@ -550,7 +591,11 @@ def _priority(suite: dict[str, Any]) -> dict[str, Any]:
         "Search 优先于 Commit",
         PASS if worst <= 5.0 else FAIL,
         5.0,
-        {"worst_search_p95_s": worst, "commit_submitted": sum(commit_counts)},
+        {
+            "worst_search_p95_s": worst,
+            "commit_submitted": commit_submitted,
+            "minimum_commit_flood": MIN_PRIORITY_COMMIT_FLOOD,
+        },
         "同到达窗口 Search P95 在 5 秒内" if worst <= 5.0 else "Search P95 超过 5 秒",
     )
 

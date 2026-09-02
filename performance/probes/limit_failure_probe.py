@@ -406,12 +406,20 @@ def load_tenants(path: Path) -> list[dict[str, str]]:
 def discover_sessions(root: Path, tenants: list[dict[str, str]]) -> dict[str, str]:
     found: dict[str, str] = {}
     wanted = {item["tenant_id"] for item in tenants}
+    tenant_by_index = {
+        str(index): item["tenant_id"]
+        for index, item in enumerate(tenants)
+    }
     for path in root.rglob("*.csv"):
         try:
             with path.open(newline="", encoding="utf-8") as handle:
                 for row in csv.DictReader(handle):
                     tenant = row.get("tenant", "")
                     session_id = row.get("session_id", "")
+                    # The formal-suite contract stores a zero-based tenant
+                    # index in normalized CSVs, while older probe artifacts
+                    # stored the tenant ID. Accept both representations.
+                    tenant = tenant_by_index.get(tenant, tenant)
                     if tenant in wanted and session_id and tenant not in found:
                         found[tenant] = session_id
         except (OSError, UnicodeDecodeError):

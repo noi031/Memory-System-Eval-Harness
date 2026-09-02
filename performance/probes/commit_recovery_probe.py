@@ -216,6 +216,14 @@ def kill_and_start(container: str, restart_wait_s: float) -> dict[str, Any]:
     return result
 
 
+def recovery_control_ok(control: dict[str, Any]) -> bool:
+    """Return true only when both the real kill and restart succeeded."""
+    return (
+        control.get("kill_returncode") == 0
+        and control.get("start_returncode") == 0
+    )
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--base-url", required=True)
@@ -343,6 +351,8 @@ def main() -> int:
     }
     result["accepted_202"] = commit_box.get("status_code") == 202
     result["container_control"] = kill_and_start(args.container, 0)
+    control_ok = recovery_control_ok(result["container_control"])
+    result["container_control_ok"] = control_ok
     commit_thread.join(timeout=1.0)
     result["commit_response"] = dict(commit_box)
 
@@ -381,7 +391,15 @@ def main() -> int:
     result["commit_response_result"] = commit_payload
     result["idempotency_key"] = idempotency_key
 
-    if not recovered:
+    if not control_ok:
+        result.update({
+            "status": INCONCLUSIVE,
+            "reason": (
+                "未成功执行真实 kill-9/start 控制，不能把服务仍然健康 "
+                "解释为崩溃恢复通过"
+            ),
+        })
+    elif not recovered:
         result.update({"status": FAIL, "reason": "service did not recover within timeout"})
     else:
         # A kill can drop the HTTP response even when EchoMem accepted the

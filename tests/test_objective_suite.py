@@ -12,7 +12,9 @@ from performance.objective_suite import (
     _acquire_output_lock,
     _materialize_fault_plan,
     _preserve_probe_status,
+    _resolve_tenant_id,
     _formal_run_counts,
+    load_env_file,
     load_profiles,
     objective_statuses,
     run_command,
@@ -21,6 +23,7 @@ from performance.objective_suite import (
 from performance.probes.limit_failure_probe import (
     auth_key,
     classify_response,
+    discover_sessions,
     error_class,
     load_tenants,
     metrics_coverage,
@@ -35,6 +38,37 @@ class ObjectiveSuiteTests(unittest.TestCase):
             path = Path(directory) / "profiles.json"
             path.write_text(json.dumps({"profiles": [{"name": "4U8G"}]}), encoding="utf-8")
             self.assertEqual(["4U8G"], [item["name"] for item in load_profiles(path)])
+
+    def test_load_env_file_accepts_export_and_comments(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "run.env"
+            path.write_text(
+                "# credentials\nexport MODEL_KEY='secret-value'\nEMPTY=\n",
+                encoding="utf-8",
+            )
+            self.assertEqual(
+                {"MODEL_KEY": "secret-value", "EMPTY": ""},
+                load_env_file(path),
+            )
+
+    def test_resolve_tenant_id_falls_back_when_profile_is_stale(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "tenants.json"
+            path.write_text(
+                json.dumps(
+                    {
+                        "tenants": [
+                            {"tenant_id": "tenant-live-a"},
+                            {"tenant_id": "tenant-live-b"},
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            self.assertEqual(
+                "tenant-live-a",
+                _resolve_tenant_id(path, "stress-a"),
+            )
 
     def test_quick_matrix_is_bounded_and_contains_priority(self) -> None:
         self.assertIn("search-priority-blackbox", QUICK_SCENARIOS)
@@ -131,6 +165,21 @@ class ObjectiveSuiteTests(unittest.TestCase):
             self.assertTrue(profile["missing_cases"]["enabled"])
             self.assertEqual(4, profile["concurrent_commit"]["concurrency"])
 
+    def test_profile_can_request_real_quick_seed(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "profiles.json"
+            path.write_text(
+                json.dumps({
+                    "profiles": [{
+                        "name": "4U8G",
+                        "quick_include_seed": True,
+                    }]
+                }),
+                encoding="utf-8",
+            )
+            profile = load_profiles(path)[0]
+            self.assertTrue(profile["quick_include_seed"])
+
     def test_recovery_profile_requires_accepted_202(self) -> None:
         profile_path = (
             Path(__file__).parents[1]
@@ -165,6 +214,52 @@ class ObjectiveSuiteTests(unittest.TestCase):
             self.assertEqual(
                 [{"tenant_id": "a", "user_id": "u", "auth_key_env": "", "auth_key": "key-a"}],
                 load_tenants(path),
+            )
+
+    def test_limit_probe_discovers_sessions_from_numeric_tenant_indexes(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            csv_path = root / "run" / "requests.csv"
+            csv_path.parent.mkdir()
+            csv_path.write_text(
+                "tenant,session_id,op,status\n"
+                "0,session-a,open,ok\n"
+                "1,session-b,open,ok\n",
+                encoding="utf-8",
+            )
+            tenants = [
+                {"tenant_id": "tenant-a"},
+                {"tenant_id": "tenant-b"},
+            ]
+            self.assertEqual(
+                {
+                    "tenant-a": "session-a",
+                    "tenant-b": "session-b",
+                },
+                discover_sessions(root, tenants),
+            )
+
+    def test_limit_probe_discovers_sessions_from_tenant_ids(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            csv_path = root / "run" / "requests.csv"
+            csv_path.parent.mkdir()
+            csv_path.write_text(
+                "tenant,session_id,op,status\n"
+                "tenant-a,session-a,open,ok\n"
+                "tenant-b,session-b,open,ok\n",
+                encoding="utf-8",
+            )
+            tenants = [
+                {"tenant_id": "tenant-a"},
+                {"tenant_id": "tenant-b"},
+            ]
+            self.assertEqual(
+                {
+                    "tenant-a": "session-a",
+                    "tenant-b": "session-b",
+                },
+                discover_sessions(root, tenants),
             )
 
     def test_limit_probe_preserves_error_class_and_detail(self) -> None:

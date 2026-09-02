@@ -63,11 +63,41 @@ def load_profiles(path: Path) -> list[dict[str, Any]]:
     return [item for item in profiles if isinstance(item, dict) and item.get("name")]
 
 
+def load_env_file(path: Path) -> dict[str, str]:
+    """Load simple KEY=VALUE exports for nested real-model subprocesses.
+
+    The objective suite launches formal_suite and its probes as child
+    processes.  Server deployments commonly keep model credentials in a
+    Docker env file, so accepting that file here prevents the preflight from
+    seeing a different environment from EchoMem itself.  Values are never
+    written to reports or included in command output.
+    """
+    values: dict[str, str] = {}
+    for raw_line in path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("export "):
+            line = line[7:].lstrip()
+        if "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        key = key.strip()
+        if not key or any(char not in "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_" for char in key):
+            continue
+        value = value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
+            value = value[1:-1]
+        values[key] = value
+    return values
+
+
 def run_command(
     command: list[str],
     *,
     timeout_s: float,
     redact_values: set[str] | None = None,
+    env: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     started = datetime.now(timezone.utc)
     redact_values = redact_values or set()
@@ -85,6 +115,7 @@ def run_command(
             capture_output=True,
             timeout=timeout_s,
             check=False,
+            env=env,
         )
         return {
             "status": "PASS" if completed.returncode == 0 else "FAIL",
@@ -183,6 +214,31 @@ def _resolve_auth_key(
         return direct or os.getenv(env_name, ""), env_name
     except (OSError, IndexError, TypeError):
         return "", ""
+
+
+def _resolve_tenant_id(tenant_config: Path, requested: str) -> str:
+    """Use the configured tenant, or the first real tenant when a profile is stale."""
+    requested = str(requested or "").strip()
+    payload = read_json(tenant_config)
+    entries = payload.get("tenants") or []
+    if not isinstance(entries, list):
+        return requested
+    for item in entries:
+        if not isinstance(item, dict):
+            continue
+        tenant_id = str(
+            item.get("tenant_id") or item.get("id") or item.get("user_id") or ""
+        ).strip()
+        if tenant_id == requested:
+            return tenant_id
+    for item in entries:
+        if isinstance(item, dict):
+            tenant_id = str(
+                item.get("tenant_id") or item.get("id") or item.get("user_id") or ""
+            ).strip()
+            if tenant_id:
+                return tenant_id
+    return requested
 
 
 def _resolve_profile_path(value: str, profiles_path: Path) -> str:
@@ -520,6 +576,9 @@ def _run_configured_probes(
     recovery = profile.get("commit_recovery")
     if isinstance(recovery, dict) and tenant_path.is_file():
         output = profile_dir / "commit-recovery.json"
+        recovery_tenant = _resolve_tenant_id(
+            tenant_path, str(recovery.get("tenant") or "")
+        )
         command = [
             sys.executable,
             "-m",
@@ -533,8 +592,9 @@ def _run_configured_probes(
             "--out",
             str(output),
         ]
+        if recovery_tenant:
+            command += ["--tenant", recovery_tenant]
         for key, flag in (
-            ("tenant", "--tenant"),
             ("kill_delay_s", "--kill-delay-s"),
             ("messages", "--messages"),
             ("content_chars", "--content-chars"),
@@ -921,9 +981,9 @@ def main() -> int:
     parser.add_argument(
         "--quick-barrier-count-cap",
         type=int,
-        default=2,
+        default=32,
         help=(
-            "quick 模式的 barrier Commit 上限，默认 2；这是有界诊断值，不代表完整验收负载。"
+            "quick 模式的 barrier Commit 上限，默认 32；低于该值不能验收严格优先级。"
             "完整套件请显式传 --barrier-count-cap 0"
         ),
     )
@@ -947,7 +1007,27 @@ def main() -> int:
         default=None,
         help="配合 --skip-run 读取已有 formal suite.json；不重新发送压测请求",
     )
+    parser.add_argument(
+        "--env-file",
+        type=Path,
+        default=None,
+        help=(
+            "加载 KEY=VALUE 环境文件供 formal suite/探针使用；"
+            "适合服务器 Docker env 文件，密钥不会写入报告"
+        ),
+    )
     args = parser.parse_args()
+
+    child_env = dict(os.environ)
+    if args.env_file is not None:
+        try:
+            child_env.update(load_env_file(args.env_file.expanduser().resolve()))
+        except OSError as exc:
+            parser.error(f"无法读取 --env-file: {exc}")
+    # Keep the same environment for every nested runner and probe.  The
+    # target service may already have these variables, but the harness
+    # subprocesses must independently pass the real-model preflight.
+    os.environ.update(child_env)
 
     profiles = load_profiles(args.profiles)
     if args.profile:
@@ -974,7 +1054,9 @@ def main() -> int:
             prepare = str(profile.get("prepare_command") or "").strip()
             if prepare:
                 command_result["prepare"] = run_command(
-                    ["bash", "-lc", prepare], timeout_s=min(args.timeout_s, 900)
+                    ["bash", "-lc", prepare],
+                    timeout_s=min(args.timeout_s, 900),
+                    env=child_env,
                 )
                 if command_result["prepare"]["status"] != "PASS":
                     output_profiles.append({
@@ -1035,11 +1117,17 @@ def main() -> int:
                     ]
                     if args.quick:
                         command += ["--quick-mode"]
-                if args.quick and not args.quick_include_seed:
+                include_quick_seed = bool(
+                    args.quick_include_seed
+                    or profile.get("quick_include_seed")
+                )
+                if args.quick and not include_quick_seed:
                     command += ["--skip-seed", "--seed-sessions-per-tenant", "0"]
                 if bool(profile.get("allow_partial_tenants")):
                     command += ["--allow-partial-tenants"]
-                command_result["run"] = run_command(command, timeout_s=args.timeout_s)
+                command_result["run"] = run_command(
+                    command, timeout_s=args.timeout_s, env=child_env
+                )
                 formal_root = profile_dir / "formal"
                 candidates = []
                 if (formal_root / "suite.json").is_file():
