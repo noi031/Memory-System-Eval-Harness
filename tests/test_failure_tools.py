@@ -162,7 +162,7 @@ class FailureToolTests(unittest.TestCase):
                 "runs": [
                     run("capacity-2", {"0": 2, "1": 2}),
                     run("capacity-4", {"0": 3, "1": 2, "2": 1, "3": 2}),
-                    run("search-priority-blackbox", {"0": 4, "1": 4, "2": 4, "3": 4}),
+                    run("fairness-bounded", {"0": 4, "1": 4, "2": 4, "3": 4}),
                 ],
             }
         )
@@ -171,7 +171,7 @@ class FailureToolTests(unittest.TestCase):
             if item["name"] == "Commit/Search 公平性 Jain"
         )
         self.assertEqual("PASS", fairness["status"])
-        self.assertEqual("search-priority-blackbox", fairness["observed"]["scenario"])
+        self.assertEqual("fairness-bounded", fairness["observed"]["scenario"])
         self.assertEqual(1.0, fairness["observed"]["jain"])
 
     def test_commit_client_includes_idempotency_key(self) -> None:

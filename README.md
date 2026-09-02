@@ -897,7 +897,9 @@ python3 -m performance.objective_suite \
   --out-dir results/objective-suite-custom
 ```
 
-正式数据去掉 `--quick`。O1 的“最大用户量”是压测
+正式数据去掉 `--quick`。O1 只有在“成功容量档位 + 更高一档真实失败/超时/资源边界”
+同时存在时才会判定为 PASS；如果所有已跑档位都成功，报告只给出“至少支持到 N”
+的容量下界并标记 `INCONCLUSIVE`，不会把最后一个成功档位冒充最大用户量。O1 的“最大用户量”是压测
 窗口内完成的容量阶梯上限，不直接等同于业务 DAU；O6 必须额外提供真实 container
 重启和 cursor/message-set 对账配置；O7 必须实际抓到服务端 `/metrics` 四元组。
 O4 会在 `search-priority-blackbox`、`tenant-skew` 等候选负载中选择租户覆盖最完整

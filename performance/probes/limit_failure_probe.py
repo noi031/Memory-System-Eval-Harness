@@ -97,6 +97,23 @@ def error_class(status_code: int | None) -> str:
     return ""
 
 
+def classify_response(status_code: int | None, reason_code: str, detail: str) -> str:
+    """Classify overload responses even when the service uses HTTP 400."""
+    text = f"{reason_code} {detail}".lower()
+    overload_markers = (
+        "too many",
+        "in flight",
+        "rate limit",
+        "queue full",
+        "busy",
+        "overload",
+        "capacity",
+    )
+    if any(marker in text for marker in overload_markers):
+        return "admission_rejected"
+    return error_class(status_code)
+
+
 def quantile(values: list[float], p: float) -> float | None:
     if not values:
         return None
@@ -246,6 +263,9 @@ def request(
                 header_reason_code(response.headers) or response_reason_code(raw)
             )
             row["error_detail"] = response_error_detail(raw)
+            row["error_class"] = classify_response(
+                response.status, row["reason_code"], row["error_detail"]
+            )
             row["body_size"] = len(raw)
             try:
                 payload = json.loads(raw)
@@ -266,6 +286,9 @@ def request(
         )
         row["error"] = f"HTTP {exc.code}"
         row["error_detail"] = response_error_detail(raw)
+        row["error_class"] = classify_response(
+            exc.code, row["reason_code"], row["error_detail"]
+        )
         row["body_size"] = len(raw)
     except Exception as exc:
         row["status_code"] = None
@@ -332,6 +355,9 @@ def commit_request(
                 header_reason_code(response.headers) or response_reason_code(raw)
             )
             row["error_detail"] = response_error_detail(raw)
+            row["error_class"] = classify_response(
+                response.status, row["reason_code"], row["error_detail"]
+            )
             row["body_size"] = len(raw)
     except urllib.error.HTTPError as exc:
         row["status_code"] = exc.code
@@ -343,6 +369,9 @@ def commit_request(
         )
         row["error"] = f"HTTP {exc.code}"
         row["error_detail"] = response_error_detail(raw)
+        row["error_class"] = classify_response(
+            exc.code, row["reason_code"], row["error_detail"]
+        )
         row["body_size"] = len(raw)
     except Exception as exc:
         row["status_code"] = None

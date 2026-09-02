@@ -19,7 +19,7 @@
       },
       "commit_recovery": {
         "container": "echomem-pr449-fresh-4u8g",
-        "tenant": "tenant_deebbe563763",
+        "tenant": "stress-a",
         "kill_delay_s": 0.5,
         "messages": 4,
         "content_chars": 500,

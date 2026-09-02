@@ -116,6 +116,61 @@ class SchedulerAcceptanceTests(unittest.TestCase):
         check = next(item for item in result["checks"] if item["name"] == "DAU / 最大热用户容量")
         self.assertEqual(INCONCLUSIVE, check["status"])
 
+    def test_capacity_success_only_proves_lower_bound(self) -> None:
+        result = evaluate(
+            {
+                "instance_profile": "4U8G",
+                "runs": [{
+                    "scenario": "capacity-4",
+                    "status": "completed",
+                    "summary": {
+                        "metrics": {
+                            "search": {"submitted": 4, "success_rate": 1.0},
+                            "commit": {"submitted": 0},
+                        }
+                    },
+                }],
+            }
+        )
+        check = next(item for item in result["checks"] if item["name"] == "DAU / 最大热用户容量")
+        self.assertEqual(INCONCLUSIVE, check["status"])
+        self.assertEqual(
+            "只有成功容量档位，缺少更高一档真实失败/超时边界；目前只能报告容量下界",
+            check["reason"],
+        )
+
+    def test_capacity_passes_only_with_higher_failed_boundary(self) -> None:
+        result = evaluate(
+            {
+                "instance_profile": "4U8G",
+                "runs": [
+                    {
+                        "scenario": "capacity-4",
+                        "status": "completed",
+                        "summary": {
+                            "metrics": {
+                                "search": {"submitted": 4, "success_rate": 1.0},
+                                "commit": {"submitted": 0},
+                            }
+                        },
+                    },
+                    {
+                        "scenario": "capacity-8",
+                        "status": "completed",
+                        "summary": {
+                            "metrics": {
+                                "search": {"submitted": 8, "success_rate": 0.5},
+                                "commit": {"submitted": 0},
+                            }
+                        },
+                    },
+                ],
+            }
+        )
+        check = next(item for item in result["checks"] if item["name"] == "DAU / 最大热用户容量")
+        self.assertEqual(PASS, check["status"])
+        self.assertEqual([8], check["observed"]["capacity_boundary_levels"])
+
     def test_multi_spec_needs_two_completed_profiles(self) -> None:
         result = evaluate(
             {

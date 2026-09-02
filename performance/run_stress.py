@@ -607,7 +607,16 @@ def _run_all_scenes(
             writes,
             read.get("errors_total", 0),
         )
-        # B 场景尾段立即做写后读一致性检查：write anchors 会被后续场景清空
+        # Reconcile each scene while its successful write candidates are still
+        # scoped to that scene. This covers normal writes and barrier writes
+        # (S/H), and prevents a later workload from hiding a gap.
+        if generator._reconciliation_candidates:
+            reconciliation_data.extend(
+                generator.run_reconciliation(
+                    tenants, max_sessions=args.reconciliation_sessions
+                )
+            )
+        # B 场景尾段立即做写后读一致性检查。
         if scene.scene_id == "B":
             check_records = generator.run_consistency_checks(
                 tenants,
@@ -616,12 +625,6 @@ def _run_all_scenes(
             )
             all_records.extend(check_records)
             consistency = consistency_summary(check_records)
-            # 消息级对账（正确写入 = 重试成功 + 对账通过）：候选在下一个场景前清空
-            reconciliation_data.extend(
-                generator.run_reconciliation(
-                    tenants, max_sessions=args.reconciliation_sessions
-                )
-            )
 
     return {
         "records": all_records,

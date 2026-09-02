@@ -469,6 +469,7 @@ class PreparedWrite:
     content_hashes: list[str]
     anchor: str
     archive_id: str = ""
+    reconciliation_registered: bool = False
 
 
 class LoadGenerator:
@@ -1238,6 +1239,17 @@ class LoadGenerator:
                         extra="barrier",
                     )
                 )
+                if status == "ok" and not prepared_write.reconciliation_registered:
+                    self._reconciliation_candidates.append(
+                        (
+                            prepared_write.tenant_idx,
+                            prepared_write.session_id,
+                            prepared_write.message_ids,
+                            prepared_write.content_hashes,
+                            prepared_write.archive_id,
+                        )
+                    )
+                    prepared_write.reconciliation_registered = True
 
             # Keep status polling concurrent with submission. Serial polling
             # makes independent Commit waits add up to N*timeout.
@@ -1482,9 +1494,12 @@ class LoadGenerator:
         as ``*_available=False`` instead of aborting.
         """
         data: list[dict[str, Any]] = []
-        for tenant_idx, session_id, client_ids, client_hashes, archive_id in (
-            self._reconciliation_candidates[-max_sessions:]
-        ):
+        candidates = self._reconciliation_candidates[-max_sessions:]
+        # Keep reconciliation scoped to the just-finished scene. Without
+        # draining this list, later scenes repeatedly re-read old sessions
+        # and can hide which workload produced a persistence gap.
+        self._reconciliation_candidates = []
+        for tenant_idx, session_id, client_ids, client_hashes, archive_id in candidates:
             client = tenants[tenant_idx].client
             entry: dict[str, Any] = {
                 "tenant_idx": tenant_idx,

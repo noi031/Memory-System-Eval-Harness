@@ -179,6 +179,7 @@ def _capacity(suite: dict[str, Any]) -> dict[str, Any]:
         and str(run.get("scenario")).split("-", 1)[1].isdigit()
     )
     valid_levels = []
+    invalid_levels = []
     hot_user_candidates: list[int] = []
     for run in _suite_runs(suite):
         scenario = str(run.get("scenario") or "")
@@ -197,6 +198,12 @@ def _capacity(suite: dict[str, Any]) -> dict[str, Any]:
                 )
             ):
                 valid_levels.append(int(scenario.split("-", 1)[1]))
+            else:
+                # A completed but unsuccessful higher capacity point is the
+                # boundary evidence needed to claim the previous point as a
+                # maximum.  A successful point by itself only proves a lower
+                # bound.
+                invalid_levels.append(int(scenario.split("-", 1)[1]))
         elif scenario == "tenant-skew" and str(run.get("status")) == "completed":
             submitted = [
                 int((data.get("commit") or {}).get("submitted") or 0)
@@ -205,7 +212,15 @@ def _capacity(suite: dict[str, Any]) -> dict[str, Any]:
             ]
             if submitted:
                 hot_user_candidates.append(max(submitted))
-    status = PASS if profile and valid_levels else INCONCLUSIVE
+    max_valid_level = max(valid_levels, default=None)
+    boundary_levels = [
+        level for level in invalid_levels
+        if max_valid_level is not None and level > max_valid_level
+    ]
+    has_capacity_boundary = bool(
+        profile and max_valid_level is not None and boundary_levels
+    )
+    status = PASS if has_capacity_boundary else INCONCLUSIVE
     return _result(
         "DAU / 最大热用户容量",
         status,
@@ -214,14 +229,20 @@ def _capacity(suite: dict[str, Any]) -> dict[str, Any]:
             "capacity_levels": levels,
             "completed_capacity_levels": completed_levels,
             "valid_capacity_levels": sorted(set(valid_levels)),
-            "max_completed_active_user_proxy": max(valid_levels, default=None),
+            "invalid_capacity_levels": sorted(set(invalid_levels)),
+            "capacity_boundary_levels": sorted(set(boundary_levels)),
+            "max_completed_active_user_proxy": max_valid_level,
             "max_hot_user_proxy": max(hot_user_candidates, default=None),
             "instance_profile": profile,
         },
         (
-            "已记录实际规格、有效容量阶梯和热租户负载；数值是压测代理上限，不直接等于业务 DAU"
+            "已记录实际规格、有效容量阶梯和更高一档失败边界；数值是压测代理上限，不直接等于业务 DAU"
             if status == PASS
-            else "有容量场景，但没有实际完成的容量级别或实例规格证据"
+            else (
+                "只有成功容量档位，缺少更高一档真实失败/超时边界；目前只能报告容量下界"
+                if valid_levels
+                else "有容量场景，但没有实际完成的有效容量级别"
+            )
         ),
     )
 

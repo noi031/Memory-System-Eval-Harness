@@ -19,6 +19,7 @@ from performance.objective_suite import (
 )
 from performance.probes.limit_failure_probe import (
     auth_key,
+    classify_response,
     error_class,
     load_tenants,
     metrics_coverage,
@@ -142,6 +143,14 @@ class ObjectiveSuiteTests(unittest.TestCase):
         self.assertEqual(
             "invalid session",
             response_error_detail(json.dumps({"detail": "invalid session"})),
+        )
+        self.assertEqual(
+            "admission_rejected",
+            classify_response(400, "", "too many recall requests in flight"),
+        )
+        self.assertEqual(
+            "request_or_admission_4xx",
+            classify_response(400, "", "invalid session"),
         )
 
     def test_recovery_objective_requires_idempotency_evidence(self) -> None:
