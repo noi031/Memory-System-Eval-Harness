@@ -7,7 +7,7 @@
       "preflight_config": "/config/config.json",
       "allow_partial_tenants": true,
       "metrics_enabled": true,
-      "quick_include_seed": true,
+      "quick_include_seed": false,
       "capability_probe": {
         "health_path": "/health",
         "metrics_path": "/metrics",

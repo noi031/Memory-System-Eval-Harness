@@ -987,7 +987,12 @@ def main() -> int:
             "完整套件请显式传 --barrier-count-cap 0"
         ),
     )
-    parser.add_argument("--quick-commit-timeout-s", type=float, default=30.0)
+    parser.add_argument(
+        "--quick-commit-timeout-s",
+        type=float,
+        default=30.0,
+        help="quick 模式单个真实 Commit 的最终状态等待上限",
+    )
     parser.add_argument("--quick-commit-max-attempts", type=int, default=1)
     parser.add_argument("--quick-commit-retry-backoff-s", type=float, default=0.0)
     parser.add_argument(

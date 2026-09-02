@@ -172,13 +172,13 @@ class ObjectiveSuiteTests(unittest.TestCase):
                 json.dumps({
                     "profiles": [{
                         "name": "4U8G",
-                        "quick_include_seed": True,
+                        "quick_include_seed": False,
                     }]
                 }),
                 encoding="utf-8",
             )
             profile = load_profiles(path)[0]
-            self.assertTrue(profile["quick_include_seed"])
+            self.assertFalse(profile["quick_include_seed"])
 
     def test_recovery_profile_requires_accepted_202(self) -> None:
         profile_path = (

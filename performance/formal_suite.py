@@ -383,6 +383,12 @@ FOUR_U8G_SCENARIOS.update({
         "capacity-8",
     )
 })
+for _capacity_name in ("capacity-2", "capacity-4", "capacity-8"):
+    # Capacity is a Search-only measurement in quick mode.  Keep this
+    # override on the bounded 4U8G catalog as well as the base catalog;
+    # otherwise the profile replacement loses the explicit zero rate and
+    # run_stress falls back to its default Commit rate.
+    FOUR_U8G_SCENARIOS[_capacity_name]["quick_commit_rpm"] = 0.0
 FOUR_U8G_SCENARIOS["fairness-bounded"] = {
     "label": "四租户均衡 Commit/Search 公平性（短窗口）",
     "tenants": 4,
@@ -779,7 +785,10 @@ def _build_case_command(
     commit_rpm = case.get("commit_rpm")
     if getattr(args, "quick_mode", False) and "quick_commit_rpm" in case:
         commit_rpm = case["quick_commit_rpm"]
-    if commit_rpm:
+    # ``0`` is meaningful in quick capacity cases: it disables background
+    # Commit generation so the capacity probe measures Search only. Passing
+    # no flag would make run_stress fall back to its non-zero default.
+    if commit_rpm is not None:
         cmd += ["--commit-rpm", str(commit_rpm)]
     if args.preflight_config:
         cmd += ["--preflight-config", args.preflight_config]

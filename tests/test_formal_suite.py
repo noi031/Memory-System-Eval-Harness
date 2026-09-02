@@ -10,6 +10,7 @@ from pathlib import Path
 from performance.formal_suite import (
     FOUR_U8G_SCENARIOS,
     SCENARIOS,
+    SCENARIO_PROFILES,
     _build_case_command,
     _build_seed_warmup_command,
     _derive_case_summary,
@@ -355,6 +356,17 @@ class FormalSuiteAdapterTests(unittest.TestCase):
             self.assertEqual("2.0", self._flag_value(command, "--commit-rpm"))
             self.assertEqual("4", self._flag_value(command, "--tenants"))
             self.assertEqual(str(output / "run"), self._flag_value(command, "--out-dir"))
+
+    def test_quick_capacity_explicitly_disables_commit_rate(self) -> None:
+        args = self._args(quick_mode=True)
+        command = _build_case_command(
+            args,
+            SCENARIO_PROFILES["4u8g"]["capacity-2"],
+            Path("/tmp/tenants.json"),
+            Path("/tmp/out"),
+            duration_s=15.0,
+        )
+        self.assertEqual("0.0", self._flag_value(command, "--commit-rpm"))
 
     def test_build_case_command_can_reuse_existing_data_without_seed(self) -> None:
         case = {
