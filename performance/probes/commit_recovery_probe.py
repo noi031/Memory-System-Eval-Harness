@@ -13,6 +13,7 @@ import argparse
 import json
 import os
 import signal
+import shutil
 import subprocess
 import threading
 import time
@@ -22,6 +23,7 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 
 try:
     from ._client import EchoMemHTTP
@@ -42,10 +44,12 @@ def load_tenant(path: Path, tenant_id: str) -> dict[str, str]:
     data = json.loads(path.read_text(encoding="utf-8"))
     for item in data.get("tenants", []):
         if str(item.get("tenant_id")) == tenant_id:
+            direct_key = str(item.get("auth_key") or "").strip()
+            env_name = str(item.get("auth_key_env") or "").strip()
             return {
                 "tenant_id": str(item["tenant_id"]),
                 "user_id": str(item.get("user_id") or f"stress-{tenant_id}"),
-                "auth_key": os.environ.get(str(item.get("auth_key_env") or ""), ""),
+                "auth_key": direct_key or os.environ.get(env_name, ""),
             }
     raise RuntimeError(f"tenant not found: {tenant_id}")
 
@@ -75,25 +79,57 @@ def health(url: str, timeout_s: float) -> dict[str, Any]:
 
 
 def kill_and_start(container: str, restart_wait_s: float) -> dict[str, Any]:
-    killed = subprocess.run(
-        ["docker", "kill", "--signal", "KILL", container],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
+    if shutil.which("docker"):
+        killed = subprocess.run(
+            ["docker", "kill", "--signal", "KILL", container],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    else:
+        # The web runner may have the Docker socket mounted without the CLI.
+        # Use the Engine HTTP API through curl so recovery remains runnable
+        # inside the existing Python 3.11 runner container.
+        encoded = quote(container, safe="")
+        killed = subprocess.run(
+            [
+                "curl", "--silent", "--show-error", "--fail",
+                "--unix-socket", "/var/run/docker.sock",
+                "-X", "POST",
+                f"http://localhost/containers/{encoded}/kill?signal=KILL",
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
     result: dict[str, Any] = {
         "kill_returncode": killed.returncode,
         "kill_stderr": killed.stderr[-2000:],
         "killed_at": now(),
+        "control_backend": "docker-cli" if shutil.which("docker") else "docker-engine-api",
     }
     if killed.returncode != 0:
         return result
-    started = subprocess.run(
-        ["docker", "start", container],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
+    if shutil.which("docker"):
+        started = subprocess.run(
+            ["docker", "start", container],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    else:
+        encoded = quote(container, safe="")
+        started = subprocess.run(
+            [
+                "curl", "--silent", "--show-error", "--fail",
+                "--unix-socket", "/var/run/docker.sock",
+                "-X", "POST",
+                f"http://localhost/containers/{encoded}/start",
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
     result.update(
         {
             "start_returncode": started.returncode,
