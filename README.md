@@ -560,6 +560,14 @@ queued/wait/exec/rejected 四元组。旧报告只有单维 Jain、单一指标�
 伪压测数据。该文件只保留租户名、状态码、耗时和 key 的 SHA-256 前缀，不保存密钥。
 如果部署使用单一本地身份，可显式传入 `--local-auth`。
 
+如果正式套件在场景启动前显示“无法测试”，先看结果目录下的
+`auth-preflight.json`、每个 case 的 `command.json` 和
+`suite_runner.stderr.log`。`command.json` 会记录实际使用的是
+`tenant_config` 还是 `local_auth`，不会再把默认 `auth_mode=provision`
+误认为本轮真的重新创建了租户；HTTP 失败会保留状态码、请求路径和截断后的服务响应，
+便于区分凭据错误（401）、接口错误（4xx）、服务异常（5xx）和网络超时。
+这类前置失败应归为测试环境/配置问题，不能直接判定 EchoMem 功能失败。
+
 - **正式验收套件**（`formal_suite.py`）：以子进程方式逐 case 重跑
   `run_stress.py`（`report6` / `pr421` / `complete` 三档场景目录），把原生产物
   推导成 `acceptance.py` 验收门禁（8 个 gate：search 成功率 / report6 质量 /

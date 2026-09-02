@@ -59,10 +59,10 @@ PR421_ACCEPTANCE_TARGETS: dict[str, Any] = {
         "echomem_lane_rejected_total",
     ],
     "lane_values": [
-        "http_interactive",
-        "http_background",
-        "http_global",
-        "tenant_rate_limit",
+        "recall_engine",
+        "recall_intent_llm",
+        "recall_query_embedding",
+        "recall_rerank",
         "commit",
     ],
     "lane_label_contract": {
@@ -815,7 +815,11 @@ def _derive_case_summary(run_dir: Path, identity_independent: bool) -> dict[str,
                 "missing": [family for family in families if family not in observed],
                 "bounded_label_violations": _bounded_label_violations(metrics_rows),
             }
-            per_tenant_quartets: dict[str, dict[str, Any]] = {}
+            # PR421 deliberately forbids tenant/request labels on scheduler
+            # metrics. Build coverage by the bounded ``lane`` label instead
+            # of requiring a per-tenant quartet.
+            lane_quartets: dict[str, dict[str, bool]] = {}
+            fanout_engines: dict[str, dict[str, bool]] = {}
             for row in metrics_rows:
                 metric_name = str(row.get("metric") or "")
                 family = next(
@@ -827,7 +831,7 @@ def _derive_case_summary(run_dir: Path, identity_independent: bool) -> dict[str,
                     ),
                     None,
                 )
-                if family not in PR421_ACCEPTANCE_TARGETS["lane_metric_families"]:
+                if family is None:
                     continue
                 try:
                     labels = json.loads(row.get("labels") or "{}")
@@ -835,43 +839,39 @@ def _derive_case_summary(run_dir: Path, identity_independent: bool) -> dict[str,
                     labels = {}
                 if not isinstance(labels, dict):
                     continue
-                tenant = labels.get("tenant_id") or labels.get("tenant")
-                if tenant in (None, ""):
-                    continue
-                short = {
-                    "echomem_lane_queued": "queued",
-                    "echomem_lane_wait_seconds": "wait",
-                    "echomem_lane_exec_seconds": "exec",
-                    "echomem_lane_rejected_total": "rejected",
-                }[family]
-                entry = per_tenant_quartets.setdefault(
-                    str(tenant),
-                    {
-                        "queued": False,
-                        "wait": False,
-                        "exec": False,
-                        "rejected": False,
-                        "lanes": set(),
-                        "per_lane": {},
-                    },
-                )
-                entry[short] = True
-                if labels.get("lane") not in (None, ""):
-                    lane = str(labels["lane"])
-                    entry["lanes"].add(lane)
-                    lane_entry = entry["per_lane"].setdefault(
-                        lane,
+                if family in PR421_ACCEPTANCE_TARGETS["lane_metric_families"]:
+                    lane = labels.get("lane")
+                    if lane in (None, ""):
+                        continue
+                    short = {
+                        "echomem_lane_queued": "queued",
+                        "echomem_lane_wait_seconds": "wait",
+                        "echomem_lane_exec_seconds": "exec",
+                        "echomem_lane_rejected_total": "rejected",
+                    }[family]
+                    lane_quartets.setdefault(
+                        str(lane),
                         {
                             "queued": False,
                             "wait": False,
                             "exec": False,
                             "rejected": False,
                         },
+                    )[short] = True
+                elif family in PR421_ACCEPTANCE_TARGETS["fanout_metric_families"]:
+                    engine = labels.get("engine")
+                    if engine in (None, ""):
+                        continue
+                    short = (
+                        "exec"
+                        if family == "echomem_engine_fanout_exec_seconds"
+                        else "skipped"
                     )
-                    lane_entry[short] = True
-            for entry in per_tenant_quartets.values():
-                entry["lanes"] = sorted(entry["lanes"])
-            details["pr421_metric_coverage"]["per_tenant_quartets"] = per_tenant_quartets
+                    fanout_engines.setdefault(
+                        str(engine), {"exec": False, "skipped": False}
+                    )[short] = True
+            details["pr421_metric_coverage"]["lane_quartets"] = lane_quartets
+            details["pr421_metric_coverage"]["fanout_engines"] = fanout_engines
 
     def _percentile(values: list[float], p: float) -> float | None:
         value = percentile(values, p)
@@ -1033,6 +1033,23 @@ def run_case(
     command = _build_case_command(
         args, case, config_path, output, duration_s, barrier_count_cap
     )
+    (output / "command.json").write_text(
+        json.dumps(
+            {
+                "argv": command,
+                "effective_auth_mode": (
+                    "local_auth" if getattr(args, "local_auth_mode", False)
+                    else "tenant_config"
+                ),
+                "tenant_config": str(config_path),
+                "base_url": args.base_url,
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
     if args.reset_command:
         completed_reset = subprocess.run(
             args.reset_command,
@@ -1078,6 +1095,14 @@ def run_case(
         derived["status"] = "TIMEOUT"
     elif completed.returncode != 0:
         derived["status"] = "NO_SUMMARY"
+    if completed.returncode != 0:
+        derived["failure_evidence"] = {
+            "returncode": completed.returncode,
+            "stdout_tail": completed.stdout[-4000:],
+            "stderr_tail": completed.stderr[-8000:],
+            "rows_written": len(rows),
+            "run_dir": str(run_dir.resolve()),
+        }
     (output / "summary.json").write_text(
         json.dumps(derived, ensure_ascii=False, indent=2) + "\n",
         encoding="utf-8",
@@ -1461,6 +1486,7 @@ def main() -> int:
     # Do not infer the wire authentication mode from config.json. A deployment
     # may keep a local workspace config while exposing API-key identities.
     args.local_auth_mode = bool(args.local_auth)
+    args.effective_auth_mode = "local_auth" if args.local_auth else "tenant_config"
     args.local_tenant_id = (
         str(auth_config.get("default_tenant_id") or "local")
         if isinstance(auth_config, dict)

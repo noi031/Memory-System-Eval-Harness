@@ -225,10 +225,10 @@ class SchedulerAcceptanceTests(unittest.TestCase):
 
     def test_observability_accepts_pr421_bounded_lane_and_fanout_evidence(self) -> None:
         lanes = (
-            "http_interactive",
-            "http_background",
-            "http_global",
-            "tenant_rate_limit",
+            "recall_engine",
+            "recall_intent_llm",
+            "recall_query_embedding",
+            "recall_rerank",
             "commit",
         )
         result = evaluate(
@@ -293,6 +293,53 @@ class SchedulerAcceptanceTests(unittest.TestCase):
                             },
                             "fanout_engines": {
                                 "memory": {"exec": True, "skipped": True},
+                            },
+                        }
+                    }
+                },
+                "status": "completed",
+            }]},
+            capability={
+                "checks": [{
+                    "name": "Prometheus B7 metrics",
+                    "present": {},
+                }]
+            },
+        )
+        check = next(
+            item for item in result["checks"]
+            if item["name"] == "分层/分租户调度可观测性"
+        )
+        self.assertEqual(INCONCLUSIVE, check["status"])
+
+    def test_observability_legacy_evidence_with_missing_family_is_inconclusive(self) -> None:
+        lanes = (
+            "http_interactive",
+            "http_background",
+            "http_global",
+            "tenant_rate_limit",
+            "commit",
+        )
+        result = evaluate(
+            {"runs": [{
+                "summary": {
+                    "details": {
+                        "pr421_metric_coverage": {
+                            "missing": ["lane_wait"],
+                            "bounded_label_violations": [],
+                            "per_tenant_quartets": {
+                                tenant: {
+                                    "per_lane": {
+                                        lane: {
+                                            "queued": True,
+                                            "wait": True,
+                                            "exec": True,
+                                            "rejected": True,
+                                        }
+                                        for lane in lanes
+                                    }
+                                }
+                                for tenant in ("a", "b")
                             },
                         }
                     }

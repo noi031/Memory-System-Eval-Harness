@@ -82,6 +82,7 @@ from performance.perf_preflight import (
 from performance.prepare import (
     TenantContext,
     TenantPreparer,
+    _format_prepare_error,
     _query_fragments,
     load_locomo_seed_batches,
     load_tenant_specs,
@@ -2505,6 +2506,25 @@ class TenantSpecsTests(unittest.TestCase):
         self.assertFalse(empty.keys_independent())
         # 非 config 模式（provision 天然独立）
         self.assertTrue(TenantPreparer("http://x").keys_independent())
+
+    def test_tenant_config_is_reported_as_effective_identity_mode(self) -> None:
+        preparer = TenantPreparer(
+            "http://x",
+            auth_mode="provision",
+            tenant_specs=[{"tenant_id": "t1", "auth_key": "key"}],
+        )
+        self.assertEqual("tenant_config", preparer.identity_mode())
+        self.assertEqual("provision", TenantPreparer("http://x").identity_mode())
+
+    def test_prepare_error_keeps_http_status_url_and_bounded_body(self) -> None:
+        error = RuntimeError("request failed")
+        error.echomem_status = 401
+        error.echomem_url = "http://127.0.0.1:8010/api/sessions/open"
+        error.echomem_body = "x" * 1000
+        detail = _format_prepare_error(error)
+        self.assertIn("HTTP 401", detail)
+        self.assertIn("/api/sessions/open", detail)
+        self.assertEqual(500, len(detail.rsplit("body=", 1)[1]))
 
 
 class NewFeatureVerdictTests(unittest.TestCase):

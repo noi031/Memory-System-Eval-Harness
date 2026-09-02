@@ -244,14 +244,35 @@ def _seed_session_flow(
                     f"status={commit.status} error={commit.error}"
                 )
             return texts
-        except Exception:
+        except Exception as exc:
             if attempt == 1:
                 logger.warning(
-                    "种子会话失败，重灌一次 idx=%d session=%d", idx, session_idx,
+                    "种子会话失败，重灌一次 idx=%d session=%d error=%s",
+                    idx,
+                    session_idx,
+                    _format_prepare_error(exc),
                 )
                 continue
-            raise
+            raise RuntimeError(
+                f"seed session failed idx={idx} session={session_idx}: "
+                f"{_format_prepare_error(exc)}"
+            ) from exc
     raise RuntimeError("unreachable")
+
+
+def _format_prepare_error(exc: Exception) -> str:
+    """Render bounded HTTP context for setup failures."""
+    status = getattr(exc, "echomem_status", None)
+    url = str(getattr(exc, "echomem_url", "") or "")
+    body = str(getattr(exc, "echomem_body", "") or "").strip()
+    if status is None:
+        return f"{type(exc).__name__}: {exc}"
+    detail = f"HTTP {status}"
+    if url:
+        detail += f" {url}"
+    if body:
+        detail += f" body={body[:500]}"
+    return detail
 
 
 def seed_tenant(
@@ -501,6 +522,10 @@ class TenantPreparer:
             return True
         keys = [str(spec.get("auth_key") or "") for spec in self.tenant_specs]
         return all(keys) and len(set(keys)) == len(keys)
+
+    def identity_mode(self) -> str:
+        """Return the identity source actually used by this preparer."""
+        return "tenant_config" if self.tenant_specs else self.auth_mode
 
     def cleanup(self) -> None:
         """Delete every tenant this preparer provisioned.

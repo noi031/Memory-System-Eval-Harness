@@ -18,6 +18,14 @@ FAIL = "FAIL"
 INCONCLUSIVE = "INCONCLUSIVE"
 NOT_IMPLEMENTED = "NOT_IMPLEMENTED"
 
+PR421_LANES = {
+    "recall_engine",
+    "recall_intent_llm",
+    "recall_query_embedding",
+    "recall_rerank",
+    "commit",
+}
+
 # Review status is kept separate from measured PR421 gates. A harness item
 # can be resolved while the corresponding EchoMem capability is unavailable.
 PR28_REVIEW_RESOLUTION = [
@@ -180,15 +188,39 @@ def _target_coverage(manifest: dict[str, Any]) -> dict[str, Any]:
         for item in coverages
         for violation in (item.get("bounded_label_violations") or [])
     ]
-    per_tenant_coverage = [
-        item.get("per_tenant_quartets") or {}
+    lane_coverage = [
+        item.get("lane_quartets") or {}
         for item in coverages
-        if isinstance(item.get("per_tenant_quartets"), dict)
+        if isinstance(item.get("lane_quartets"), dict)
     ]
-    tenants_with_quartets = sorted({
+    fanout_coverage = [
+        item.get("fanout_engines") or {}
+        for item in coverages
+        if isinstance(item.get("fanout_engines"), dict)
+    ]
+    expected_lanes = PR421_LANES
+    complete_lanes = sorted({
+        str(lane)
+        for coverage in lane_coverage
+        for lane, quartet in coverage.items()
+        if isinstance(quartet, dict)
+        and all(bool(quartet.get(family)) for family in (
+            "queued", "wait", "exec", "rejected"
+        ))
+    })
+    complete_fanout_engines = sorted({
+        str(engine)
+        for coverage in fanout_coverage
+        for engine, facts in coverage.items()
+        if isinstance(facts, dict)
+        and facts.get("exec") and facts.get("skipped")
+    })
+    # Legacy results used per-tenant labels. Keep them readable, but don't
+    # require that forbidden shape for new PR421 evidence.
+    legacy_tenants = sorted({
         str(tenant)
-        for coverage in per_tenant_coverage
-        for tenant, families in coverage.items()
+        for item in coverages
+        for tenant, families in (item.get("per_tenant_quartets") or {}).items()
         if isinstance(families, dict)
         and all(bool(families.get(family)) for family in (
             "queued", "wait", "exec", "rejected"
@@ -202,7 +234,18 @@ def _target_coverage(manifest: dict[str, Any]) -> dict[str, Any]:
     })
     status = (
         PASS
-        if not missing and not label_violations and len(tenants_with_quartets) >= 2
+        if (
+            not missing
+            and not label_violations
+            and expected_lanes.issubset(set(complete_lanes))
+            and complete_fanout_engines
+        )
+        or (
+            not lane_coverage
+            and not missing
+            and not label_violations
+            and len(legacy_tenants) >= 2
+        )
         else INCONCLUSIVE
     )
     return _result(
@@ -213,16 +256,19 @@ def _target_coverage(manifest: dict[str, Any]) -> dict[str, Any]:
             "present": present,
             "missing": missing,
             "bounded_label_violations": label_violations,
-            "tenants_with_complete_quartets": tenants_with_quartets,
+            "complete_lanes": complete_lanes,
+            "missing_lanes": sorted(expected_lanes - set(complete_lanes)),
+            "complete_fanout_engines": complete_fanout_engines,
+            "legacy_tenants_with_complete_quartets": legacy_tenants,
         },
         evidence="details.pr421_metric_coverage",
         reason=(
-            "全部指标族均有服务端证据，且至少两个租户都有完整四元组"
+            "全部指标族、预期 lane 四元组和 fan-out 均有服务端证据"
             if status == PASS
             else (
                 "指标标签不符合 bounded-label 契约，不能证明服务端 lane/fan-out 行为"
                 if label_violations and not missing
-                else "指标族或每租户四元组覆盖不足，不能证明每层每租户可观测"
+                else "指标族、预期 lane 四元组或 fan-out 覆盖不足，不能证明调度可观测"
             )
         ),
     )

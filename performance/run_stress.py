@@ -414,6 +414,7 @@ def _resolve_args(args: argparse.Namespace) -> dict[str, Any]:
         "seed_dataset_path": seed_dataset_path,
         "commit_tenant_counts": commit_tenant_counts,
         "tenant_specs": tenant_specs,
+        "effective_auth_mode": "tenant_config" if tenant_specs else args.auth_mode,
     }
 
 
@@ -1159,6 +1160,8 @@ def main() -> None:
                 "config": {
                     **vars(args),
                     "auth_key": _redact(args.auth_key),
+                    "effective_auth_mode": preparer.identity_mode(),
+                    "tenant_config_count": len(resolved.get("tenant_specs") or []),
                     "scenario_ids": resolved["scenario_ids"],
                     "concurrency_steps": resolved["concurrency_steps"],
                     "mix_ratios": [f"{r}:{w}" for r, w in resolved["mix_ratios"]],

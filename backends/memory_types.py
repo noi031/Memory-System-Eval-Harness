@@ -217,6 +217,11 @@ class BaseHTTPMemoryClient(ABC):
                     pass
                 finally:
                     e.close()
+                # Preserve bounded diagnostics for callers that write
+                # structured evidence; credentials are never included here.
+                e.echomem_status = e.code
+                e.echomem_url = req.full_url
+                e.echomem_body = body
                 last_err = e
                 self._log.warning(
                     "HTTP %s %s -> %d %s (attempt %d/%d)",

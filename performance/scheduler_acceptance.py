@@ -18,6 +18,21 @@ PASS = "PASS"
 FAIL = "FAIL"
 INCONCLUSIVE = "INCONCLUSIVE"
 
+PR421_LANES = {
+    "recall_engine",
+    "recall_intent_llm",
+    "recall_query_embedding",
+    "recall_rerank",
+    "commit",
+}
+LEGACY_LANES = {
+    "http_interactive",
+    "http_background",
+    "http_global",
+    "tenant_rate_limit",
+    "commit",
+}
+
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -552,10 +567,10 @@ def _observability(capability: dict[str, Any], suite: dict[str, Any]) -> dict[st
     ]
     coverage = [item for item in coverage if isinstance(item, dict)]
     expected_lanes = {
-        "http_interactive",
-        "http_background",
-        "http_global",
-        "tenant_rate_limit",
+        "recall_engine",
+        "recall_intent_llm",
+        "recall_query_embedding",
+        "recall_rerank",
         "commit",
     }
     lane_quartets: dict[str, dict[str, bool]] = {}
@@ -621,7 +636,7 @@ def _observability(capability: dict[str, Any], suite: dict[str, Any]) -> dict[st
     }
     legacy_complete_tenants = [
         tenant for tenant, lanes in legacy_tenant_lanes.items()
-        if expected_lanes.issubset(set(lanes))
+        if LEGACY_LANES.issubset(set(lanes))
     ]
     complete = (
         not missing
@@ -631,6 +646,7 @@ def _observability(capability: dict[str, Any], suite: dict[str, Any]) -> dict[st
         # Accept old artifacts only when they explicitly contain the legacy
         # per-tenant evidence and no bounded-label violation was recorded.
         not lane_quartets
+        and not missing
         and bool(legacy_complete_tenants)
         and not any(item.get("bounded_label_violations") for item in coverage)
     )

@@ -234,6 +234,126 @@ class AcceptanceTests(unittest.TestCase):
         )
         self.assertEqual(INCONCLUSIVE, check["status"])
 
+    def test_bounded_lane_and_fanout_evidence_passes(self):
+        lanes = (
+            "recall_engine",
+            "recall_intent_llm",
+            "recall_query_embedding",
+            "recall_rerank",
+            "commit",
+        )
+        result = evaluate_pr421_acceptance(
+            {
+                "runs": [{
+                    "summary": {
+                        "details": {
+                            "pr421_metric_coverage": {
+                                "present": {
+                                    "echomem_lane_queued": True,
+                                    "echomem_lane_wait_seconds": True,
+                                    "echomem_lane_exec_seconds": True,
+                                    "echomem_lane_rejected_total": True,
+                                    "echomem_engine_fanout_exec_seconds": True,
+                                    "echomem_engine_fanout_skipped_total": True,
+                                },
+                                "missing": [],
+                                "bounded_label_violations": [],
+                                "lane_quartets": {
+                                    lane: {
+                                        "queued": True,
+                                        "wait": True,
+                                        "exec": True,
+                                        "rejected": True,
+                                    }
+                                    for lane in lanes
+                                },
+                                "fanout_engines": {
+                                    "memory": {"exec": True, "skipped": True},
+                                },
+                            }
+                        }
+                    }
+                }]
+            }
+        )
+        check = next(
+            item for item in result["checks"]
+            if item["name"] == "B7 lane/fan-out metrics"
+        )
+        self.assertEqual("PASS", check["status"])
+        self.assertEqual(sorted(lanes), check["observed"]["complete_lanes"])
+        self.assertEqual(["memory"], check["observed"]["complete_fanout_engines"])
+
+    def test_bounded_lane_evidence_without_all_lanes_is_inconclusive(self):
+        result = evaluate_pr421_acceptance(
+            {
+                "runs": [{
+                    "summary": {
+                        "details": {
+                            "pr421_metric_coverage": {
+                                "present": {},
+                                "missing": [],
+                                "bounded_label_violations": [],
+                                "lane_quartets": {
+                                    "commit": {
+                                        "queued": True,
+                                        "wait": True,
+                                        "exec": True,
+                                        "rejected": True,
+                                    }
+                                },
+                                "fanout_engines": {
+                                    "memory": {"exec": True, "skipped": True},
+                                },
+                            }
+                        }
+                    }
+                }]
+            }
+        )
+        check = next(
+            item for item in result["checks"]
+            if item["name"] == "B7 lane/fan-out metrics"
+        )
+        self.assertEqual(INCONCLUSIVE, check["status"])
+        self.assertIn("recall_engine", check["observed"]["missing_lanes"])
+
+    def test_legacy_evidence_with_missing_metric_family_is_inconclusive(self):
+        result = evaluate_pr421_acceptance(
+            {
+                "runs": [{
+                    "summary": {
+                        "details": {
+                            "pr421_metric_coverage": {
+                                "present": {},
+                                "missing": ["echomem_lane_wait_seconds"],
+                                "bounded_label_violations": [],
+                                "per_tenant_quartets": {
+                                    "a": {
+                                        "queued": True,
+                                        "wait": True,
+                                        "exec": True,
+                                        "rejected": True,
+                                    },
+                                    "b": {
+                                        "queued": True,
+                                        "wait": True,
+                                        "exec": True,
+                                        "rejected": True,
+                                    },
+                                },
+                            }
+                        }
+                    }
+                }]
+            }
+        )
+        check = next(
+            item for item in result["checks"]
+            if item["name"] == "B7 lane/fan-out metrics"
+        )
+        self.assertEqual(INCONCLUSIVE, check["status"])
+
     def test_fairness_uses_commit_completion_throughput(self):
         result = evaluate_pr421_acceptance(
             {
