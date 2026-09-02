@@ -89,6 +89,7 @@ class Report6ScenarioTests(unittest.TestCase):
             commit_timeout_s=60.0,
             commit_max_attempts=0,
             commit_retry_backoff_s=0.0,
+            quick_mode=True,
         )
         command = _build_case_command(
             args,
@@ -99,6 +100,32 @@ class Report6ScenarioTests(unittest.TestCase):
             barrier_count_cap=16,
         )
         self.assertIn("--commit-barrier-count", command)
+        self.assertEqual("16", command[command.index("--commit-barrier-count") + 1])
+
+    def test_quick_fairness_uses_more_than_smoke_barrier_cap(self) -> None:
+        args = argparse.Namespace(
+            base_url="http://127.0.0.1:8010",
+            barrier_wave_size=32,
+            local_auth_mode=False,
+            reuse_existing_data=True,
+            preflight_config="",
+            no_server_metrics=False,
+            commit_timeout_s=60.0,
+            commit_max_attempts=0,
+            commit_retry_backoff_s=0.0,
+            quick_mode=True,
+        )
+        command = _build_case_command(
+            args,
+            {
+                **SCENARIOS["search-priority-blackbox"],
+                "quick_barrier_count_cap": 16,
+            },
+            Path("/tmp/tenants.json"),
+            Path("/tmp/out"),
+            30.0,
+            barrier_count_cap=2,
+        )
         self.assertEqual("16", command[command.index("--commit-barrier-count") + 1])
 
     def test_histogram_samples_count_as_metric_family_coverage(self) -> None:

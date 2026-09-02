@@ -927,7 +927,10 @@ PR397 的写后可见性/持久化对账、Commit 状态机、冷暖 Search，�
 `suite_path`，然后执行 `objective_suite.py --skip-run`；该模式只读取
 `suite.json` 和已有探针制品。
 
-快速运行仍显示 `INCONCLUSIVE` 的常见原因不是 EchoMem 一定失败：
+quick 模式默认把容量场景的 Commit 负载设为 0，避免容量测量被后台写入拖住；
+`fairness-bounded`、`search-priority-blackbox`、`saturation` 等需要真实竞争样本的
+场景会使用各自的有界 barrier 上限（当前为 16），不会被全局诊断上限 2 截断。
+这仍是快速诊断，不替代正式长窗口验收。快速运行仍显示 `INCONCLUSIVE` 的常见原因不是 EchoMem 一定失败：
 
 | 目标 | 还需要的真实证据 | 归属 |
 |---|---|---|

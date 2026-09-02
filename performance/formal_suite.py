@@ -17,6 +17,9 @@ import signal
 import statistics
 import subprocess
 import sys
+import time
+import urllib.error
+import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -117,6 +120,7 @@ SCENARIOS: dict[str, dict[str, Any]] = {
         "commit_barrier_count": 160,
         "commit_tenant_distribution": "zipf",
         "commit_zipf_exponent": 2.0,
+        "quick_barrier_count_cap": 16,
         "sessions_per_tenant": 40,
         "messages_per_session": 3,
     },
@@ -129,6 +133,7 @@ SCENARIOS: dict[str, dict[str, Any]] = {
         "commit_barrier": True,
         "commit_barrier_count": 128,
         "commit_tenant_distribution": "uniform",
+        "quick_barrier_count_cap": 16,
         "sessions_per_tenant": 32,
         "messages_per_session": 3,
     },
@@ -203,6 +208,7 @@ SCENARIOS: dict[str, dict[str, Any]] = {
         "commit_barrier": True,
         "commit_barrier_count": 128,
         "commit_tenant_distribution": "uniform",
+        "quick_barrier_count_cap": 16,
         "sessions_per_tenant": 32,
         "messages_per_session": 3,
         "blackbox_search_priority": True,
@@ -386,6 +392,7 @@ FOUR_U8G_SCENARIOS["fairness-bounded"] = {
     "sessions_per_tenant": 8,
     "messages_per_session": 1,
     "fairness_bounded": True,
+    "quick_barrier_count_cap": 16,
 }
 SCENARIO_PROFILES["4u8g"] = FOUR_U8G_SCENARIOS
 
@@ -501,6 +508,38 @@ def run_case_process(
             subprocess.CompletedProcess(command, 124, stdout, stderr),
             True,
         )
+
+
+def wait_for_service(
+    base_url: str,
+    *,
+    timeout_s: float,
+    poll_s: float = 2.0,
+) -> tuple[bool, str]:
+    """Wait for the target to become healthy before starting a case.
+
+    A previous case may intentionally restart the service (for example after
+    a burst or a deployment supervisor action).  Launching the next runner
+    immediately turns that expected recovery window into a misleading
+    harness/environment failure, so the suite records the wait separately.
+    """
+    deadline = time.monotonic() + max(0.0, timeout_s)
+    last_error = ""
+    while True:
+        try:
+            request = urllib.request.Request(
+                base_url.rstrip("/") + "/health",
+                headers={"Accept": "application/json"},
+            )
+            with urllib.request.urlopen(request, timeout=5.0) as response:
+                if 200 <= response.status < 300:
+                    return True, ""
+                last_error = f"HTTP {response.status}"
+        except (OSError, urllib.error.URLError, TimeoutError) as exc:
+            last_error = f"{type(exc).__name__}: {exc}"
+        if time.monotonic() >= deadline:
+            return False, last_error
+        time.sleep(max(0.1, poll_s))
 
 
 def _read_requests_csv(path: Path) -> list[dict[str, str]]:
@@ -683,12 +722,19 @@ def _build_case_command(
         cmd += ["--commit-rpm", str(commit_rpm)]
     if args.preflight_config:
         cmd += ["--preflight-config", args.preflight_config]
+    if getattr(args, "search_queries", ""):
+        cmd += ["--search-queries", str(args.search_queries)]
     if args.no_server_metrics:
         cmd += ["--no-metrics"]
     if case.get("commit_barrier"):
         barrier_count = int(case.get("commit_barrier_count", 32))
-        if barrier_count_cap > 0:
-            barrier_count = min(barrier_count, barrier_count_cap)
+        effective_barrier_cap = barrier_count_cap
+        if getattr(args, "quick_mode", False):
+            scenario_cap = int(case.get("quick_barrier_count_cap") or 0)
+            if scenario_cap > 0:
+                effective_barrier_cap = scenario_cap
+        if effective_barrier_cap > 0:
+            barrier_count = min(barrier_count, effective_barrier_cap)
         # 洪峰窗口（report6 D：waves 为 1 且存在 burst 窗口）→ D 场景。
         if case.get("commit_burst_window_s") and not (case.get("commit_barrier_waves") or 1) > 1:
             cmd += [
@@ -715,9 +761,9 @@ def _build_case_command(
                 cmd += ["--commit-zipf-exponent", str(case["commit_zipf_exponent"])]
             if case.get("commit_tenant_counts"):
                 counts = list(map(int, case["commit_tenant_counts"]))
-                if barrier_count_cap > 0:
+                if effective_barrier_cap > 0:
                     counts = _scale_explicit_tenant_counts(
-                        counts, barrier_count_cap
+                        counts, effective_barrier_cap
                     )
                 cmd += ["--commit-tenant-counts", ",".join(map(str, counts))]
     else:
@@ -1073,6 +1119,47 @@ def run_case(
 ) -> dict[str, Any]:
     output = case_root / scenario / f"repeat-{repetition:02d}" / policy
     output.mkdir(parents=True, exist_ok=True)
+    recovery_timeout_s = float(
+        getattr(args, "inter_case_recovery_timeout_s", 0.0) or 0.0
+    )
+    if recovery_timeout_s > 0:
+        healthy, health_error = wait_for_service(
+            args.base_url,
+            timeout_s=recovery_timeout_s,
+            poll_s=float(getattr(args, "health_poll_s", 2.0) or 2.0),
+        )
+        (output / "pre_case_health.json").write_text(
+            json.dumps(
+                {
+                    "healthy": healthy,
+                    "timeout_s": recovery_timeout_s,
+                    "error": health_error,
+                    "checked_at": now_iso(),
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        if not healthy:
+            return {
+                "scenario": scenario,
+                "scenario_label": case["label"],
+                "repetition": repetition,
+                "policy": policy,
+                "status": "ENV_ERROR",
+                "runner_returncode": 125,
+                "duration_s": float(case["duration_s"]),
+                "case_timeout_s": float(args.case_timeout_s or 0),
+                "output_dir": str(output.resolve()),
+                "summary": {},
+                "failure_evidence": {
+                    "phase": "pre_case_health",
+                    "error": health_error,
+                    "recovery_timeout_s": recovery_timeout_s,
+                },
+            }
     duration_s = case["duration_s"]
     if args.duration_cap_s > 0:
         duration_s = min(float(duration_s), args.duration_cap_s)
@@ -1433,6 +1520,23 @@ def main() -> int:
     parser.add_argument("--reset-command", default="", help="Optional command run before every case")
     parser.add_argument("--no-server-metrics", action="store_true")
     parser.add_argument(
+        "--search-queries",
+        default=os.getenv("ECHOMEM_SEARCH_QUERIES", ""),
+        help="skip-seed 时使用已有记忆的真实查询词，逗号分隔；未提供则记录 fallback",
+    )
+    parser.add_argument(
+        "--inter-case-recovery-timeout-s",
+        type=float,
+        default=90.0,
+        help="每个场景开始前等待 EchoMem /health 恢复的最长时间",
+    )
+    parser.add_argument(
+        "--health-poll-s",
+        type=float,
+        default=2.0,
+        help="场景间健康检查轮询间隔",
+    )
+    parser.add_argument(
         "--reuse-existing-data",
         action="store_true",
         help="复用 tenant-config 对应租户的已有记忆，不重复注入真实模型",
@@ -1505,6 +1609,10 @@ def main() -> int:
         parser.error("--case-timeout-s must not be negative")
     if args.barrier_wave_size < 1:
         parser.error("--barrier-wave-size must be >= 1")
+    if args.inter_case_recovery_timeout_s < 0:
+        parser.error("--inter-case-recovery-timeout-s must not be negative")
+    if args.health_poll_s <= 0:
+        parser.error("--health-poll-s must be > 0")
     if args.seed_sessions_per_tenant is not None and args.seed_sessions_per_tenant < 0:
         parser.error("--seed-sessions-per-tenant must be >= 0")
     if args.profile in {"report6", "4u8g", "complete"} and not args.preflight_config:
@@ -1666,6 +1774,8 @@ def main() -> int:
         "reuse_existing_data": args.reuse_existing_data,
         "skip_seed": args.skip_seed,
         "seed_sessions_per_tenant_override": args.seed_sessions_per_tenant,
+        "search_queries_configured": bool(args.search_queries),
+        "inter_case_recovery_timeout_s": args.inter_case_recovery_timeout_s,
         "client_admission_enabled": False,
         "server_observation_mode": True,
         "runs": [],
