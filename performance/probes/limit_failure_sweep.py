@@ -38,6 +38,10 @@ def main() -> int:
     parser.add_argument("--out-dir", type=Path, required=True)
     parser.add_argument("--levels", default="4,16,64,128,256")
     parser.add_argument("--timeout-s", type=float, default=8.0)
+    parser.add_argument("--search-count", type=int, default=0)
+    parser.add_argument("--commit-count", type=int, default=0)
+    parser.add_argument("--open-count", type=int, default=0)
+    parser.add_argument("--workers", type=int, default=0)
     args = parser.parse_args()
 
     tenants = load_tenants(args.tenant_config)
@@ -50,8 +54,14 @@ def main() -> int:
     rows = []
     for workers in levels:
         # Keep each level bounded while making the arrival burst visible.
-        count = min(512, max(32, workers * 2))
-        for kind, amount in (("search", count), ("commit", count), ("open", count)):
+        effective_workers = args.workers if args.workers > 0 else workers
+        default_count = min(512, max(32, effective_workers * 2))
+        counts = {
+            "search": args.search_count if args.search_count > 0 else default_count,
+            "commit": args.commit_count if args.commit_count > 0 else default_count,
+            "open": args.open_count if args.open_count > 0 else default_count,
+        }
+        for kind in ("search", "commit", "open"):
             path = "/api/retrieval/search" if kind == "search" else "/api/sessions/open"
             if kind == "commit":
                 path = "/commit"
@@ -60,8 +70,8 @@ def main() -> int:
                 tenants,
                 sessions,
                 kind=kind,
-                count=amount,
-                workers=workers,
+                count=counts[kind],
+                workers=effective_workers,
                 timeout_s=args.timeout_s,
                 path=path,
             )
@@ -88,6 +98,12 @@ def main() -> int:
         "base_url": args.base_url,
         "tenants": [item["tenant_id"] for item in tenants],
         "workers_levels": levels,
+        "worker_override": args.workers or None,
+        "counts": {
+            "search": args.search_count or "auto",
+            "commit": args.commit_count or "auto",
+            "open": args.open_count or "auto",
+        },
         "timeout_s": args.timeout_s,
         "client_admission": False,
         "recovery_probe": "16 Search requests at 4 workers after the sweep",

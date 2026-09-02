@@ -113,6 +113,19 @@ def read_json(path: Path) -> dict[str, Any]:
         return {}
 
 
+def _preserve_probe_status(
+    execution: dict[str, Any],
+    payload: dict[str, Any],
+) -> dict[str, Any]:
+    """Keep probe-level INCONCLUSIVE/NOT_IMPLEMENTED distinct from process failure."""
+    if (
+        execution.get("status") == "FAIL"
+        and payload.get("status") in {"INCONCLUSIVE", "NOT_IMPLEMENTED"}
+    ):
+        execution["status"] = payload["status"]
+    return execution
+
+
 def _first_completed_commit_csv(formal_root: Path) -> tuple[Path, str] | None:
     candidates = sorted(formal_root.glob("**/commit_results.csv"))
     for path in candidates:
@@ -340,6 +353,7 @@ def _run_configured_probes(
         )
         commands["capability_probe"] = execution
         payload = read_json(output)
+        _preserve_probe_status(execution, payload)
         if payload:
             artifacts["capability_probe"] = {**payload, "path": str(output)}
 
@@ -416,6 +430,7 @@ def _run_configured_probes(
         execution = run_command(command, timeout_s=min(timeout_s, 900), redact_values=redact)
         commands["commit_recovery"] = execution
         payload = read_json(output)
+        _preserve_probe_status(execution, payload)
         if payload:
             artifacts["commit_recovery"] = {**payload, "path": str(output)}
 
@@ -448,6 +463,7 @@ def _run_configured_probes(
         execution = run_command(command, timeout_s=min(timeout_s, 900), redact_values=redact)
         commands["fault_suite"] = execution
         payload = read_json(output_dir / "fault-suite.json")
+        _preserve_probe_status(execution, payload)
         if payload:
             artifacts["fault_suite"] = {
                 **payload,

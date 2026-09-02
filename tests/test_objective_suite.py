@@ -11,6 +11,7 @@ from performance.objective_suite import (
     _resolve_auth_key,
     _acquire_output_lock,
     _materialize_fault_plan,
+    _preserve_probe_status,
     load_profiles,
     objective_statuses,
     run_command,
@@ -92,6 +93,20 @@ class ObjectiveSuiteTests(unittest.TestCase):
         self.assertEqual(
             "INCONCLUSIVE",
             next(item["status"] for item in objectives if item["id"] == "O2"),
+        )
+
+    def test_probe_inconclusive_is_not_reported_as_process_failure(self) -> None:
+        execution = {"status": "FAIL", "returncode": 2}
+        self.assertEqual(
+            "INCONCLUSIVE",
+            _preserve_probe_status(execution, {"status": "INCONCLUSIVE"})["status"],
+        )
+
+    def test_probe_pass_failure_status_is_preserved(self) -> None:
+        execution = {"status": "FAIL", "returncode": 2}
+        self.assertEqual(
+            "FAIL",
+            _preserve_probe_status(execution, {"status": "PASS"})["status"],
         )
 
     def test_recovery_objective_requires_idempotency_evidence(self) -> None:
