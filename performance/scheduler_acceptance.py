@@ -176,7 +176,7 @@ def _fairness(suite: dict[str, Any]) -> dict[str, Any]:
     acceptance = suite.get("acceptance") if isinstance(suite.get("acceptance"), dict) else {}
     checks = acceptance.get("checks") if isinstance(acceptance.get("checks"), list) else []
     check = next((item for item in checks if item.get("name") == "Tenant fairness (Jain)"), None)
-    if not isinstance(check, dict):
+    if not isinstance(check, dict) or check.get("observed") in (None, ""):
         counts: dict[str, int] = {}
         run_count = 0
         for run in _suite_runs(suite):
@@ -297,7 +297,19 @@ def _recovery(recovery: dict[str, Any]) -> dict[str, Any]:
         rate = float(replay_rate)
     except (TypeError, ValueError):
         rate = None
-    passed = status == PASS and (rate is None or rate >= 1.0) and recovery.get("recovered") is not False
+    cursor = recovery.get("cursor_reconciliation")
+    cursor_proven = isinstance(cursor, dict) and str(cursor.get("status")) == PASS
+    message_set_proven = bool(
+        recovery.get("message_set_reconciled")
+        or recovery.get("replay_verified")
+        or recovery.get("replay_rate") is not None
+    )
+    passed = (
+        status == PASS
+        and (rate is None or rate >= 1.0)
+        and recovery.get("recovered") is not False
+        and (cursor_proven or message_set_proven)
+    )
     return _result(
         "Commit kill-9 恢复与重放",
         PASS if passed else status if status in {FAIL, INCONCLUSIVE} else FAIL,
