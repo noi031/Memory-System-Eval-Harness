@@ -13,6 +13,7 @@ import argparse
 import json
 import os
 import signal
+import socket
 import shutil
 import subprocess
 import threading
@@ -78,6 +79,34 @@ def health(url: str, timeout_s: float) -> dict[str, Any]:
         }
 
 
+def _docker_engine_post(path: str) -> tuple[int, str]:
+    """POST to the mounted Docker Engine socket using only the stdlib."""
+    request = (
+        f"POST {path} HTTP/1.1\r\n"
+        "Host: localhost\r\n"
+        "Content-Length: 0\r\n"
+        "Connection: close\r\n\r\n"
+    ).encode("ascii")
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
+            client.settimeout(15.0)
+            client.connect("/var/run/docker.sock")
+            client.sendall(request)
+            response = b""
+            while True:
+                chunk = client.recv(65536)
+                if not chunk:
+                    break
+                response += chunk
+        status_line = response.split(b"\r\n", 1)[0].decode(
+            "ascii", errors="replace"
+        )
+        code = int(status_line.split()[1])
+        return code, "" if 200 <= code < 300 else status_line
+    except (OSError, ValueError, IndexError) as exc:
+        return 0, f"{type(exc).__name__}: {exc}"
+
+
 def kill_and_start(container: str, restart_wait_s: float) -> dict[str, Any]:
     if shutil.which("docker"):
         killed = subprocess.run(
@@ -88,27 +117,26 @@ def kill_and_start(container: str, restart_wait_s: float) -> dict[str, Any]:
         )
     else:
         # The web runner may have the Docker socket mounted without the CLI.
-        # Use the Engine HTTP API through curl so recovery remains runnable
-        # inside the existing Python 3.11 runner container.
+        # Use the Engine HTTP API directly so recovery needs no extra binary.
         encoded = quote(container, safe="")
-        killed = subprocess.run(
-            [
-                "curl", "--silent", "--show-error", "--fail",
-                "--unix-socket", "/var/run/docker.sock",
-                "-X", "POST",
-                f"http://localhost/containers/{encoded}/kill?signal=KILL",
-            ],
-            capture_output=True,
-            text=True,
-            check=False,
+        kill_code, kill_error = _docker_engine_post(
+            f"/containers/{encoded}/kill?signal=KILL"
         )
     result: dict[str, Any] = {
-        "kill_returncode": killed.returncode,
-        "kill_stderr": killed.stderr[-2000:],
+        "kill_returncode": (
+            killed.returncode
+            if shutil.which("docker")
+            else (0 if 200 <= kill_code < 300 else 1)
+        ),
+        "kill_stderr": (
+            killed.stderr[-2000:]
+            if shutil.which("docker")
+            else kill_error[-2000:]
+        ),
         "killed_at": now(),
         "control_backend": "docker-cli" if shutil.which("docker") else "docker-engine-api",
     }
-    if killed.returncode != 0:
+    if result["kill_returncode"] != 0:
         return result
     if shutil.which("docker"):
         started = subprocess.run(
@@ -119,21 +147,21 @@ def kill_and_start(container: str, restart_wait_s: float) -> dict[str, Any]:
         )
     else:
         encoded = quote(container, safe="")
-        started = subprocess.run(
-            [
-                "curl", "--silent", "--show-error", "--fail",
-                "--unix-socket", "/var/run/docker.sock",
-                "-X", "POST",
-                f"http://localhost/containers/{encoded}/start",
-            ],
-            capture_output=True,
-            text=True,
-            check=False,
+        start_code, start_error = _docker_engine_post(
+            f"/containers/{encoded}/start"
         )
     result.update(
         {
-            "start_returncode": started.returncode,
-            "start_stderr": started.stderr[-2000:],
+            "start_returncode": (
+                started.returncode
+                if shutil.which("docker")
+                else (0 if 200 <= start_code < 300 else 1)
+            ),
+            "start_stderr": (
+                started.stderr[-2000:]
+                if shutil.which("docker")
+                else start_error[-2000:]
+            ),
             "restart_at": now(),
         }
     )
