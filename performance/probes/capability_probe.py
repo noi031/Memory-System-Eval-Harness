@@ -38,6 +38,7 @@ def request(
     auth_key: str = "",
     auth_header: str = "X-Auth-Key",
     timeout_s: float = 10.0,
+    preserve_raw: bool = False,
 ) -> dict[str, Any]:
     headers = {"Accept": "application/json"}
     if body is not None:
@@ -57,7 +58,7 @@ def request(
             try:
                 payload: Any = json.loads(raw) if raw else {}
             except json.JSONDecodeError:
-                payload = {"raw": raw[-4000:]}
+                payload = {"raw": raw if preserve_raw else raw[-4000:]}
             return {
                 "status_code": response.status,
                 "elapsed_s": time.monotonic() - started,
@@ -69,7 +70,7 @@ def request(
         try:
             payload = json.loads(raw) if raw else {}
         except json.JSONDecodeError:
-            payload = {"raw": raw[-4000:]}
+            payload = {"raw": raw if preserve_raw else raw[-4000:]}
         return {
             "status_code": exc.code,
             "elapsed_s": time.monotonic() - started,
@@ -178,7 +179,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
 
     metric_result = request(
         args.base_url, args.metrics_path, auth_key=auth_key,
-        auth_header=args.auth_header, timeout_s=args.timeout_s,
+        auth_header=args.auth_header, timeout_s=args.timeout_s, preserve_raw=True,
     )
     metric_check = classify_probe("Prometheus B7 metrics", metric_result)
     raw = metric_result.get("payload", {}).get("raw", "") if isinstance(metric_result.get("payload"), dict) else ""

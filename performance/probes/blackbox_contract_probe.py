@@ -37,6 +37,7 @@ def request(
     auth_key: str,
     auth_header: str,
     timeout_s: float,
+    preserve_raw: bool = False,
 ) -> dict[str, Any]:
     started = time.monotonic()
     req = urllib.request.Request(
@@ -51,7 +52,7 @@ def request(
             try:
                 payload: Any = json.loads(raw) if raw else {}
             except json.JSONDecodeError:
-                payload = {"raw": raw[-4000:]}
+                payload = {"raw": raw if preserve_raw else raw[-4000:]}
             return {
                 "status_code": response.status,
                 "elapsed_s": round(time.monotonic() - started, 6),
@@ -62,7 +63,7 @@ def request(
         try:
             payload = json.loads(raw) if raw else {}
         except json.JSONDecodeError:
-            payload = {"raw": raw[-4000:]}
+            payload = {"raw": raw if preserve_raw else raw[-4000:]}
         return {
             "status_code": exc.code,
             "elapsed_s": round(time.monotonic() - started, 6),
@@ -178,6 +179,7 @@ def probe(args: argparse.Namespace) -> dict[str, Any]:
         auth_key=args.auth_key,
         auth_header=args.auth_header,
         timeout_s=args.timeout_s,
+        preserve_raw=True,
     )
     metric = classify("metrics", metrics)
     metric_text = ""
