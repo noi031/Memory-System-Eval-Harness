@@ -540,6 +540,12 @@ python -m performance.scheduler_acceptance \
 缺少故障控制、重启控制或多规格实测时，报告保留 `INCONCLUSIVE`，不会
 根据客户端延迟或 HTTP 200 推断 EchoMem 已实现对应保证。
 
+恢复对账必须使用 EchoMem `POST /messages` 返回的服务端消息 `id`（例如
+`msg_*`）；压测脚本生成的 `recovery-*` 只作为请求关联字段，不能当作持久化
+消息 ID。`Commit` 返回 `completed` 只证明事务到达终态，仍需另外核对
+`history`、archive 和 `echo://sessions/{session}/current/commit_cursor.json`；
+没有显式幂等键时，报告会把“消息已持久化”和“重复提交幂等”分开判定。
+
 - **正式验收套件**（`formal_suite.py`）：以子进程方式逐 case 重跑
   `run_stress.py`（`report6` / `pr421` / `complete` 三档场景目录），把原生产物
   推导成 `acceptance.py` 验收门禁（8 个 gate：search 成功率 / report6 质量 /
