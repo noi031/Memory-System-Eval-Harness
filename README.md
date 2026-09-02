@@ -948,6 +948,9 @@ PR397 的写后可见性/持久化对账、Commit 状态机、冷暖 Search，�
 `suite.json` 和已有探针制品。
 
 quick 模式默认把容量场景的 Commit 负载设为 0，避免容量测量被后台写入拖住；
+容量场景的 `K` 负载在 `commit-rpm=0` 时严格只启动 Search worker，不会因为
+默认的读写线程拆分而偷偷发起 Commit；这保证容量档位测的是活跃用户的 Search
+边界，而不是异步 Commit 的完成时间。
 `fairness-bounded`、`search-priority-blackbox`、`saturation` 等需要真实竞争样本的
 场景会使用有界 barrier 上限（默认 32 个 Commit）；少于 32 个只能报告
 `INCONCLUSIVE`，不能验收严格 Search 优先级。quick 模式如果打开真实模型灌种，
@@ -964,6 +967,10 @@ quick 模式默认把容量场景的 Commit 负载设为 0，避免容量测量�
 | O5 | `search-priority-blackbox` 中同时存在 Commit 洪泛和 Search P95 | 测试平台场景，服务端负责实际调度 |
 | O6 | 202 Commit、真实 kill/restart、history/archive/cursor/幂等重放对账 | 部署提供 kill/restart 权限，EchoMem提供既有读接口 |
 | O7 | 每个实际 lane 都采到 queued/wait/exec/rejected 四元组，并有 engine fan-out 的 exec/skipped 证据；不要求把 `tenant_id` 放进指标标签 | EchoMem `/metrics` 暴露 bounded-label 指标，测试平台负责按 lane/fan-out 对账 |
+
+公平性计算还要求被选中的同一负载窗口覆盖所有参与租户：每个租户都必须有
+Search 样本和 Commit 提交样本。缺少某个租户时只报告 `INCONCLUSIVE`，不会把
+没有到达或没有完成的租户从 Jain 分母中删除。
 
 故障计划中的 `${BASE_URL}` 会被替换为 profile 当前地址，并写入运行目录的
 `fault-plan.resolved.json`；不要再把旧服务器端口直接复制到通用示例中。
