@@ -756,6 +756,26 @@ find "$STRESS_OUTPUT_DIR" -name summary.json -type f | sort
 
 最终应确认 `suite.json` 中 25 个场景均有结果；`acceptance.json` 中的
 `PASS`、`FAIL`、`INCONCLUSIVE` 要逐项查看，不能只看总准确率或退出码。
+
+### 七项目标统一自动化入口
+
+使用 `performance/objective_suite.py` 可以按实例规格逐个执行容量、稳定性、
+公平性、Search 优先级、Commit 恢复和 `/metrics` 可观测性检查。真实服务器上先
+把 `performance/instance-profiles.example.json` 复制为实际 profile 配置，并填写
+真实的 `tenant_config`、`preflight_config` 和可选 `prepare_command`：
+
+```bash
+python3 -m performance.objective_suite \
+  --profiles performance/instance-profiles.example.json \
+  --profile 4U8G \
+  --out-dir results/objective-suite-$(date +%Y%m%d_%H%M%S) \
+  --quick
+```
+
+`--quick` 只做 bounded smoke；正式数据去掉 `--quick`。O1 的“最大用户量”是压测
+窗口内完成的容量阶梯上限，不直接等同于业务 DAU；O6 必须额外提供真实 container
+重启和 cursor/message-set 对账配置；O7 必须实际抓到服务端 `/metrics` 四元组。
+报告输出 `objective-suite.json` 和 `objective-suite.html`，不会把缺失证据算成通过。
 报告文件为 `suite.html`，逐请求和资源时序通常位于各场景的 `run/` 目录。
 
 ### 8. 常见问题

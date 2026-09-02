@@ -5,6 +5,7 @@
       "base_url": "http://127.0.0.1:8010",
       "tenant_config": "performance/tenants-32.server.json",
       "preflight_config": "/etc/echomem/4u8g/config.json",
+      "metrics_enabled": true,
       "resource_profile": {
         "cpu": "4 vCPU",
         "memory": "8 GiB"
@@ -16,11 +17,48 @@
       "base_url": "http://127.0.0.1:8010",
       "tenant_config": "performance/tenants-32.server.json",
       "preflight_config": "/etc/echomem/8u16g/config.json",
+      "metrics_enabled": true,
       "resource_profile": {
         "cpu": "8 vCPU",
         "memory": "16 GiB"
       },
       "prepare_command": "/usr/local/bin/echomem-select-profile 8U16G"
+    },
+    {
+      "name": "16U32G",
+      "base_url": "http://127.0.0.1:8010",
+      "tenant_config": "performance/tenants-32.server.json",
+      "preflight_config": "/etc/echomem/16u32g/config.json",
+      "metrics_enabled": true,
+      "resource_profile": {
+        "cpu": "16 vCPU",
+        "memory": "32 GiB"
+      },
+      "prepare_command": "/usr/local/bin/echomem-select-profile 16U32G"
+    },
+    {
+      "name": "32U",
+      "base_url": "http://127.0.0.1:8010",
+      "tenant_config": "performance/tenants-32.server.json",
+      "preflight_config": "/etc/echomem/32u/config.json",
+      "metrics_enabled": true,
+      "resource_profile": {
+        "cpu": "32 vCPU",
+        "memory": "32 GiB"
+      },
+      "prepare_command": "/usr/local/bin/echomem-select-profile 32U"
+    },
+    {
+      "name": "64G",
+      "base_url": "http://127.0.0.1:8010",
+      "tenant_config": "performance/tenants-32.server.json",
+      "preflight_config": "/etc/echomem/64g/config.json",
+      "metrics_enabled": true,
+      "resource_profile": {
+        "cpu": "8 vCPU",
+        "memory": "64 GiB"
+      },
+      "prepare_command": "/usr/local/bin/echomem-select-profile 64G"
     }
   ]
 }

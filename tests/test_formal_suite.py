@@ -63,13 +63,16 @@ class Report6ScenarioTests(unittest.TestCase):
         payload = json.loads(path.read_text(encoding="utf-8"))
         profiles = payload["profiles"]
         self.assertEqual(
-            ["4U8G", "8U16G"],
+            ["4U8G", "8U16G", "16U32G", "32U", "64G"],
             [item["name"] for item in profiles],
         )
         self.assertEqual(
             [
                 ("4 vCPU", "8 GiB"),
                 ("8 vCPU", "16 GiB"),
+                ("16 vCPU", "32 GiB"),
+                ("32 vCPU", "32 GiB"),
+                ("8 vCPU", "64 GiB"),
             ],
             [
                 (item["resource_profile"]["cpu"], item["resource_profile"]["memory"])
