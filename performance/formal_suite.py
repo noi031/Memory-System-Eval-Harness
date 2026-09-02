@@ -527,7 +527,11 @@ def _build_case_command(
     # Barrier 场景会在 run_stress 内部另外准备精确数量的未提交会话。
     # ``sessions_per_tenant`` 只用于 warm-up；将它设置成 barrier 总数会在
     # 正式压测前额外提交数百个真实模型请求，并可能耗尽 case timeout。
-    seed_sessions = int(case.get("sessions_per_tenant", 5))
+    seed_sessions = int(
+        getattr(args, "seed_sessions_per_tenant", None)
+        if getattr(args, "seed_sessions_per_tenant", None) is not None
+        else case.get("sessions_per_tenant", 5)
+    )
     if case.get("commit_barrier"):
         seed_sessions = min(seed_sessions, 4)
     cmd = [
@@ -572,7 +576,7 @@ def _build_case_command(
         ]
     else:
         cmd += ["--tenant-config", str(config_path)]
-    if getattr(args, "reuse_existing_data", False):
+    if getattr(args, "skip_seed", False) or getattr(args, "reuse_existing_data", False):
         cmd += ["--skip-seed"]
     if case.get("search_rps"):
         cmd += ["--mode", "fixed-rps", "--rps", str(case["search_rps"])]
@@ -1296,6 +1300,23 @@ def main() -> int:
         help="复用 tenant-config 对应租户的已有记忆，不重复注入真实模型",
     )
     parser.add_argument(
+        "--skip-seed",
+        action="store_true",
+        help=(
+            "正式套件别名：复用已有租户和记忆，只执行调度/延迟/指标压测；"
+            "不用于证明记忆质量"
+        ),
+    )
+    parser.add_argument(
+        "--seed-sessions-per-tenant",
+        type=int,
+        default=None,
+        help=(
+            "覆盖各场景的灌种 session 数；0 表示不灌种。"
+            "正式记忆质量测试建议保留默认场景值"
+        ),
+    )
+    parser.add_argument(
         "--preflight-config",
         default=os.getenv("ECHOMEM_CONFIG", ""),
         help="EchoMem config.json to validate before the suite starts",
@@ -1326,6 +1347,8 @@ def main() -> int:
         parser.error("--case-timeout-s must not be negative")
     if args.barrier_wave_size < 1:
         parser.error("--barrier-wave-size must be >= 1")
+    if args.seed_sessions_per_tenant is not None and args.seed_sessions_per_tenant < 0:
+        parser.error("--seed-sessions-per-tenant must be >= 0")
     if args.profile in {"report6", "complete"} and not args.preflight_config:
         parser.error(
             f"--profile {args.profile} requires --preflight-config with the actual EchoMem config.json"
@@ -1450,6 +1473,8 @@ def main() -> int:
         "auth_preflight": auth_preflight_result,
         "reset_command": args.reset_command,
         "reuse_existing_data": args.reuse_existing_data,
+        "skip_seed": args.skip_seed,
+        "seed_sessions_per_tenant_override": args.seed_sessions_per_tenant,
         "client_admission_enabled": False,
         "server_observation_mode": True,
         "runs": [],
@@ -1544,6 +1569,8 @@ def main() -> int:
             "policies": list(POLICIES),
             "commit_timeout_s": args.commit_timeout_s,
             "barrier_wave_size": args.barrier_wave_size,
+            "skip_seed": args.skip_seed,
+            "seed_sessions_per_tenant_override": args.seed_sessions_per_tenant,
         },
         "details": {
             "run_count": len(manifest["runs"]),

@@ -186,6 +186,9 @@ class FormalSuiteAdapterTests(unittest.TestCase):
             instance_profile="4U8G",
             preflight_config="",
             no_server_metrics=False,
+            skip_seed=False,
+            reuse_existing_data=False,
+            seed_sessions_per_tenant=None,
         )
         for key, value in overrides.items():
             setattr(args, key, value)
@@ -239,6 +242,40 @@ class FormalSuiteAdapterTests(unittest.TestCase):
                 15.0,
             )
             self.assertIn("--skip-seed", command)
+
+    def test_build_case_command_explicit_skip_seed_without_legacy_alias(self) -> None:
+        case = {
+            "tenants": 4,
+            "search_rps": 8.0,
+            "sessions_per_tenant": 20,
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "out"
+            command = _build_case_command(
+                self._args(skip_seed=True),
+                case,
+                output.parent / "tenants.json",
+                output,
+                15.0,
+            )
+            self.assertIn("--skip-seed", command)
+
+    def test_build_case_command_overrides_seed_session_count(self) -> None:
+        case = {
+            "tenants": 4,
+            "search_rps": 8.0,
+            "sessions_per_tenant": 20,
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "out"
+            command = _build_case_command(
+                self._args(seed_sessions_per_tenant=0),
+                case,
+                output.parent / "tenants.json",
+                output,
+                15.0,
+            )
+            self.assertEqual("0", self._flag_value(command, "--seed-sessions-per-tenant"))
 
     def test_build_case_command_maps_zipf_barrier_to_S(self) -> None:
         case = {
