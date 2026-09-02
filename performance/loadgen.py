@@ -1141,14 +1141,14 @@ class LoadGenerator:
                 for future in futures:
                     future.result()
 
-            for pre in prepared:
-                if not pre.archive_id:
-                    continue
+            def poll_one(prepared_write: PreparedWrite) -> None:
+                if not prepared_write.archive_id:
+                    return
                 started = time.perf_counter()
                 try:
-                    commit = pre.client.poll_commit(
-                        pre.session_id,
-                        pre.archive_id,
+                    commit = prepared_write.client.poll_commit(
+                        prepared_write.session_id,
+                        prepared_write.archive_id,
                         timeout_s=self.commit_poll_timeout_s,
                         poll_interval_s=self.commit_poll_interval_s,
                     )
@@ -1157,62 +1157,49 @@ class LoadGenerator:
                         RequestRecord(
                             scene_key=scene.key,
                             step_conc=scene.per_tenant_conc,
-                            tenant_idx=pre.tenant_idx,
+                            tenant_idx=prepared_write.tenant_idx,
                             op="commit_done",
                             stage_ms=(time.perf_counter() - started) * 1000,
                             status="error",
                             error_type=classify_error(exc),
                             ts_ms=time.time() * 1000,
-                            session_id=pre.session_id,
+                            session_id=prepared_write.session_id,
                             extra="barrier",
                         )
                     )
-                    continue
-                if commit.status == "completed":
-                    records.append(
-                        RequestRecord(
-                            scene_key=scene.key,
-                            step_conc=scene.per_tenant_conc,
-                            tenant_idx=pre.tenant_idx,
-                            op="commit_done",
-                            stage_ms=commit.elapsed_s * 1000,
-                            status="ok",
-                            error_type="",
-                            ts_ms=time.time() * 1000,
-                            session_id=pre.session_id,
-                            extra="barrier",
-                        )
+                    return
+                status = "ok" if commit.status == "completed" else "error"
+                error_type = (
+                    ""
+                    if commit.status == "completed"
+                    else "commit_timeout"
+                    if commit.status == "timeout"
+                    else "commit_failed"
+                )
+                records.append(
+                    RequestRecord(
+                        scene_key=scene.key,
+                        step_conc=scene.per_tenant_conc,
+                        tenant_idx=prepared_write.tenant_idx,
+                        op="commit_done",
+                        stage_ms=commit.elapsed_s * 1000,
+                        status=status,
+                        error_type=error_type,
+                        ts_ms=time.time() * 1000,
+                        session_id=prepared_write.session_id,
+                        extra="barrier",
                     )
-                elif commit.status == "timeout":
-                    records.append(
-                        RequestRecord(
-                            scene_key=scene.key,
-                            step_conc=scene.per_tenant_conc,
-                            tenant_idx=pre.tenant_idx,
-                            op="commit_done",
-                            stage_ms=commit.elapsed_s * 1000,
-                            status="error",
-                            error_type="commit_timeout",
-                            ts_ms=time.time() * 1000,
-                            session_id=pre.session_id,
-                            extra="barrier",
-                        )
-                    )
-                else:
-                    records.append(
-                        RequestRecord(
-                            scene_key=scene.key,
-                            step_conc=scene.per_tenant_conc,
-                            tenant_idx=pre.tenant_idx,
-                            op="commit_done",
-                            stage_ms=commit.elapsed_s * 1000,
-                            status="error",
-                            error_type="commit_failed",
-                            ts_ms=time.time() * 1000,
-                            session_id=pre.session_id,
-                            extra="barrier",
-                        )
-                    )
+                )
+
+            # Keep status polling concurrent with submission. Serial polling
+            # makes independent Commit waits add up to N*timeout.
+            with ThreadPoolExecutor(
+                max_workers=min(len(prepared), 64, self.barrier_wave_size),
+                thread_name_prefix="perf-barrier-poll",
+            ) as pool:
+                futures = [pool.submit(poll_one, pre) for pre in prepared]
+                for future in futures:
+                    future.result()
         finally:
             self._barrier_prep_records = []
         return records

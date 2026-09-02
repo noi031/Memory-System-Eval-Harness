@@ -15,6 +15,7 @@ from performance.objective_suite import (
     run_command,
     render_report,
 )
+from performance.formal_suite import SCENARIOS
 
 
 class ObjectiveSuiteTests(unittest.TestCase):
@@ -32,6 +33,8 @@ class ObjectiveSuiteTests(unittest.TestCase):
         self.assertNotIn("B@1", QUICK_SCENARIOS)
         self.assertNotIn("D@1", QUICK_SCENARIOS)
         self.assertNotIn("soak", QUICK_SCENARIOS)
+        self.assertEqual(0.0, SCENARIOS["capacity-2"]["quick_commit_rpm"])
+        self.assertEqual(0.0, SCENARIOS["capacity-4"]["quick_commit_rpm"])
 
     def test_first_completed_commit_csv_finds_real_artifact(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -144,6 +147,19 @@ class ObjectiveSuiteTests(unittest.TestCase):
                 "http://127.0.0.1:18187/health",
                 payload["recovery"]["health_url"],
             )
+
+    def test_skip_run_can_use_explicit_suite_path(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            suite = root / "suite.json"
+            suite.write_text("{}", encoding="utf-8")
+            profiles = root / "profiles.json"
+            profiles.write_text(
+                json.dumps({"profiles": [{"name": "4U8G"}]}),
+                encoding="utf-8",
+            )
+            self.assertTrue(suite.is_file())
+            self.assertEqual("4U8G", load_profiles(profiles)[0]["name"])
 
     def test_output_lock_rejects_second_writer(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

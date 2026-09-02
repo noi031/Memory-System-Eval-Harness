@@ -160,6 +160,7 @@ SCENARIOS: dict[str, dict[str, Any]] = {
         "duration_s": 180,
         "search_rps": 2.0,
         "commit_rpm": 2.0,
+        "quick_commit_rpm": 0.0,
         "sessions_per_tenant": 2,
         "messages_per_session": 3,
     },
@@ -169,6 +170,7 @@ SCENARIOS: dict[str, dict[str, Any]] = {
         "duration_s": 180,
         "search_rps": 4.0,
         "commit_rpm": 2.0,
+        "quick_commit_rpm": 0.0,
         "sessions_per_tenant": 2,
         "messages_per_session": 3,
     },
@@ -618,8 +620,11 @@ def _build_case_command(
         cmd += ["--skip-seed"]
     if case.get("search_rps"):
         cmd += ["--mode", "fixed-rps", "--rps", str(case["search_rps"])]
-    if case.get("commit_rpm"):
-        cmd += ["--commit-rpm", str(case["commit_rpm"])]
+    commit_rpm = case.get("commit_rpm")
+    if getattr(args, "quick_mode", False) and "quick_commit_rpm" in case:
+        commit_rpm = case["quick_commit_rpm"]
+    if commit_rpm:
+        cmd += ["--commit-rpm", str(commit_rpm)]
     if args.preflight_config:
         cmd += ["--preflight-config", args.preflight_config]
     if args.no_server_metrics:
@@ -1349,6 +1354,11 @@ def main() -> int:
             "正式套件别名：复用已有租户和记忆，只执行调度/延迟/指标压测；"
             "不用于证明记忆质量"
         ),
+    )
+    parser.add_argument(
+        "--quick-mode",
+        action="store_true",
+        help="启用场景定义中的 bounded quick 覆盖（例如容量阶梯不发送后台 Commit）",
     )
     parser.add_argument(
         "--seed-sessions-per-tenant",

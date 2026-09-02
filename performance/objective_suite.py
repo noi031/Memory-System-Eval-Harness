@@ -633,9 +633,9 @@ def main() -> int:
     parser.add_argument(
         "--quick-barrier-count-cap",
         type=int,
-        default=4,
+        default=2,
         help=(
-            "quick 模式的 barrier Commit 上限；这是有界诊断值，不代表完整验收负载。"
+            "quick 模式的 barrier Commit 上限，默认 2；这是有界诊断值，不代表完整验收负载。"
             "完整套件请显式传 --barrier-count-cap 0"
         ),
     )
@@ -648,7 +648,17 @@ def main() -> int:
         help="quick 默认跳过真实模型灌种；打开后保留灌种",
     )
     parser.add_argument("--timeout-s", type=float, default=7200.0)
-    parser.add_argument("--skip-run", action="store_true", help="只根据已有 suite.json 生成总报告")
+    parser.add_argument(
+        "--skip-run",
+        action="store_true",
+        help="只根据已有 suite.json 生成总报告",
+    )
+    parser.add_argument(
+        "--suite-path",
+        type=Path,
+        default=None,
+        help="配合 --skip-run 读取已有 formal suite.json；不重新发送压测请求",
+    )
     args = parser.parse_args()
 
     profiles = load_profiles(args.profiles)
@@ -731,6 +741,8 @@ def main() -> int:
                         "--commit-retry-backoff-s",
                         str(args.quick_commit_retry_backoff_s),
                     ]
+                    if args.quick:
+                        command += ["--quick-mode"]
                 if args.quick and not args.quick_include_seed:
                     command += ["--skip-seed", "--seed-sessions-per-tenant", "0"]
                 command_result["run"] = run_command(command, timeout_s=args.timeout_s)
@@ -743,7 +755,11 @@ def main() -> int:
                     suite_path = candidates[-1]
         else:
             configured_suite = str(
-                profile.get("suite_path") or profile.get("suite") or ""
+                (
+                    args.suite_path
+                    if args.suite_path is not None
+                    else profile.get("suite_path") or profile.get("suite") or ""
+                )
             ).strip()
             if configured_suite:
                 suite_path = Path(configured_suite).expanduser().resolve()

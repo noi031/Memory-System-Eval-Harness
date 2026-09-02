@@ -16,6 +16,7 @@ import json
 import os
 import re
 import tempfile
+import time
 import unittest
 import urllib.error
 from pathlib import Path
@@ -2212,6 +2213,41 @@ class BarrierTests(unittest.TestCase):
         )
         with self.assertRaises(ValueError):
             self._run(scene, 2)
+
+    def test_commit_polling_is_concurrent(self) -> None:
+        class DelayedPollClient(FakeMemClient):
+            def poll_commit(self, session_id, archive_id, **kwargs):
+                time.sleep(0.1)
+                return super().poll_commit(session_id, archive_id, **kwargs)
+
+        scene = SceneRun(
+            "S", 1, 60.0, barrier_commits=4,
+            barrier_distribution="uniform",
+        )
+        gen = LoadGenerator(barrier_wave_size=4)
+        tenants = []
+        for idx in range(4):
+            client = DelayedPollClient()
+            tenants.append(
+                TenantContext(
+                    idx=idx,
+                    tenant_id=f"t{idx}",
+                    user_id=f"u{idx}",
+                    auth_key="k",
+                    client=client,
+                )
+            )
+
+        started = time.perf_counter()
+        records = gen.run_commit_barrier(scene, tenants, messages_per_session=1)
+        elapsed = time.perf_counter() - started
+
+        self.assertEqual(
+            4,
+            sum(1 for record in records if record.op == "commit_done" and record.status == "ok"),
+        )
+        # Four 100 ms polls should remain close to one wave, not four serial waits.
+        self.assertLess(elapsed, 0.30)
 
     def test_explicit_count_sum_mismatch_raises(self) -> None:
         scene = SceneRun(
