@@ -30,7 +30,8 @@ class ObjectiveSuiteTests(unittest.TestCase):
     def test_quick_matrix_is_bounded_and_contains_priority(self) -> None:
         self.assertIn("search-priority-blackbox", QUICK_SCENARIOS)
         self.assertIn("capacity-2", QUICK_SCENARIOS)
-        self.assertIn("tenant-skew", QUICK_SCENARIOS)
+        self.assertIn("fairness-bounded", QUICK_SCENARIOS)
+        self.assertNotIn("tenant-skew", QUICK_SCENARIOS)
         self.assertNotIn("A@1", QUICK_SCENARIOS)
         self.assertNotIn("B@1", QUICK_SCENARIOS)
         self.assertNotIn("D@1", QUICK_SCENARIOS)

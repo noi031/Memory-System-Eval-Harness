@@ -46,7 +46,7 @@ FAIL = "FAIL"
 # every real Commit is polled to completion.  Full acceptance still uses the
 # complete catalog; quick mode is explicitly a smoke/diagnostic run.
 QUICK_SCENARIOS = (
-    "baseline,tenant-skew,search-priority-blackbox,"
+    "baseline,fairness-bounded,search-priority-blackbox,"
     "saturation,capacity-2,capacity-4"
 )
 
