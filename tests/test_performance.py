@@ -550,6 +550,9 @@ class WriteTransactionTests(unittest.TestCase):
         ops = [rec.op for rec in result.records]
         self.assertEqual(ops, ["open"] + ["add"] * 10 + ["commit_submit", "commit_done"])
         self.assertEqual(result.anchor, "PERFTAIL-0-7")
+        self.assertEqual(result.archive_id, "archive-1")
+        self.assertEqual(result.records[-2].archive_id, "archive-1")
+        self.assertEqual(result.records[-1].archive_id, "archive-1")
         self.assertTrue(
             result.records[-1].stage_ms >= 1500.0
         )  # poll_commit elapsed 1.5s
@@ -576,6 +579,7 @@ class WriteTransactionTests(unittest.TestCase):
         _, result = self._run("poll")
         self.assertEqual(result.records[-1].op, "commit_done")
         self.assertEqual(result.records[-1].error_type, "timeout")
+        self.assertEqual(result.records[-1].archive_id, "archive-1")
 
 
 class MonitorAnalyticsTests(unittest.TestCase):

@@ -297,22 +297,31 @@ def _fairness(suite: dict[str, Any]) -> dict[str, Any]:
             "commit-barrier",
             "commit-storm",
         ]
-        selected_scenario = next(
-            (
-                scenario
-                for scenario in candidate_scenarios
-                if any(
-                    isinstance((_run_summary(run).get("metrics") or {}).get("fairness"), dict)
-                    and isinstance(
-                        ((_run_summary(run).get("metrics") or {}).get("fairness") or {}).get(
-                            "commit_completed_per_tenant"
-                        ),
-                        dict,
-                    )
-                    for run in runs_by_scenario.get(scenario, [])
+        # Prefer the workload with the broadest tenant coverage.  A bounded
+        # priority smoke can legitimately finish only two barrier Commits;
+        # selecting it merely because it appears first would make fairness
+        # depend on the quick-mode matrix ordering rather than the evidence.
+        candidates: list[tuple[int, int, str]] = []
+        for priority, scenario in enumerate(candidate_scenarios):
+            tenant_ids: set[str] = set()
+            for run in runs_by_scenario.get(scenario, []):
+                fairness = (_run_summary(run).get("metrics") or {}).get("fairness")
+                per_tenant = (
+                    fairness.get("commit_completed_per_tenant")
+                    if isinstance(fairness, dict)
+                    else None
                 )
-            ),
-            "",
+                if not isinstance(per_tenant, dict):
+                    continue
+                tenant_ids.update(str(key) for key in per_tenant)
+            if tenant_ids:
+                candidates.append(
+                    (len(tenant_ids), -priority, scenario)
+                )
+        selected_scenario = (
+            max(candidates, key=lambda item: (item[0], item[1]))[2]
+            if candidates
+            else ""
         )
         selected_runs = (
             runs_by_scenario.get(selected_scenario, [])
@@ -549,14 +558,28 @@ def _observability(capability: dict[str, Any], suite: dict[str, Any]) -> dict[st
         "tenant_rate_limit",
         "commit",
     }
-    complete_tenant_lanes: dict[str, list[str]] = {}
+    lane_quartets: dict[str, dict[str, bool]] = {}
+    fanout_engines: dict[str, dict[str, bool]] = {}
+    legacy_tenant_lanes: dict[str, list[str]] = {}
     for item in coverage:
+        for lane, quartet in (item.get("lane_quartets") or {}).items():
+            if isinstance(quartet, dict):
+                lane_quartets[str(lane)] = {
+                    key: bool(quartet.get(key))
+                    for key in ("queued", "wait", "exec", "rejected")
+                }
+        for engine, observations in (item.get("fanout_engines") or {}).items():
+            if isinstance(observations, dict):
+                fanout_engines[str(engine)] = {
+                    "exec": bool(observations.get("exec")),
+                    "skipped": bool(observations.get("skipped")),
+                }
         for tenant, data in (item.get("per_tenant_quartets") or {}).items():
             if not isinstance(data, dict):
                 continue
             lane_map = data.get("per_lane") or {}
             if isinstance(lane_map, dict):
-                complete_tenant_lanes[str(tenant)] = sorted(
+                legacy_tenant_lanes[str(tenant)] = sorted(
                     lane for lane, quartet in lane_map.items()
                     if isinstance(quartet, dict)
                     and all(bool(quartet.get(key)) for key in (
@@ -566,34 +589,61 @@ def _observability(capability: dict[str, Any], suite: dict[str, Any]) -> dict[st
             elif all(bool(data.get(key)) for key in (
                 "queued", "wait", "exec", "rejected"
             )):
-                complete_tenant_lanes[str(tenant)] = list(data.get("lanes") or [])
-    tenants_with_all_lanes = sorted(
-        tenant for tenant, lanes in complete_tenant_lanes.items()
-        if expected_lanes.issubset(set(lanes))
+                legacy_tenant_lanes[str(tenant)] = list(data.get("lanes") or [])
+    complete_lanes = sorted(
+        lane for lane, quartet in lane_quartets.items()
+        if all(bool(quartet.get(key)) for key in (
+            "queued", "wait", "exec", "rejected"
+        ))
     )
-    if (missing or len(tenants_with_all_lanes) < 2) and not coverage:
+    missing_lanes = sorted(expected_lanes - set(complete_lanes))
+    complete_fanout_engines = sorted(
+        engine for engine, observations in fanout_engines.items()
+        if observations.get("exec") and observations.get("skipped")
+    )
+    if missing and not coverage:
         return _result(
             "分层/分租户调度可观测性",
             INCONCLUSIVE,
-            "每层每租户 queued/wait/exec/rejected 四类指标",
+            "每个实际 lane 有 queued/wait/exec/rejected 四元组，且有 fan-out 证据",
             {"missing": missing},
             "没有完整的 Prometheus B7 指标覆盖证据",
         )
     observed = {
         "missing": missing,
         "coverage_samples": len(coverage),
-        "complete_tenant_lanes": complete_tenant_lanes,
-        "tenants_with_all_lanes": tenants_with_all_lanes,
+        "lane_quartets": lane_quartets,
+        "complete_lanes": complete_lanes,
+        "missing_lanes": missing_lanes,
+        "fanout_engines": fanout_engines,
+        "complete_fanout_engines": complete_fanout_engines,
+        "legacy_tenant_lanes": legacy_tenant_lanes,
     }
+    legacy_complete_tenants = [
+        tenant for tenant, lanes in legacy_tenant_lanes.items()
+        if expected_lanes.issubset(set(lanes))
+    ]
+    complete = (
+        not missing
+        and not missing_lanes
+        and bool(complete_fanout_engines)
+    ) or (
+        # Accept old artifacts only when they explicitly contain the legacy
+        # per-tenant evidence and no bounded-label violation was recorded.
+        not lane_quartets
+        and bool(legacy_complete_tenants)
+        and not any(item.get("bounded_label_violations") for item in coverage)
+    )
+    observed["legacy_complete_tenants"] = legacy_complete_tenants
     return _result(
         "分层/分租户调度可观测性",
-        PASS if not missing and len(tenants_with_all_lanes) >= 2 else INCONCLUSIVE,
-        "四类指标均存在，且至少两个租户覆盖全部预期 lane",
+        PASS if complete else INCONCLUSIVE,
+        "每个预期 lane 都有 queued/wait/exec/rejected 四元组，且至少一个 engine 有 fan-out 证据",
         observed,
         (
-            "四类 lane 指标均有服务端证据，且至少两个租户覆盖全部预期 lane"
-            if not missing and len(tenants_with_all_lanes) >= 2
-            else "指标族或每租户/每 lane 四元组覆盖不足，不能完整验收"
+            "全部预期 lane 和 fan-out 指标均有真实服务端证据"
+            if complete
+            else "指标族、预期 lane 四元组或 fan-out 覆盖不足，不能完整验收"
         ),
     )
 

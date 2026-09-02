@@ -223,6 +223,95 @@ class SchedulerAcceptanceTests(unittest.TestCase):
         check = next(item for item in result["checks"] if item["name"] == "分层/分租户调度可观测性")
         self.assertEqual(PASS, check["status"])
 
+    def test_observability_accepts_pr421_bounded_lane_and_fanout_evidence(self) -> None:
+        lanes = (
+            "http_interactive",
+            "http_background",
+            "http_global",
+            "tenant_rate_limit",
+            "commit",
+        )
+        result = evaluate(
+            {"runs": [{
+                "summary": {
+                    "details": {
+                        "pr421_metric_coverage": {
+                            "missing": [],
+                            "bounded_label_violations": [],
+                            "lane_quartets": {
+                                lane: {
+                                    "queued": True,
+                                    "wait": True,
+                                    "exec": True,
+                                    "rejected": True,
+                                }
+                                for lane in lanes
+                            },
+                            "fanout_engines": {
+                                "memory": {"exec": True, "skipped": True},
+                            },
+                        }
+                    }
+                },
+                "status": "completed",
+            }]},
+            capability={
+                "checks": [{
+                    "name": "Prometheus B7 metrics",
+                    "present": {
+                        "lane_queued": True,
+                        "lane_wait": True,
+                        "lane_exec": True,
+                        "lane_rejected": True,
+                    },
+                }]
+            },
+        )
+        check = next(
+            item for item in result["checks"]
+            if item["name"] == "分层/分租户调度可观测性"
+        )
+        self.assertEqual(PASS, check["status"])
+        self.assertEqual(sorted(lanes), check["observed"]["complete_lanes"])
+        self.assertEqual(["memory"], check["observed"]["complete_fanout_engines"])
+
+    def test_observability_does_not_pass_partial_bounded_lane_evidence(self) -> None:
+        result = evaluate(
+            {"runs": [{
+                "summary": {
+                    "details": {
+                        "pr421_metric_coverage": {
+                            "missing": [],
+                            "bounded_label_violations": [],
+                            "lane_quartets": {
+                                "commit": {
+                                    "queued": True,
+                                    "wait": True,
+                                    "exec": True,
+                                    "rejected": True,
+                                }
+                            },
+                            "fanout_engines": {
+                                "memory": {"exec": True, "skipped": True},
+                            },
+                        }
+                    }
+                },
+                "status": "completed",
+            }]},
+            capability={
+                "checks": [{
+                    "name": "Prometheus B7 metrics",
+                    "present": {},
+                }]
+            },
+        )
+        check = next(
+            item for item in result["checks"]
+            if item["name"] == "分层/分租户调度可观测性"
+        )
+        self.assertEqual(INCONCLUSIVE, check["status"])
+
     def test_fairness_can_be_derived_from_run_summaries(self) -> None:
         result = evaluate(
             {
@@ -265,6 +354,40 @@ class SchedulerAcceptanceTests(unittest.TestCase):
         )
         self.assertEqual(PASS, check["status"])
         self.assertAlmostEqual(0.9259, check["observed"]["jain"], places=4)
+
+    def test_fairness_prefers_broader_tenant_coverage_over_priority_order(self) -> None:
+        def run(scenario: str, tenants: dict[str, int]) -> dict:
+            return {
+                "scenario": scenario,
+                "status": "completed",
+                "summary": {
+                    "metrics": {
+                        "fairness": {"commit_completed_per_tenant": tenants},
+                        "per_tenant": {
+                            tenant: {
+                                "commit": {"completed": count},
+                                "search": {"latency": {"p95_s": 1.0}},
+                            }
+                            for tenant, count in tenants.items()
+                        },
+                    }
+                },
+            }
+
+        result = evaluate(
+            {
+                "runs": [
+                    run("search-priority-blackbox", {"a": 2, "b": 2}),
+                    run("tenant-skew", {"a": 2, "b": 2, "c": 2, "d": 2}),
+                ]
+            }
+        )
+        check = next(
+            item for item in result["checks"]
+            if item["name"] == "Commit/Search 公平性 Jain"
+        )
+        self.assertEqual(PASS, check["status"])
+        self.assertEqual("tenant-skew", check["observed"]["scenario"])
 
 
 if __name__ == "__main__":

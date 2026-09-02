@@ -8,6 +8,7 @@ from pathlib import Path
 from performance.objective_suite import (
     QUICK_SCENARIOS,
     _first_completed_commit_csv,
+    _resolve_auth_key,
     _acquire_output_lock,
     _materialize_fault_plan,
     load_profiles,
@@ -46,6 +47,38 @@ class ObjectiveSuiteTests(unittest.TestCase):
                 encoding="utf-8",
             )
             self.assertEqual((csv_path, "0"), _first_completed_commit_csv(root))
+
+    def test_resolve_auth_key_follows_numeric_tenant_index(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "tenants.json"
+            path.write_text(
+                json.dumps(
+                    {
+                        "tenants": [
+                            {"tenant_id": "a", "auth_key": "key-a"},
+                            {"tenant_id": "b", "auth_key": "key-b"},
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            self.assertEqual(("key-b", ""), _resolve_auth_key(path, "1"))
+
+    def test_resolve_auth_key_follows_tenant_id(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "tenants.json"
+            path.write_text(
+                json.dumps(
+                    {
+                        "tenants": [
+                            {"tenant_id": "a", "auth_key": "key-a"},
+                            {"tenant_id": "b", "auth_key": "key-b"},
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            self.assertEqual(("key-b", ""), _resolve_auth_key(path, "b"))
 
     def test_missing_evidence_stays_inconclusive(self) -> None:
         objectives = objective_statuses(

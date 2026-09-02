@@ -859,6 +859,9 @@ python3 -m performance.objective_suite \
 正式数据去掉 `--quick`。O1 的“最大用户量”是压测
 窗口内完成的容量阶梯上限，不直接等同于业务 DAU；O6 必须额外提供真实 container
 重启和 cursor/message-set 对账配置；O7 必须实际抓到服务端 `/metrics` 四元组。
+O4 会在 `search-priority-blackbox`、`tenant-skew` 等候选负载中选择租户覆盖最完整
+的一轮计算公平性，避免 quick 模式的小 barrier 结果遮蔽更完整的真实证据；如果
+该轮仍有租户没有 Commit 或 Search 样本，结果仍会保留为 `FAIL` 或 `INCONCLUSIVE`。
 报告输出 `objective-suite.json` 和 `objective-suite.html`，不会把缺失证据算成通过。
 profile 中配置 `capability_probe`、`commit_recovery`、`fault_plan` 后，入口会自动
 执行真实 HTTP 能力探针、Commit 中途 kill-9 恢复探针和故障套件，并把每个检查项写入
@@ -881,7 +884,7 @@ HTML 明细。可从 `performance/instance-profiles.example.json` 与
 | O4 | 同一稳态窗口内至少两个租户同时有 Commit 吞吐和 Search P95 | 测试平台负载与独立租户凭据 |
 | O5 | `search-priority-blackbox` 中同时存在 Commit 洪泛和 Search P95 | 测试平台场景，服务端负责实际调度 |
 | O6 | 202 Commit、真实 kill/restart、history/archive/cursor/幂等重放对账 | 部署提供 kill/restart 权限，EchoMem提供既有读接口 |
-| O7 | 每个租户、每个 lane 都采到 queued/wait/exec/rejected 四元组 | EchoMem `/metrics` 暴露完整指标 |
+| O7 | 每个实际 lane 都采到 queued/wait/exec/rejected 四元组，并有 engine fan-out 的 exec/skipped 证据；不要求把 `tenant_id` 放进指标标签 | EchoMem `/metrics` 暴露 bounded-label 指标，测试平台负责按 lane/fan-out 对账 |
 
 故障计划中的 `${BASE_URL}` 会被替换为 profile 当前地址，并写入运行目录的
 `fault-plan.resolved.json`；不要再把旧服务器端口直接复制到通用示例中。

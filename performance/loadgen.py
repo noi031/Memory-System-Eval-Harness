@@ -394,15 +394,33 @@ def run_write_transaction(
             poll_interval_s=commit_poll_interval_s,
         )
     except Exception as exc:
-        record("commit_done", (time.perf_counter() - started) * 1000, "error", classify_error(exc))
+        record(
+            "commit_done",
+            (time.perf_counter() - started) * 1000,
+            "error",
+            classify_error(exc),
+            archive_id=archive_id,
+        )
         return result
     if commit.status == "completed":
-        record("commit_done", commit.elapsed_s * 1000, "ok")
+        record("commit_done", commit.elapsed_s * 1000, "ok", archive_id=archive_id)
         result.ok = True
     elif commit.status == "timeout":
-        record("commit_done", commit.elapsed_s * 1000, "error", "commit_timeout")
+        record(
+            "commit_done",
+            commit.elapsed_s * 1000,
+            "error",
+            "commit_timeout",
+            archive_id=archive_id,
+        )
     else:
-        record("commit_done", commit.elapsed_s * 1000, "error", "commit_failed")
+        record(
+            "commit_done",
+            commit.elapsed_s * 1000,
+            "error",
+            "commit_failed",
+            archive_id=archive_id,
+        )
     result.anchor = anchor
     result.records = records
     return result
@@ -1124,6 +1142,7 @@ class LoadGenerator:
                         error_type="",
                         ts_ms=time.time() * 1000,
                         session_id=pre.session_id,
+                        archive_id=archive_id,
                         extra="barrier",
                         retry_after_s=None,
                         reason_code="",
@@ -1164,6 +1183,7 @@ class LoadGenerator:
                             error_type=classify_error(exc),
                             ts_ms=time.time() * 1000,
                             session_id=prepared_write.session_id,
+                            archive_id=prepared_write.archive_id,
                             extra="barrier",
                         )
                     )
@@ -1187,6 +1207,7 @@ class LoadGenerator:
                         error_type=error_type,
                         ts_ms=time.time() * 1000,
                         session_id=prepared_write.session_id,
+                        archive_id=prepared_write.archive_id,
                         extra="barrier",
                     )
                 )
