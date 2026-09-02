@@ -203,6 +203,34 @@ class SchedulerAcceptanceTests(unittest.TestCase):
         self.assertEqual(PASS, check["status"])
         self.assertEqual([4], check["observed"]["valid_capacity_levels"])
 
+    def test_capacity_timeout_is_a_boundary_after_real_lower_level(self) -> None:
+        result = evaluate(
+            {
+                "instance_profile": "4U8G",
+                "runs": [
+                    {
+                        "scenario": "capacity-4",
+                        "status": "completed",
+                        "summary": {
+                            "metrics": {
+                                "search": {"submitted": 4, "success_rate": 1.0},
+                            }
+                        },
+                    },
+                    {
+                        "scenario": "capacity-8",
+                        "status": "TIMEOUT",
+                        "runner_returncode": 124,
+                        "case_timeout_s": 120.0,
+                        "summary": {},
+                    },
+                ],
+            }
+        )
+        check = next(item for item in result["checks"] if item["name"] == "DAU / 最大热用户容量")
+        self.assertEqual(PASS, check["status"])
+        self.assertEqual([8], check["observed"]["timeout_capacity_levels"])
+
     def test_multi_spec_needs_two_completed_profiles(self) -> None:
         result = evaluate(
             {

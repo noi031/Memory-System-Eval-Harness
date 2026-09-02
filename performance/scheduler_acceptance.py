@@ -191,12 +191,23 @@ def _capacity(suite: dict[str, Any]) -> dict[str, Any]:
     )
     valid_levels = []
     invalid_levels = []
+    timeout_levels = []
     hot_user_candidates: list[int] = []
     for run in _suite_runs(suite):
         scenario = str(run.get("scenario") or "")
         metrics = (_run_summary(run).get("metrics") or {})
         if scenario.startswith("capacity-"):
+            level_text = scenario.split("-", 1)[1]
+            if not level_text.isdigit():
+                continue
+            level = int(level_text)
             if str(run.get("status")) != "completed":
+                if str(run.get("status") or "").upper() == "TIMEOUT":
+                    # A real load case that exceeded its bounded wall-clock
+                    # budget is a valid capacity-boundary observation.  Other
+                    # failed states may be setup/environment failures and are
+                    # intentionally not treated as a service limit.
+                    timeout_levels.append(level)
                 continue
             search = metrics.get("search") or {}
             # Capacity is the active-user/Search boundary.  Commit flooding
@@ -206,13 +217,13 @@ def _capacity(suite: dict[str, Any]) -> dict[str, Any]:
                 int(search.get("submitted") or 0) > 0
                 and float(search.get("success_rate") or 0) >= 0.99
             ):
-                valid_levels.append(int(scenario.split("-", 1)[1]))
+                valid_levels.append(level)
             else:
                 # A completed but unsuccessful higher capacity point is the
                 # boundary evidence needed to claim the previous point as a
                 # maximum.  A successful point by itself only proves a lower
                 # bound.
-                invalid_levels.append(int(scenario.split("-", 1)[1]))
+                invalid_levels.append(level)
         elif scenario == "tenant-skew" and str(run.get("status")) == "completed":
             submitted = [
                 int((data.get("commit") or {}).get("submitted") or 0)
@@ -226,6 +237,10 @@ def _capacity(suite: dict[str, Any]) -> dict[str, Any]:
         level for level in invalid_levels
         if max_valid_level is not None and level > max_valid_level
     ]
+    boundary_levels.extend(
+        level for level in timeout_levels
+        if max_valid_level is not None and level > max_valid_level
+    )
     has_capacity_boundary = bool(
         profile and max_valid_level is not None and boundary_levels
     )
@@ -239,6 +254,7 @@ def _capacity(suite: dict[str, Any]) -> dict[str, Any]:
             "completed_capacity_levels": completed_levels,
             "valid_capacity_levels": sorted(set(valid_levels)),
             "invalid_capacity_levels": sorted(set(invalid_levels)),
+            "timeout_capacity_levels": sorted(set(timeout_levels)),
             "capacity_boundary_levels": sorted(set(boundary_levels)),
             "max_completed_active_user_proxy": max_valid_level,
             "max_hot_user_proxy": max(hot_user_candidates, default=None),
