@@ -771,7 +771,12 @@ echo $! >"$STRESS_OUTPUT_DIR/launcher.pid"
 服务器没有 Python 依赖时，使用 runner 镜像，并确保工作目录为 `/harness`：
 
 ```bash
+python3 performance/prepare_docker_env.py \
+  /opt/echomem-stress/tenant_keys.env \
+  /opt/echomem-stress/tenant_keys.docker.env
+
 docker run --rm --network host \
+  --env-file /opt/echomem-stress/tenant_keys.docker.env \
   --env-file /opt/echomem-stress/formal-run.env \
   -v /opt/Memory-System-Eval-Harness:/harness \
   -v /opt/echomem-stress:/opt/echomem-stress \
@@ -783,6 +788,9 @@ docker run --rm --network host \
   echomem-stress-runner:latest \
   bash -lc 'export STRESS_CASE_TIMEOUT_S=180; export STRESS_COMMIT_TIMEOUT_S=600; ./performance/run_4u8g_complete.sh'
 ```
+
+`--env-file` 只能接受 `NAME=value`，不能直接传入包含 `export` 的 shell
+文件；上面的转换命令只读取赋值，不执行其中的 shell 代码，也不会打印变量值。
 
 ### 7. 查看进度和结果
 

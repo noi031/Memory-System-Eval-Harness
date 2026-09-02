@@ -64,7 +64,10 @@ def open_session(base_url: str, tenant: Any, *, timeout_s: float) -> dict[str, A
                 ) if isinstance(payload, dict) else "",
             }
     except urllib.error.HTTPError as exc:
-        raw = exc.read().decode("utf-8", errors="replace")
+        try:
+            raw = exc.read().decode("utf-8", errors="replace")
+        except OSError:
+            raw = ""
         reason = ""
         try:
             payload = json.loads(raw) if raw else {}
