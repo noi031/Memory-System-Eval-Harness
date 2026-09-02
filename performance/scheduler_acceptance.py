@@ -199,14 +199,12 @@ def _capacity(suite: dict[str, Any]) -> dict[str, Any]:
             if str(run.get("status")) != "completed":
                 continue
             search = metrics.get("search") or {}
-            commit = metrics.get("commit") or {}
+            # Capacity is the active-user/Search boundary.  Commit flooding
+            # has its own O5 gate and must not invalidate an otherwise healthy
+            # Search capacity point.
             if (
                 int(search.get("submitted") or 0) > 0
                 and float(search.get("success_rate") or 0) >= 0.99
-                and (
-                    int(commit.get("submitted") or 0) == 0
-                    or float(commit.get("success_rate") or 0) >= 0.99
-                )
             ):
                 valid_levels.append(int(scenario.split("-", 1)[1]))
             else:

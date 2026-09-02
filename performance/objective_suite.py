@@ -231,6 +231,7 @@ def _run_limit_failure_sweep(
     profiles_path: Path,
     formal_root: Path,
     timeout_s: float,
+    quick: bool = False,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     """Run an optional real admission sweep after the bounded suite.
 
@@ -253,6 +254,23 @@ def _run_limit_failure_sweep(
     tenant_path = Path(_resolve_profile_path(tenant_value, profiles_path))
     output = profile_dir / "limit-failure-sweep"
     output.mkdir(parents=True, exist_ok=True)
+    levels = str(config.get("levels") or "16,64,128,256")
+    search_count = config.get("search_count")
+    open_count = config.get("open_count")
+    commit_count = config.get("commit_count")
+    workers = config.get("workers")
+    probe_timeout_s = config.get("timeout_s") or 8.0
+    if quick:
+        # Quick objective runs must remain diagnostic and bounded.  The
+        # formal suite already has a small wall-clock cap, but a configured
+        # admission sweep can otherwise reintroduce hundreds of requests per
+        # wave and make the whole run appear stuck.
+        levels = "4,16"
+        search_count = min(int(search_count or 16), 16)
+        open_count = min(int(open_count or 8), 8)
+        commit_count = min(int(commit_count or 8), 8)
+        workers = min(int(workers or 16), 16)
+        probe_timeout_s = min(float(probe_timeout_s), 5.0)
     command = [
         sys.executable,
         "-m",
@@ -264,9 +282,9 @@ def _run_limit_failure_sweep(
         "--out-dir",
         str(output),
         "--levels",
-        str(config.get("levels") or "16,64,128,256"),
+        levels,
         "--timeout-s",
-        str(config.get("timeout_s") or 8.0),
+        str(probe_timeout_s),
     ]
     session_root = str(config.get("session_root") or "").strip()
     if session_root:
@@ -282,8 +300,14 @@ def _run_limit_failure_sweep(
         ("commit_count", "--commit-count"),
         ("workers", "--workers"),
     ):
-        _add_option(command, flag, config.get(key))
-    execution = run_command(command, timeout_s=min(timeout_s, 1800))
+        value = {
+            "search_count": search_count,
+            "open_count": open_count,
+            "commit_count": commit_count,
+            "workers": workers,
+        }.get(key)
+        _add_option(command, flag, value)
+    execution = run_command(command, timeout_s=min(timeout_s, 180 if quick else 1800))
     commands = {"limit_failure_sweep": execution}
     summary_path = output / "summary.json"
     payload = read_json(summary_path)
@@ -305,6 +329,7 @@ def _run_configured_probes(
     profiles_path: Path,
     formal_root: Path,
     timeout_s: float,
+    quick: bool = False,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     """Run explicitly configured real probes and return artifacts/metadata."""
     artifacts: dict[str, Any] = {}
@@ -398,6 +423,7 @@ def _run_configured_probes(
         profiles_path=profiles_path,
         formal_root=formal_root,
         timeout_s=timeout_s,
+        quick=quick,
     )
     artifacts.update(sweep_artifacts)
     commands.update(sweep_commands)
@@ -924,6 +950,7 @@ def main() -> int:
             profiles_path=args.profiles,
             formal_root=formal_root,
             timeout_s=args.timeout_s,
+            quick=args.quick,
         )
         suite = {**suite, **probe_artifacts}
         command_result.update(probe_commands)
