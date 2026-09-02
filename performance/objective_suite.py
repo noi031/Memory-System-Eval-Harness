@@ -402,30 +402,50 @@ def objective_statuses(
     capacity_ok = bool(capacity) and all(
         str(run.get("status")) == "completed" for run in capacity
     )
+    instance_profiles = suite.get("instance_profiles")
+    completed_profiles = (
+        [
+            item for item in instance_profiles
+            if isinstance(item, dict)
+            and str(item.get("status") or "").lower()
+            in {"completed", "pass", "passed"}
+            and int(item.get("completed_runs") or 0) > 0
+        ]
+        if isinstance(instance_profiles, list)
+        else []
+    )
+    multi_spec_status = PASS if len(completed_profiles) >= 2 else INCONCLUSIVE
+
+    def strict_observed(name: str) -> Any:
+        return strict(name).get("observed", {})
+
     return [
         {
             "id": "O1",
             "name": OBJECTIVES[0][1],
             "status": strict("DAU / 最大热用户容量")["status"],
             "reason": strict("DAU / 最大热用户容量").get("reason", ""),
+            "observed": strict_observed("DAU / 最大热用户容量"),
             "evidence": "scheduler_acceptance: DAU / 最大热用户容量",
         },
         {
             "id": "O2",
             "name": OBJECTIVES[1][1],
-            "status": "PASS" if suite.get("profile_name") else "INCONCLUSIVE",
+            "status": multi_spec_status,
             "reason": (
-                "由 objective_suite 按 instance-profiles 配置逐 profile 执行"
-                if suite.get("profile_name")
-                else "未通过 profile-aware 入口执行"
+                "至少两种规格均有真实完成场景，可比较调度与 config"
+                if multi_spec_status == PASS
+                else "当前只完成单一规格或没有真实场景结果；仅有 profile 配置不能证明多规格调度"
             ),
-            "evidence": "profile.json + prepare_command + suite.json",
+            "observed": {"completed_profiles": completed_profiles},
+            "evidence": completed_profiles,
         },
         {
             "id": "O3",
             "name": OBJECTIVES[2][1],
             "status": strict("单租户故障隔离")["status"],
             "reason": strict("单租户故障隔离").get("reason", ""),
+            "observed": strict_observed("单租户故障隔离"),
             "evidence": "scheduler_acceptance: 单租户故障隔离",
         },
         {
@@ -433,6 +453,7 @@ def objective_statuses(
             "name": OBJECTIVES[3][1],
             "status": strict("Commit/Search 公平性 Jain")["status"],
             "reason": strict("Commit/Search 公平性 Jain").get("reason", ""),
+            "observed": strict_observed("Commit/Search 公平性 Jain"),
             "evidence": "scheduler_acceptance: Commit/Search 公平性 Jain",
         },
         {
@@ -440,6 +461,7 @@ def objective_statuses(
             "name": OBJECTIVES[4][1],
             "status": strict("Search 优先于 Commit")["status"],
             "reason": strict("Search 优先于 Commit").get("reason", ""),
+            "observed": strict_observed("Search 优先于 Commit"),
             "evidence": "scheduler_acceptance: Search 优先于 Commit",
         },
         {
@@ -447,6 +469,7 @@ def objective_statuses(
             "name": OBJECTIVES[5][1],
             "status": strict("Commit kill-9 恢复与重放")["status"],
             "reason": strict("Commit kill-9 恢复与重放").get("reason", ""),
+            "observed": strict_observed("Commit kill-9 恢复与重放"),
             "evidence": "scheduler_acceptance: Commit kill-9 恢复与重放",
         },
         {
@@ -454,6 +477,7 @@ def objective_statuses(
             "name": OBJECTIVES[6][1],
             "status": strict("分层/分租户调度可观测性")["status"],
             "reason": strict("分层/分租户调度可观测性").get("reason", ""),
+            "observed": strict_observed("分层/分租户调度可观测性"),
             "evidence": "scheduler_acceptance: 分层/分租户调度可观测性",
         },
     ]
@@ -470,7 +494,8 @@ def render_report(result: dict[str, Any], path: Path) -> None:
                 f"{html.escape(str(objective.get('name')))}</td>"
                 f"<td class='{html.escape(str(objective.get('status')).lower())}'>"
                 f"{html.escape(str(objective.get('status')))}</td>"
-                f"<td>{html.escape(str(objective.get('reason')))}</td>"
+                f"<td>{html.escape(str(objective.get('reason')))}"
+                f"<br><code>{html.escape(json.dumps(objective.get('observed', {}), ensure_ascii=False, sort_keys=True))}</code></td>"
                 f"<td><code>{html.escape(str(objective.get('evidence')))}</code></td>"
                 "</tr>"
             )
@@ -639,20 +664,70 @@ def main() -> int:
         suite = {**suite, **probe_artifacts}
         command_result.update(probe_commands)
 
+        completed_runs = sum(
+            1
+            for item in (suite.get("runs") or [])
+            if isinstance(item, dict)
+            and str(item.get("status") or "") == "completed"
+        )
+        profile_execution_status = (
+            "completed"
+            if completed_runs > 0
+            else str(command_result.get("run", {}).get("status") or "not_run")
+        )
         output_profiles.append({
             **profile,
             "name": name,
             "suite": str(suite_path),
+            "profile_execution_status": profile_execution_status,
+            "completed_runs": completed_runs,
             **probe_artifacts,
             "command": command_result,
             "objectives": objective_statuses(
-                {**suite, "profile_name": name},
+                {
+                    **suite,
+                    "profile_name": name,
+                    "instance_profiles": [{
+                        "name": name,
+                        "status": profile_execution_status,
+                        "completed_runs": completed_runs,
+                    }],
+                },
                 recovery_configured=bool(profile.get("commit_recovery")),
                 metrics_configured=bool(profile.get("metrics_enabled", True)),
             ),
         })
 
-    result = {"created_at": now(), "profiles": output_profiles, "objectives": OBJECTIVES}
+    completed_profile_records = [
+        {
+            "name": str(profile.get("name") or ""),
+            "status": str(profile.get("profile_execution_status") or ""),
+            "completed_runs": int(profile.get("completed_runs") or 0),
+        }
+        for profile in output_profiles
+    ]
+    completed_profile_count = sum(
+        1
+        for item in completed_profile_records
+        if item["status"] == "completed" and item["completed_runs"] > 0
+    )
+    for profile in output_profiles:
+        for objective in profile.get("objectives") or []:
+            if objective.get("id") == "O2":
+                objective["status"] = PASS if completed_profile_count >= 2 else INCONCLUSIVE
+                objective["reason"] = (
+                    "至少两种规格均有真实完成场景，可比较调度与 config"
+                    if completed_profile_count >= 2
+                    else "当前只完成单一规格或没有真实场景结果；仅有 profile 配置不能证明多规格调度"
+                )
+                objective["evidence"] = completed_profile_records
+    result = {
+        "created_at": now(),
+        "profiles": output_profiles,
+        "objectives": OBJECTIVES,
+        "instance_profiles": completed_profile_records,
+        "multi_spec_completed_count": completed_profile_count,
+    }
     (args.out_dir / "objective-suite.json").write_text(
         json.dumps(result, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
     )

@@ -45,7 +45,10 @@ class ObjectiveSuiteTests(unittest.TestCase):
             metrics_configured=False,
         )
         self.assertTrue(all(item["status"] == "INCONCLUSIVE" for item in objectives if item["id"] != "O2"))
-        self.assertEqual("PASS", next(item["status"] for item in objectives if item["id"] == "O2"))
+        self.assertEqual(
+            "INCONCLUSIVE",
+            next(item["status"] for item in objectives if item["id"] == "O2"),
+        )
 
     def test_recovery_objective_requires_idempotency_evidence(self) -> None:
         suite = {
