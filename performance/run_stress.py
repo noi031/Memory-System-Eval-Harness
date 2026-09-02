@@ -179,6 +179,12 @@ def build_parser() -> argparse.ArgumentParser:
         default=4,
         help="commit barrier 未提交 session 准备并发数（默认 4）",
     )
+    g.add_argument(
+        "--barrier-wave-size",
+        type=int,
+        default=32,
+        help="barrier Commit 最大同时在途数（默认 32，避免 4U8G 一次性打满）",
+    )
     g = parser.add_argument_group("Load")
     g.add_argument(
         "--concurrency-steps",
@@ -350,6 +356,8 @@ def _resolve_args(args: argparse.Namespace) -> dict[str, Any]:
         raise ValueError("--seed-concurrency 必须 >= 1")
     if args.barrier_prepare_concurrency < 1:
         raise ValueError("--barrier-prepare-concurrency 必须 >= 1")
+    if getattr(args, "barrier_wave_size", 32) < 1:
+        raise ValueError("--barrier-wave-size 必须 >= 1")
     commit_tenant_counts: list[int] | None = None
     if str(args.commit_tenant_counts or "").strip():
         try:
@@ -1039,6 +1047,7 @@ def main() -> None:
             commit_retry_max=args.commit_retry_max,
             commit_retry_backoff_s=args.commit_retry_backoff_s,
             barrier_prepare_concurrency=args.barrier_prepare_concurrency,
+            barrier_wave_size=args.barrier_wave_size,
         )
 
         try:

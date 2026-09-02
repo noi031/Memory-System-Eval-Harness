@@ -705,7 +705,7 @@ FORMAL_PROGRESS 1/1 scenario=baseline repeat=1 policy=server-observe status=comp
 ### 6. 执行 4U8G 完整测试
 
 默认执行 PR397/report(6) 与 PR421 的 25 个 bounded 场景，单轮、不执行
-7 小时 `soak`，只测试 4U8G：
+30 分钟 `soak`，只测试 4U8G：
 
 ```bash
 cd /opt/Memory-System-Eval-Harness
@@ -724,7 +724,10 @@ echo $! >"$STRESS_OUTPUT_DIR/launcher.pid"
 ```
 
 `tenant-skew` 会一次提交 260 个 Commit，单场景可能明显慢于普通场景；
-出现异常时使用 `STRESS_CASE_TIMEOUT_S=180`，不要设置成 1800 秒后无人值守。
+平台默认限制 barrier 同时在途数为 32（可用 `STRESS_BARRIER_WAVE_SIZE` 调整），
+因此总样本仍是 260 个，但不会把 260 个真实任务一次性压入 EchoMem。
+`STRESS_CASE_TIMEOUT_S=0` 表示按场景时长 + Commit 轮询预算自动计算；只有诊断时
+才建议手动设置较小的超时。超时会记录为 `TIMEOUT`，不会伪装成 EchoMem 的业务失败。
 
 服务器没有 Python 依赖时，使用 runner 镜像，并确保工作目录为 `/harness`：
 

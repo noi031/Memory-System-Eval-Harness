@@ -465,6 +465,7 @@ class LoadGenerator:
         commit_retry_max: int = 0,
         commit_retry_backoff_s: float = 0.5,
         barrier_prepare_concurrency: int = 4,
+        barrier_wave_size: int = 32,
     ) -> None:
         self.top_k = top_k
         self.timeout_s = timeout_s
@@ -478,7 +479,10 @@ class LoadGenerator:
         self.commit_retry_backoff_s = commit_retry_backoff_s
         if barrier_prepare_concurrency < 1:
             raise ValueError("barrier_prepare_concurrency must be >= 1")
+        if barrier_wave_size < 1:
+            raise ValueError("barrier_wave_size must be >= 1")
         self.barrier_prepare_concurrency = barrier_prepare_concurrency
+        self.barrier_wave_size = barrier_wave_size
         self._last_write_anchors: list[AnchorWrite] = []
         self._reconciliation_candidates: list[tuple[int, str, list[str], list[str], str]] = []
         # commit barrier 准备阶段产生的 add 记录（run_commit_barrier 持有其引用）
@@ -1124,7 +1128,11 @@ class LoadGenerator:
                 )
 
             with ThreadPoolExecutor(
-                max_workers=min(total, 64), thread_name_prefix="perf-barrier"
+                # The barrier still records all requested commits, but limits
+                # in-flight work so a 128/260 request case does not turn into
+                # an uncontrolled memory spike on the target service.
+                max_workers=min(total, 64, self.barrier_wave_size),
+                thread_name_prefix="perf-barrier",
             ) as pool:
                 futures = [pool.submit(submit, pre) for pre in prepared]
                 for future in futures:

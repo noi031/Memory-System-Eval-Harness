@@ -12,7 +12,8 @@ preflight_config="${ECHOMEM_CONFIG:?set ECHOMEM_CONFIG to the actual EchoMem con
 out_dir="${STRESS_OUTPUT_DIR:-$root_dir/results/performance/4u8g-complete-$(date +%Y%m%d_%H%M%S)}"
 repeats="${STRESS_REPEATS:-1}"
 commit_timeout_s="${STRESS_COMMIT_TIMEOUT_S:-600}"
-case_timeout_s="${STRESS_CASE_TIMEOUT_S:-180}"
+case_timeout_s="${STRESS_CASE_TIMEOUT_S:-0}"
+barrier_wave_size="${STRESS_BARRIER_WAVE_SIZE:-32}"
 
 # complete_scenarios() contains 26 cases; omit only the 30-minute soak from
 # the routine 4U8G run. The explicit list is recorded in suite.json.
@@ -29,6 +30,7 @@ python3 -m performance.formal_suite \
   --repeats "$repeats" \
   --commit-timeout-s "$commit_timeout_s" \
   --case-timeout-s "$case_timeout_s" \
+  --barrier-wave-size "$barrier_wave_size" \
   --out-dir "$out_dir"
 
 printf '4U8G complete suite: %s\n' "$out_dir"

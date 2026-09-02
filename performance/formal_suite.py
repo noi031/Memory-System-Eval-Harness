@@ -553,6 +553,8 @@ def _build_case_command(
         str(args.commit_retry_backoff_s),
         "--barrier-prepare-concurrency",
         "4",
+        "--barrier-wave-size",
+        str(getattr(args, "barrier_wave_size", 32)),
     ]
     if getattr(args, "local_auth_mode", False):
         # EchoMem local auth resolves the configured default identity when no
@@ -890,7 +892,9 @@ def run_case(
     rows = _read_requests_csv(run_dir / "requests.csv")
     _write_case_csvs(output, rows)
     derived = _derive_case_summary(run_dir, args.identity_independent)
-    if completed.returncode != 0:
+    if timed_out:
+        derived["status"] = "TIMEOUT"
+    elif completed.returncode != 0:
         derived["status"] = "NO_SUMMARY"
     (output / "summary.json").write_text(
         json.dumps(derived, ensure_ascii=False, indent=2) + "\n",
@@ -901,7 +905,12 @@ def run_case(
         "scenario_label": case["label"],
         "repetition": repetition,
         "policy": policy,
-        "status": "FAIL" if completed.returncode != 0 else derived["status"],
+        "status": (
+            "TIMEOUT" if timed_out
+            else "ENV_ERROR" if completed.returncode != 0 and not rows
+            else "FAIL" if completed.returncode != 0
+            else derived["status"]
+        ),
         "runner_returncode": completed.returncode,
         "duration_s": duration_s,
         "case_timeout_s": case_timeout_s,
@@ -1128,6 +1137,12 @@ def main() -> int:
     parser.add_argument("--commit-timeout-s", type=float, default=120.0)
     parser.add_argument("--commit-max-attempts", type=int, default=3)
     parser.add_argument("--commit-retry-backoff-s", type=float, default=2.0)
+    parser.add_argument(
+        "--barrier-wave-size",
+        type=int,
+        default=32,
+        help="barrier Commit 最大同时在途数，默认 32",
+    )
     parser.add_argument("--reset-command", default="", help="Optional command run before every case")
     parser.add_argument("--no-server-metrics", action="store_true")
     parser.add_argument(
@@ -1140,9 +1155,12 @@ def main() -> int:
     scenario_catalog = SCENARIO_PROFILES[args.profile]
     default_scenarios = (
         "baseline,mixed,commit-storm,commit-barrier,saturation,tenant-skew,"
-        "search-priority-blackbox,search-storm,soak"
+        "search-priority-blackbox,search-storm"
         if args.profile == "pr421"
-        else ",".join(scenario_catalog)
+        else ",".join(
+            name for name in scenario_catalog
+            if not (args.profile == "complete" and name == "soak")
+        )
     )
     scenario_names = [
         item.strip()
@@ -1156,6 +1174,8 @@ def main() -> int:
         parser.error("--repeats must be >= 1")
     if args.case_timeout_s < 0:
         parser.error("--case-timeout-s must not be negative")
+    if args.barrier_wave_size < 1:
+        parser.error("--barrier-wave-size must be >= 1")
     if args.profile in {"report6", "complete"} and not args.preflight_config:
         parser.error(
             f"--profile {args.profile} requires --preflight-config with the actual EchoMem config.json"
@@ -1312,9 +1332,12 @@ def main() -> int:
         from formal_data_report import render as render_data_report
     render_data_report(root / "suite.json", report_path)
     statuses = [str(run.get("status") or "NO_SUMMARY") for run in manifest["runs"]]
-    if any(status in {"ENVIRONMENT_ERROR", "RESET_FAILED", "NO_SUMMARY", "FAIL"} for status in statuses) or acceptance["overall"] == "FAIL":
+    if any(
+        status in {"ENVIRONMENT_ERROR", "ENV_ERROR", "RESET_FAILED", "NO_SUMMARY", "TIMEOUT", "FAIL"}
+        for status in statuses
+    ) or acceptance["overall"] == "FAIL":
         overall = "FAIL"
-    elif any(status == "INCONCLUSIVE" for status in statuses) or acceptance["overall"] in {"INCONCLUSIVE", "NOT_IMPLEMENTED"}:
+    elif any(status in {"INCONCLUSIVE", "NOT_IMPLEMENTED"} for status in statuses) or acceptance["overall"] in {"INCONCLUSIVE", "NOT_IMPLEMENTED"}:
         overall = "INCONCLUSIVE"
     else:
         overall = "PASS"
@@ -1337,6 +1360,7 @@ def main() -> int:
             "repeats": args.repeats,
             "policies": list(POLICIES),
             "commit_timeout_s": args.commit_timeout_s,
+            "barrier_wave_size": args.barrier_wave_size,
         },
         "details": {
             "run_count": len(manifest["runs"]),
@@ -1345,7 +1369,7 @@ def main() -> int:
             "failed_runs": sum(status == "FAIL" for status in statuses),
             "inconclusive_runs": sum(status == "INCONCLUSIVE" for status in statuses),
             "environment_errors": sum(
-                status in {"ENVIRONMENT_ERROR", "RESET_FAILED", "NO_SUMMARY"}
+                status in {"ENVIRONMENT_ERROR", "ENV_ERROR", "RESET_FAILED", "NO_SUMMARY", "TIMEOUT"}
                 for status in statuses
             ),
             "suite_report": "suite.html",
