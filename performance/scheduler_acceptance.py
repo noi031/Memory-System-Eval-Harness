@@ -27,7 +27,12 @@ def _load(path: Path | None) -> dict[str, Any]:
     if not path or not path.is_file():
         return {}
     try:
-        value = json.loads(path.read_text(encoding="utf-8"))
+        text = path.read_text(encoding="utf-8").strip()
+        # Some legacy server jobs wrote a literal "\\n" after the JSON object.
+        # Accept that harmless artifact so old evidence remains auditable.
+        if text.endswith("\\n"):
+            text = text[:-2].rstrip()
+        value = json.loads(text)
     except (OSError, json.JSONDecodeError):
         return {}
     return value if isinstance(value, dict) else {}
@@ -172,12 +177,45 @@ def _fairness(suite: dict[str, Any]) -> dict[str, Any]:
     checks = acceptance.get("checks") if isinstance(acceptance.get("checks"), list) else []
     check = next((item for item in checks if item.get("name") == "Tenant fairness (Jain)"), None)
     if not isinstance(check, dict):
+        counts: dict[str, int] = {}
+        run_count = 0
+        for run in _suite_runs(suite):
+            metrics = _run_summary(run).get("metrics")
+            fairness = metrics.get("fairness") if isinstance(metrics, dict) else {}
+            per_tenant = (
+                fairness.get("commit_completed_per_tenant")
+                if isinstance(fairness, dict)
+                else None
+            )
+            if not isinstance(per_tenant, dict):
+                continue
+            run_count += 1
+            for tenant, value in per_tenant.items():
+                try:
+                    count = int(value)
+                except (TypeError, ValueError):
+                    continue
+                counts[str(tenant)] = counts.get(str(tenant), 0) + max(0, count)
+        values = [float(value) for value in counts.values() if value > 0]
+        if len(values) >= 2 and sum(values) > 0:
+            jain = (sum(values) ** 2) / (len(values) * sum(value ** 2 for value in values))
+            return _result(
+                "Commit/Search 公平性 Jain",
+                PASS if jain >= 0.90 else FAIL,
+                0.90,
+                {
+                    "jain": round(jain, 4),
+                    "completed_per_tenant": counts,
+                    "runs_with_fairness": run_count,
+                },
+                "按独立租户最终完成 Commit 数计算 Jain 指数",
+            )
         return _result(
             "Commit/Search 公平性 Jain",
             INCONCLUSIVE,
             0.90,
-            {},
-            "没有至少两个独立租户的 Commit 吞吐 Jain 指数",
+            {"completed_per_tenant": counts, "runs_with_fairness": run_count},
+            "没有至少两个租户的有效 Commit 完成吞吐样本",
         )
     observed = check.get("observed")
     try:
