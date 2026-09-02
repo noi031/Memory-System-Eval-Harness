@@ -881,9 +881,10 @@ python3 -m performance.objective_suite \
 `--quick-include-seed`。单场景默认最多运行 30 秒、总墙钟 120 秒、barrier 最多
 2 个 Commit；Commit 默认单次最多等待 30 秒、不重试，可按机器和目标调整：
 
-默认 quick 场景为 `baseline`、`tenant-skew`、`search-priority-blackbox`、
-`saturation`、`capacity-2`、`capacity-4`。它们用于快速拿到单租户基线、热租户
-偏斜、Search/Commit 并发、饱和和小规模容量阶梯的真实 HTTP 证据；PR397 的完整
+默认 quick 场景为 `baseline`、`fairness-bounded`、`search-priority-blackbox`、
+`saturation`、`capacity-2`、`capacity-4`、`capacity-8`。它们用于快速拿到单租户基线、
+公平性、Search/Commit 并发、饱和和小规模容量阶梯的真实 HTTP 证据；其中
+`capacity-8` 用于尝试找到容量边界。PR397 的完整
 A/B/C/D 矩阵以及大规模 barrier 不属于 quick，不能用 quick 结果替代完整验收。
 
 ```bash

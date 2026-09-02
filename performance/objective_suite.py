@@ -47,7 +47,7 @@ FAIL = "FAIL"
 # complete catalog; quick mode is explicitly a smoke/diagnostic run.
 QUICK_SCENARIOS = (
     "baseline,fairness-bounded,search-priority-blackbox,"
-    "saturation,capacity-2,capacity-4"
+    "saturation,capacity-2,capacity-4,capacity-8"
 )
 
 
