@@ -230,6 +230,12 @@ def main() -> int:
     parser.add_argument("--recovery-timeout-s", type=float, default=180.0)
     parser.add_argument("--poll-s", type=float, default=2.0)
     parser.add_argument(
+        "--require-accepted-202",
+        action="store_true",
+        help="只有先收到 HTTP 202，再 kill/restart，才纳入恢复验收",
+    )
+    parser.add_argument("--accepted-wait-s", type=float, default=10.0)
+    parser.add_argument(
         "--idempotency-key",
         default="",
         help="Stable Commit idempotency key; generated when omitted",
@@ -305,6 +311,7 @@ def main() -> int:
         })
 
     commit_box: dict[str, Any] = {}
+    commit_response_ready = threading.Event()
 
     def submit() -> None:
         try:
@@ -314,13 +321,27 @@ def main() -> int:
             commit_box["error"] = response.error
         except BaseException as exc:  # the process may be killed during the request
             commit_box["error"] = f"{type(exc).__name__}: {exc}"
+        finally:
+            commit_response_ready.set()
 
     commit_thread = threading.Thread(target=submit, daemon=True)
     commit_started = time.monotonic()
     commit_thread.start()
-    time.sleep(max(0.0, args.kill_delay_s))
+    # The target contract is "accepted as 202, then crash".  Waiting for the
+    # response before killing avoids accidentally testing a client-side
+    # timeout/connection loss instead of recovery of an accepted operation.
+    response_ready = commit_response_ready.wait(max(0.0, args.accepted_wait_s))
+    if response_ready:
+        time.sleep(max(0.0, args.kill_delay_s))
+    else:
+        time.sleep(max(0.0, args.kill_delay_s))
     result["commit_submitted_at"] = now()
     result["commit_request_elapsed_before_kill_s"] = time.monotonic() - commit_started
+    result["commit_response_before_kill"] = {
+        "ready": response_ready,
+        "status_code": commit_box.get("status_code"),
+    }
+    result["accepted_202"] = commit_box.get("status_code") == 202
     result["container_control"] = kill_and_start(args.container, 0)
     commit_thread.join(timeout=1.0)
     result["commit_response"] = dict(commit_box)
@@ -554,6 +575,13 @@ def main() -> int:
             if final_state in {"failed", "error", "cancelled"}
             else INCONCLUSIVE
         )
+        if args.require_accepted_202 and not result["accepted_202"]:
+            result["status"] = FAIL if commit_box.get("status_code") else INCONCLUSIVE
+            result["reason"] = (
+                "Commit 未在崩溃前返回 HTTP 202，不能证明已接受的异步操作可恢复"
+                if commit_box.get("status_code")
+                else "崩溃前未收到 Commit 响应，无法证明该操作曾返回 HTTP 202"
+            )
         result["reason"] = (
             "same idempotency key returned the original archive with replayed=true, "
             "and all server-assigned message IDs were found in durable readback"

@@ -26,6 +26,16 @@
         "recovery_timeout_s": 180,
         "poll_s": 2
       },
+      "fault_isolation": {
+        "enabled": false,
+        "target_tenant": "stress-a",
+        "bystander_tenants": "stress-b,stress-c,stress-d",
+        "endpoint": "http://127.0.0.1:8010/fault/control",
+        "samples": 8,
+        "workers": 8,
+        "timeout_s": 20,
+        "control_timeout_s": 30
+      },
       "fault_plan": "fault-plan.example.json",
       "limit_failure_sweep": {
         "levels": "16,64,128,256",

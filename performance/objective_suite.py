@@ -468,6 +468,38 @@ def _run_configured_probes(
         if payload:
             artifacts["concurrent_commit"] = {**payload, "path": str(output)}
 
+    fault_isolation = profile.get("fault_isolation")
+    if isinstance(fault_isolation, dict) and fault_isolation.get("enabled", True):
+        output = profile_dir / "fault-isolation.json"
+        command = [
+            sys.executable,
+            "-m",
+            "performance.probes.fault_isolation_probe",
+            "--base-url", base_url,
+            "--tenant-config", str(tenant_path),
+            "--target-tenant", str(fault_isolation.get("target_tenant") or ""),
+            "--bystander-tenants", str(fault_isolation.get("bystander_tenants") or ""),
+            "--out", str(output),
+        ]
+        for key, flag in (
+            ("endpoint", "--endpoint"),
+            ("command", "--command"),
+            ("samples", "--samples"),
+            ("workers", "--workers"),
+            ("timeout_s", "--timeout-s"),
+            ("control_timeout_s", "--control-timeout-s"),
+            ("auth_header", "--auth-header"),
+        ):
+            _add_option(command, flag, fault_isolation.get(key))
+        execution = run_command(
+            command, timeout_s=min(timeout_s, 600 if quick else 1800), redact_values=redact
+        )
+        commands["fault_isolation"] = execution
+        payload = read_json(output)
+        _preserve_probe_status(execution, payload)
+        if payload:
+            artifacts["fault_isolation"] = {**payload, "path": str(output)}
+
     sweep_artifacts, sweep_commands = _run_limit_failure_sweep(
         profile,
         profile_dir=profile_dir,
@@ -502,8 +534,11 @@ def _run_configured_probes(
             ("content_chars", "--content-chars"),
             ("recovery_timeout_s", "--recovery-timeout-s"),
             ("poll_s", "--poll-s"),
+            ("accepted_wait_s", "--accepted-wait-s"),
         ):
             _add_option(command, flag, recovery.get(key))
+        if recovery.get("require_accepted_202"):
+            command.append("--require-accepted-202")
         execution = run_command(command, timeout_s=min(timeout_s, 900), redact_values=redact)
         commands["commit_recovery"] = execution
         payload = read_json(output)
@@ -759,6 +794,7 @@ def render_report(result: dict[str, Any], path: Path) -> None:
             ("blackbox_contract_probe", "黑盒契约探针"),
             ("missing_cases", "PR397 黑盒一致性探针"),
             ("concurrent_commit", "并发 Commit 探针"),
+            ("fault_isolation", "单租户故障隔离探针"),
             ("limit_failure_sweep", "真实限流阶梯"),
             ("commit_recovery", "Commit 崩溃恢复探针"),
             ("fault_suite", "故障套件"),
