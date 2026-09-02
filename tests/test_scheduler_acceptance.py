@@ -222,7 +222,11 @@ class SchedulerAcceptanceTests(unittest.TestCase):
                         "status": "TIMEOUT",
                         "runner_returncode": 124,
                         "case_timeout_s": 120.0,
-                        "summary": {},
+                        "summary": {
+                            "metrics": {
+                                "search": {"submitted": 1},
+                            }
+                        },
                     },
                 ],
             }

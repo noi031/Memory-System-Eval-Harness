@@ -204,10 +204,15 @@ def _capacity(suite: dict[str, Any]) -> dict[str, Any]:
             if str(run.get("status")) != "completed":
                 if str(run.get("status") or "").upper() == "TIMEOUT":
                     # A real load case that exceeded its bounded wall-clock
-                    # budget is a valid capacity-boundary observation.  Other
-                    # failed states may be setup/environment failures and are
-                    # intentionally not treated as a service limit.
-                    timeout_levels.append(level)
+                    # budget is a valid capacity-boundary observation only
+                    # after the workload actually emitted Search requests.
+                    # Setup/Commit preparation timeouts are not a Search
+                    # capacity limit.
+                    search_submitted = int(
+                        (metrics.get("search") or {}).get("submitted") or 0
+                    )
+                    if search_submitted > 0:
+                        timeout_levels.append(level)
                 continue
             search = metrics.get("search") or {}
             # Capacity is the active-user/Search boundary.  Commit flooding

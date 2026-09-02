@@ -899,6 +899,7 @@ python3 -m performance.objective_suite \
 ```
 
 正式数据去掉 `--quick`。O1 按活跃用户的 Search SLO 评估容量，Commit 洪泛由 O5 单独验收；
+容量档位超时只有在超时前已实际发出 Search 请求时才算边界；准备阶段或 Commit 阶段卡住不能冒充 Search 容量上限。
 O1 只有在“Search 成功容量档位 + 更高一档真实失败/超时/资源边界”
 同时存在时才会判定为 PASS；如果所有已跑档位都成功，报告只给出“至少支持到 N”
 的容量下界并标记 `INCONCLUSIVE`，不会把最后一个成功档位冒充最大用户量。O1 的“最大用户量”是压测
