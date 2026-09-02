@@ -567,6 +567,10 @@ queued/wait/exec/rejected 四元组。旧报告只有单维 Jain、单一指标�
 误认为本轮真的重新创建了租户；HTTP 失败会保留状态码、请求路径和截断后的服务响应，
 便于区分凭据错误（401）、接口错误（4xx）、服务异常（5xx）和网络超时。
 这类前置失败应归为测试环境/配置问题，不能直接判定 EchoMem 功能失败。
+另外，`--skip-seed` 只表示不重新灌入模型数据，并不会自动从 EchoMem 读取历史查询词。
+正式复用已有记忆时请传入 `--search-queries "关键词1,关键词2"`；若省略，平台会使用
+`hello` 作为 fallback，并在 `summary.json.data_scale.query_source` 标记为
+`default_fallback`。这种运行可以验证服务调度和延迟，但不能替代真实记忆质量测试。
 
 - **正式验收套件**（`formal_suite.py`）：以子进程方式逐 case 重跑
   `run_stress.py`（`report6` / `pr421` / `complete` 三档场景目录），把原生产物

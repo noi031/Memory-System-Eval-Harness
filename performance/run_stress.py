@@ -173,6 +173,14 @@ def build_parser() -> argparse.ArgumentParser:
         help="复用已有租户和记忆，只执行压测请求，不重复注入真实模型",
     )
     g.add_argument(
+        "--search-queries",
+        default=os.getenv("ECHOMEM_SEARCH_QUERIES", ""),
+        help=(
+            "Search 查询词，逗号分隔；skip-seed/复用已有数据时用于恢复查询池。"
+            "未提供时使用 hello，并在结果中标记为 fallback"
+        ),
+    )
+    g.add_argument(
         "--seed-concurrency",
         type=int,
         default=4,
@@ -415,6 +423,11 @@ def _resolve_args(args: argparse.Namespace) -> dict[str, Any]:
         "commit_tenant_counts": commit_tenant_counts,
         "tenant_specs": tenant_specs,
         "effective_auth_mode": "tenant_config" if tenant_specs else args.auth_mode,
+        "search_queries": [
+            item.strip()
+            for item in str(getattr(args, "search_queries", "") or "").split(",")
+            if item.strip()
+        ],
     }
 
 
@@ -1034,6 +1047,17 @@ def main() -> None:
                     else None
                 ),
             )
+            fallback_queries = list(resolved.get("search_queries") or []) or ["hello"]
+            if (args.skip_seed or getattr(args, "reuse_existing_data", False)):
+                for tenant in tenants:
+                    if not tenant.queries:
+                        tenant.queries = list(fallback_queries)
+                        logger.warning(
+                            "skip-seed 未恢复已有查询池，使用 fallback Search 查询: "
+                            "tenant_idx=%d queries=%s",
+                            tenant.idx,
+                            ",".join(fallback_queries),
+                        )
         except BaseException:
             # prepare 阶段失败也要清掉已 provision 的租户（seed 中途失败时
             # preparer 仍持有它们的 client）；清完再向上抛。
@@ -1172,6 +1196,15 @@ def main() -> None:
                     "skip_seed": args.skip_seed,
                     "messages_per_session": args.messages_per_session,
                     "queries_per_tenant": [len(tenant.queries) for tenant in tenants],
+                    "query_source": (
+                        "seeded"
+                        if not (args.skip_seed or getattr(args, "reuse_existing_data", False))
+                        else (
+                            "configured_fallback"
+                            if resolved.get("search_queries")
+                            else "default_fallback"
+                        )
+                    ),
                     "tenant_details": [tenant.to_dict() for tenant in tenants],
                 },
                 "server": server_info,
