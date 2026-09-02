@@ -113,7 +113,6 @@ def first_completed(path: Path, tenant: str = "") -> dict[str, str]:
         if (
             str(row.get("status") or "").lower()
             in {"completed", "complete", "success", "succeeded"}
-            and row.get("archive_id")
         ):
             return row
     return {}
@@ -132,19 +131,33 @@ def probe(args: argparse.Namespace) -> dict[str, Any]:
             "reason": "commit_results.csv 中没有已完成 Commit 的 session_id",
             "checks": checks,
         }
+    if not archive:
+        # Older runner artifacts did not persist archive_id. Keep probing the
+        # session-scoped contracts, but make the missing operation identity
+        # explicit instead of discarding otherwise useful evidence.
+        checks.append({
+            "name": "commit_identity",
+            "status": INCONCLUSIVE,
+            "http_status": None,
+            "reason": "旧版 commit_results.csv 未记录 archive_id，无法定位单次 commit_status",
+            "payload_keys": [],
+        })
 
     paths = [
         ("history", f"/api/sessions/{quote(session, safe='')}/history?limit=200"),
         ("archives", f"/api/sessions/{quote(session, safe='')}/archives?limit=200"),
-        (
-            "commit_status",
-            f"/api/sessions/{quote(session, safe='')}/commits/{quote(archive, safe='')}",
-        ),
-        (
-            "commit_memories",
-            f"/api/sessions/{quote(session, safe='')}/commits/{quote(archive, safe='')}/memories",
-        ),
     ]
+    if archive:
+        paths.extend([
+            (
+                "commit_status",
+                f"/api/sessions/{quote(session, safe='')}/commits/{quote(archive, safe='')}",
+            ),
+            (
+                "commit_memories",
+                f"/api/sessions/{quote(session, safe='')}/commits/{quote(archive, safe='')}/memories",
+            ),
+        ])
     for name, path in paths:
         checks.append(
             classify(

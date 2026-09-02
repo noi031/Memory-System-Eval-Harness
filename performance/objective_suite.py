@@ -29,6 +29,9 @@ OBJECTIVES = [
     ("O6", "202 Commit 崩溃恢复后 100% 重放且不丢序"),
     ("O7", "每层每租户四元组可观测指标"),
 ]
+INCONCLUSIVE = "INCONCLUSIVE"
+PASS = "PASS"
+FAIL = "FAIL"
 
 QUICK_SCENARIOS = (
     "A@1,B@1,D@1,baseline,mixed,commit-barrier,saturation,"
@@ -110,7 +113,6 @@ def _first_completed_commit_csv(formal_root: Path) -> tuple[Path, str] | None:
             if (
                 str(row.get("status") or "").lower()
                 in {"completed", "complete", "success", "succeeded"}
-                and row.get("archive_id")
             ):
                 return path, str(row.get("tenant") or "")
     return None
@@ -129,6 +131,176 @@ def _resolve_auth_key(tenant_config: Path) -> tuple[str, str]:
         return "", ""
 
 
+def _resolve_profile_path(value: str, profiles_path: Path) -> str:
+    """Resolve relative profile paths next to the profile manifest."""
+    if not value:
+        return ""
+    path = Path(value).expanduser()
+    return str(path if path.is_absolute() else (profiles_path.parent / path).resolve())
+
+
+def _add_option(command: list[str], flag: str, value: Any) -> None:
+    if value not in (None, ""):
+        command.extend([flag, str(value)])
+
+
+def _run_configured_probes(
+    profile: dict[str, Any],
+    *,
+    profile_dir: Path,
+    profiles_path: Path,
+    formal_root: Path,
+    timeout_s: float,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Run explicitly configured real probes and return artifacts/metadata."""
+    artifacts: dict[str, Any] = {}
+    commands: dict[str, Any] = {}
+    base_url = str(profile.get("base_url") or "http://127.0.0.1:8010")
+    tenant_path = Path(
+        _resolve_profile_path(str(profile.get("tenant_config") or ""), profiles_path)
+    )
+    auth_key, auth_key_env = _resolve_auth_key(tenant_path)
+    redact = {auth_key} if auth_key else set()
+
+    commit_artifact = _first_completed_commit_csv(formal_root)
+    commit_csv = commit_artifact[0] if commit_artifact else None
+    tenant_index = commit_artifact[1] if commit_artifact else ""
+
+    capability = profile.get("capability_probe")
+    if isinstance(capability, dict):
+        output = profile_dir / "capability-probe.json"
+        command = [
+            sys.executable,
+            "-m",
+            "performance.probes.capability_probe",
+            "--base-url",
+            base_url,
+            "--out",
+            str(output),
+        ]
+        if auth_key:
+            command += ["--auth-key", auth_key]
+        elif auth_key_env:
+            command += ["--auth-key-env", auth_key_env]
+        for key, flag in (
+            ("session_id", "--session-id"),
+            ("health_path", "--health-path"),
+            ("metrics_path", "--metrics-path"),
+            ("cursor_path", "--cursor-path"),
+            ("operation_path", "--operation-path"),
+            ("conflict_path", "--conflict-path"),
+            ("ttl_path", "--ttl-path"),
+            ("engine_path", "--engine-path"),
+            ("fault_path", "--fault-path"),
+            ("timeout_s", "--timeout-s"),
+        ):
+            _add_option(command, flag, capability.get(key))
+        execution = run_command(
+            command, timeout_s=min(timeout_s, 180), redact_values=redact
+        )
+        commands["capability_probe"] = execution
+        payload = read_json(output)
+        if payload:
+            artifacts["capability_probe"] = {**payload, "path": str(output)}
+
+    if commit_csv and tenant_path.is_file():
+        output = profile_dir / "blackbox-contract-probe.json"
+        command = [
+            sys.executable,
+            "-m",
+            "performance.probes.blackbox_contract_probe",
+            "--base-url",
+            base_url,
+            "--commit-csv",
+            str(commit_csv),
+            "--tenant",
+            tenant_index,
+            "--out",
+            str(output),
+        ]
+        if auth_key:
+            command += ["--auth-key", auth_key]
+        elif auth_key_env:
+            command += ["--auth-key-env", auth_key_env]
+        execution = run_command(
+            command, timeout_s=min(timeout_s, 180), redact_values=redact
+        )
+        commands["blackbox_probe"] = execution
+        payload = read_json(output)
+        if payload:
+            artifacts["blackbox_contract_probe"] = {**payload, "path": str(output)}
+    else:
+        commands["blackbox_probe"] = {
+            "status": "INCONCLUSIVE",
+            "reason": (
+                "本轮没有完成 Commit 或租户配置不存在，"
+                "无法从真实 session 启动黑盒契约探测"
+            ),
+        }
+
+    recovery = profile.get("commit_recovery")
+    if isinstance(recovery, dict) and tenant_path.is_file():
+        output = profile_dir / "commit-recovery.json"
+        command = [
+            sys.executable,
+            "-m",
+            "performance.probes.commit_recovery_probe",
+            "--base-url",
+            base_url,
+            "--container",
+            str(recovery.get("container") or ""),
+            "--tenant-config",
+            str(tenant_path),
+            "--out",
+            str(output),
+        ]
+        for key, flag in (
+            ("tenant", "--tenant"),
+            ("kill_delay_s", "--kill-delay-s"),
+            ("messages", "--messages"),
+            ("content_chars", "--content-chars"),
+            ("recovery_timeout_s", "--recovery-timeout-s"),
+            ("poll_s", "--poll-s"),
+        ):
+            _add_option(command, flag, recovery.get(key))
+        execution = run_command(command, timeout_s=min(timeout_s, 900), redact_values=redact)
+        commands["commit_recovery"] = execution
+        payload = read_json(output)
+        if payload:
+            artifacts["commit_recovery"] = {**payload, "path": str(output)}
+
+    fault_plan_value = profile.get("fault_plan")
+    if fault_plan_value:
+        plan_path = Path(_resolve_profile_path(str(fault_plan_value), profiles_path))
+        output_dir = profile_dir / "fault-suite"
+        output_dir.mkdir(parents=True, exist_ok=True)
+        command = [
+            sys.executable,
+            "-m",
+            "performance.probes.fault_suite",
+            "--plan",
+            str(plan_path),
+            "--out-dir",
+            str(output_dir),
+            "--base-url",
+            base_url,
+        ]
+        if auth_key:
+            command += ["--auth-key", auth_key]
+        if commit_csv:
+            command += ["--commit-csv", str(commit_csv)]
+        execution = run_command(command, timeout_s=min(timeout_s, 900), redact_values=redact)
+        commands["fault_suite"] = execution
+        payload = read_json(output_dir / "fault-suite.json")
+        if payload:
+            artifacts["fault_suite"] = {
+                **payload,
+                "path": str(output_dir / "fault-suite.json"),
+            }
+
+    return artifacts, commands
+
+
 def acceptance_by_name(suite: dict[str, Any]) -> dict[str, dict[str, Any]]:
     acceptance = suite.get("acceptance") or {}
     return {
@@ -145,9 +317,38 @@ def objective_statuses(
     metrics_configured: bool,
 ) -> list[dict[str, Any]]:
     checks = acceptance_by_name(suite)
+    blackbox = suite.get("blackbox_contract_probe") or {}
+    recovery = suite.get("commit_recovery") or {}
+    fault_suite = suite.get("fault_suite") or {}
 
     def status(name: str, fallback: str = "INCONCLUSIVE") -> str:
         return str((checks.get(name) or {}).get("status") or fallback)
+
+    def fault_case_statuses() -> list[str]:
+        return [
+            str((case.get("execution") or {}).get("result", {}).get("status") or INCONCLUSIVE)
+            for case in fault_suite.get("cases") or []
+            if isinstance(case, dict)
+        ]
+
+    fault_cases = fault_case_statuses()
+    fault_has_search_observation = any(
+        isinstance(case, dict)
+        and (
+            "search_p95" in case
+            or "search" in case
+            or "observer" in case
+            or "isolation_ratio" in case
+        )
+        for case in fault_suite.get("cases") or []
+    )
+    recovery_reconcile = recovery.get("message_reconciliation") or {}
+    cursor_reconcile = recovery.get("cursor_reconciliation") or {}
+    recovery_statuses = [
+        str(recovery.get("status") or INCONCLUSIVE),
+        str(recovery_reconcile.get("status") or INCONCLUSIVE),
+        str(cursor_reconcile.get("status") or INCONCLUSIVE),
+    ]
 
     # O1 is a capacity ladder. It is a measured upper bound for active test
     # identities, not a product DAU forecast.
@@ -184,9 +385,35 @@ def objective_statuses(
         {
             "id": "O3",
             "name": OBJECTIVES[2][1],
-            "status": status("Search P95 isolation ratio"),
-            "reason": "需要 baseline 与单租户故障/压力窗口的有效 Search P95 成对数据",
-            "evidence": "acceptance: Search P95 isolation ratio",
+            "status": (
+                (
+                    FAIL
+                    if FAIL in fault_cases
+                    else INCONCLUSIVE
+                    if not fault_has_search_observation or INCONCLUSIVE in fault_cases
+                    else PASS
+                )
+                if fault_suite.get("cases")
+                and fault_has_search_observation
+                else status("Search P95 isolation ratio")
+            ),
+            "reason": (
+                "已执行真实故障探针，并包含旁观租户 Search P95 观测"
+                if fault_has_search_observation
+                and fault_cases
+                and all(item == PASS for item in fault_cases)
+                else "故障探针包含失败，需要检查故障窗口与旁观租户 Search P95 数据"
+                if fault_has_search_observation
+                and FAIL in fault_cases
+                else "故障套件已执行，但没有旁观租户 Search P95 证据，不能判定隔离性"
+                if fault_suite.get("cases")
+                else "需要 baseline 与单租户故障/压力窗口的有效 Search P95 成对数据"
+            ),
+            "evidence": (
+                str(fault_suite.get("path") or "fault-suite.json")
+                if fault_suite.get("cases")
+                else "acceptance: Search P95 isolation ratio"
+            ),
         },
         {
             "id": "O4",
@@ -206,12 +433,20 @@ def objective_statuses(
             "id": "O6",
             "name": OBJECTIVES[5][1],
             "status": (
-                status("cursor/message-set")
+                (
+                    FAIL
+                    if FAIL in recovery_statuses
+                    else INCONCLUSIVE
+                    if INCONCLUSIVE in recovery_statuses
+                    else PASS
+                )
                 if recovery_configured
                 else "INCONCLUSIVE"
             ),
             "reason": (
-                "已配置真实重启控制和消息/cursor 对账"
+                "真实重启、Commit 终态、消息集合和 cursor 对账均通过"
+                if recovery_configured and all(item == PASS for item in recovery_statuses)
+                else "真实重启已执行，但 Commit 终态或消息/cursor 对账未全部通过"
                 if recovery_configured
                 else "未配置真实 PID/container 重启控制，不能证明崩溃恢复重放"
             ),
@@ -221,7 +456,16 @@ def objective_statuses(
             "id": "O7",
             "name": OBJECTIVES[6][1],
             "status": (
-                status("B7 lane/fan-out metrics")
+                str(
+                    next(
+                        (
+                            item.get("status")
+                            for item in blackbox.get("checks", [])
+                            if item.get("name") == "metrics"
+                        ),
+                        status("B7 lane/fan-out metrics"),
+                    )
+                )
                 if metrics_configured
                 else "INCONCLUSIVE"
             ),
@@ -250,6 +494,47 @@ def render_report(result: dict[str, Any], path: Path) -> None:
                 f"<td><code>{html.escape(str(objective.get('evidence')))}</code></td>"
                 "</tr>"
             )
+    details = []
+    for profile in result.get("profiles") or []:
+        details.append(f"<h3>{html.escape(str(profile.get('name')))}</h3>")
+        for key, label in (
+            ("capability_probe", "能力探针"),
+            ("blackbox_contract_probe", "黑盒契约探针"),
+            ("commit_recovery", "Commit 崩溃恢复探针"),
+            ("fault_suite", "故障套件"),
+        ):
+            payload = profile.get(key)
+            if not isinstance(payload, dict):
+                continue
+            checks_detail = payload.get("checks") or payload.get("cases") or []
+            details.append(
+                f"<details><summary>{label}："
+                f"<strong>{html.escape(str(payload.get('status', '未返回')))}</strong>"
+                "</summary>"
+            )
+            if payload.get("reason"):
+                details.append(f"<p>{html.escape(str(payload['reason']))}</p>")
+            if isinstance(checks_detail, list) and checks_detail:
+                details.append(
+                    "<table><thead><tr><th>检查项</th><th>状态</th><th>HTTP/耗时</th>"
+                    "<th>说明</th></tr></thead><tbody>"
+                )
+                for item in checks_detail:
+                    item = item if isinstance(item, dict) else {}
+                    execution = item.get("execution") if isinstance(item.get("execution"), dict) else {}
+                    nested = execution.get("result") if isinstance(execution.get("result"), dict) else {}
+                    details.append(
+                        "<tr>"
+                        f"<td>{html.escape(str(item.get('name') or item.get('kind') or 'case'))}</td>"
+                        f"<td>{html.escape(str(item.get('status') or nested.get('status') or ''))}</td>"
+                        f"<td>{html.escape(str(item.get('http_status') or item.get('elapsed_s') or ''))}</td>"
+                        f"<td>{html.escape(str(item.get('reason') or nested.get('reason') or ''))}</td>"
+                        "</tr>"
+                    )
+                details.append("</tbody></table>")
+            details.append(
+                f"<p class='muted'>制品：<code>{html.escape(str(payload.get('path', '')))}</code></p></details>"
+            )
     doc = f"""<!doctype html>
 <html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>EchoMem 七项目标自动化验收</title>
@@ -267,6 +552,9 @@ code{{background:#f0f3f5;padding:2px 4px}}.scroll{{overflow:auto}}
 <section class="scroll"><h2>逐 profile 目标状态</h2>
 <table><thead><tr><th>Profile</th><th>目标</th><th>状态</th><th>说明</th><th>证据</th></tr></thead>
 <tbody>{"".join(rows)}</tbody></table></section>
+<section class="scroll"><h2>探针与黑盒证据明细</h2>
+<p class="muted">这里显示真实 HTTP 探针实际检查到的内容。没有真实输入、控制能力或服务端观测时，状态保持 INCONCLUSIVE。</p>
+{"".join(details)}</section>
 </main></html>"""
     path.write_text(doc, encoding="utf-8")
 
@@ -312,8 +600,12 @@ def main() -> int:
                         ),
                     })
                     continue
-            tenant_config = str(profile.get("tenant_config") or "")
-            preflight_config = str(profile.get("preflight_config") or "")
+            tenant_config = _resolve_profile_path(
+                str(profile.get("tenant_config") or ""), args.profiles
+            )
+            preflight_config = _resolve_profile_path(
+                str(profile.get("preflight_config") or ""), args.profiles
+            )
             if not tenant_config or not preflight_config:
                 command_result["run"] = {
                     "status": "INCONCLUSIVE",
@@ -357,68 +649,25 @@ def main() -> int:
 
         suite = read_json(suite_path)
         formal_root = profile_dir / "formal"
-        probe_result: dict[str, Any] = {}
-        commit_artifact = _first_completed_commit_csv(formal_root)
-        tenant_config_path = Path(str(profile.get("tenant_config") or "")).expanduser()
-        if commit_artifact and tenant_config_path.is_file():
-            commit_csv, tenant_index = commit_artifact
-            tenant_payload = read_json(tenant_config_path)
-            tenants = tenant_payload.get("tenants") or []
-            try:
-                tenant_item = tenants[int(tenant_index)]
-            except (IndexError, TypeError, ValueError):
-                tenant_item = tenants[0] if tenants else {}
-            direct = str(tenant_item.get("auth_key") or "") if isinstance(tenant_item, dict) else ""
-            env_name = str(tenant_item.get("auth_key_env") or "") if isinstance(tenant_item, dict) else ""
-            auth_key = direct or os.getenv(env_name, "")
-            auth_key_env = env_name
-            probe_path = profile_dir / "blackbox-contract-probe.json"
-            probe_command = [
-                sys.executable,
-                "-m",
-                "performance.probes.blackbox_contract_probe",
-                "--base-url",
-                str(profile.get("base_url") or "http://127.0.0.1:8010"),
-                "--commit-csv",
-                str(commit_csv),
-                "--auth-key",
-                auth_key,
-                "--auth-key-env",
-                auth_key_env,
-                "--tenant",
-                tenant_index,
-                "--out",
-                str(probe_path),
-            ]
-            probe_execution = run_command(
-                probe_command,
-                timeout_s=min(args.timeout_s, 180),
-                redact_values={auth_key} if auth_key else set(),
-            )
-            probe_result = read_json(probe_path)
-            command_result["blackbox_probe"] = {
-                **probe_execution,
-                "artifact": str(probe_path),
-                "commit_csv": str(commit_csv),
-                "tenant": tenant_index,
-            }
-            if probe_result:
-                suite = {**suite, "blackbox_contract_probe": probe_result}
-        elif not commit_csv:
-            command_result["blackbox_probe"] = {
-                "status": "INCONCLUSIVE",
-                "reason": "本轮没有完成 Commit，无法从真实 session 启动黑盒契约探测",
-            }
+        probe_artifacts, probe_commands = _run_configured_probes(
+            profile,
+            profile_dir=profile_dir,
+            profiles_path=args.profiles,
+            formal_root=formal_root,
+            timeout_s=args.timeout_s,
+        )
+        suite = {**suite, **probe_artifacts}
+        command_result.update(probe_commands)
 
         output_profiles.append({
             **profile,
             "name": name,
             "suite": str(suite_path),
-            "blackbox_contract_probe": probe_result,
+            **probe_artifacts,
             "command": command_result,
             "objectives": objective_statuses(
                 {**suite, "profile_name": name},
-                recovery_configured=bool(profile.get("recovery_plan")),
+                recovery_configured=bool(profile.get("commit_recovery")),
                 metrics_configured=bool(profile.get("metrics_enabled", True)),
             ),
         })

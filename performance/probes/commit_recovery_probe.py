@@ -218,6 +218,11 @@ def main() -> int:
     parser.add_argument("--health-timeout-s", type=float, default=5.0)
     parser.add_argument("--recovery-timeout-s", type=float, default=180.0)
     parser.add_argument("--poll-s", type=float, default=2.0)
+    parser.add_argument(
+        "--idempotency-key",
+        default="",
+        help="Stable Commit idempotency key; generated when omitted",
+    )
     parser.add_argument("--out", required=True, type=Path)
     args = parser.parse_args()
 
@@ -255,6 +260,7 @@ def main() -> int:
 
     session_id, _ = client.open_session(args.tenant, f"pr421-recovery-{uuid.uuid4().hex[:10]}")
     marker = f"pr421-recovery-marker-{uuid.uuid4().hex}"
+    idempotency_key = args.idempotency_key or f"pr421-recovery-commit-{uuid.uuid4().hex}"
     client_message_ids: list[str] = []
     message_records: list[dict[str, Any]] = []
     for index in range(max(1, args.messages)):
@@ -291,7 +297,7 @@ def main() -> int:
 
     def submit() -> None:
         try:
-            response = client.commit(session_id)
+            response = client.commit(session_id, idempotency_key=idempotency_key)
             commit_box["status_code"] = response.status_code
             commit_box["payload"] = response.payload
             commit_box["error"] = response.error
@@ -341,6 +347,7 @@ def main() -> int:
     ]
     result["archive_id"] = archive_id
     result["commit_response_result"] = commit_payload
+    result["idempotency_key"] = idempotency_key
 
     if not recovered:
         result.update({"status": FAIL, "reason": "service did not recover within timeout"})
@@ -386,6 +393,30 @@ def main() -> int:
             )
             print(json.dumps(result, ensure_ascii=False))
             return 2
+        replay_response = client.commit(
+            session_id,
+            idempotency_key=idempotency_key,
+        )
+        replay_payload = replay_response.payload if isinstance(replay_response.payload, dict) else {}
+        replay_result = (
+            replay_payload.get("result")
+            if isinstance(replay_payload.get("result"), dict)
+            else replay_payload
+        )
+        replay_archive_id = (
+            replay_result.get("archive_id")
+            or replay_result.get("commit_id")
+            or replay_result.get("id")
+        )
+        replayed = bool(replay_result.get("replayed")) if isinstance(replay_result, dict) else False
+        result["idempotency_replay"] = {
+            "status_code": replay_response.status_code,
+            "archive_id": replay_archive_id,
+            "replayed": replayed,
+            "same_archive": str(replay_archive_id or "") == str(archive_id),
+            "payload": replay_payload,
+            "error": replay_response.error,
+        }
         terminal = []
         deadline = time.monotonic() + max(1.0, args.recovery_timeout_s)
         while time.monotonic() < deadline:
@@ -485,10 +516,15 @@ def main() -> int:
             "expected_server_message_ids": sorted(expected_message_ids),
         }
         result["idempotency_reconciliation"] = {
-            "status": INCONCLUSIVE,
+            "status": (
+                PASS
+                if replayed and str(replay_archive_id or "") == str(archive_id)
+                else FAIL
+            ),
             "reason": (
-                "this probe kills the service during one Commit request; the "
-                "public request did not provide a replay/idempotency key"
+                "same idempotency key returned the same archive with replayed=true"
+                if replayed and str(replay_archive_id or "") == str(archive_id)
+                else "same-key Commit replay did not return the original archive with replayed=true"
             ),
         }
         result["status"] = (
@@ -496,6 +532,7 @@ def main() -> int:
             if (
                 final_state == "completed"
                 and reconciliation_status == PASS
+                and result["idempotency_reconciliation"]["status"] == PASS
                 and history.status_code
                 and history.status_code < 400
             )

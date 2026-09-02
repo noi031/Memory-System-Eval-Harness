@@ -177,9 +177,44 @@ def _fairness(suite: dict[str, Any]) -> dict[str, Any]:
     checks = acceptance.get("checks") if isinstance(acceptance.get("checks"), list) else []
     check = next((item for item in checks if item.get("name") == "Tenant fairness (Jain)"), None)
     if not isinstance(check, dict) or check.get("observed") in (None, ""):
+        # Fairness is a within-workload statistic. Never add completion
+        # counts from capacity, priority, and skew scenarios together: their
+        # denominators and admission windows differ. Prefer the bounded
+        # priority workload, then use one fallback workload at a time.
+        runs_by_scenario: dict[str, list[dict[str, Any]]] = {}
+        for run in _suite_runs(suite):
+            runs_by_scenario.setdefault(str(run.get("scenario") or ""), []).append(run)
+        candidate_scenarios = [
+            "search-priority-blackbox",
+            "tenant-skew",
+            "commit-barrier",
+            "commit-storm",
+        ]
+        selected_scenario = next(
+            (
+                scenario
+                for scenario in candidate_scenarios
+                if any(
+                    isinstance((_run_summary(run).get("metrics") or {}).get("fairness"), dict)
+                    and isinstance(
+                        ((_run_summary(run).get("metrics") or {}).get("fairness") or {}).get(
+                            "commit_completed_per_tenant"
+                        ),
+                        dict,
+                    )
+                    for run in runs_by_scenario.get(scenario, [])
+                )
+            ),
+            "",
+        )
+        selected_runs = (
+            runs_by_scenario.get(selected_scenario, [])
+            if selected_scenario
+            else _suite_runs(suite)
+        )
         counts: dict[str, int] = {}
         run_count = 0
-        for run in _suite_runs(suite):
+        for run in selected_runs:
             metrics = _run_summary(run).get("metrics")
             fairness = metrics.get("fairness") if isinstance(metrics, dict) else {}
             per_tenant = (
@@ -207,6 +242,7 @@ def _fairness(suite: dict[str, Any]) -> dict[str, Any]:
                     "jain": round(jain, 4),
                     "completed_per_tenant": counts,
                     "runs_with_fairness": run_count,
+                    "scenario": selected_scenario or "mixed",
                 },
                 "按独立租户最终完成 Commit 数计算 Jain 指数",
             )
@@ -214,7 +250,11 @@ def _fairness(suite: dict[str, Any]) -> dict[str, Any]:
             "Commit/Search 公平性 Jain",
             INCONCLUSIVE,
             0.90,
-            {"completed_per_tenant": counts, "runs_with_fairness": run_count},
+            {
+                "completed_per_tenant": counts,
+                "runs_with_fairness": run_count,
+                "scenario": selected_scenario or "mixed",
+            },
             "没有至少两个租户的有效 Commit 完成吞吐样本",
         )
     observed = check.get("observed")

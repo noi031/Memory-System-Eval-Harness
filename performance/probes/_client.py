@@ -416,11 +416,19 @@ class EchoMemHTTP:
         """Read an EchoMem echo:// file through the existing read-only API."""
         return self.request("GET", f"/fs/read?uri={quote(uri, safe=':/')}")
 
-    def commit(self, session_id: str) -> HttpResult:
+    def commit(
+        self,
+        session_id: str,
+        *,
+        idempotency_key: str | None = None,
+    ) -> HttpResult:
+        body: dict[str, Any] = {"metadata": {"keep_recent_count": 0}}
+        if idempotency_key:
+            body["idempotency_key"] = idempotency_key
         return self.request(
             "POST",
             f"/api/sessions/{session_id}/commit",
-            {"metadata": {"keep_recent_count": 0}},
+            body,
             operation="commit",
         )
 

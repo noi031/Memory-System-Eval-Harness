@@ -6,6 +6,26 @@
       "tenant_config": "performance/tenants-32.server.json",
       "preflight_config": "/etc/echomem/4u8g/config.json",
       "metrics_enabled": true,
+      "capability_probe": {
+        "health_path": "/health",
+        "metrics_path": "/metrics",
+        "cursor_path": "",
+        "operation_path": "",
+        "conflict_path": "",
+        "ttl_path": "",
+        "engine_path": "",
+        "fault_path": ""
+      },
+      "commit_recovery": {
+        "container": "echomem-4u8g",
+        "tenant": "stress-a",
+        "kill_delay_s": 0.5,
+        "messages": 12,
+        "content_chars": 2500,
+        "recovery_timeout_s": 180,
+        "poll_s": 2
+      },
+      "fault_plan": "fault-plan.example.json",
       "resource_profile": {
         "cpu": "4 vCPU",
         "memory": "8 GiB"

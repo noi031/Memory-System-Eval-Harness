@@ -10,7 +10,9 @@ from pathlib import Path
 from performance.probes.cursor_reconcile import reconcile
 from performance.probes.cursor_reconcile import values_from_payload
 from performance.probes._client import extract_message
+from performance.probes._client import EchoMemHTTP
 from performance.probes.commit_recovery_probe import decode_fs_read_payload
+from performance.scheduler_acceptance import evaluate as evaluate_scheduler_acceptance
 from performance.probes.capability_probe import classify_probe, run as run_capability
 from performance.probes.capability_probe import request as capability_request
 from performance.probes.blackbox_contract_probe import request as blackbox_request
@@ -132,6 +134,47 @@ class FailureToolTests(unittest.TestCase):
                 }
             }),
         )
+
+    def test_scheduler_fairness_does_not_mix_different_workloads(self) -> None:
+        def run(scenario: str, counts: dict[str, int]) -> dict[str, object]:
+            return {
+                "scenario": scenario,
+                "summary": {
+                    "metrics": {
+                        "fairness": {
+                            "commit_completed_per_tenant": counts,
+                        }
+                    }
+                },
+            }
+
+        result = evaluate_scheduler_acceptance(
+            {
+                "instance_profile": "4U8G",
+                "runs": [
+                    run("capacity-2", {"0": 2, "1": 2}),
+                    run("capacity-4", {"0": 3, "1": 2, "2": 1, "3": 2}),
+                    run("search-priority-blackbox", {"0": 4, "1": 4, "2": 4, "3": 4}),
+                ],
+            }
+        )
+        fairness = next(
+            item for item in result["checks"]
+            if item["name"] == "Commit/Search 公平性 Jain"
+        )
+        self.assertEqual("PASS", fairness["status"])
+        self.assertEqual("search-priority-blackbox", fairness["observed"]["scenario"])
+        self.assertEqual(1.0, fairness["observed"]["jain"])
+
+    def test_commit_client_includes_idempotency_key(self) -> None:
+        client = EchoMemHTTP("http://example.test")
+        with patch.object(client, "request") as request:
+            client.commit("session-1", idempotency_key="commit-key-1")
+        request.assert_called_once()
+        args, kwargs = request.call_args
+        self.assertEqual("POST", args[0])
+        self.assertEqual("/api/sessions/session-1/commit", args[1])
+        self.assertEqual("commit-key-1", args[2]["idempotency_key"])
 
     def test_fault_control_without_real_control_is_inconclusive(self) -> None:
         class Args:

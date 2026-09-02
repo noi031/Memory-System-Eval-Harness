@@ -801,6 +801,12 @@ python3 -m performance.objective_suite \
 窗口内完成的容量阶梯上限，不直接等同于业务 DAU；O6 必须额外提供真实 container
 重启和 cursor/message-set 对账配置；O7 必须实际抓到服务端 `/metrics` 四元组。
 报告输出 `objective-suite.json` 和 `objective-suite.html`，不会把缺失证据算成通过。
+profile 中配置 `capability_probe`、`commit_recovery`、`fault_plan` 后，入口会自动
+执行真实 HTTP 能力探针、Commit 中途 kill-9 恢复探针和故障套件，并把每个检查项写入
+HTML 明细。可从 `performance/instance-profiles.example.json` 与
+`performance/fault-plan.example.json` 复制后按实际服务地址、租户和容器名修改。
+没有真实故障控制端点时，故障项必须显示 `INCONCLUSIVE`，不能用测试平台自身缺少
+适配器来判定 EchoMem 未实现。
 报告文件为 `suite.html`，逐请求和资源时序通常位于各场景的 `run/` 目录。
 
 ### 8. 常见问题
