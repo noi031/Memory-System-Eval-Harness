@@ -17,7 +17,7 @@ from performance.objective_suite import (
     run_command,
     render_report,
 )
-from performance.probes.limit_failure_probe import metrics_coverage
+from performance.probes.limit_failure_probe import auth_key, load_tenants, metrics_coverage
 from performance.formal_suite import SCENARIOS
 
 
@@ -108,6 +108,26 @@ class ObjectiveSuiteTests(unittest.TestCase):
             "FAIL",
             _preserve_probe_status(execution, {"status": "PASS"})["status"],
         )
+
+    def test_limit_probe_accepts_explicit_auth_key(self) -> None:
+        self.assertEqual(
+            "key-a",
+            auth_key({"auth_key": "key-a", "auth_key_env": "MISSING_KEY"}),
+        )
+
+    def test_limit_probe_loads_explicit_tenant_credentials(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "tenants.json"
+            path.write_text(
+                json.dumps(
+                    {"tenants": [{"tenant_id": "a", "user_id": "u", "auth_key": "key-a"}]}
+                ),
+                encoding="utf-8",
+            )
+            self.assertEqual(
+                [{"tenant_id": "a", "user_id": "u", "auth_key_env": "", "auth_key": "key-a"}],
+                load_tenants(path),
+            )
 
     def test_recovery_objective_requires_idempotency_evidence(self) -> None:
         suite = {

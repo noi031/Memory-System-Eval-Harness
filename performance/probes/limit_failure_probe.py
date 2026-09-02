@@ -64,6 +64,14 @@ def header_reason_code(headers: Any) -> str:
     return ""
 
 
+def auth_key(tenant: dict[str, str]) -> str:
+    """Resolve either an explicit key or the configured environment key."""
+    direct = str(tenant.get("auth_key") or "").strip()
+    if direct:
+        return direct
+    return os.environ.get(str(tenant.get("auth_key_env") or ""), "")
+
+
 def quantile(values: list[float], p: float) -> float | None:
     if not values:
         return None
@@ -91,7 +99,7 @@ def fetch_metrics(
     started = time.monotonic()
     headers = {
         "Accept": "text/plain, application/openmetrics-text",
-        "X-Auth-Key": os.environ.get(tenant["auth_key_env"], ""),
+        "X-Auth-Key": auth_key(tenant),
     }
     req = urllib.request.Request(
         base_url.rstrip("/") + "/metrics",
@@ -191,7 +199,7 @@ def request(
     headers = {
         "Content-Type": "application/json",
         "Accept": "application/json",
-        "X-Auth-Key": os.environ.get(tenant["auth_key_env"], ""),
+        "X-Auth-Key": auth_key(tenant),
     }
     data = json.dumps(body).encode("utf-8")
     row: dict[str, Any] = {
@@ -248,7 +256,7 @@ def commit_request(
     headers = {
         "Content-Type": "application/json",
         "Accept": "application/json",
-        "X-Auth-Key": os.environ.get(tenant["auth_key_env"], ""),
+        "X-Auth-Key": auth_key(tenant),
     }
     message_id = f"limit-probe-{uuid.uuid4().hex}"
     message_body = {
@@ -315,12 +323,14 @@ def load_tenants(path: Path) -> list[dict[str, str]]:
     result = []
     for item in tenants:
         env_name = str(item.get("auth_key_env") or "")
-        if env_name and os.environ.get(env_name):
+        direct_key = str(item.get("auth_key") or "").strip()
+        if direct_key or (env_name and os.environ.get(env_name)):
             result.append(
                 {
                     "tenant_id": str(item.get("tenant_id") or ""),
                     "user_id": str(item.get("user_id") or ""),
                     "auth_key_env": env_name,
+                    "auth_key": direct_key,
                 }
             )
     if not result:
@@ -358,7 +368,7 @@ def create_sessions(
         headers = {
             "Content-Type": "application/json",
             "Accept": "application/json",
-            "X-Auth-Key": os.environ.get(tenant["auth_key_env"], ""),
+        "X-Auth-Key": auth_key(tenant),
         }
         body = {
             "agent_id": "echomem-limit-failure-probe",
