@@ -645,6 +645,15 @@ class LoadGenerator:
         """Run one scene for its duration and return all records."""
         scene_key = scene.key
         total_workers = len(tenants) * scene.per_tenant_conc
+        # A rate-based K scene has independent read and commit streams. With
+        # one tenant/worker, integer 1:1 splitting otherwise creates only a
+        # writer, producing a misleading "completed" run with zero Search.
+        if (
+            scene.scene_id == "K"
+            and self.rate_limiter is not None
+            and self.commit_rate_limiter is not None
+        ):
+            total_workers = max(2, total_workers)
         stop = threading.Event()
         started_wall = time.time()
         burst_start: float | None = None

@@ -2527,6 +2527,20 @@ class TenantSpecsTests(unittest.TestCase):
         self.assertEqual(500, len(detail.rsplit("body=", 1)[1]))
 
 
+class LoadGeneratorSceneTests(unittest.TestCase):
+    def test_rate_based_mixed_scene_keeps_read_worker_at_single_tenant(self) -> None:
+        generator = LoadGenerator(rps=2.0, commit_rpm=2.0)
+        scene = SceneRun("K", 1, 1.0)
+        tenant = mock.Mock(idx=0)
+        with (
+            mock.patch.object(generator, "_read_loop", return_value=[]) as read_loop,
+            mock.patch.object(generator, "_write_loop", return_value=[]) as write_loop,
+        ):
+            generator.run_scene(scene, [tenant], messages_per_session=1)
+        self.assertEqual(1, read_loop.call_count)
+        self.assertEqual(1, write_loop.call_count)
+
+
 class NewFeatureVerdictTests(unittest.TestCase):
     """evaluate_features 新增特性：tenant_isolation / saturation_contract / hot_tenant_fairness。"""
 
