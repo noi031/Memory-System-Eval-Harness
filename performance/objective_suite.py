@@ -593,6 +593,7 @@ def objective_statuses(
             "status": strict("DAU / 最大热用户容量")["status"],
             "reason": strict("DAU / 最大热用户容量").get("reason", ""),
             "observed": strict_observed("DAU / 最大热用户容量"),
+            "owner": strict("DAU / 最大热用户容量").get("owner"),
             "evidence": "scheduler_acceptance: DAU / 最大热用户容量",
         },
         {
@@ -605,6 +606,7 @@ def objective_statuses(
                 else "当前只完成单一规格或没有真实场景结果；仅有 profile 配置不能证明多规格调度"
             ),
             "observed": {"completed_profiles": completed_profiles},
+            "owner": "测试平台 + 部署资源",
             "evidence": completed_profiles,
         },
         {
@@ -613,6 +615,7 @@ def objective_statuses(
             "status": strict("单租户故障隔离")["status"],
             "reason": strict("单租户故障隔离").get("reason", ""),
             "observed": strict_observed("单租户故障隔离"),
+            "owner": strict("单租户故障隔离").get("owner"),
             "evidence": "scheduler_acceptance: 单租户故障隔离",
         },
         {
@@ -621,6 +624,7 @@ def objective_statuses(
             "status": strict("Commit/Search 公平性 Jain")["status"],
             "reason": strict("Commit/Search 公平性 Jain").get("reason", ""),
             "observed": strict_observed("Commit/Search 公平性 Jain"),
+            "owner": strict("Commit/Search 公平性 Jain").get("owner"),
             "evidence": "scheduler_acceptance: Commit/Search 公平性 Jain",
         },
         {
@@ -629,6 +633,7 @@ def objective_statuses(
             "status": strict("Search 优先于 Commit")["status"],
             "reason": strict("Search 优先于 Commit").get("reason", ""),
             "observed": strict_observed("Search 优先于 Commit"),
+            "owner": strict("Search 优先于 Commit").get("owner"),
             "evidence": "scheduler_acceptance: Search 优先于 Commit",
         },
         {
@@ -637,6 +642,7 @@ def objective_statuses(
             "status": strict("Commit kill-9 恢复与重放")["status"],
             "reason": strict("Commit kill-9 恢复与重放").get("reason", ""),
             "observed": strict_observed("Commit kill-9 恢复与重放"),
+            "owner": strict("Commit kill-9 恢复与重放").get("owner"),
             "evidence": "scheduler_acceptance: Commit kill-9 恢复与重放",
         },
         {
@@ -645,6 +651,7 @@ def objective_statuses(
             "status": strict("分层/分租户调度可观测性")["status"],
             "reason": strict("分层/分租户调度可观测性").get("reason", ""),
             "observed": strict_observed("分层/分租户调度可观测性"),
+            "owner": strict("分层/分租户调度可观测性").get("owner"),
             "evidence": "scheduler_acceptance: 分层/分租户调度可观测性",
         },
     ]
@@ -663,6 +670,7 @@ def render_report(result: dict[str, Any], path: Path) -> None:
                 f"{html.escape(str(objective.get('status')))}</td>"
                 f"<td>{html.escape(str(objective.get('reason')))}"
                 f"<br><code>{html.escape(json.dumps(objective.get('observed', {}), ensure_ascii=False, sort_keys=True))}</code></td>"
+                f"<td>{html.escape(str(objective.get('owner') or '测试平台'))}</td>"
                 f"<td><code>{html.escape(str(objective.get('evidence')))}</code></td>"
                 "</tr>"
             )
@@ -723,7 +731,7 @@ code{{background:#f0f3f5;padding:2px 4px}}.scroll{{overflow:auto}}
 <div class="muted">生成时间：{html.escape(result.get("created_at", ""))} · 真实 HTTP：是 · mock 模型：否</div>
 <p>报告只依据实际运行证据判定；缺少部署控制或服务端指标时标记为 INCONCLUSIVE，不推断为通过。</p></section>
 <section class="scroll"><h2>逐 profile 目标状态</h2>
-<table><thead><tr><th>Profile</th><th>目标</th><th>状态</th><th>说明</th><th>证据</th></tr></thead>
+<table><thead><tr><th>Profile</th><th>目标</th><th>状态</th><th>说明</th><th>归属</th><th>证据</th></tr></thead>
 <tbody>{"".join(rows)}</tbody></table></section>
 <section class="scroll"><h2>探针与黑盒证据明细</h2>
 <p class="muted">这里显示真实 HTTP 探针实际检查到的内容。没有真实输入、控制能力或服务端观测时，状态保持 INCONCLUSIVE。</p>

@@ -25,6 +25,16 @@ PR421_LANES = {
     "recall_rerank",
     "commit",
 }
+
+OBJECTIVE_OWNERS = {
+    "DAU / 最大热用户容量": "测试平台 + 部署资源",
+    "多规格实例调度配置": "测试平台 + 部署资源",
+    "单租户故障隔离": "EchoMem/部署控制面 + 测试平台采集",
+    "Commit/Search 公平性 Jain": "EchoMem 调度 + 测试平台负载",
+    "Search 优先于 Commit": "EchoMem 调度 + 测试平台负载",
+    "Commit kill-9 恢复与重放": "EchoMem 持久化 + 部署重启权限 + 测试平台对账",
+    "分层/分租户调度可观测性": "EchoMem /metrics + 测试平台校验",
+}
 LEGACY_LANES = {
     "http_interactive",
     "http_background",
@@ -60,6 +70,7 @@ def _result(name: str, status: str, target: Any, observed: Any, reason: str) -> 
         "target": target,
         "observed": observed,
         "reason": reason,
+        "owner": OBJECTIVE_OWNERS.get(name, "测试平台"),
     }
 
 
