@@ -141,6 +141,7 @@ class TenantSpec:
 def load_tenant_specs(
     path: str | Path,
     environ: dict[str, str] | None = None,
+    tenant_count: int = 0,
 ) -> list[TenantSpec]:
     """Load tenant identities while keeping credentials out of report data."""
     env = environ if environ is not None else os.environ
@@ -148,6 +149,8 @@ def load_tenant_specs(
     entries = payload.get("tenants") if isinstance(payload, dict) else payload
     if not isinstance(entries, list) or not entries:
         raise ValueError("tenant config must contain a non-empty tenants list")
+    if tenant_count > 0:
+        entries = entries[:tenant_count]
     specs: list[TenantSpec] = []
     seen: set[str] = set()
     for index, item in enumerate(entries):

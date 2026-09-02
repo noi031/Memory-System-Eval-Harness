@@ -107,9 +107,7 @@ def run(
     timeout_s: float = 5.0,
     tenant_count: int = 0,
 ) -> dict[str, Any]:
-    tenants = load_tenant_specs(tenant_config)
-    if tenant_count > 0:
-        tenants = tenants[:tenant_count]
+    tenants = load_tenant_specs(tenant_config, tenant_count=tenant_count)
     results = [open_session(base_url, tenant, timeout_s=timeout_s) for tenant in tenants]
     failed = [item for item in results if not item["session_opened"]]
     return {
