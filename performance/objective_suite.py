@@ -591,6 +591,36 @@ def _run_configured_probes(
     return artifacts, commands
 
 
+def _formal_run_counts(suite: dict[str, Any]) -> tuple[int, int]:
+    """Return (completed, submitted) counts without equating the two.
+
+    A run can emit requests and still end in TIMEOUT, ENV_ERROR, or blocked
+    state.  Profile-level evidence for O2 must count only explicit completed
+    runs, while submitted is retained as a diagnostic volume.
+    """
+    completed = 0
+    submitted = 0
+    for item in suite.get("runs") or []:
+        if not isinstance(item, dict):
+            continue
+        summary = item.get("summary")
+        if not isinstance(summary, dict):
+            continue
+        metrics = summary.get("metrics")
+        if not isinstance(metrics, dict):
+            continue
+        search = metrics.get("search")
+        commit = metrics.get("commit")
+        search = search if isinstance(search, dict) else {}
+        commit = commit if isinstance(commit, dict) else {}
+        if int(search.get("submitted") or 0) <= 0 and int(commit.get("submitted") or 0) <= 0:
+            continue
+        submitted += 1
+        if str(item.get("status") or "").lower() == "completed":
+            completed += 1
+    return completed, submitted
+
+
 def acceptance_by_name(suite: dict[str, Any]) -> dict[str, dict[str, Any]]:
     acceptance = suite.get("acceptance") or {}
     return {
@@ -1050,18 +1080,7 @@ def main() -> int:
         suite = {**suite, **probe_artifacts}
         command_result.update(probe_commands)
 
-        completed_runs = 0
-        for item in suite.get("runs") or []:
-            if not isinstance(item, dict):
-                continue
-            summary = item.get("summary")
-            if not isinstance(summary, dict):
-                continue
-            metrics = summary.get("metrics") if isinstance(summary.get("metrics"), dict) else {}
-            search = metrics.get("search") if isinstance(metrics.get("search"), dict) else {}
-            commit = metrics.get("commit") if isinstance(metrics.get("commit"), dict) else {}
-            if int(search.get("submitted") or 0) > 0 or int(commit.get("submitted") or 0) > 0:
-                completed_runs += 1
+        completed_runs, submitted_runs = _formal_run_counts(suite)
         profile_execution_status = (
             "completed"
             if completed_runs > 0
@@ -1073,6 +1092,7 @@ def main() -> int:
             "suite": str(suite_path),
             "profile_execution_status": profile_execution_status,
             "completed_runs": completed_runs,
+            "submitted_runs": submitted_runs,
             **probe_artifacts,
             "command": command_result,
             "objectives": objective_statuses(
@@ -1095,6 +1115,7 @@ def main() -> int:
             "name": str(profile.get("name") or ""),
             "status": str(profile.get("profile_execution_status") or ""),
             "completed_runs": int(profile.get("completed_runs") or 0),
+            "submitted_runs": int(profile.get("submitted_runs") or 0),
         }
         for profile in output_profiles
     ]

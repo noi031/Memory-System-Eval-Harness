@@ -12,6 +12,7 @@ from performance.objective_suite import (
     _acquire_output_lock,
     _materialize_fault_plan,
     _preserve_probe_status,
+    _formal_run_counts,
     load_profiles,
     objective_statuses,
     run_command,
@@ -235,6 +236,31 @@ class ObjectiveSuiteTests(unittest.TestCase):
         )
         o2 = next(item for item in objectives if item["id"] == "O2")
         self.assertEqual("INCONCLUSIVE", o2["status"])
+
+    def test_only_completed_formal_runs_count_as_completed_profile_evidence(self) -> None:
+        suite = {
+            "runs": [
+                {
+                    "status": "TIMEOUT",
+                    "summary": {
+                        "metrics": {
+                            "search": {"submitted": 10},
+                            "commit": {"submitted": 2},
+                        }
+                    },
+                },
+                {
+                    "status": "completed",
+                    "summary": {
+                        "metrics": {
+                            "search": {"submitted": 10},
+                            "commit": {"submitted": 2},
+                        }
+                    },
+                },
+            ]
+        }
+        self.assertEqual((1, 2), _formal_run_counts(suite))
 
     def test_run_command_redacts_secret_values(self) -> None:
         result = run_command(
