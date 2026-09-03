@@ -18,6 +18,9 @@ import os
 import shlex
 import subprocess
 import sys
+import time
+import urllib.error
+import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -119,6 +122,15 @@ def run_command(
             for item in command
         ]
 
+    if timeout_s <= 0:
+        return {
+            "status": "TIMEOUT",
+            "returncode": 124,
+            "command": safe_command(),
+            "stdout": "",
+            "stderr": "objective suite wall-clock budget exhausted\n",
+            "elapsed_s": 0.0,
+        }
     try:
         completed = subprocess.run(
             command,
@@ -145,6 +157,66 @@ def run_command(
             "stderr": str(exc.stderr or "")[-12000:],
             "elapsed_s": (datetime.now(timezone.utc) - started).total_seconds(),
         }
+
+
+def _remaining_budget(deadline: float | None) -> float | None:
+    if deadline is None:
+        return None
+    return max(0.0, deadline - time.monotonic())
+
+
+def _bounded_timeout(requested_s: float, deadline: float | None) -> float:
+    remaining = _remaining_budget(deadline)
+    if remaining is None:
+        return max(0.0, float(requested_s))
+    return max(0.0, min(float(requested_s), remaining))
+
+
+def _service_available(base_url: str, *, timeout_s: float) -> tuple[bool, str]:
+    if timeout_s <= 0:
+        return False, "objective suite wall-clock budget exhausted"
+    try:
+        request = urllib.request.Request(
+            base_url.rstrip("/") + "/health",
+            headers={"Accept": "application/json"},
+        )
+        with urllib.request.urlopen(request, timeout=min(3.0, timeout_s)) as response:
+            if 200 <= response.status < 300:
+                return True, ""
+            return False, f"health returned HTTP {response.status}"
+    except (OSError, urllib.error.URLError, TimeoutError) as exc:
+        return False, f"{type(exc).__name__}: {exc}"
+
+
+def _probe_budget_skip(
+    profile: dict[str, Any],
+    *,
+    reason: str,
+) -> dict[str, Any]:
+    keys = (
+        "capability_probe",
+        "blackbox_probe",
+        "missing_cases",
+        "concurrent_commit",
+        "fault_isolation",
+        "limit_failure_sweep",
+        "commit_recovery",
+        "fault_plan",
+    )
+    skipped: dict[str, Any] = {}
+    for key in keys:
+        configured = profile.get(key)
+        enabled = (
+            bool(configured)
+            if key == "fault_plan"
+            else isinstance(configured, dict) and configured.get("enabled", True)
+        )
+        if enabled:
+            skipped[key] = {
+                "status": "TIMEOUT" if "budget" in reason else "ENVIRONMENT_ERROR",
+                "reason": reason,
+            }
+    return skipped
 
 
 def read_json(path: Path) -> dict[str, Any]:
@@ -397,11 +469,29 @@ def _run_configured_probes(
     formal_root: Path,
     timeout_s: float,
     quick: bool = False,
+    deadline: float | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     """Run explicitly configured real probes and return artifacts/metadata."""
     artifacts: dict[str, Any] = {}
     commands: dict[str, Any] = {}
     base_url = str(profile.get("base_url") or "http://127.0.0.1:8010")
+    probe_budget = _bounded_timeout(timeout_s, deadline)
+    available, availability_error = _service_available(
+        base_url,
+        timeout_s=probe_budget,
+    )
+    if not available:
+        reason = f"目标 EchoMem 在探针开始前不可达：{availability_error}"
+        commands.update(_probe_budget_skip(profile, reason=reason))
+        commands["service_preflight"] = {
+            "status": (
+                "TIMEOUT"
+                if "budget" in availability_error
+                else "ENVIRONMENT_ERROR"
+            ),
+            "reason": reason,
+        }
+        return artifacts, commands
     tenant_path = Path(
         _resolve_profile_path(str(profile.get("tenant_config") or ""), profiles_path)
     )
@@ -441,7 +531,9 @@ def _run_configured_probes(
         ):
             _add_option(command, flag, capability.get(key))
         execution = run_command(
-            command, timeout_s=min(timeout_s, 180), redact_values=redact
+            command,
+            timeout_s=_bounded_timeout(min(timeout_s, 180), deadline),
+            redact_values=redact,
         )
         commands["capability_probe"] = execution
         payload = read_json(output)
@@ -469,7 +561,9 @@ def _run_configured_probes(
         elif auth_key_env:
             command += ["--auth-key-env", auth_key_env]
         execution = run_command(
-            command, timeout_s=min(timeout_s, 180), redact_values=redact
+            command,
+            timeout_s=_bounded_timeout(min(timeout_s, 180), deadline),
+            redact_values=redact,
         )
         commands["blackbox_probe"] = execution
         payload = read_json(output)
@@ -507,7 +601,12 @@ def _run_configured_probes(
         ):
             _add_option(command, flag, missing.get(key))
         execution = run_command(
-            command, timeout_s=min(timeout_s, 300 if quick else 900), redact_values=redact
+            command,
+            timeout_s=_bounded_timeout(
+                min(timeout_s, 300 if quick else 900),
+                deadline,
+            ),
+            redact_values=redact,
         )
         commands["missing_cases"] = execution
         payload = read_json(output)
@@ -533,7 +632,12 @@ def _run_configured_probes(
         ):
             _add_option(command, flag, concurrent.get(key))
         execution = run_command(
-            command, timeout_s=min(timeout_s, 300 if quick else 900), redact_values=redact
+            command,
+            timeout_s=_bounded_timeout(
+                min(timeout_s, 300 if quick else 900),
+                deadline,
+            ),
+            redact_values=redact,
         )
         commands["concurrent_commit"] = execution
         payload = read_json(output)
@@ -565,7 +669,12 @@ def _run_configured_probes(
         ):
             _add_option(command, flag, fault_isolation.get(key))
         execution = run_command(
-            command, timeout_s=min(timeout_s, 600 if quick else 1800), redact_values=redact
+            command,
+            timeout_s=_bounded_timeout(
+                min(timeout_s, 600 if quick else 1800),
+                deadline,
+            ),
+            redact_values=redact,
         )
         commands["fault_isolation"] = execution
         payload = read_json(output)
@@ -573,16 +682,22 @@ def _run_configured_probes(
         if payload:
             artifacts["fault_isolation"] = {**payload, "path": str(output)}
 
-    sweep_artifacts, sweep_commands = _run_limit_failure_sweep(
-        profile,
-        profile_dir=profile_dir,
-        profiles_path=profiles_path,
-        formal_root=formal_root,
-        timeout_s=timeout_s,
-        quick=quick,
-    )
-    artifacts.update(sweep_artifacts)
-    commands.update(sweep_commands)
+    if _remaining_budget(deadline) is not None and _remaining_budget(deadline) <= 0:
+        commands["limit_failure_sweep"] = {
+            "status": "TIMEOUT",
+            "reason": "objective suite wall-clock budget exhausted",
+        }
+    else:
+        sweep_artifacts, sweep_commands = _run_limit_failure_sweep(
+            profile,
+            profile_dir=profile_dir,
+            profiles_path=profiles_path,
+            formal_root=formal_root,
+            timeout_s=_bounded_timeout(timeout_s, deadline),
+            quick=quick,
+        )
+        artifacts.update(sweep_artifacts)
+        commands.update(sweep_commands)
 
     recovery = profile.get("commit_recovery")
     if isinstance(recovery, dict) and tenant_path.is_file():
@@ -620,7 +735,11 @@ def _run_configured_probes(
             _add_option(command, flag, recovery.get(key))
         if recovery.get("require_accepted_202"):
             command.append("--require-accepted-202")
-        execution = run_command(command, timeout_s=min(timeout_s, 900), redact_values=redact)
+        execution = run_command(
+            command,
+            timeout_s=_bounded_timeout(min(timeout_s, 900), deadline),
+            redact_values=redact,
+        )
         commands["commit_recovery"] = execution
         payload = read_json(output)
         _preserve_probe_status(execution, payload)
@@ -630,12 +749,20 @@ def _run_configured_probes(
     fault_plan_value = profile.get("fault_plan")
     if fault_plan_value:
         plan_path = Path(_resolve_profile_path(str(fault_plan_value), profiles_path))
-        if plan_path.is_file():
-            plan_path = _materialize_fault_plan(
-                plan_path,
-                base_url=base_url,
-                output_path=profile_dir / "fault-plan.resolved.json",
-            )
+        if not plan_path.is_file():
+            commands["fault_suite"] = {
+                "status": "INCONCLUSIVE",
+                "reason": (
+                    "fault_plan 不存在，未启动故障套件；"
+                    f"期望路径：{plan_path}"
+                ),
+            }
+            return artifacts, commands
+        plan_path = _materialize_fault_plan(
+            plan_path,
+            base_url=base_url,
+            output_path=profile_dir / "fault-plan.resolved.json",
+        )
         output_dir = profile_dir / "fault-suite"
         output_dir.mkdir(parents=True, exist_ok=True)
         command = [
@@ -653,7 +780,11 @@ def _run_configured_probes(
             command += ["--auth-key", auth_key]
         if commit_csv:
             command += ["--commit-csv", str(commit_csv)]
-        execution = run_command(command, timeout_s=min(timeout_s, 900), redact_values=redact)
+        execution = run_command(
+            command,
+            timeout_s=_bounded_timeout(min(timeout_s, 900), deadline),
+            redact_values=redact,
+        )
         commands["fault_suite"] = execution
         payload = read_json(output_dir / "fault-suite.json")
         _preserve_probe_status(execution, payload)
@@ -1037,6 +1168,12 @@ def main() -> int:
     )
     parser.add_argument("--timeout-s", type=float, default=7200.0)
     parser.add_argument(
+        "--max-wall-clock-s",
+        type=float,
+        default=3600.0,
+        help="所有 profile 与探针共享的最大 wall-clock 时间；默认 3600 秒",
+    )
+    parser.add_argument(
         "--skip-run",
         action="store_true",
         help="只根据已有 suite.json 生成总报告",
@@ -1057,6 +1194,11 @@ def main() -> int:
         ),
     )
     args = parser.parse_args()
+    if args.timeout_s <= 0:
+        parser.error("--timeout-s must be > 0")
+    if args.max_wall_clock_s <= 0:
+        parser.error("--max-wall-clock-s must be > 0")
+    suite_deadline = time.monotonic() + min(args.timeout_s, args.max_wall_clock_s)
 
     child_env = dict(os.environ)
     if args.env_file is not None:
@@ -1095,7 +1237,10 @@ def main() -> int:
             if prepare:
                 command_result["prepare"] = run_command(
                     ["bash", "-lc", prepare],
-                    timeout_s=min(args.timeout_s, 900),
+                    timeout_s=_bounded_timeout(
+                        min(args.timeout_s, 900),
+                        suite_deadline,
+                    ),
                     env=child_env,
                 )
                 if command_result["prepare"]["status"] != "PASS":
@@ -1144,6 +1289,17 @@ def main() -> int:
                     "--out-dir",
                     str(profile_dir / "formal"),
                 ]
+                preflight_payload = read_json(Path(preflight_config))
+                auth_config = (
+                    preflight_payload.get("auth")
+                    if isinstance(preflight_payload, dict)
+                    else {}
+                )
+                if (
+                    isinstance(auth_config, dict)
+                    and str(auth_config.get("mode") or "").lower() == "local"
+                ):
+                    command.append("--local-auth")
                 if scenarios:
                     command += [
                         "--scenarios", scenarios,
@@ -1168,6 +1324,14 @@ def main() -> int:
                         command += ["--quick-seed-tenant-cap", "4"]
                     if args.quick:
                         command += ["--quick-mode"]
+                remaining_for_formal = _bounded_timeout(
+                    args.timeout_s,
+                    suite_deadline,
+                )
+                command += [
+                    "--max-wall-clock-s",
+                    str(max(0.0, remaining_for_formal)),
+                ]
                 include_quick_seed = bool(
                     args.quick_include_seed
                     or profile.get("quick_include_seed")
@@ -1187,7 +1351,9 @@ def main() -> int:
                 if bool(profile.get("allow_partial_tenants")):
                     command += ["--allow-partial-tenants"]
                 command_result["run"] = run_command(
-                    command, timeout_s=args.timeout_s, env=child_env
+                    command,
+                    timeout_s=remaining_for_formal,
+                    env=child_env,
                 )
                 formal_root = profile_dir / "formal"
                 candidates = []
@@ -1223,8 +1389,9 @@ def main() -> int:
             profile_dir=profile_dir,
             profiles_path=args.profiles,
             formal_root=formal_root,
-            timeout_s=args.timeout_s,
+            timeout_s=_bounded_timeout(args.timeout_s, suite_deadline),
             quick=args.quick,
+            deadline=suite_deadline,
         )
         suite = {**suite, **probe_artifacts}
         command_result.update(probe_commands)

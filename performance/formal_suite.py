@@ -646,6 +646,64 @@ def wait_for_service(
         time.sleep(max(0.1, poll_s))
 
 
+def _remaining_budget(deadline: float | None) -> float | None:
+    if deadline is None:
+        return None
+    return max(0.0, deadline - time.monotonic())
+
+
+def _budget_timeout(
+    requested_s: float,
+    deadline: float | None,
+    *,
+    minimum_s: float = 0.1,
+) -> float:
+    requested = max(0.0, float(requested_s))
+    remaining = _remaining_budget(deadline)
+    if remaining is None:
+        return max(minimum_s, requested)
+    return max(0.0, min(requested, remaining))
+
+
+def _budget_exhausted_run(
+    scenario: str,
+    repetition: int,
+    policy: str,
+    case: dict[str, Any],
+    output: Path,
+    max_wall_clock_s: float,
+) -> dict[str, Any]:
+    output.mkdir(parents=True, exist_ok=True)
+    reason = "测试平台总 wall-clock 预算已耗尽，未启动该场景；这不是 EchoMem 业务失败"
+    summary = {
+        "status": "TIMEOUT",
+        "metrics": {},
+        "details": {
+            "owner": "测试平台",
+            "reason": reason,
+            "max_wall_clock_s": max_wall_clock_s,
+        },
+    }
+    (output / "summary.json").write_text(
+        json.dumps(summary, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    return {
+        "scenario": scenario,
+        "scenario_label": case["label"],
+        "repetition": repetition,
+        "policy": policy,
+        "status": "TIMEOUT",
+        "runner_returncode": 124,
+        "duration_s": 0.0,
+        "case_timeout_s": 0.0,
+        "runner_timeout": True,
+        "output_dir": str(output.resolve()),
+        "summary": summary,
+        "failure_evidence": {"phase": "suite_deadline", "reason": reason},
+    }
+
+
 def _read_requests_csv(path: Path) -> list[dict[str, str]]:
     """读取逐请求 CSV；文件缺失时返回空列表。"""
     if not path.is_file():
@@ -1383,6 +1441,8 @@ def run_case(
     config_path: Path,
     args: argparse.Namespace,
     case: dict[str, Any],
+    *,
+    deadline: float | None = None,
 ) -> dict[str, Any]:
     started_at = now_iso()
     output = case_root / scenario / f"repeat-{repetition:02d}" / policy
@@ -1391,6 +1451,20 @@ def run_case(
         getattr(args, "inter_case_recovery_timeout_s", 0.0) or 0.0
     )
     if recovery_timeout_s > 0:
+        recovery_timeout_s = _budget_timeout(
+            recovery_timeout_s,
+            deadline,
+            minimum_s=0.0,
+        )
+        if recovery_timeout_s <= 0:
+            return _budget_exhausted_run(
+                scenario,
+                repetition,
+                policy,
+                case,
+                output,
+                float(getattr(args, "max_wall_clock_s", 0.0) or 0.0),
+            )
         healthy, health_error = wait_for_service(
             args.base_url,
             timeout_s=recovery_timeout_s,
@@ -1442,6 +1516,16 @@ def run_case(
             120.0 if case.get("commit_barrier") and not getattr(args, "barrier_count_cap", 0) else 0.0,
         )
     )
+    case_timeout_s = _budget_timeout(case_timeout_s, deadline, minimum_s=0.0)
+    if case_timeout_s <= 0:
+        return _budget_exhausted_run(
+            scenario,
+            repetition,
+            policy,
+            case,
+            output,
+            float(getattr(args, "max_wall_clock_s", 0.0) or 0.0),
+        )
     barrier_count_cap = int(getattr(args, "barrier_count_cap", 0) or 0)
     command = _build_case_command(
         args, case, config_path, output, duration_s, barrier_count_cap
@@ -1464,12 +1548,23 @@ def run_case(
         encoding="utf-8",
     )
     if args.reset_command:
-        completed_reset = subprocess.run(
-            args.reset_command,
-            shell=True,
-            text=True,
-            capture_output=True,
-        )
+        try:
+            completed_reset = subprocess.run(
+                args.reset_command,
+                shell=True,
+                text=True,
+                capture_output=True,
+                timeout=_budget_timeout(case_timeout_s, deadline, minimum_s=0.1),
+            )
+        except subprocess.TimeoutExpired:
+            return _budget_exhausted_run(
+                scenario,
+                repetition,
+                policy,
+                case,
+                output,
+                float(getattr(args, "max_wall_clock_s", 0.0) or 0.0),
+            )
         (output / "reset.stdout.log").write_text(
             completed_reset.stdout, encoding="utf-8"
         )
@@ -1494,7 +1589,7 @@ def run_case(
             }
     completed, timed_out = run_case_process(
         command,
-        timeout_s=case_timeout_s,
+        timeout_s=_budget_timeout(case_timeout_s, deadline, minimum_s=0.1),
     )
     (output / "suite_runner.stdout.log").write_text(
         completed.stdout, encoding="utf-8"
@@ -1795,6 +1890,12 @@ def main() -> int:
         help="barrier Search 窗口结束后收集 Commit 终态的最大等待时间",
     )
     parser.add_argument(
+        "--max-wall-clock-s",
+        type=float,
+        default=3600.0,
+        help="整轮正式套件最大 wall-clock 时间；超时后不再启动新场景",
+    )
+    parser.add_argument(
         "--barrier-count-cap",
         type=int,
         default=0,
@@ -1910,6 +2011,8 @@ def main() -> int:
         parser.error("--repeats must be >= 1")
     if args.case_timeout_s < 0:
         parser.error("--case-timeout-s must not be negative")
+    if args.max_wall_clock_s <= 0:
+        parser.error("--max-wall-clock-s must be > 0")
     if args.seed_commit_timeout_s <= 0:
         parser.error("--seed-commit-timeout-s must be > 0")
     if args.barrier_wave_size < 1:
@@ -1928,9 +2031,13 @@ def main() -> int:
         parser.error(
             f"--profile {args.profile} requires --preflight-config with the actual EchoMem config.json"
         )
+    suite_deadline = time.monotonic() + args.max_wall_clock_s
     preflight_result: dict[str, Any] | None = None
     if args.preflight_config:
-        preflight_result = run_preflight(args.preflight_config, timeout_s=30.0)
+        preflight_result = run_preflight(
+            args.preflight_config,
+            timeout_s=_budget_timeout(30.0, suite_deadline, minimum_s=0.0),
+        )
         if not preflight_result["ok"]:
             parser.error(
                 f"real-model preflight failed: {preflight_result['error']}"
@@ -1957,7 +2064,7 @@ def main() -> int:
         auth_preflight_result = run_auth_preflight(
             args.base_url,
             tenant_path,
-            timeout_s=5.0,
+            timeout_s=_budget_timeout(5.0, suite_deadline, minimum_s=0.0),
             tenant_count=required_tenants,
         )
         if (
@@ -2067,6 +2174,7 @@ def main() -> int:
         "repeats": args.repeats,
         "duration_cap_s": args.duration_cap_s,
         "case_timeout_s": args.case_timeout_s,
+        "max_wall_clock_s": args.max_wall_clock_s,
         "seed_commit_timeout_s": args.seed_commit_timeout_s,
         "policies": list(POLICIES),
         "acceptance_targets": PR421_ACCEPTANCE_TARGETS,
@@ -2130,10 +2238,21 @@ def main() -> int:
             args.seed_commit_timeout_s,
         )
         warmup_output.mkdir(parents=True, exist_ok=True)
-        warmup_completed, warmup_timed_out = run_case_process(
-            warmup_command,
-            timeout_s=warmup_timeout_s,
-        )
+        warmup_timeout_s = _budget_timeout(warmup_timeout_s, suite_deadline, minimum_s=0.0)
+        if warmup_timeout_s <= 0:
+            seed_ready = False
+            warmup_completed = subprocess.CompletedProcess(
+                warmup_command,
+                124,
+                "",
+                "formal_suite: suite wall-clock budget exhausted before seed warmup\n",
+            )
+            warmup_timed_out = True
+        else:
+            warmup_completed, warmup_timed_out = run_case_process(
+                warmup_command,
+                timeout_s=warmup_timeout_s,
+            )
         warmup_finished_at = now_iso()
         (warmup_output / "stdout.log").write_text(
             warmup_completed.stdout, encoding="utf-8"
@@ -2179,8 +2298,28 @@ def main() -> int:
                 "共享真实模型 seed warmup 未完成；后续场景不重复灌种，"
                 "避免把 seed 超时重复放大成整套结果"
             )
-    for scenario in scenario_names:
+    budget_exhausted = False
+    total_runs = len(scenario_names) * args.repeats * len(POLICIES)
+    for scenario_index, scenario in enumerate(scenario_names):
         case = scenario_catalog[scenario]
+        if _remaining_budget(suite_deadline) <= 0:
+            budget_exhausted = True
+            for remaining_scenario in scenario_names[scenario_index:]:
+                remaining_case = scenario_catalog[remaining_scenario]
+                for repetition in range(1, args.repeats + 1):
+                    for remaining_policy in POLICIES:
+                        output = root / remaining_scenario / f"repeat-{repetition:02d}" / remaining_policy
+                        manifest["runs"].append(
+                            _budget_exhausted_run(
+                                remaining_scenario,
+                                repetition,
+                                remaining_policy,
+                                remaining_case,
+                                output,
+                                args.max_wall_clock_s,
+                            )
+                        )
+            break
         if seed_warmup_failed:
             reason = (
                 "共享 seed warmup 失败，未执行该场景；"
@@ -2232,6 +2371,25 @@ def main() -> int:
             continue
         for repetition in range(1, args.repeats + 1):
             for policy in POLICIES:
+                if _remaining_budget(suite_deadline) <= 0:
+                    budget_exhausted = True
+                    for remaining_scenario in scenario_names[scenario_index:]:
+                        remaining_case = scenario_catalog[remaining_scenario]
+                        first_repetition = repetition if remaining_scenario == scenario else 1
+                        for remaining_repetition in range(first_repetition, args.repeats + 1):
+                            for remaining_policy in POLICIES:
+                                output = root / remaining_scenario / f"repeat-{remaining_repetition:02d}" / remaining_policy
+                                manifest["runs"].append(
+                                    _budget_exhausted_run(
+                                        remaining_scenario,
+                                        remaining_repetition,
+                                        remaining_policy,
+                                        remaining_case,
+                                        output,
+                                        args.max_wall_clock_s,
+                                    )
+                                )
+                    break
                 # A quick scheduler/capacity suite should pay the real-model
                 # seed cost once per tenant envelope, not once per scenario.
                 # Reuse is safe when the current case needs no more tenants
@@ -2260,6 +2418,7 @@ def main() -> int:
                         config_paths[case["tenants"]],
                         args,
                         case,
+                        deadline=suite_deadline,
                     )
                 except BaseException as exc:  # noqa: BLE001
                     # A single probe must not discard the rest of the matrix.
@@ -2312,6 +2471,10 @@ def main() -> int:
                     json.dumps(manifest, ensure_ascii=False, indent=2) + "\n",
                     encoding="utf-8",
                 )
+            if budget_exhausted:
+                break
+        if budget_exhausted:
+            break
 
     acceptance = evaluate_pr421_acceptance(manifest)
     manifest["acceptance"] = acceptance
@@ -2378,6 +2541,7 @@ def main() -> int:
             "repeats": args.repeats,
             "policies": list(POLICIES),
             "commit_timeout_s": args.commit_timeout_s,
+            "max_wall_clock_s": args.max_wall_clock_s,
             "barrier_wave_size": args.barrier_wave_size,
             "barrier_drain_timeout_s": args.barrier_drain_timeout_s,
             "skip_seed": args.skip_seed,
