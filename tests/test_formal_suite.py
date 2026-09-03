@@ -19,6 +19,7 @@ from performance.formal_suite import (
     _scale_explicit_tenant_counts,
     _write_case_csvs,
     complete_scenarios,
+    FOUR_U8G_FULL_SCENARIOS,
     report6_scenarios,
 )
 
@@ -308,6 +309,20 @@ class Report6ScenarioTests(unittest.TestCase):
         self.assertTrue(
             all(item["messages_per_session"] == 10 for item in scenarios.values())
         )
+
+    def test_4u8g_full_contains_both_named_plan_catalogs(self) -> None:
+        pr397 = [
+            name for name in FOUR_U8G_FULL_SCENARIOS
+            if name.startswith("pr397__")
+        ]
+        pr421 = [
+            name for name in FOUR_U8G_FULL_SCENARIOS
+            if name.startswith("pr421__")
+        ]
+        self.assertEqual(12, len(pr397))
+        self.assertEqual(25, len(pr421))
+        self.assertEqual(37, len(FOUR_U8G_FULL_SCENARIOS))
+        self.assertNotIn("pr421__soak", FOUR_U8G_FULL_SCENARIOS)
 
     def test_report6_mixed_ratios_are_exact_over_one_minute(self) -> None:
         scenarios = report6_scenarios()

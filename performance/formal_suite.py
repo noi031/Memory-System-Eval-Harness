@@ -433,6 +433,25 @@ FOUR_U8G_SCENARIOS["fairness-bounded"] = {
 }
 SCENARIO_PROFILES["4u8g"] = FOUR_U8G_SCENARIOS
 
+# The historical ``4u8g`` profile is kept for compatibility with existing
+# quick commands.  This explicit profile runs both source plans in full:
+# PR397/report(6) has 12 cases and the PR421 4U8G catalog has 25 cases.
+# Names are namespaced because the two plans intentionally reuse some case
+# names; the original scenario name is retained for acceptance evaluation.
+FOUR_U8G_FULL_SCENARIOS: dict[str, dict[str, Any]] = {}
+for _source_prefix, _catalog in (
+    ("pr397", report6_scenarios()),
+    ("pr421", FOUR_U8G_SCENARIOS),
+):
+    for _name, _case in _catalog.items():
+        _full_name = f"{_source_prefix}__{_name}"
+        FOUR_U8G_FULL_SCENARIOS[_full_name] = {
+            **_case,
+            "_plan_source": _source_prefix,
+            "_source_scenario": _name,
+        }
+SCENARIO_PROFILES["4u8g-full"] = FOUR_U8G_FULL_SCENARIOS
+
 
 def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -1857,20 +1876,6 @@ def _finalize_suite_outputs(
     final_reason: str = "",
 ) -> str:
     """Always materialize machine-readable and HTML output, including partial runs."""
-    overall = _finalize_suite_outputs(
-        root,
-        manifest,
-        args,
-        tenant_path,
-        scenario_names,
-        final_status="completed",
-    )
-    report_path = root / "suite.html"
-    signal.signal(signal.SIGINT, previous_sigint)
-    signal.signal(signal.SIGTERM, previous_sigterm)
-    print(report_path)
-    return 0 if overall in {"PASS", "INCONCLUSIVE"} else 2
-
     acceptance = evaluate_pr421_acceptance(manifest)
     manifest["acceptance"] = acceptance
     manifest["finalization"] = {
@@ -1933,7 +1938,8 @@ def _finalize_suite_outputs(
             "profile": args.profile,
             "instance_profile": args.instance_profile,
             "plan_sources": (
-                ["PR397/report(6)", "PR421"] if args.profile in {"4u8g", "complete"}
+                ["PR397/report(6)", "PR421"]
+                if args.profile in {"4u8g", "4u8g-full", "complete"}
                 else ["PR397/report(6)"] if args.profile == "report6"
                 else ["PR421"] if args.profile == "pr421"
                 else ["report(4)"]
@@ -2005,8 +2011,9 @@ def main() -> int:
         default="pr421",
         help=(
             "Scenario profile; report6 is the PR397/report(6) matrix, pr421 "
-            "is the PR421 acceptance suite, 4u8g is the bounded single-instance "
-            "black-box run, and complete runs both catalogs."
+            "is the PR421 acceptance suite, 4u8g is the compatibility bounded "
+            "single-instance run, 4u8g-full runs all 12 PR397 and 25 PR421 "
+            "cases, and complete runs both catalogs."
         ),
     )
     parser.add_argument(
@@ -2178,6 +2185,11 @@ def main() -> int:
         )
         if args.profile == "4u8g"
         else ",".join(
+            name for name in FOUR_U8G_FULL_SCENARIOS
+            if name != "pr421__soak"
+        )
+        if args.profile == "4u8g-full"
+        else ",".join(
             name for name in scenario_catalog
             if not (args.profile == "complete" and name == "soak")
         )
@@ -2210,7 +2222,7 @@ def main() -> int:
         parser.error("--seed-sessions-per-tenant must be >= 0")
     if args.quick_seed_tenant_cap < 1:
         parser.error("--quick-seed-tenant-cap must be >= 1")
-    if args.profile in {"report6", "4u8g", "complete"} and not args.preflight_config:
+    if args.profile in {"report6", "4u8g", "4u8g-full", "complete"} and not args.preflight_config:
         parser.error(
             f"--profile {args.profile} requires --preflight-config with the actual EchoMem config.json"
         )
@@ -2316,32 +2328,44 @@ def main() -> int:
         "plan_sources": {
             "pr397": {
                 "name": "EchoMem PR397 / report(6) 故障发现与真实多租户压测方案",
-                "included": args.profile in {"report6", "4u8g", "complete"},
+                "included": args.profile in {"report6", "4u8g", "4u8g-full", "complete"},
                 "scenario_count": (
                     len(report6_scenarios())
-                    if args.profile in {"report6", "complete"}
-                    else len(report6_scenarios())
-                    if args.profile == "4u8g"
+                    if args.profile in {"report6", "4u8g", "4u8g-full", "complete"}
                     else 0
                 ),
                 "scenarios": (
                     sorted(report6_scenarios())
                     if args.profile in {"report6", "4u8g", "complete"}
+                    else sorted(
+                        name.removeprefix("pr397__")
+                        for name in FOUR_U8G_FULL_SCENARIOS
+                        if name.startswith("pr397__")
+                    )
+                    if args.profile == "4u8g-full"
                     else []
                 ),
             },
             "pr421": {
                 "name": "EchoMem PR421 可量化验收与调度指标方案",
-                "included": args.profile in {"pr421", "4u8g", "complete"},
+                "included": args.profile in {"pr421", "4u8g", "4u8g-full", "complete"},
                 "scenario_count": (
-                    len(scenario_catalog)
+                    len(FOUR_U8G_SCENARIOS)
+                    if args.profile == "4u8g-full"
+                    else len(scenario_catalog)
                     if args.profile in {"pr421", "4u8g"}
                     else len(SCENARIOS)
                     if args.profile == "complete"
                     else 0
                 ),
                 "scenarios": (
-                    sorted(scenario_catalog)
+                    sorted(
+                        name.removeprefix("pr421__")
+                        for name in FOUR_U8G_FULL_SCENARIOS
+                        if name.startswith("pr421__")
+                    )
+                    if args.profile == "4u8g-full"
+                    else sorted(scenario_catalog)
                     if args.profile in {"pr421", "4u8g"}
                     else sorted(SCENARIOS)
                     if args.profile == "complete"
@@ -2429,7 +2453,7 @@ def main() -> int:
     )
     seed_tenant_count = max_seed_count
     auto_reuse_seed = (
-        bool(args.quick_mode or args.profile in {"4u8g", "complete", "report6"})
+        bool(args.quick_mode or args.profile in {"4u8g", "4u8g-full", "complete", "report6"})
         and not bool(args.reuse_existing_data)
         and not bool(args.skip_seed)
         and not bool(args.no_seed_reuse)
@@ -2677,6 +2701,13 @@ def main() -> int:
                         f"error={type(exc).__name__}: {exc}",
                         flush=True,
                     )
+                run["scenario_key"] = scenario
+                run["source_scenario"] = case.get("_source_scenario", scenario)
+                run["plan_source"] = case.get("_plan_source", "")
+                # Acceptance gates consume the canonical scenario name while
+                # ``scenario_key`` keeps duplicate PR397/PR421 artifacts
+                # separately addressable on disk.
+                run["scenario"] = case.get("_source_scenario", scenario)
                 run["seed_reused"] = case_reuses_seed
                 run["seed_status"] = "completed" if case_reuses_seed else "not_requested"
                 run["effective_commit_timeout_s"] = float(args.commit_timeout_s)
@@ -2695,6 +2726,20 @@ def main() -> int:
                 break
         if budget_exhausted:
             break
+
+    overall = _finalize_suite_outputs(
+        root,
+        manifest,
+        args,
+        tenant_path,
+        scenario_names,
+        final_status="completed",
+    )
+    report_path = root / "suite.html"
+    signal.signal(signal.SIGINT, previous_sigint)
+    signal.signal(signal.SIGTERM, previous_sigterm)
+    print(report_path)
+    return 0 if overall in {"PASS", "INCONCLUSIVE"} else 2
 
     acceptance = evaluate_pr421_acceptance(manifest)
     manifest["acceptance"] = acceptance

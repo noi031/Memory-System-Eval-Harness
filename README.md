@@ -589,7 +589,10 @@ queued/wait/exec/rejected 四元组。旧报告只有单维 Jain、单一指标�
   访问 EchoMem；只在部署方显式提供故障/恢复控制时才执行真实操作，否则如实上报
   `INCONCLUSIVE`，显式 404 是「未实现」的唯一证据。
 
-单台 4U8G 机器优先使用 `4u8g` 档，而不是直接运行完整矩阵。该档只执行
+单台 4U8G 机器可以使用 `4u8g` 档快速诊断；需要完整数据时使用
+`4u8g-full`。完整档会分别执行 PR397/report(6) 的 12 个场景和 PR421
+的 25 个场景，共 37 个执行项，重复场景也会分别保留，不能用并集数量替代。
+快速档只执行
 能在一台服务实例上快速得到黑盒证据的场景：单租户基线、均衡混合、Commit
 屏障、饱和、热租户偏斜、Search/Commit 同时到达，以及 2/4/8 租户容量阶梯；
 不包含 7 小时 `soak`、第二种实例规格，也不会伪造 kill-9 或依赖故障控制结果。
@@ -611,6 +614,18 @@ python -m performance.formal_suite \
 `INCONCLUSIVE`，并在 `suite.json` / `acceptance.json` 记录缺失证据及归属
 （测试平台、部署配置或 EchoMem 服务端）。因此“无法测试”不等同于
 “EchoMem 功能失败”。
+
+```bash
+# 4U8G 完整黑盒矩阵：PR397 12 项 + PR421 25 项，共 37 项；不含 soak
+python -m performance.formal_suite \
+  --profile 4u8g-full \
+  --base-url http://127.0.0.1:8010 \
+  --tenant-config performance/tenants-32.server.json \
+  --preflight-config /etc/echomem/4u8g/config.json \
+  --instance-profile 4U8G \
+  --repeats 1 \
+  --out-dir results/performance/4u8g-full
+```
 
 ```bash
 # 正式验收套件（默认 pr421 场景目录，3 轮）
@@ -785,8 +800,8 @@ FORMAL_PROGRESS 1/1 scenario=baseline repeat=1 policy=server-observe status=comp
 
 ### 6. 执行 4U8G 完整测试
 
-默认执行 PR397/report(6) 与 PR421 的 25 个 bounded 场景，单轮、不执行
-30 分钟 `soak`，只测试 4U8G：
+默认执行 PR397/report(6) 的 12 个场景与 PR421 的 25 个场景，共 37 个
+bounded 场景，单轮、不执行 `soak`，只测试 4U8G：
 
 ```bash
 cd /opt/Memory-System-Eval-Harness

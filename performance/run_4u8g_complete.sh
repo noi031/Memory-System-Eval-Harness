@@ -22,9 +22,14 @@ commit_timeout_s="${STRESS_COMMIT_TIMEOUT_S:-600}"
 case_timeout_s="${STRESS_CASE_TIMEOUT_S:-0}"
 barrier_wave_size="${STRESS_BARRIER_WAVE_SIZE:-32}"
 
-# complete_scenarios() contains 26 cases; omit only the 30-minute soak from
-# the routine 4U8G run. The explicit list is recorded in suite.json.
-scenarios="${STRESS_SCENARIOS:-A@1,B@1,C8:1@1,C4:1@1,C1:1@1,D@1,A@2,B@2,C8:1@2,C4:1@2,C1:1@2,D@2,baseline,mixed,commit-storm,commit-barrier,saturation,tenant-skew,search-priority-blackbox,search-storm,capacity-2,capacity-4,capacity-8,capacity-16,capacity-32}"
+# The full 4U8G profile runs 12 PR397/report(6) cases plus the 25-case
+# PR421 catalog. The long soak case remains excluded from the routine run.
+profile="${STRESS_PROFILE:-4u8g-full}"
+scenarios="${STRESS_SCENARIOS:-}"
+scenario_args=()
+if [ -n "$scenarios" ]; then
+  scenario_args=(--scenarios "$scenarios")
+fi
 
 mkdir -p "$out_dir"
 
@@ -32,8 +37,8 @@ python3 -m performance.formal_suite \
   --base-url "$base_url" \
   --tenant-config "$tenant_config" \
   --preflight-config "$preflight_config" \
-  --profile complete \
-  --scenarios "$scenarios" \
+  --profile "$profile" \
+  "${scenario_args[@]}" \
   --repeats "$repeats" \
   --commit-timeout-s "$commit_timeout_s" \
   --case-timeout-s "$case_timeout_s" \
