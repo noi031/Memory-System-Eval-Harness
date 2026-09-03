@@ -1813,6 +1813,178 @@ def aggregate_runs(runs: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return aggregates
 
 
+def _write_json_atomic(path: Path, payload: dict[str, Any]) -> None:
+    """Write a manifest without leaving a truncated JSON file after interruption."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.tmp")
+    temporary.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    temporary.replace(path)
+
+
+def _write_suite_checkpoint(
+    root: Path,
+    manifest: dict[str, Any],
+    *,
+    expected_run_count: int,
+    status: str = "running",
+    reason: str = "",
+) -> None:
+    """Persist a resumable, secret-free snapshot after each observable step."""
+    checkpoint = {
+        "status": status,
+        "updated_at": now_iso(),
+        "reason": reason,
+        "completed_run_count": len(manifest.get("runs") or []),
+        "expected_run_count": expected_run_count,
+        "manifest": "suite.json",
+    }
+    manifest["checkpoint"] = checkpoint
+    _write_json_atomic(root / "suite.json", manifest)
+    _write_json_atomic(root / "checkpoint.json", checkpoint)
+
+
+def _finalize_suite_outputs(
+    root: Path,
+    manifest: dict[str, Any],
+    args: argparse.Namespace,
+    tenant_path: Path,
+    scenario_names: list[str],
+    *,
+    final_status: str = "completed",
+) -> str:
+    """Always materialize machine-readable and HTML output, including partial runs."""
+    overall = _finalize_suite_outputs(
+        root,
+        manifest,
+        args,
+        tenant_path,
+        scenario_names,
+        final_status="completed",
+    )
+    report_path = root / "suite.html"
+    print(report_path)
+    return 0 if overall in {"PASS", "INCONCLUSIVE"} else 2
+
+    acceptance = evaluate_pr421_acceptance(manifest)
+    manifest["acceptance"] = acceptance
+    manifest["finalization"] = {
+        "status": final_status,
+        "finished_at": now_iso(),
+        "run_count": len(manifest.get("runs") or []),
+        "expected_run_count": len(scenario_names) * args.repeats * len(POLICIES),
+    }
+    _write_json_atomic(root / "suite.json", manifest)
+    _write_json_atomic(root / "acceptance.json", acceptance)
+    _write_json_atomic(
+        root / "model_analysis_input.json",
+        build_model_analysis_input(manifest, acceptance),
+    )
+
+    report_path = root / "suite.html"
+    try:
+        from .formal_data_report import render as render_data_report
+    except ImportError:
+        from formal_data_report import render as render_data_report
+    render_data_report(root / "suite.json", report_path)
+
+    statuses = [
+        str(run.get("status") or "NO_SUMMARY")
+        for run in manifest.get("runs") or []
+    ]
+    has_environment_error = any(
+        status in {
+            "ENVIRONMENT_ERROR",
+            "ENV_ERROR",
+            "RESET_FAILED",
+            "NO_SUMMARY",
+            "TIMEOUT",
+            "FAIL",
+            "HARNESS_ERROR",
+        }
+        for status in statuses
+    )
+    if has_environment_error or acceptance["overall"] == "FAIL":
+        overall = "FAIL"
+    elif (
+        any(status in {"INCONCLUSIVE", "NOT_IMPLEMENTED", "BLOCKED", "blocked"}
+            for status in statuses)
+        or acceptance["overall"] in {"INCONCLUSIVE", "NOT_IMPLEMENTED"}
+        or final_status != "completed"
+    ):
+        overall = "INCONCLUSIVE"
+    else:
+        overall = "PASS"
+
+    suite_summary = {
+        "status": overall,
+        "test_type": "formal_stress_suite",
+        "base_url": args.base_url,
+        "created_at": manifest.get("created_at"),
+        "finished_at": now_iso(),
+        "parameters": {
+            "tenant_config": str(tenant_path),
+            "profile": args.profile,
+            "instance_profile": args.instance_profile,
+            "plan_sources": (
+                ["PR397/report(6)", "PR421"] if args.profile in {"4u8g", "complete"}
+                else ["PR397/report(6)"] if args.profile == "report6"
+                else ["PR421"] if args.profile == "pr421"
+                else ["report(4)"]
+            ),
+            "scenarios": scenario_names,
+            "repeats": args.repeats,
+            "policies": list(POLICIES),
+            "commit_timeout_s": args.commit_timeout_s,
+            "max_wall_clock_s": args.max_wall_clock_s,
+            "barrier_wave_size": args.barrier_wave_size,
+            "barrier_drain_timeout_s": args.barrier_drain_timeout_s,
+            "skip_seed": args.skip_seed,
+            "seed_sessions_per_tenant_override": args.seed_sessions_per_tenant,
+        },
+        "details": {
+            "run_count": len(manifest.get("runs") or []),
+            "expected_run_count": len(scenario_names) * args.repeats * len(POLICIES),
+            "plan_sources": manifest.get("plan_sources") or {},
+            "failed_runs": sum(status == "FAIL" for status in statuses),
+            "inconclusive_runs": sum(
+                status in {"INCONCLUSIVE", "NOT_IMPLEMENTED", "BLOCKED", "blocked"}
+                for status in statuses
+            ),
+            "environment_errors": sum(
+                status in {
+                    "ENVIRONMENT_ERROR",
+                    "ENV_ERROR",
+                    "RESET_FAILED",
+                    "NO_SUMMARY",
+                    "TIMEOUT",
+                    "HARNESS_ERROR",
+                }
+                for status in statuses
+            ),
+            "suite_report": "suite.html",
+            "suite_manifest": "suite.json",
+            "acceptance_report": "acceptance.json",
+            "model_analysis_input": "model_analysis_input.json",
+            "acceptance_overall": acceptance["overall"],
+            "finalization_status": final_status,
+        },
+        "aggregates": aggregate_runs(manifest.get("runs") or []),
+        "acceptance": acceptance,
+    }
+    _write_json_atomic(root / "summary.json", suite_summary)
+    _write_suite_checkpoint(
+        root,
+        manifest,
+        expected_run_count=len(scenario_names) * args.repeats * len(POLICIES),
+        status=final_status,
+        reason=manifest.get("finalization", {}).get("reason", ""),
+    )
+    return overall
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Run formal real multi-tenant stress suite")
     parser.add_argument("--base-url", default=os.getenv("ECHOMEM_BASE_URL", "http://127.0.0.1:8010"))
