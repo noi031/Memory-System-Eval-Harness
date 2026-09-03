@@ -2144,6 +2144,13 @@ def main() -> int:
         default=os.getenv("ECHOMEM_CONFIG", ""),
         help="EchoMem config.json to validate before the suite starts",
     )
+    # Compatibility options used by the Web/Feishu orchestrator.  The formal
+    # suite derives worker counts from each scenario, but accepting these
+    # legacy knobs keeps an already deployed API from failing before case 1.
+    parser.add_argument("--commit-workers", type=int, default=0, help=argparse.SUPPRESS)
+    parser.add_argument("--search-workers", type=int, default=0, help=argparse.SUPPRESS)
+    parser.add_argument("--auth-header", default="X-API-Key", help=argparse.SUPPRESS)
+    parser.add_argument("--pid", default="", help=argparse.SUPPRESS)
     args = parser.parse_args()
 
     if args.quick_mode:
@@ -2376,6 +2383,41 @@ def main() -> int:
         "server_observation_mode": True,
         "runs": [],
     }
+    expected_run_count = len(scenario_names) * args.repeats * len(POLICIES)
+
+    def checkpoint(status: str = "running", reason: str = "") -> None:
+        _write_suite_checkpoint(
+            root,
+            manifest,
+            expected_run_count=expected_run_count,
+            status=status,
+            reason=reason,
+        )
+
+    signal_state = {"finalized": False}
+
+    def handle_interrupt(signum: int, _frame: Any) -> None:
+        """Persist a readable partial report before honoring SIGINT/SIGTERM."""
+        if signal_state["finalized"]:
+            raise KeyboardInterrupt
+        signal_state["finalized"] = True
+        reason = f"收到信号 {signum}，套件在当前场景停止；未运行场景保留为缺失证据"
+        checkpoint("interrupted", reason)
+        try:
+            _finalize_suite_outputs(
+                root,
+                manifest,
+                args,
+                tenant_path,
+                scenario_names,
+                final_status="interrupted",
+            )
+        finally:
+            raise KeyboardInterrupt
+
+    previous_sigint = signal.signal(signal.SIGINT, handle_interrupt)
+    previous_sigterm = signal.signal(signal.SIGTERM, handle_interrupt)
+    checkpoint()
     # 用确定性顺序执行，便于重跑对比；服务端重置钩子负责固定数据/索引边界。
     max_seed_count = max(
         int(scenario_catalog[name]["tenants"]) for name in scenario_names
