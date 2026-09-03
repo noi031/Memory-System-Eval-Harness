@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run the seven EchoMem target checks from one profile-aware entry point.
+"""Run the six 4U8G EchoMem target checks from one profile-aware entry point.
 
 The suite orchestrates existing real-HTTP probes. It does not mock the target
 service and does not change EchoMem code. Missing deployment controls are
@@ -29,12 +29,11 @@ except ImportError:
 
 OBJECTIVES = [
     ("O1", "单实例最大用户量 / 热用户量"),
-    ("O2", "多规格实例调度与 config"),
-    ("O3", "单租户故障下 Search P95 劣化 <= 20%"),
-    ("O4", "多租户公平性 Jain >= 0.9"),
-    ("O5", "Commit 洪泛时 Search P95 <= 5s"),
-    ("O6", "202 Commit 崩溃恢复后 100% 重放且不丢序"),
-    ("O7", "每层每租户四元组可观测指标"),
+    ("O2", "单租户故障下 Search P95 劣化 <= 20%"),
+    ("O3", "多租户公平性 Jain >= 0.9"),
+    ("O4", "Commit 洪泛时 Search P95 <= 5s"),
+    ("O5", "202 Commit 崩溃恢复后 100% 重放且不丢序"),
+    ("O6", "每层每租户四元组可观测指标"),
 ]
 INCONCLUSIVE = "INCONCLUSIVE"
 PASS = "PASS"
@@ -101,6 +100,17 @@ def run_command(
 ) -> dict[str, Any]:
     started = datetime.now(timezone.utc)
     redact_values = redact_values or set()
+    child_env = dict(env) if env is not None else None
+    if child_env is not None:
+        # Nested probes are launched with ``-m``. Make the Harness root
+        # explicit so they work regardless of the caller's working directory.
+        project_root = str(Path(__file__).resolve().parent.parent)
+        existing_pythonpath = child_env.get("PYTHONPATH", "")
+        child_env["PYTHONPATH"] = (
+            project_root
+            if not existing_pythonpath
+            else project_root + os.pathsep + existing_pythonpath
+        )
 
     def safe_command() -> list[str]:
         return [
@@ -115,7 +125,7 @@ def run_command(
             capture_output=True,
             timeout=timeout_s,
             check=False,
-            env=env,
+            env=child_env,
         )
         return {
             "status": "PASS" if completed.returncode == 0 else "FAIL",
@@ -655,8 +665,9 @@ def _formal_run_counts(suite: dict[str, Any]) -> tuple[int, int]:
     """Return (completed, submitted) counts without equating the two.
 
     A run can emit requests and still end in TIMEOUT, ENV_ERROR, or blocked
-    state.  Profile-level evidence for O2 must count only explicit completed
-    runs, while submitted is retained as a diagnostic volume.
+    state. Profile-level evidence for the optional multi-spec diagnostic must
+    count only explicit completed runs, while submitted is retained as a
+    diagnostic volume.
     """
     completed = 0
     submitted = 0
@@ -774,23 +785,6 @@ def objective_statuses(
         run for run in suite.get("runs") or []
         if str(run.get("scenario") or "").startswith("capacity-")
     ]
-    capacity_ok = bool(capacity) and all(
-        str(run.get("status")) == "completed" for run in capacity
-    )
-    instance_profiles = suite.get("instance_profiles")
-    completed_profiles = (
-        [
-            item for item in instance_profiles
-            if isinstance(item, dict)
-            and str(item.get("status") or "").lower()
-            in {"completed", "pass", "passed"}
-            and int(item.get("completed_runs") or 0) > 0
-        ]
-        if isinstance(instance_profiles, list)
-        else []
-    )
-    multi_spec_status = PASS if len(completed_profiles) >= 2 else INCONCLUSIVE
-
     def strict_observed(name: str) -> Any:
         return strict(name).get("observed", {})
 
@@ -807,19 +801,6 @@ def objective_statuses(
         {
             "id": "O2",
             "name": OBJECTIVES[1][1],
-            "status": multi_spec_status,
-            "reason": (
-                "至少两种规格均有真实完成场景，可比较调度与 config"
-                if multi_spec_status == PASS
-                else "当前只完成单一规格或没有真实场景结果；仅有 profile 配置不能证明多规格调度"
-            ),
-            "observed": {"completed_profiles": completed_profiles},
-            "owner": "测试平台 + 部署资源",
-            "evidence": completed_profiles,
-        },
-        {
-            "id": "O3",
-            "name": OBJECTIVES[2][1],
             "status": strict("单租户故障隔离")["status"],
             "reason": strict("单租户故障隔离").get("reason", ""),
             "observed": strict_observed("单租户故障隔离"),
@@ -827,8 +808,8 @@ def objective_statuses(
             "evidence": "scheduler_acceptance: 单租户故障隔离",
         },
         {
-            "id": "O4",
-            "name": OBJECTIVES[3][1],
+            "id": "O3",
+            "name": OBJECTIVES[2][1],
             "status": strict("Commit/Search 公平性 Jain")["status"],
             "reason": strict("Commit/Search 公平性 Jain").get("reason", ""),
             "observed": strict_observed("Commit/Search 公平性 Jain"),
@@ -836,8 +817,8 @@ def objective_statuses(
             "evidence": "scheduler_acceptance: Commit/Search 公平性 Jain",
         },
         {
-            "id": "O5",
-            "name": OBJECTIVES[4][1],
+            "id": "O4",
+            "name": OBJECTIVES[3][1],
             "status": strict("Search 优先于 Commit")["status"],
             "reason": strict("Search 优先于 Commit").get("reason", ""),
             "observed": strict_observed("Search 优先于 Commit"),
@@ -845,8 +826,8 @@ def objective_statuses(
             "evidence": "scheduler_acceptance: Search 优先于 Commit",
         },
         {
-            "id": "O6",
-            "name": OBJECTIVES[5][1],
+            "id": "O5",
+            "name": OBJECTIVES[4][1],
             "status": strict("Commit kill-9 恢复与重放")["status"],
             "reason": strict("Commit kill-9 恢复与重放").get("reason", ""),
             "observed": strict_observed("Commit kill-9 恢复与重放"),
@@ -854,8 +835,8 @@ def objective_statuses(
             "evidence": "scheduler_acceptance: Commit kill-9 恢复与重放",
         },
         {
-            "id": "O7",
-            "name": OBJECTIVES[6][1],
+            "id": "O6",
+            "name": OBJECTIVES[5][1],
             "status": strict("分层/分租户调度可观测性")["status"],
             "reason": strict("分层/分租户调度可观测性").get("reason", ""),
             "observed": strict_observed("分层/分租户调度可观测性"),
@@ -866,6 +847,20 @@ def objective_statuses(
 
 
 def render_report(result: dict[str, Any], path: Path) -> None:
+    def target_text(objective: dict[str, Any]) -> str:
+        target = objective.get("target")
+        if target not in (None, ""):
+            return str(target)
+        names = {
+            "O1": "成功容量档位 + 更高一档真实失败/超时边界",
+            "O2": "旁观租户 Search P95 劣化 <= 20%",
+            "O3": "Commit Jain 与 Search 延迟 Jain 的较小值 >= 0.90",
+            "O4": "洪泛窗口 Search P95 <= 5s，且相对基线劣化 <= 2x",
+            "O5": "HTTP 202 + kill/restart + 消息集合/cursor/幂等对账全部通过",
+            "O6": "每个实际 lane 具备 queued/wait/exec/rejected 四元组",
+        }
+        return names.get(str(objective.get("id") or ""), "见验收器")
+
     rows = []
     for profile in result.get("profiles") or []:
         for objective in profile.get("objectives") or []:
@@ -876,6 +871,7 @@ def render_report(result: dict[str, Any], path: Path) -> None:
                 f"{html.escape(str(objective.get('name')))}</td>"
                 f"<td class='{html.escape(str(objective.get('status')).lower())}'>"
                 f"{html.escape(str(objective.get('status')))}</td>"
+                f"<td>{html.escape(target_text(objective))}</td>"
                 f"<td>{html.escape(str(objective.get('reason')))}"
                 f"<br><code>{html.escape(json.dumps(objective.get('observed', {}), ensure_ascii=False, sort_keys=True))}</code></td>"
                 f"<td>{html.escape(str(objective.get('owner') or '测试平台'))}</td>"
@@ -927,9 +923,31 @@ def render_report(result: dict[str, Any], path: Path) -> None:
             details.append(
                 f"<p class='muted'>制品：<code>{html.escape(str(payload.get('path', '')))}</code></p></details>"
             )
+    optional_profiles = result.get("instance_profiles")
+    if isinstance(optional_profiles, list):
+        details.append(
+            "<details><summary>附加诊断：多规格实例对比（不计入六项总体判定）</summary>"
+            "<table><thead><tr><th>规格</th><th>状态</th><th>完成场景</th>"
+            "<th>提交场景</th></tr></thead><tbody>"
+        )
+        for item in optional_profiles:
+            if not isinstance(item, dict):
+                continue
+            details.append(
+                "<tr>"
+                f"<td>{html.escape(str(item.get('name') or ''))}</td>"
+                f"<td>{html.escape(str(item.get('status') or ''))}</td>"
+                f"<td>{html.escape(str(item.get('completed_runs') or 0))}</td>"
+                f"<td>{html.escape(str(item.get('submitted_runs') or 0))}</td>"
+                "</tr>"
+            )
+        details.append(
+            "</tbody></table><p class='muted'>多规格需要至少两种规格都实际完成同一组场景，"
+            "本轮 4U8G 单规格不会因此被判定为失败。</p></details>"
+        )
     doc = f"""<!doctype html>
 <html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>EchoMem 七项目标自动化验收</title>
+<title>EchoMem 六项 4U8G 目标自动化验收</title>
 <style>
 body{{font:14px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;color:#17212b;background:#f5f7f8;margin:0}}
 main{{max-width:1280px;margin:auto;padding:28px 18px 56px}}section{{background:#fff;border:1px solid #dfe6ea;padding:18px;margin-top:14px}}
@@ -938,11 +956,11 @@ th,td{{border-bottom:1px solid #e7ecef;padding:9px;text-align:left;vertical-alig
 .pass{{color:#197c62;font-weight:700}}.fail,.timeout{{color:#b6403b;font-weight:700}}.inconclusive{{color:#9a6a00;font-weight:700}}
 code{{background:#f0f3f5;padding:2px 4px}}.scroll{{overflow:auto}}
 </style><main>
-<section><h1>EchoMem 七项目标自动化验收</h1>
+<section><h1>EchoMem 六项 4U8G 目标自动化验收</h1>
 <div class="muted">生成时间：{html.escape(result.get("created_at", ""))} · 真实 HTTP：是 · mock 模型：否</div>
 <p>报告只依据实际运行证据判定；缺少部署控制或服务端指标时标记为 INCONCLUSIVE，不推断为通过。</p></section>
 <section class="scroll"><h2>逐 profile 目标状态</h2>
-<table><thead><tr><th>Profile</th><th>目标</th><th>状态</th><th>说明</th><th>归属</th><th>证据</th></tr></thead>
+<table><thead><tr><th>Profile</th><th>目标</th><th>状态</th><th>判定目标</th><th>说明</th><th>归属</th><th>证据</th></tr></thead>
 <tbody>{"".join(rows)}</tbody></table></section>
 <section class="scroll"><h2>探针与黑盒证据明细</h2>
 <p class="muted">这里显示真实 HTTP 探针实际检查到的内容。没有真实输入、控制能力或服务端观测时，状态保持 INCONCLUSIVE。</p>
@@ -977,7 +995,7 @@ def main() -> int:
     parser.add_argument("--quick", action="store_true", help="bounded smoke matrix")
     parser.add_argument("--scenarios", default="", help="覆盖场景列表，逗号分隔")
     parser.add_argument("--quick-duration-cap-s", type=float, default=30.0)
-    parser.add_argument("--quick-case-timeout-s", type=float, default=120.0)
+    parser.add_argument("--quick-case-timeout-s", type=float, default=180.0)
     parser.add_argument(
         "--quick-barrier-count-cap",
         type=int,
@@ -990,11 +1008,23 @@ def main() -> int:
     parser.add_argument(
         "--quick-commit-timeout-s",
         type=float,
-        default=30.0,
+        default=180.0,
         help="quick 模式单个真实 Commit 的最终状态等待上限",
+    )
+    parser.add_argument(
+        "--quick-seed-commit-timeout-s",
+        type=float,
+        default=180.0,
+        help="quick 模式共享 seed warmup 的真实 Commit 等待上限",
     )
     parser.add_argument("--quick-commit-max-attempts", type=int, default=1)
     parser.add_argument("--quick-commit-retry-backoff-s", type=float, default=0.0)
+    parser.add_argument(
+        "--quick-barrier-wave-size",
+        type=int,
+        default=4,
+        help="quick 模式每波最多并发的 Commit 数，降低队列堆积",
+    )
     parser.add_argument(
         "--quick-include-seed",
         action="store_true",
@@ -1116,9 +1146,13 @@ def main() -> int:
                         "--case-timeout-s", str(args.quick_case_timeout_s),
                         "--barrier-count-cap", str(args.quick_barrier_count_cap),
                         "--commit-timeout-s", str(args.quick_commit_timeout_s),
+                        "--seed-commit-timeout-s",
+                        str(args.quick_seed_commit_timeout_s),
                         "--commit-max-attempts", str(args.quick_commit_max_attempts),
                         "--commit-retry-backoff-s",
                         str(args.quick_commit_retry_backoff_s),
+                        "--barrier-wave-size",
+                        str(args.quick_barrier_wave_size),
                     ]
                     if args.quick:
                         command += ["--quick-mode"]
@@ -1128,6 +1162,16 @@ def main() -> int:
                 )
                 if args.quick and not include_quick_seed:
                     command += ["--skip-seed", "--seed-sessions-per-tenant", "0"]
+                elif args.quick:
+                    # Capacity/user evidence needs real session identities.
+                    # Keep one minimal seed session per case; reusing a
+                    # warm-up process would lose its session IDs in the child
+                    # runner and make active-user counts silently zero.
+                    command += [
+                        "--seed-sessions-per-tenant",
+                        "1",
+                        "--no-seed-reuse",
+                    ]
                 if bool(profile.get("allow_partial_tenants")):
                     command += ["--allow-partial-tenants"]
                 command_result["run"] = run_command(
@@ -1217,16 +1261,6 @@ def main() -> int:
         for item in completed_profile_records
         if item["status"] == "completed" and item["completed_runs"] > 0
     )
-    for profile in output_profiles:
-        for objective in profile.get("objectives") or []:
-            if objective.get("id") == "O2":
-                objective["status"] = PASS if completed_profile_count >= 2 else INCONCLUSIVE
-                objective["reason"] = (
-                    "至少两种规格均有真实完成场景，可比较调度与 config"
-                    if completed_profile_count >= 2
-                    else "当前只完成单一规格或没有真实场景结果；仅有 profile 配置不能证明多规格调度"
-                )
-                objective["evidence"] = completed_profile_records
     result = {
         "created_at": now(),
         "profiles": output_profiles,

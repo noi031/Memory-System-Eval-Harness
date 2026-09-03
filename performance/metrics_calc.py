@@ -257,6 +257,10 @@ def fairness_measurements(fairness: dict[str, Any]) -> dict[str, Any]:
 FAIRNESS_MAX_MIN_RATIO = 3.0
 # RSS 斜率泄漏判定阈值（MB/分钟）：超过即判疑似泄漏。
 RSS_LEAK_SLOPE_MB_PER_MIN = 5.0
+# A short bounded smoke test is too dominated by allocator warm-up and GC to
+# support a leak conclusion. Keep the slope for diagnostics, but gate the
+# verdict until the observed window is long enough.
+RSS_LEAK_MIN_WINDOW_S = 60.0
 
 
 def _verdict(verdict: str, reason: str) -> dict[str, Any]:
@@ -381,7 +385,13 @@ def rss_trend_mb_per_min(series: list[tuple[float, float]]) -> dict[str, Any]:
     """
     n = len(series)
     if n < 4:
-        return {"slope_mb_per_min": None, "r2": None, "samples": n}
+        return {
+            "slope_mb_per_min": None,
+            "r2": None,
+            "samples": n,
+            "window_s": 0.0,
+            "verdictable": False,
+        }
     xs = [ts for ts, _ in series]
     ys = [value / 1024 / 1024 for _, value in series]  # MB
     mean_x = sum(xs) / n
@@ -389,7 +399,13 @@ def rss_trend_mb_per_min(series: list[tuple[float, float]]) -> dict[str, Any]:
     s_xy = sum((x - mean_x) * (y - mean_y) for x, y in zip(xs, ys))
     s_xx = sum((x - mean_x) ** 2 for x in xs)
     if s_xx <= 0:
-        return {"slope_mb_per_min": None, "r2": None, "samples": n}
+        return {
+            "slope_mb_per_min": None,
+            "r2": None,
+            "samples": n,
+            "window_s": 0.0,
+            "verdictable": False,
+        }
     slope = s_xy / s_xx  # MB per second
     ss_res = sum((y - (mean_y + slope * (x - mean_x))) ** 2 for x, y in zip(xs, ys))
     ss_tot = sum((y - mean_y) ** 2 for y in ys)
@@ -398,6 +414,8 @@ def rss_trend_mb_per_min(series: list[tuple[float, float]]) -> dict[str, Any]:
         "slope_mb_per_min": round(slope * 60, 3),
         "r2": r2,
         "samples": n,
+        "window_s": round(max(xs) - min(xs), 3),
+        "verdictable": (max(xs) - min(xs)) >= RSS_LEAK_MIN_WINDOW_S,
     }
 
 
@@ -595,10 +613,25 @@ def evaluate_features(summary: dict[str, Any]) -> dict[str, Any]:
         (normalized.get("net_trend") or {}).get("slope_mb_per_min")
         or trend.get("slope_mb_per_min")
     )
+    trend_window_s = (
+        (normalized.get("net_trend") or {}).get("window_s")
+        if normalized.get("net_trend")
+        else None
+    )
+    if trend_window_s is None:
+        trend_window_s = trend.get("window_s")
     unsettled = resources.get("rss_unsettled_mb")
-    if slope is None:
+    if slope is None or (
+        trend_window_s is not None and trend_window_s < RSS_LEAK_MIN_WINDOW_S
+    ):
         features["memory_leak"] = _verdict(
-            "INCONCLUSIVE", "RSS 采样不足（<4 帧）或 /metrics 不可用，无法判定泄漏趋势"
+            "INCONCLUSIVE",
+            (
+                "RSS 采样不足（<4 帧）或 /metrics 不可用，无法判定泄漏趋势"
+                if trend_window_s is None or trend_window_s >= RSS_LEAK_MIN_WINDOW_S
+                else f"RSS 观测窗口仅 {trend_window_s}s，小于 "
+                f"{RSS_LEAK_MIN_WINDOW_S:.0f}s 最小判定窗口；短时启动/GC 波动不作泄漏结论"
+            ),
         )
     elif slope >= RSS_LEAK_SLOPE_MB_PER_MIN:
         features["memory_leak"] = _verdict(
@@ -634,6 +667,10 @@ def evaluate_features(summary: dict[str, Any]) -> dict[str, Any]:
         },
         "trend_r2": trend.get("r2"),
         "trend_samples": trend.get("samples"),
+        "trend_window_s": trend_window_s,
+        "trend_verdictable": (
+            trend_window_s is not None and trend_window_s >= RSS_LEAK_MIN_WINDOW_S
+        ),
     }
 
     # -- 特性4: 资源利用率随时间变化图（报告内容完整性） -------------------------
@@ -795,10 +832,31 @@ def evaluate_features(summary: dict[str, Any]) -> dict[str, Any]:
             f"租户隔离失效",
         )
     else:
-        # 单次探针 PASS 不足以证明隔离（如 key 未验证互异），保守判数据不足
-        features["tenant_isolation"] = _verdict(
-            "INCONCLUSIVE", "隔离探针结果不足以判定租户隔离"
+        config = summary.get("config") or {}
+        auth_mode = str(config.get("auth_mode") or config.get("effective_auth_mode") or "")
+        tenant_count = int(
+            (summary.get("data_scale") or {}).get("tenants")
+            or config.get("tenants")
+            or 0
         )
+        # Provisioned identities are generated independently by the service.
+        # Static/local auth intentionally remains inconclusive because all
+        # probes can resolve to one identity even when ``--tenants`` is > 1.
+        if (
+            isolation_probe.get("verdict") == "PASS"
+            and auth_mode == "provision"
+            and tenant_count >= 2
+            and int(isolation_probe.get("probe_count") or 0) >= 4
+        ):
+            features["tenant_isolation"] = _verdict(
+                "PASS",
+                "独立 provision 租户的同租户命中率为 100%，跨租户误命中率为 0%",
+            )
+        else:
+            features["tenant_isolation"] = _verdict(
+                "INCONCLUSIVE",
+                "探针通过，但未能从运行配置证明使用了至少两个独立租户身份",
+            )
     features["tenant_isolation"]["measurements"] = isolation_probe
 
     # -- 特性12: 饱和拒绝契约（429/503 拒绝必须带 Retry-After + reason_code） ----
@@ -987,8 +1045,8 @@ def isolation_probe_summary(records: list[RequestRecord]) -> dict[str, Any]:
 def saturation_summary(records: list[RequestRecord]) -> dict[str, Any]:
     """饱和拒绝契约：429/503 拒绝样本必须携带 Retry-After 与 reason_code。
 
-    拒绝样本 = commit_submit/read 的 http_4xx 错误中带 retry_after_s 或
-    reason_code 的记录。verdict: "PASS"（有拒绝样本且全部带两字段）/
+    拒绝样本 = commit_submit/read 的真实 HTTP 429/503 错误记录。
+    verdict: "PASS"（有拒绝样本且全部带两字段）/
     "FAIL"（有拒绝样本但缺字段）/ "INCONCLUSIVE"（无拒绝样本）。
     """
     ops = ("commit_submit", "read")
@@ -998,8 +1056,7 @@ def saturation_summary(records: list[RequestRecord]) -> dict[str, Any]:
         for rec in records
         if rec.op in ops
         and rec.status == "error"
-        and rec.error_type == "http_4xx"
-        and (rec.retry_after_s is not None or rec.reason_code != "")
+        and rec.http_status in (429, 503)
     ]
     total = success + len(rejected)
     retry_after_present = sum(1 for rec in rejected if rec.retry_after_s is not None)

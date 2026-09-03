@@ -16,6 +16,7 @@ import json
 import os
 import re
 import tempfile
+import threading
 import time
 import unittest
 import urllib.error
@@ -720,6 +721,8 @@ class PrepareTests(unittest.TestCase):
         self.assertEqual(client.add_calls, 3)
         self.assertEqual(tenant.seed_sessions, 2)
         self.assertEqual(tenant.seed_messages, 3)
+        self.assertEqual(len(tenant.active_session_ids), 2)
+        self.assertTrue(all(tenant.active_session_ids))
         # query 池只含用户消息的分句片段
         self.assertEqual(tenant.queries, ["First message of conv30", "Third message"])
 
@@ -812,6 +815,7 @@ class RunStressArgsTests(unittest.TestCase):
             commit_barrier_waves=1,
             commit_barrier_cooldown_s=0.0,
             isolation_markers_per_tenant=5,
+            client_connection_error_abort_threshold=100,
         )
         base.update(overrides)
         return argparse.Namespace(**base)
@@ -839,6 +843,12 @@ class RunStressArgsTests(unittest.TestCase):
     def test_static_without_cleanup_is_ok(self) -> None:
         args = self._args(auth_mode="static", cleanup_identities=False)
         _resolve_args(args)  # 不抛错即可
+
+    def test_fixed_rps_zero_per_tenant_rate_is_not_passed_as_configured(self) -> None:
+        args = self._args(mode="fixed-rps", rps=8.0, per_tenant_rps=0.0)
+        resolved = _resolve_args(args)
+        self.assertEqual(8.0, resolved["rps"])
+        self.assertIsNone(resolved["per_tenant_rps"])
 
     def test_locomo_seed_missing_dataset_raises(self) -> None:
         args = self._args(seed_source="locomo", dataset_path="no-such-file.json")
@@ -953,6 +963,15 @@ class FeatureGuaranteeTests(unittest.TestCase):
         series = [(0.0, 100.0 * 1024 * 1024), (1.0, 110.0 * 1024 * 1024)]
         trend = rss_trend_mb_per_min(series)
         self.assertIsNone(trend["slope_mb_per_min"])
+
+    def test_rss_trend_short_window_is_not_verdictable(self) -> None:
+        series = [
+            (float(i), (100 + i) * 1024 * 1024)
+            for i in range(0, 50, 10)
+        ]
+        trend = rss_trend_mb_per_min(series)
+        self.assertEqual(trend["window_s"], 40.0)
+        self.assertFalse(trend["verdictable"])
 
     def test_cpu_utilization_series(self) -> None:
         monitor = MetricsMonitor("http://test")
@@ -1086,6 +1105,46 @@ class FeatureVerdictTests(unittest.TestCase):
         meas = feature["measurements"]
         self.assertEqual(meas["projected_growth_mb_per_hour"], 720.0)
         self.assertIn("720.0", feature["reason"])
+
+    def test_memory_leak_short_window_is_inconclusive(self) -> None:
+        summary = self._base_summary()
+        summary["resources"]["rss_trend"] = {
+            "slope_mb_per_min": 12.0,
+            "r2": 0.99,
+            "samples": 5,
+            "window_s": 5.0,
+        }
+        result = evaluate_features(summary)
+        feature = result["features"]["memory_leak"]
+        self.assertEqual(feature["verdict"], "INCONCLUSIVE")
+        self.assertIn("最小判定窗口", feature["reason"])
+
+    def test_tenant_isolation_passes_for_independent_provisioned_tenants(self) -> None:
+        summary = self._base_summary()
+        summary["config"].update({"auth_mode": "provision", "tenants": 4})
+        summary["data_scale"] = {"tenants": 4}
+        summary["isolation_probe"] = {
+            "verdict": "PASS",
+            "probe_count": 16,
+            "same_tenant_hit_rate": 1.0,
+            "cross_tenant_false_positive_rate": 0.0,
+        }
+        result = evaluate_features(summary)
+        self.assertEqual(result["features"]["tenant_isolation"]["verdict"], "PASS")
+
+    def test_tenant_isolation_static_identity_stays_inconclusive(self) -> None:
+        summary = self._base_summary()
+        summary["config"].update({"auth_mode": "static", "tenants": 1})
+        summary["isolation_probe"] = {
+            "verdict": "PASS",
+            "probe_count": 16,
+            "same_tenant_hit_rate": 1.0,
+            "cross_tenant_false_positive_rate": 0.0,
+        }
+        result = evaluate_features(summary)
+        self.assertEqual(
+            result["features"]["tenant_isolation"]["verdict"], "INCONCLUSIVE"
+        )
 
     def test_inconclusive_cases(self) -> None:
         # 未跑写场景
@@ -1970,6 +2029,72 @@ class PreflightTests(unittest.TestCase):
             os.unlink(path)
         self.assertEqual([item["id"] for item in engines], ["model.llm"])
 
+    def test_parse_native_config_skips_inactive_intent_llm(self) -> None:
+        path = self._write_config(
+            {
+                "recall": {
+                    "search": {"intent": {"backend": "rule"}},
+                    "model": {
+                        "intent_llm": {
+                            "provider": "openai_compatible",
+                            "api_base": "https://intent.example/v1",
+                            "api_key_env": "INTENT_KEY",
+                            "model": "unsupported-model",
+                        }
+                    },
+                },
+                "model": {
+                    "llm": {
+                        "provider": "openai_compatible",
+                        "api_base": "https://llm.example/v1",
+                        "api_key_env": "LLM_KEY",
+                        "model": "supported-model",
+                    }
+                },
+            }
+        )
+        try:
+            engines = parse_engine_configs(path)
+        finally:
+            os.unlink(path)
+        self.assertEqual([item["id"] for item in engines], ["model.llm"])
+
+    def test_parse_native_config_skips_intent_llm_from_engine_search_config(self) -> None:
+        path = self._write_config(
+            {
+                "engine": {
+                    "configs": {
+                        "atomic_engine": {
+                            "search": {"intent": {"backend": "rule"}}
+                        }
+                    }
+                },
+                "recall": {
+                    "model": {
+                        "intent_llm": {
+                            "provider": "openai_compatible",
+                            "api_base": "https://intent.example/v1",
+                            "api_key_env": "INTENT_KEY",
+                            "model": "unsupported-model",
+                        }
+                    }
+                },
+                "model": {
+                    "llm": {
+                        "provider": "openai_compatible",
+                        "api_base": "https://llm.example/v1",
+                        "api_key_env": "LLM_KEY",
+                        "model": "supported-model",
+                    }
+                },
+            }
+        )
+        try:
+            engines = parse_engine_configs(path)
+        finally:
+            os.unlink(path)
+        self.assertEqual([item["id"] for item in engines], ["model.llm"])
+
     def test_config_digest_stable(self) -> None:
         self.assertEqual(config_digest([{"a": 1}]), config_digest([{"a": 1}]))
         self.assertNotEqual(config_digest([{"a": 1}]), config_digest([{"a": 2}]))
@@ -2335,18 +2460,27 @@ class SaturationSummaryTests(unittest.TestCase):
     """saturation_summary：429/503 拒绝样本的 Retry-After / reason_code 契约。"""
 
     @staticmethod
-    def _rec(op, status, error_type="", retry_after=None, reason="", stage=10.0):
+    def _rec(
+        op,
+        status,
+        error_type="",
+        retry_after=None,
+        reason="",
+        stage=10.0,
+        http_status=None,
+    ):
         return RequestRecord(
             scene_key="S@1", step_conc=1, tenant_idx=0, op=op,
             stage_ms=stage, status=status, error_type=error_type, ts_ms=0.0,
+            http_status=http_status,
             retry_after_s=retry_after, reason_code=reason,
         )
 
     def test_pass_when_all_rejections_carry_contract(self) -> None:
         records = [
             self._rec("read", "ok"),
-            self._rec("commit_submit", "error", "http_4xx", retry_after=1.0, reason="rate_limited"),
-            self._rec("commit_submit", "error", "http_4xx", retry_after=2.0, reason="rate_limited"),
+            self._rec("commit_submit", "error", "http_4xx", retry_after=1.0, reason="rate_limited", http_status=429),
+            self._rec("commit_submit", "error", "http_4xx", retry_after=2.0, reason="rate_limited", http_status=429),
         ]
         summary = saturation_summary(records)
         self.assertEqual(summary["verdict"], "PASS")
@@ -2357,14 +2491,14 @@ class SaturationSummaryTests(unittest.TestCase):
 
     def test_fail_when_reason_code_missing(self) -> None:
         records = [
-            self._rec("commit_submit", "error", "http_4xx", retry_after=1.0),
+            self._rec("commit_submit", "error", "http_4xx", retry_after=1.0, http_status=429),
         ]
         summary = saturation_summary(records)
         self.assertEqual(summary["verdict"], "FAIL")
 
     def test_fail_when_retry_after_missing(self) -> None:
         records = [
-            self._rec("commit_submit", "error", "http_4xx", reason="rate_limited"),
+            self._rec("commit_submit", "error", "http_4xx", reason="rate_limited", http_status=503),
         ]
         summary = saturation_summary(records)
         self.assertEqual(summary["verdict"], "FAIL")
@@ -2382,9 +2516,9 @@ class SaturationSummaryTests(unittest.TestCase):
     def test_rejection_latency_percentiles(self) -> None:
         records = [
             self._rec("read", "ok"),
-            self._rec("commit_submit", "error", "http_4xx", retry_after=1.0, reason="x", stage=100.0),
-            self._rec("commit_submit", "error", "http_4xx", retry_after=1.0, reason="x", stage=200.0),
-            self._rec("commit_submit", "error", "http_4xx", retry_after=1.0, reason="x", stage=300.0),
+            self._rec("commit_submit", "error", "http_4xx", retry_after=1.0, reason="x", stage=100.0, http_status=429),
+            self._rec("commit_submit", "error", "http_4xx", retry_after=1.0, reason="x", stage=200.0, http_status=429),
+            self._rec("commit_submit", "error", "http_4xx", retry_after=1.0, reason="x", stage=300.0, http_status=429),
         ]
         summary = saturation_summary(records)
         self.assertEqual(summary["rejection_p50_ms"], 200.0)
@@ -2573,6 +2707,34 @@ class LoadGeneratorSceneTests(unittest.TestCase):
             generator.run_scene(scene, [tenant], messages_per_session=1)
         self.assertEqual(1, read_loop.call_count)
         self.assertEqual(0, write_loop.call_count)
+
+    def test_connection_error_threshold_stops_unbounded_read_load(self) -> None:
+        generator = LoadGenerator(client_connection_error_abort_threshold=2)
+        client = mock.Mock()
+        client.search_with_meta.side_effect = urllib.error.URLError("address pool exhausted")
+        stop = threading.Event()
+        records = generator._read_loop(
+            stop,
+            mock.Mock(
+                idx=0,
+                client=client,
+                queries=["hello"],
+                active_session_ids=[],
+            ),
+            scene_key="A@1",
+            step_conc=1,
+        )
+        self.assertEqual(2, len(records))
+        self.assertTrue(stop.is_set())
+        self.assertEqual(
+            {
+                "connection_errors": 2,
+                "abort_threshold": 2,
+                "client_resource_exhausted": True,
+                "verdict": "CLIENT_RESOURCE_EXHAUSTED",
+            },
+            generator.client_diagnostics(),
+        )
 
 
 class NewFeatureVerdictTests(unittest.TestCase):

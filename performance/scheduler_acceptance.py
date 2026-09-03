@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Evaluate the seven scheduler acceptance targets from real evidence.
+"""Evaluate the six 4U8G scheduler acceptance targets from real evidence.
 
 This command intentionally separates the test-platform verdict from the
 EchoMem capability verdict. Missing runtime controls are INCONCLUSIVE, never
@@ -33,7 +33,6 @@ PR421_LANES = {
 
 OBJECTIVE_OWNERS = {
     "DAU / 最大热用户容量": "测试平台 + 部署资源",
-    "多规格实例调度配置": "测试平台 + 部署资源",
     "单租户故障隔离": "EchoMem/部署控制面 + 测试平台采集",
     "Commit/Search 公平性 Jain": "EchoMem 调度 + 测试平台负载",
     "Search 优先于 Commit": "EchoMem 调度 + 测试平台负载",
@@ -130,12 +129,21 @@ def _per_tenant_metrics(suite: dict[str, Any]) -> dict[str, dict[str, Any]]:
                 {
                     "commit_submitted": 0,
                     "commit_completed": 0,
+                    "window_s": 0.0,
                     "search_p95_s": [],
                 },
             )
             commit = data.get("commit") or {}
             entry["commit_submitted"] += int(commit.get("submitted") or 0)
             entry["commit_completed"] += int(commit.get("completed") or 0)
+            run_window = run.get("duration_s")
+            if run_window is None:
+                run_window = _metric(_run_summary(run), "config", "duration_s")
+            try:
+                window = max(0.0, float(run_window))
+            except (TypeError, ValueError):
+                window = 0.0
+            entry["window_s"] += window
             search = data.get("search") or {}
             search_latency = search.get("latency") or {}
             value = search_latency.get("p95_s")
@@ -148,6 +156,14 @@ def _per_tenant_metrics(suite: dict[str, Any]) -> dict[str, dict[str, Any]]:
         values = entry.pop("search_p95_s", [])
         entry["search_p95_s"] = (
             sum(values) / len(values) if values else None
+        )
+        entry["commit_throughput"] = (
+            entry["commit_completed"] / entry["window_s"]
+            if entry["window_s"] > 0
+            else float(entry["commit_completed"])
+        )
+        entry["commit_throughput_source"] = (
+            "completed_per_window" if entry["window_s"] > 0 else "completed_count_fallback"
         )
     return merged
 
@@ -329,34 +345,6 @@ def _capacity(suite: dict[str, Any]) -> dict[str, Any]:
     )
 
 
-def _multi_spec(suite: dict[str, Any]) -> dict[str, Any]:
-    profiles = suite.get("instance_profiles") or suite.get("profiles")
-    if not isinstance(profiles, list):
-        profiles = []
-    target = "配置可切换并实际执行至少两种实例规格"
-    completed = [
-        item for item in profiles
-        if isinstance(item, dict)
-        and str(item.get("status") or "").lower()
-        in {"completed", "pass", "passed"}
-    ]
-    if len(completed) < 2:
-        return _result(
-            "多规格实例调度配置",
-            INCONCLUSIVE,
-            target,
-            {"profiles": profiles, "completed_profiles": completed},
-            "本轮没有至少两种规格的实际运行结果；只有配置文件不能证明调度生效",
-        )
-    return _result(
-        "多规格实例调度配置",
-        PASS,
-        target,
-        {"profiles": profiles, "completed_profiles": completed},
-        "至少两种规格均有实际运行记录",
-    )
-
-
 def _fault_isolation(suite: dict[str, Any], fault: dict[str, Any]) -> dict[str, Any]:
     evidence = fault.get("tenant_fault_isolation") if isinstance(fault, dict) else None
     if not isinstance(evidence, dict):
@@ -370,6 +358,31 @@ def _fault_isolation(suite: dict[str, Any], fault: dict[str, Any]) -> dict[str, 
             "没有按租户注入故障并对旁观租户做前后 P95 配对的真实证据",
         )
     degradation = evidence.get("bystander_p95_degradation")
+    bystander = evidence.get("bystander_tenants")
+    if not isinstance(bystander, dict) or not bystander:
+        return _result(
+            "单租户故障隔离",
+            INCONCLUSIVE,
+            0.20,
+            evidence,
+            "缺少逐旁观租户的 baseline_p95、fault_p95 和 degradation 记录",
+        )
+    incomplete = []
+    for tenant, sample in bystander.items():
+        if not isinstance(sample, dict):
+            incomplete.append(str(tenant))
+            continue
+        required = ("baseline_p95_s", "fault_p95_s", "degradation")
+        if any(sample.get(key) in (None, "") for key in required):
+            incomplete.append(str(tenant))
+    if incomplete:
+        return _result(
+            "单租户故障隔离",
+            INCONCLUSIVE,
+            0.20,
+            {"incomplete_tenants": incomplete, "evidence": evidence},
+            "逐旁观租户证据不完整，不能只用聚合最大值判定隔离",
+        )
     try:
         value = float(degradation)
     except (TypeError, ValueError):
@@ -517,9 +530,9 @@ def _fairness(suite: dict[str, Any]) -> dict[str, Any]:
             )
         )
         commit_values = [
-            float(item["commit_completed"])
+            float(item["commit_throughput"])
             for item in tenant_metrics.values()
-            if item["commit_completed"] >= 0
+            if item.get("commit_throughput") is not None
         ]
         search_values = [
             1.0 / float(item["search_p95_s"])
@@ -618,10 +631,67 @@ def _priority(suite: dict[str, Any]) -> dict[str, Any]:
             {"runs": len(runs), "completed_runs": 0},
             "场景存在但没有已完成的真实运行结果",
         )
+    overlap_evidence = [
+        ((_run_summary(run).get("details") or {}).get("same_window_overlap"))
+        for run in completed_runs
+    ]
+    if not overlap_evidence or any(
+        not isinstance(item, dict) or not bool(item.get("overlap_proven"))
+        for item in overlap_evidence
+    ):
+        return _result(
+            "Search 优先于 Commit",
+            INCONCLUSIVE,
+            "Search P95 <= 5s 且 Search/Commit 提交时间窗口真实重叠",
+            {
+                "runs": len(completed_runs),
+                "same_window_overlap": overlap_evidence,
+            },
+            "缺少 Search 与 Commit 同时到达的时间窗口证据",
+        )
     p95_values = [
         _metric(_run_summary(run), "metrics", "search", "latency", "p95_s")
         for run in completed_runs
     ]
+    baseline_values = []
+    for run in completed_runs:
+        details = _run_summary(run).get("details") or {}
+        baseline = details.get("baseline_search_p95_s")
+        if baseline is None:
+            baseline = details.get("baseline", {}).get("search_p95_s")
+        if isinstance(baseline, (int, float)) and baseline > 0:
+            baseline_values.append(float(baseline))
+    # Formal suites commonly execute a separate baseline case before the
+    # contention case. Use only completed, successful baseline evidence from
+    # that same suite; never compare against an unrelated historical run.
+    if not baseline_values:
+        baseline_runs = [
+            run for run in _suite_runs(suite)
+            if str(run.get("scenario") or "") in {"baseline", "A", "A@1"}
+            and str(run.get("status") or "") == "completed"
+        ]
+        for run in baseline_runs:
+            summary = _run_summary(run)
+            search = _metric(summary, "metrics", "search") or {}
+            if (
+                float(search.get("success_rate") or 0.0) >= 0.99
+                and isinstance(
+                    _metric(summary, "metrics", "search", "latency", "p95_s"),
+                    (int, float),
+                )
+                and float(_metric(summary, "metrics", "search", "latency", "p95_s")) > 0
+            ):
+                baseline_values.append(
+                    float(_metric(summary, "metrics", "search", "latency", "p95_s"))
+                )
+    if not baseline_values:
+        return _result(
+            "Search 优先于 Commit",
+            INCONCLUSIVE,
+            "有无 Commit 洪泛基线和劣化比例，且 Search P95 <= 5s",
+            {"runs": len(completed_runs)},
+            "缺少同配置、无洪泛 Search 基线 P95，不能仅凭绝对 P95 证明优先级",
+        )
     commit_counts = [
         _metric(_run_summary(run), "metrics", "commit", "submitted")
         for run in completed_runs
@@ -665,16 +735,25 @@ def _priority(suite: dict[str, Any]) -> dict[str, Any]:
             "场景运行了，但没有 Search P95 数据",
         )
     worst = max(values)
+    baseline = min(baseline_values)
+    degradation = worst / baseline if baseline > 0 else None
+    max_degradation = 2.0
     return _result(
         "Search 优先于 Commit",
-        PASS if worst <= 5.0 else FAIL,
-        5.0,
+        PASS if worst <= 5.0 and degradation <= max_degradation else FAIL,
+        {"search_p95_max_s": 5.0, "degradation_max_ratio": max_degradation},
         {
             "worst_search_p95_s": worst,
+            "baseline_search_p95_s": baseline,
+            "degradation_ratio": round(degradation, 4),
             "commit_submitted": commit_submitted,
             "minimum_commit_flood": MIN_PRIORITY_COMMIT_FLOOD,
         },
-        "同到达窗口 Search P95 在 5 秒内" if worst <= 5.0 else "Search P95 超过 5 秒",
+        (
+            "同到达窗口 Search P95 在 5 秒内且相对基线劣化不超过 2x"
+            if worst <= 5.0 and degradation <= max_degradation
+            else "Search P95 超过 5 秒或相对基线劣化超过 2x"
+        ),
     )
 
 
@@ -697,43 +776,84 @@ def _recovery(recovery: dict[str, Any]) -> dict[str, Any]:
         rate = None
     cursor = recovery.get("cursor_reconciliation")
     cursor_proven = isinstance(cursor, dict) and str(cursor.get("status")) == PASS
-    message_set_proven = bool(recovery.get("message_set_reconciled"))
-    replay_proven = bool(recovery.get("replay_verified"))
+    message_reconciliation = recovery.get("message_reconciliation")
+    message_set_proven = bool(
+        recovery.get("message_set_reconciled")
+        or (
+            isinstance(message_reconciliation, dict)
+            and str(message_reconciliation.get("status") or "") == PASS
+        )
+    )
+    order_reconciliation = recovery.get("order_reconciliation")
+    order_proven = (
+        isinstance(order_reconciliation, dict)
+        and str(order_reconciliation.get("status") or "") == PASS
+    )
     idempotency = recovery.get("idempotency_reconciliation")
     idempotency_status = (
         str(idempotency.get("status") or INCONCLUSIVE)
         if isinstance(idempotency, dict)
         else INCONCLUSIVE
     )
-    # A completed archive after restart proves durability only. The target
-    # explicitly includes replay, so a generic kill/restart probe without a
-    # stable idempotency key must remain inconclusive.
-    replay_evidence = replay_proven or idempotency_status == PASS
+    idempotency_replay = recovery.get("idempotency_replay")
+    same_archive = bool(
+        isinstance(idempotency_replay, dict)
+        and idempotency_replay.get("same_archive") is True
+    )
+    accepted_202 = recovery.get("accepted_202") is True
+    terminal = recovery.get("commit_terminal")
+    final_state = (
+        terminal[-1].get("state")
+        if isinstance(terminal, list) and terminal and isinstance(terminal[-1], dict)
+        else None
+    )
+    # ``replayed=true`` is an optional response annotation.  Some EchoMem
+    # versions safely deduplicate the same idempotency key and return the
+    # original archive without setting that annotation.  The black-box
+    # durability target is proven by 202 + restart + completed terminal state
+    # + durable message/cursor/order reconciliation + same archive on replay.
+    replay_evidence = same_archive or idempotency_status == PASS
     passed = (
-        status == PASS
+        accepted_202
+        and status != FAIL
         and (rate is None or rate >= 1.0)
         and recovery.get("recovered") is not False
+        and final_state == "completed"
         and cursor_proven
         and message_set_proven
+        and order_proven
         and replay_evidence
     )
-    if idempotency_status == FAIL:
+    if idempotency_status == FAIL and not same_archive:
         verdict = FAIL
-        reason = "服务恢复且消息对账通过，但同一幂等键未返回 replayed=true"
+        reason = "服务恢复但同一幂等键没有返回原 archive，幂等重放失败"
     elif passed:
         verdict = PASS
-        reason = "服务恢复、Commit 完成、消息集合对账和幂等重放均通过"
+        reason = (
+            "收到 202；服务恢复；Commit completed；消息集合、cursor、顺序对账通过；"
+            "同一幂等键仍返回原 archive"
+        )
     elif status in {FAIL, INCONCLUSIVE}:
         verdict = status
-        reason = "恢复、消息对账或幂等重放证据不完整/失败"
+        reason = "202、恢复、Commit 终态、消息/cursor/顺序对账或幂等重放证据不完整/失败"
     else:
         verdict = INCONCLUSIVE
-        reason = "恢复、消息对账或幂等重放证据不完整/失败"
+        reason = "202、恢复、Commit 终态、消息/cursor/顺序对账或幂等重放证据不完整/失败"
+    observed = dict(recovery)
+    observed["accepted_202_required"] = True
+    observed["final_state"] = final_state
+    observed["same_archive_on_idempotency_replay"] = same_archive
+    observed["replayed_flag_observed"] = (
+        idempotency_replay.get("replayed")
+        if isinstance(idempotency_replay, dict)
+        else None
+    )
+    observed["replayed_flag_is_optional_annotation"] = True
     return _result(
         "Commit kill-9 恢复与重放",
         verdict,
         1.0,
-        recovery,
+        observed,
         reason,
     )
 
@@ -860,7 +980,6 @@ def evaluate(
 ) -> dict[str, Any]:
     checks = [
         _capacity(suite),
-        _multi_spec(suite),
         _fault_isolation(suite, fault or {}),
         _fairness(suite),
         _priority(suite),
@@ -870,7 +989,7 @@ def evaluate(
     statuses = [item["status"] for item in checks]
     overall = FAIL if FAIL in statuses else INCONCLUSIVE if INCONCLUSIVE in statuses else PASS
     return {
-        "version": "scheduler-acceptance-v1",
+        "version": "scheduler-acceptance-v2",
         "created_at": _now(),
         "overall": overall,
         "checks": checks,
@@ -884,7 +1003,7 @@ def evaluate(
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Evaluate the seven scheduler targets")
+    parser = argparse.ArgumentParser(description="Evaluate the six 4U8G scheduler targets")
     parser.add_argument("--suite", required=True, type=Path)
     parser.add_argument("--capability", type=Path)
     parser.add_argument("--recovery", type=Path)

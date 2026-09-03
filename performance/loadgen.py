@@ -148,6 +148,7 @@ class RequestRecord:
     status: str  # ok | error
     error_type: str  # "" | timeout | http_4xx | http_5xx | connection | other
     ts_ms: float
+    request_id: str = ""
     http_status: int | None = None
     session_id: str = ""
     archive_id: str = ""
@@ -185,6 +186,7 @@ class RequestRecord:
             "error_type": self.error_type,
             "http_status": self.http_status,
             "ts_ms": round(self.ts_ms, 3),
+            "request_id": self.request_id,
             "session_id": self.session_id,
             "archive_id": self.archive_id,
             "extra": self.extra,
@@ -214,6 +216,27 @@ def classify_error(exc: BaseException) -> str:
     if isinstance(exc, urllib.error.URLError):
         return "connection"
     return "other"
+
+
+def _call_with_request_id(
+    method: Any,
+    *args: Any,
+    request_id: str,
+    **kwargs: Any,
+) -> Any:
+    """Use request correlation when the client supports it.
+
+    A few local test doubles and third-party client adapters still expose
+    the pre-correlation method signatures. Keep the load generator usable
+    with them while real EchoMem clients receive ``X-Request-ID``.
+    """
+    try:
+        return method(*args, request_id=request_id, **kwargs)
+    except TypeError as exc:
+        text = str(exc)
+        if "request_id" not in text or "unexpected keyword" not in text:
+            raise
+        return method(*args, **kwargs)
 
 
 def mix_token_sequence(read: int, write: int, total: int) -> list[str]:
@@ -276,6 +299,7 @@ def run_write_transaction(
     result = WriteTransactionResult(ok=False, session_id="", anchor="")
     result.records = records  # same list; all failure paths return with records attached
     anchor = seed_anchor or f"{WRITE_ANCHOR_PREFIX}-{tenant_idx}-{seq}"
+    transaction_id = f"tx-{uuid.uuid4().hex}"
 
     def record(
         op: str, ms: float, status: str, error_type: str = "", **extra_fields: Any
@@ -290,6 +314,7 @@ def run_write_transaction(
                 status=status,
                 error_type=error_type,
                 ts_ms=time.time() * 1000,
+                request_id=str(extra_fields.pop("request_id", "") or transaction_id),
                 session_id=result.session_id,
                 extra=extra,
                 **extra_fields,
@@ -297,12 +322,24 @@ def run_write_transaction(
         )
 
     started = time.perf_counter()
+    open_request_id = f"{transaction_id}-open"
     try:
-        result.session_id = client.open_session(title="perf-write-tx")
+        result.session_id = _call_with_request_id(
+            client.open_session,
+            title="perf-write-tx",
+            request_id=open_request_id,
+        )
     except Exception as exc:
-        record("open", (time.perf_counter() - started) * 1000, "error", classify_error(exc))
+        record(
+            "open",
+            (time.perf_counter() - started) * 1000,
+            "error",
+            classify_error(exc),
+            request_id=open_request_id,
+            http_status=getattr(exc, "code", None),
+        )
         return result
-    record("open", (time.perf_counter() - started) * 1000, "ok")
+    record("open", (time.perf_counter() - started) * 1000, "ok", request_id=open_request_id)
 
     for msg_idx in range(messages_per_session):
         last = msg_idx == messages_per_session - 1
@@ -312,10 +349,24 @@ def run_write_transaction(
             f"压测写入会话消息 {anchor}-{msg_idx}" if last else f"压测写入会话消息-{msg_idx}"
         )
         started = time.perf_counter()
+        add_request_id = f"{transaction_id}-add-{msg_idx}"
         try:
-            resp = client.add_message(result.session_id, "user", content)
+            resp = _call_with_request_id(
+                client.add_message,
+                result.session_id,
+                "user",
+                content,
+                request_id=add_request_id,
+            )
         except Exception as exc:
-            record("add", (time.perf_counter() - started) * 1000, "error", classify_error(exc))
+            record(
+                "add",
+                (time.perf_counter() - started) * 1000,
+                "error",
+                classify_error(exc),
+                request_id=add_request_id,
+                http_status=getattr(exc, "code", None),
+            )
             return result
         message_id = str(
             resp.get("message_id")
@@ -332,6 +383,7 @@ def run_write_transaction(
             message_id=message_id,
             content_hash=_content_hash(content),
             content_bytes=len(content.encode("utf-8")),
+            request_id=add_request_id,
         )
 
     started = time.perf_counter()
@@ -342,8 +394,13 @@ def run_write_transaction(
     last_reason_code = ""
     while True:
         attempts += 1
+        commit_request_id = f"{transaction_id}-commit"
         try:
-            archive_id = client.commit_session(result.session_id)
+            archive_id = _call_with_request_id(
+                client.commit_session,
+                result.session_id,
+                request_id=commit_request_id,
+            )
             break
         except Exception as exc:
             error_type = classify_error(exc)
@@ -367,6 +424,8 @@ def run_write_transaction(
                     retry_total_wait_ms=total_wait_ms,
                     retry_after_s=last_retry_after_s,
                     reason_code=last_reason_code,
+                    request_id=commit_request_id,
+                    http_status=getattr(exc, "code", None),
                 )
                 return result
             retried = True
@@ -384,6 +443,7 @@ def run_write_transaction(
         final_success=True,
         retry_after_s=last_retry_after_s,
         reason_code=last_reason_code,
+        request_id=commit_request_id,
     )
     result.archive_id = archive_id
 
@@ -485,32 +545,105 @@ class LoadGenerator:
         commit_poll_timeout_s: float = 120.0,
         commit_poll_interval_s: float = 0.2,
         rps: float | None = None,
+        per_tenant_rps: float | None = None,
         commit_rpm: float = 0.0,
+        per_tenant_commit_rpm: float | None = None,
         commit_retry_max: int = 0,
         commit_retry_backoff_s: float = 0.5,
         barrier_prepare_concurrency: int = 4,
         barrier_wave_size: int = 32,
+        barrier_drain_timeout_s: float = 10.0,
+        client_connection_error_abort_threshold: int = 100,
     ) -> None:
         self.top_k = top_k
         self.timeout_s = timeout_s
         self.commit_poll_timeout_s = commit_poll_timeout_s
         self.commit_poll_interval_s = commit_poll_interval_s
+        if rps and per_tenant_rps:
+            raise ValueError("rps and per_tenant_rps are mutually exclusive")
+        if commit_rpm > 0 and per_tenant_commit_rpm:
+            raise ValueError("commit_rpm and per_tenant_commit_rpm are mutually exclusive")
+        if per_tenant_rps is not None and per_tenant_rps <= 0:
+            raise ValueError("per_tenant_rps must be > 0")
+        if per_tenant_commit_rpm is not None and per_tenant_commit_rpm <= 0:
+            raise ValueError("per_tenant_commit_rpm must be > 0")
         self.rate_limiter = RateLimiter(rps) if rps else None
+        self.per_tenant_rate = per_tenant_rps
+        self._tenant_rate_limiters: dict[int, RateLimiter] = {}
         self.commit_rate_limiter = (
             RateLimiter(commit_rpm / 60.0) if commit_rpm > 0 else None
         )
+        self.per_tenant_commit_rate = per_tenant_commit_rpm
+        self._tenant_commit_rate_limiters: dict[int, RateLimiter] = {}
         self.commit_retry_max = commit_retry_max
         self.commit_retry_backoff_s = commit_retry_backoff_s
         if barrier_prepare_concurrency < 1:
             raise ValueError("barrier_prepare_concurrency must be >= 1")
         if barrier_wave_size < 1:
             raise ValueError("barrier_wave_size must be >= 1")
+        if barrier_drain_timeout_s < 0:
+            raise ValueError("barrier_drain_timeout_s must be >= 0")
+        if client_connection_error_abort_threshold < 0:
+            raise ValueError("client_connection_error_abort_threshold must be >= 0")
         self.barrier_prepare_concurrency = barrier_prepare_concurrency
         self.barrier_wave_size = barrier_wave_size
+        self.barrier_drain_timeout_s = barrier_drain_timeout_s
+        self.client_connection_error_abort_threshold = (
+            client_connection_error_abort_threshold
+        )
+        self._client_connection_errors = 0
+        self._client_diagnostic_lock = threading.Lock()
+        self._client_resource_exhausted = threading.Event()
         self._last_write_anchors: list[AnchorWrite] = []
         self._reconciliation_candidates: list[tuple[int, str, list[str], list[str], str]] = []
         # commit barrier 准备阶段产生的 add 记录（run_commit_barrier 持有其引用）
         self._barrier_prep_records: list[RequestRecord] = []
+
+    def _read_limiter(self, tenant_idx: int) -> RateLimiter | None:
+        if self.per_tenant_rate is None:
+            return self.rate_limiter
+        limiter = self._tenant_rate_limiters.get(tenant_idx)
+        if limiter is None:
+            limiter = RateLimiter(self.per_tenant_rate)
+            self._tenant_rate_limiters[tenant_idx] = limiter
+        return limiter
+
+    def _commit_limiter(self, tenant_idx: int) -> RateLimiter | None:
+        if self.per_tenant_commit_rate is None:
+            return self.commit_rate_limiter
+        limiter = self._tenant_commit_rate_limiters.get(tenant_idx)
+        if limiter is None:
+            limiter = RateLimiter(self.per_tenant_commit_rate / 60.0)
+            self._tenant_commit_rate_limiters[tenant_idx] = limiter
+        return limiter
+
+    def reset_client_diagnostics(self) -> None:
+        """Reset per-scene client-side transport diagnostics."""
+        with self._client_diagnostic_lock:
+            self._client_connection_errors = 0
+            self._client_resource_exhausted.clear()
+
+    def note_client_connection_error(self) -> bool:
+        """Record one client transport error and return whether to abort."""
+        with self._client_diagnostic_lock:
+            self._client_connection_errors += 1
+            threshold = self.client_connection_error_abort_threshold
+            if threshold > 0 and self._client_connection_errors >= threshold:
+                self._client_resource_exhausted.set()
+                return True
+            return False
+
+    def client_diagnostics(self) -> dict[str, Any]:
+        """Return diagnostics that distinguish client exhaustion from service errors."""
+        with self._client_diagnostic_lock:
+            count = self._client_connection_errors
+            exhausted = self._client_resource_exhausted.is_set()
+        return {
+            "connection_errors": count,
+            "abort_threshold": self.client_connection_error_abort_threshold,
+            "client_resource_exhausted": exhausted,
+            "verdict": "CLIENT_RESOURCE_EXHAUSTED" if exhausted else "NONE",
+        }
 
     # -- single operations ------------------------------------------------
 
@@ -522,6 +655,7 @@ class LoadGenerator:
         scene_key: str,
         step_conc: int,
         tenant_idx: int,
+        session_id: str = "",
     ) -> RequestRecord:
         started = time.perf_counter()
         hit_count = 0
@@ -530,9 +664,15 @@ class LoadGenerator:
         degraded = False
         http_status: int | None = None
         reason_code = ""
+        request_id = f"search-{uuid.uuid4().hex}"
         try:
-            items, meta = client.search_with_meta(
-                query, top_k=self.top_k, agent_id="", timeout_s=self.timeout_s
+            items, meta = _call_with_request_id(
+                client.search_with_meta,
+                query,
+                top_k=self.top_k,
+                agent_id="",
+                timeout_s=self.timeout_s,
+                request_id=request_id,
             )
             status, error = "ok", ""
             hit_count = len(items)
@@ -564,7 +704,9 @@ class LoadGenerator:
             error_type=error,
             ts_ms=time.time() * 1000,
             http_status=http_status,
+            request_id=request_id,
             reason_code=reason_code,
+            session_id=session_id,
             query=query,
             hit_count=hit_count,
             real_recall=real_recall,
@@ -581,24 +723,38 @@ class LoadGenerator:
         *,
         scene_key: str,
         step_conc: int,
+        start_event: threading.Event | None = None,
     ) -> list[RequestRecord]:
         records: list[RequestRecord] = []
         queries = tenant.queries or ["hello"]
+        active_sessions = tenant.active_session_ids
         cursor = 0
+        if start_event is not None:
+            start_event.wait()
         while not stop.is_set():
-            if self.rate_limiter is not None:
-                self.rate_limiter.acquire()
+            limiter = self._read_limiter(tenant.idx)
+            if limiter is not None:
+                limiter.acquire()
             query = queries[cursor % len(queries)]
+            session_id = (
+                active_sessions[cursor % len(active_sessions)]
+                if active_sessions
+                else ""
+            )
             cursor += 1
             records.append(
-                self._read_once(
+                record := self._read_once(
                     tenant.client,
                     query,
                     scene_key=scene_key,
                     step_conc=step_conc,
                     tenant_idx=tenant.idx,
+                    session_id=session_id,
                 )
             )
+            if record.error_type == "connection" and self.note_client_connection_error():
+                stop.set()
+                break
         return records
 
     def _write_loop(
@@ -614,8 +770,9 @@ class LoadGenerator:
         records: list[RequestRecord] = []
         anchors: list[AnchorWrite] = []
         while not stop.is_set():
-            if self.commit_rate_limiter is not None:
-                self.commit_rate_limiter.acquire()
+            limiter = self._commit_limiter(tenant.idx)
+            if limiter is not None:
+                limiter.acquire()
             seq = next(seq_counter)
             result = run_write_transaction(
                 tenant.client,
@@ -630,6 +787,12 @@ class LoadGenerator:
                 commit_retry_backoff_s=self.commit_retry_backoff_s,
             )
             records.extend(result.records)
+            if any(
+                record.error_type == "connection" and self.note_client_connection_error()
+                for record in result.records
+            ):
+                stop.set()
+                break
             if result.ok:
                 anchors.append((tenant.idx, result.session_id, result.anchor))
                 self._reconciliation_candidates.append(
@@ -653,6 +816,7 @@ class LoadGenerator:
         messages_per_session: int,
     ) -> SceneResult:
         """Run one scene for its duration and return all records."""
+        self.reset_client_diagnostics()
         scene_key = scene.key
         total_workers = len(tenants) * scene.per_tenant_conc
         # A rate-based K scene has independent read and commit streams. With
@@ -1114,15 +1278,28 @@ class LoadGenerator:
         """
         if scene.barrier_commits <= 0:
             raise ValueError("barrier_commits must be > 0")
+        prepared, records = self.prepare_commit_barrier(
+            scene, tenants, messages_per_session
+        )
+        return self.commit_prepared_barrier(scene, prepared, records)
+
+    def prepare_commit_barrier(
+        self,
+        scene: SceneRun,
+        tenants: list[TenantContext],
+        messages_per_session: int,
+    ) -> tuple[list[PreparedWrite], list[RequestRecord]]:
+        """Prepare barrier sessions outside the measured contention window.
+
+        Preparation performs real ``open``/``add`` calls and may invoke the
+        embedding/LLM path.  It must be separated from the Search-vs-Commit
+        pressure window; otherwise slow model-backed preparation can consume
+        the case timeout before any Commit request is submitted.
+        """
         records: list[RequestRecord] = []
         self._barrier_prep_records = records
         try:
             counts = self._barrier_tenant_counts(scene, len(tenants))
-            # Prepare tenants concurrently.  Preparing the hot tenant first
-            # used to block every bystander tenant, which made the
-            # tenant-skew case look like a service timeout before fairness
-            # could be measured.  The per-tenant helper still bounds its own
-            # session workers; this outer bound prevents an unbounded fan-out.
             prep_jobs = [
                 (tenant, count)
                 for tenant, count in zip(tenants, counts)
@@ -1148,32 +1325,35 @@ class LoadGenerator:
                     ]
                     for future in futures:
                         prepared.extend(future.result())
+            return prepared, records
+        finally:
+            self._barrier_prep_records = []
 
-            total = sum(counts)
+    def commit_prepared_barrier(
+        self,
+        scene: SceneRun,
+        prepared: list[PreparedWrite],
+        records: list[RequestRecord],
+        *,
+        poll_timeout_s: float | None = None,
+    ) -> list[RequestRecord]:
+        """Submit and poll already-prepared barrier sessions.
 
-            def submit(pre: PreparedWrite) -> None:
-                started = time.perf_counter()
-                try:
-                    archive_id = pre.client.commit_session(pre.session_id)
-                except Exception as exc:
-                    records.append(
-                        RequestRecord(
-                            scene_key=scene.key,
-                            step_conc=scene.per_tenant_conc,
-                            tenant_idx=pre.tenant_idx,
-                            op="commit_submit",
-                            stage_ms=(time.perf_counter() - started) * 1000,
-                            status="error",
-                            error_type=classify_error(exc),
-                            ts_ms=time.time() * 1000,
-                            session_id=pre.session_id,
-                            extra="barrier",
-                            retry_after_s=_retry_after_seconds(exc),
-                            reason_code=extract_reason_code(exc),
-                        )
-                    )
-                    return
-                pre.archive_id = archive_id
+        This is deliberately separate from :meth:`prepare_commit_barrier` so
+        callers can begin Search and Commit at the same wall-clock instant.
+        """
+        total = len(prepared)
+        effective_poll_timeout_s = (
+            self.commit_poll_timeout_s
+            if poll_timeout_s is None
+            else max(0.0, min(self.commit_poll_timeout_s, poll_timeout_s))
+        )
+
+        def submit(pre: PreparedWrite) -> None:
+            started = time.perf_counter()
+            try:
+                archive_id = pre.client.commit_session(pre.session_id)
+            except Exception as exc:
                 records.append(
                     RequestRecord(
                         scene_key=scene.key,
@@ -1181,17 +1361,36 @@ class LoadGenerator:
                         tenant_idx=pre.tenant_idx,
                         op="commit_submit",
                         stage_ms=(time.perf_counter() - started) * 1000,
-                        status="ok",
-                        error_type="",
+                        status="error",
+                        error_type=classify_error(exc),
                         ts_ms=time.time() * 1000,
                         session_id=pre.session_id,
-                        archive_id=archive_id,
                         extra="barrier",
-                        retry_after_s=None,
-                        reason_code="",
+                        retry_after_s=_retry_after_seconds(exc),
+                        reason_code=extract_reason_code(exc),
                     )
                 )
+                return
+            pre.archive_id = archive_id
+            records.append(
+                RequestRecord(
+                    scene_key=scene.key,
+                    step_conc=scene.per_tenant_conc,
+                    tenant_idx=pre.tenant_idx,
+                    op="commit_submit",
+                    stage_ms=(time.perf_counter() - started) * 1000,
+                    status="ok",
+                    error_type="",
+                    ts_ms=time.time() * 1000,
+                    session_id=pre.session_id,
+                    archive_id=archive_id,
+                    extra="barrier",
+                    retry_after_s=None,
+                    reason_code="",
+                )
+            )
 
+        if total:
             with ThreadPoolExecutor(
                 # The barrier still records all requested commits, but limits
                 # in-flight work so a 128/260 request case does not turn into
@@ -1203,81 +1402,109 @@ class LoadGenerator:
                 for future in futures:
                     future.result()
 
-            def poll_one(prepared_write: PreparedWrite) -> None:
-                if not prepared_write.archive_id:
-                    return
-                started = time.perf_counter()
-                try:
-                    commit = prepared_write.client.poll_commit(
-                        prepared_write.session_id,
-                        prepared_write.archive_id,
-                        timeout_s=self.commit_poll_timeout_s,
-                        poll_interval_s=self.commit_poll_interval_s,
-                    )
-                except Exception as exc:
-                    records.append(
-                        RequestRecord(
-                            scene_key=scene.key,
-                            step_conc=scene.per_tenant_conc,
-                            tenant_idx=prepared_write.tenant_idx,
-                            op="commit_done",
-                            stage_ms=(time.perf_counter() - started) * 1000,
-                            status="error",
-                            error_type=classify_error(exc),
-                            ts_ms=time.time() * 1000,
-                            session_id=prepared_write.session_id,
-                            archive_id=prepared_write.archive_id,
-                            extra="barrier",
-                        )
-                    )
-                    return
-                status = "ok" if commit.status == "completed" else "error"
-                error_type = (
-                    ""
-                    if commit.status == "completed"
-                    else "commit_timeout"
-                    if commit.status == "timeout"
-                    else "commit_failed"
+        def poll_one(prepared_write: PreparedWrite) -> None:
+            if not prepared_write.archive_id:
+                return
+            started = time.perf_counter()
+            try:
+                commit = prepared_write.client.poll_commit(
+                    prepared_write.session_id,
+                    prepared_write.archive_id,
+                    timeout_s=effective_poll_timeout_s,
+                    poll_interval_s=self.commit_poll_interval_s,
                 )
+            except Exception as exc:
                 records.append(
                     RequestRecord(
                         scene_key=scene.key,
                         step_conc=scene.per_tenant_conc,
                         tenant_idx=prepared_write.tenant_idx,
                         op="commit_done",
-                        stage_ms=commit.elapsed_s * 1000,
-                        status=status,
-                        error_type=error_type,
+                        stage_ms=(time.perf_counter() - started) * 1000,
+                        status="error",
+                        error_type=classify_error(exc),
                         ts_ms=time.time() * 1000,
                         session_id=prepared_write.session_id,
                         archive_id=prepared_write.archive_id,
                         extra="barrier",
                     )
                 )
-                if status == "ok" and not prepared_write.reconciliation_registered:
-                    self._reconciliation_candidates.append(
-                        (
-                            prepared_write.tenant_idx,
-                            prepared_write.session_id,
-                            prepared_write.message_ids,
-                            prepared_write.content_hashes,
-                            prepared_write.archive_id,
-                        )
+                return
+            status = "ok" if commit.status == "completed" else "error"
+            error_type = (
+                ""
+                if commit.status == "completed"
+                else "commit_timeout"
+                if commit.status == "timeout"
+                else "commit_failed"
+            )
+            records.append(
+                RequestRecord(
+                    scene_key=scene.key,
+                    step_conc=scene.per_tenant_conc,
+                    tenant_idx=prepared_write.tenant_idx,
+                    op="commit_done",
+                    stage_ms=commit.elapsed_s * 1000,
+                    status=status,
+                    error_type=error_type,
+                    ts_ms=time.time() * 1000,
+                    session_id=prepared_write.session_id,
+                    archive_id=prepared_write.archive_id,
+                    extra="barrier",
+                )
+            )
+            if status == "ok" and not prepared_write.reconciliation_registered:
+                self._reconciliation_candidates.append(
+                    (
+                        prepared_write.tenant_idx,
+                        prepared_write.session_id,
+                        prepared_write.message_ids,
+                        prepared_write.content_hashes,
+                        prepared_write.archive_id,
                     )
-                    prepared_write.reconciliation_registered = True
+                )
+                prepared_write.reconciliation_registered = True
 
+        pollable = [pre for pre in prepared if pre.archive_id]
+        if pollable:
             # Keep status polling concurrent with submission. Serial polling
             # makes independent Commit waits add up to N*timeout.
             with ThreadPoolExecutor(
-                max_workers=min(len(prepared), 64, self.barrier_wave_size),
+                max_workers=min(len(pollable), 64, self.barrier_wave_size),
                 thread_name_prefix="perf-barrier-poll",
             ) as pool:
-                futures = [pool.submit(poll_one, pre) for pre in prepared]
+                futures = [pool.submit(poll_one, pre) for pre in pollable]
                 for future in futures:
                     future.result()
-        finally:
-            self._barrier_prep_records = []
         return records
+
+    def run_commit_barrier_window(
+        self,
+        scene: SceneRun,
+        tenants: list[TenantContext],
+        messages_per_session: int,
+        *,
+        drain_timeout_s: float | None = None,
+    ) -> list[RequestRecord]:
+        """Prepare and submit a barrier, then drain status for a bounded window.
+
+        Accepted Commit submissions remain visible even when model-backed
+        completion is slow. Unfinished statuses are explicitly recorded as
+        ``commit_timeout`` rather than extending the measured Search window.
+        """
+        prepared, records = self.prepare_commit_barrier(
+            scene, tenants, messages_per_session
+        )
+        return self.commit_prepared_barrier(
+            scene,
+            prepared,
+            records,
+            poll_timeout_s=(
+                self.barrier_drain_timeout_s
+                if drain_timeout_s is None
+                else drain_timeout_s
+            ),
+        )
 
     # -- N×N 隔离探针 ------------------------------------------------------
 

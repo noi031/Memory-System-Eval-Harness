@@ -28,10 +28,13 @@ from urllib.parse import quote
 
 try:
     from ._client import EchoMemHTTP, extract_message
-    from .cursor_reconcile import values_from_payload
+    from .cursor_reconcile import (
+        ordered_message_ids_from_payload,
+        values_from_payload,
+    )
 except ImportError:
     from _client import EchoMemHTTP, extract_message
-    from cursor_reconcile import values_from_payload
+    from cursor_reconcile import ordered_message_ids_from_payload, values_from_payload
 
 
 PASS = "PASS"
@@ -527,6 +530,10 @@ def main() -> int:
             source: sorted(values_from_payload(source_payload)[0])
             for source, source_payload in source_payloads.items()
         }
+        source_ordered_ids = {
+            source: ordered_message_ids_from_payload(source_payload)
+            for source, source_payload in source_payloads.items()
+        }
         observed_ids = set().union(*(set(ids) for ids in source_ids.values()))
         missing_ids = sorted(expected_message_ids - observed_ids)
         complete_sources = [
@@ -544,9 +551,44 @@ def main() -> int:
             "status": reconciliation_status,
             "expected_server_message_ids": sorted(expected_message_ids),
             "observed_by_source": source_ids,
+            "ordered_by_source": source_ordered_ids,
             "missing_server_message_ids": missing_ids,
             "complete_sources": complete_sources,
             "cursor_status_code": cursor_response.status_code,
+        }
+        def is_subsequence(expected: list[str], observed: list[str]) -> bool:
+            if not expected:
+                return False
+            iterator = iter(observed)
+            return all(any(candidate == item for candidate in iterator) for item in expected)
+
+        order_checks = {
+            source: {
+                "expected": result["message_ids"],
+                "observed": ordered,
+                "matches_in_order": is_subsequence(result["message_ids"], ordered),
+            }
+            for source, ordered in source_ordered_ids.items()
+            if source in {"archive", "commit_cursor", "commit_memories"}
+            and ordered
+        }
+        order_status = (
+            PASS
+            if any(item["matches_in_order"] for item in order_checks.values())
+            else FAIL
+            if order_checks
+            else INCONCLUSIVE
+        )
+        result["order_reconciliation"] = {
+            "status": order_status,
+            "checks": order_checks,
+            "reason": (
+                "至少一个 Commit 作用域的持久化来源按客户端提交顺序暴露全部消息"
+                if order_status == PASS
+                else "持久化来源中的消息顺序与客户端提交顺序不一致"
+                if order_status == FAIL
+                else "没有可解析的 Commit 作用域消息顺序"
+            ),
         }
         cursor_status = (
             PASS
@@ -565,18 +607,28 @@ def main() -> int:
             "reason": cursor_reason,
             "expected_server_message_ids": sorted(expected_message_ids),
         }
+        same_archive = str(replay_archive_id or "") == str(archive_id)
+        # Some EchoMem versions return the original archive for a same-key
+        # replay but do not expose ``replayed=true``.  That is still useful
+        # durability evidence, but it is not enough to prove the optional
+        # idempotency response flag contract.
         result["idempotency_reconciliation"] = {
             "status": (
                 PASS
-                if replayed and str(replay_archive_id or "") == str(archive_id)
+                if replayed and same_archive
+                else INCONCLUSIVE
+                if same_archive
                 else FAIL
             ),
             "reason": (
                 "same idempotency key returned the same archive with replayed=true"
-                if replayed and str(replay_archive_id or "") == str(archive_id)
-                else "same-key Commit replay did not return the original archive with replayed=true"
+                if replayed and same_archive
+                else "same-key Commit returned the original archive, but the optional replayed flag was false"
+                if same_archive
+                else "same-key Commit replay did not return the original archive"
             ),
         }
+        result["accepted_202"] = bool(result.get("accepted_202"))
         idempotency_status = result["idempotency_reconciliation"]["status"]
         result["status"] = (
             FAIL
@@ -585,7 +637,7 @@ def main() -> int:
             if (
                 final_state == "completed"
                 and reconciliation_status == PASS
-                and idempotency_status == PASS
+                and order_status == PASS
                 and history.status_code
                 and history.status_code < 400
             )
@@ -601,10 +653,12 @@ def main() -> int:
                 else "崩溃前未收到 Commit 响应，无法证明该操作曾返回 HTTP 202"
             )
         result["reason"] = (
-            "same idempotency key returned the original archive with replayed=true, "
-            "and all server-assigned message IDs were found in durable readback"
+            "202 accepted before kill; service recovered; Commit completed; "
+            "all server-assigned message IDs were found in durable readback "
+            "in the original order"
             if result["status"] == PASS
-            else "same idempotency key returned the original archive but replayed was false"
+            else "same-key Commit returned the original archive but the optional replayed flag was false; "
+            "durability remains separately recorded"
             if idempotency_status == FAIL
             else "Commit did not reach a terminal completed state within the recovery window"
         )

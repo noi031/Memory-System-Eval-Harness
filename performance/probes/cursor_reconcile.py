@@ -121,6 +121,54 @@ def values_from_payload(payload: dict[str, Any]) -> tuple[set[str], set[str], se
     return message_ids, archive_ids, operation_ids
 
 
+def ordered_message_ids_from_payload(payload: dict[str, Any]) -> list[str]:
+    """Extract message IDs in the order exposed by a durable read API.
+
+    The set extractor above is intentionally schema-tolerant, but a set alone
+    cannot prove the no-reordering part of the recovery contract. Keep this
+    helper equally tolerant while preserving list order and removing repeated
+    occurrences of the same ID.
+    """
+    ordered: list[str] = []
+    seen: set[str] = set()
+    list_keys = {
+        "messages",
+        "items",
+        "message_ids",
+        "committed_message_ids",
+        "source_turn_ids",
+    }
+
+    def append(value: Any) -> None:
+        if value in (None, ""):
+            return
+        message_id = str(value)
+        if message_id not in seen:
+            seen.add(message_id)
+            ordered.append(message_id)
+
+    def visit(value: Any, list_context: str = "") -> None:
+        if isinstance(value, list):
+            for item in value:
+                if isinstance(item, dict) and list_context in list_keys:
+                    append(
+                        item.get("message_id")
+                        or item.get("messageId")
+                        or item.get("id")
+                    )
+                elif not isinstance(item, (dict, list)) and list_context in list_keys:
+                    append(item)
+                visit(item, list_context)
+            return
+        if not isinstance(value, dict):
+            return
+        for key, item in value.items():
+            visit(item, str(key) if str(key) in list_keys else "")
+
+    visit(payload)
+    return ordered
+
+
 def reconcile(args: argparse.Namespace) -> dict[str, Any]:
     commits = [
         row for row in read_commits(args.commit_csv)
@@ -228,6 +276,14 @@ def reconcile(args: argparse.Namespace) -> dict[str, Any]:
         duplicate_count = max(0, len(parsed_expected) - len(expected))
         archive_ok = not expected_archive or expected_archive in archives
         operation_ok = not expected_operation or expected_operation in operations
+        if args.strict:
+            # In strict mode, an expected identity must be observed from at
+            # least one durable source. The non-strict mode remains useful for
+            # legacy APIs that expose only message membership.
+            if expected_archive and not archives:
+                archive_ok = False
+            if expected_operation and not operations:
+                operation_ok = False
         checks.append({
             "session_id": session,
             "archive_id": row.get("archive_id", ""),

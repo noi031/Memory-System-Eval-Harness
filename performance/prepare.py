@@ -193,6 +193,7 @@ class TenantContext:
     auth_key: str
     client: EchoMemClient
     queries: list[str] = field(default_factory=list)
+    active_session_ids: list[str] = field(default_factory=list)
     seed_sessions: int = 0
     seed_messages: int = 0
     seed_elapsed_s: float = 0.0
@@ -204,6 +205,7 @@ class TenantContext:
             "user_id": self.user_id,
             "auth_key_configured": bool(self.auth_key),
             "queries": len(self.queries),
+            "active_session_ids": len(self.active_session_ids),
             "seed_sessions": self.seed_sessions,
             "seed_messages": self.seed_messages,
             "seed_elapsed_s": round(self.seed_elapsed_s, 3),
@@ -217,7 +219,7 @@ def _seed_session_flow(
     messages: list[tuple[str, str]],
     commit_poll_timeout_s: float,
     poll_interval_s: float,
-) -> list[str]:
+) -> tuple[list[str], str]:
     """open -> add -> commit -> poll 一个种子会话，失败整会话重灌一次。
 
     返回该会话的全部消息文本（供 query 池构建）。Windows 上向量索引的
@@ -243,7 +245,7 @@ def _seed_session_flow(
                     f"seed commit failed for tenant {idx} session {session_id}: "
                     f"status={commit.status} error={commit.error}"
                 )
-            return texts
+            return texts, session_id
         except Exception as exc:
             if attempt == 1:
                 logger.warning(
@@ -291,6 +293,7 @@ def seed_tenant(
     """
     queries: list[str] = []
     anchor_queries: list[str] = []
+    active_session_ids: list[str] = []
     seed_messages = 0
     started = time.perf_counter()
     for session_idx in range(sessions):
@@ -300,7 +303,7 @@ def seed_tenant(
             messages.append(("user", user_msg))
             messages.append(("assistant", assistant_msg))
             anchor_queries.append(_anchor(idx, session_idx, msg_idx))
-        texts = _seed_session_flow(
+        texts, session_id = _seed_session_flow(
             client,
             idx,
             session_idx,
@@ -308,6 +311,7 @@ def seed_tenant(
             commit_poll_timeout_s,
             poll_interval_s,
         )
+        active_session_ids.append(session_id)
         seed_messages += len(texts)
         queries.extend(_query_fragments(texts))
     # Anchor queries first so targeted lookups are always available.
@@ -324,6 +328,7 @@ def seed_tenant(
         auth_key=client.auth_key,
         client=client,
         queries=queries,
+        active_session_ids=active_session_ids,
         seed_sessions=sessions,
         seed_messages=seed_messages,
         seed_elapsed_s=elapsed,
@@ -345,6 +350,7 @@ def seed_tenant_from_conversations(
     消息的分句片段构建（真实内容没有 PERFANCHOR 锚词）。
     """
     queries: list[str] = []
+    active_session_ids: list[str] = []
     seed_messages = 0
     started = time.perf_counter()
     for session_idx, messages in enumerate(batches):
@@ -354,7 +360,7 @@ def seed_tenant_from_conversations(
             content = str(message.get("content") or "").strip()
             if content:
                 pairs.append((role, content))
-        texts = _seed_session_flow(
+        texts, session_id = _seed_session_flow(
             client,
             idx,
             session_idx,
@@ -362,6 +368,7 @@ def seed_tenant_from_conversations(
             commit_poll_timeout_s,
             poll_interval_s,
         )
+        active_session_ids.append(session_id)
         seed_messages += len(texts)
         user_texts = [content for role, content in pairs if role == "user"]
         queries.extend(_query_fragments(user_texts))
@@ -377,6 +384,7 @@ def seed_tenant_from_conversations(
         auth_key=client.auth_key,
         client=client,
         queries=queries,
+        active_session_ids=active_session_ids,
         seed_sessions=len(batches),
         seed_messages=seed_messages,
         seed_elapsed_s=elapsed,

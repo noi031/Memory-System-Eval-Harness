@@ -168,12 +168,15 @@ class BaseHTTPMemoryClient(ABC):
         *,
         timeout_s: float | None = None,
         headers: dict[str, str] | None = None,
+        request_id: str = "",
     ) -> dict[str, Any]:
         url = f"{self.base_url}{path}"
         data = json.dumps(body or {}).encode()
         request_headers = self._headers()
         if headers:
             request_headers.update(headers)
+        if request_id:
+            request_headers["X-Request-ID"] = request_id
         req = urllib.request.Request(url, data=data, headers=request_headers, method="POST")
         return self._do_request(req, timeout_s=timeout_s)
 
@@ -183,11 +186,15 @@ class BaseHTTPMemoryClient(ABC):
         query: dict[str, Any] | None = None,
         *,
         timeout_s: float | None = None,
+        request_id: str = "",
     ) -> dict[str, Any]:
         url = f"{self.base_url}{path}"
         if query:
             url += "?" + urllib.parse.urlencode(query)
-        req = urllib.request.Request(url, headers=self._headers(), method="GET")
+        request_headers = self._headers()
+        if request_id:
+            request_headers["X-Request-ID"] = request_id
+        req = urllib.request.Request(url, headers=request_headers, method="GET")
         return self._do_request(req, timeout_s=timeout_s)
 
     def _do_request(

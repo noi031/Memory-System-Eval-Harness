@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import csv
 import json
+import sys
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -18,6 +19,7 @@ from performance.probes.capability_probe import classify_probe, run as run_capab
 from performance.probes.capability_probe import request as capability_request
 from performance.probes.blackbox_contract_probe import request as blackbox_request
 from performance.probes.fault_injection import NOT_IMPLEMENTED, run_control
+from performance.probes.fault_suite import run as run_fault_case
 
 
 class FailureToolTests(unittest.TestCase):
@@ -207,6 +209,13 @@ class FailureToolTests(unittest.TestCase):
 
         self.assertEqual("INCONCLUSIVE", run_control(Args())["status"])
 
+    def test_fault_isolation_emits_paired_bystander_samples(self) -> None:
+        source = Path(__file__).resolve().parents[1] / "performance" / "probes" / "fault_isolation_probe.py"
+        text = source.read_text(encoding="utf-8")
+        self.assertIn('"bystander_tenants"', text)
+        self.assertIn('"baseline_p95_s"', text)
+        self.assertIn('"fault_p95_s"', text)
+
     def test_cursor_reconcile_compares_message_set(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -232,6 +241,57 @@ class FailureToolTests(unittest.TestCase):
 
             result = reconcile(Args())
             self.assertEqual("INCONCLUSIVE", result["status"])
+
+    def test_cursor_reconcile_strict_requires_commit_identities(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            commits = root / "commits.csv"
+            with commits.open("w", newline="", encoding="utf-8") as handle:
+                writer = csv.DictWriter(
+                    handle,
+                    fieldnames=[
+                        "status", "session_id", "archive_id",
+                        "operation_id", "message_ids",
+                    ],
+                )
+                writer.writeheader()
+                writer.writerow({
+                    "status": "completed",
+                    "session_id": "s1",
+                    "archive_id": "a1",
+                    "operation_id": "o1",
+                    "message_ids": json.dumps(["m1"]),
+                })
+
+            class Args:
+                commit_csv = commits
+                cursor_url_template = "http://example.test/{session}"
+                base_url = ""
+                cursor_uri_template = ""
+                auth_key = ""
+                auth_header = "X-API-Key"
+                timeout_s = 1
+                strict = True
+
+            with patch(
+                "performance.probes.cursor_reconcile.fetch",
+                return_value=(200, {"message_ids": ["m1"]}, ""),
+            ):
+                result = reconcile(Args())
+            self.assertEqual("FAIL", result["status"])
+            self.assertFalse(result["checks"][0]["archive_match"])
+            self.assertFalse(result["checks"][0]["operation_match"])
+
+    def test_fault_suite_child_timeout_is_recorded(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "fault.json"
+            result = run_fault_case(
+                [sys.executable, "-c", "import time; time.sleep(1)"],
+                output,
+                timeout_s=0.01,
+            )
+            self.assertTrue(result["timed_out"])
+            self.assertIsNone(result["returncode"])
 
 
 if __name__ == "__main__":

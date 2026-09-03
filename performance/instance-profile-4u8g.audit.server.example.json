@@ -2,7 +2,7 @@
   "profiles": [
     {
       "name": "4U8G",
-      "base_url": "http://127.0.0.1:18187",
+      "base_url": "http://127.0.0.1:8010",
       "tenant_config": "/config/tenants.json",
       "preflight_config": "/config/config.json",
       "allow_partial_tenants": true,

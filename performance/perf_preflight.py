@@ -86,9 +86,42 @@ def parse_engine_configs(path: str | Path) -> list[dict[str, Any]]:
         ]
     else:
         raise ValueError("engine config 必须是 JSON 对象或对象数组")
+    # Native configs may contain providers for optional branches that are not
+    # active in the selected runtime. Preflighting an inactive provider can
+    # stop an otherwise valid run (for example an intent LLM while the
+    # configured intent backend is "rule").
+    intent_backends: list[str] = []
+
+    def collect_intent_backends(value: Any, path_parts: tuple[str, ...] = ()) -> None:
+        if isinstance(value, dict):
+            if (
+                len(path_parts) >= 2
+                and path_parts[-2:] == ("search", "intent")
+                and value.get("backend")
+            ):
+                intent_backends.append(str(value["backend"]).lower())
+            for key, child in value.items():
+                collect_intent_backends(child, (*path_parts, str(key)))
+        elif isinstance(value, list):
+            for index, child in enumerate(value):
+                collect_intent_backends(child, (*path_parts, str(index)))
+
+    collect_intent_backends(raw)
+    intent_backend = next(
+        (backend for backend in intent_backends if backend),
+        "",
+    )
+
+    def is_active(candidate_id: str) -> bool:
+        if candidate_id.lower().startswith("recall.model.intent_llm"):
+            return intent_backend in {"", "llm", "model", "openai_compatible"}
+        return True
+
     engines: list[dict[str, Any]] = []
     seen: set[tuple[str, str, str, str]] = set()
     for candidate_id, entry in candidates:
+        if not is_active(candidate_id):
+            continue
         if not isinstance(entry, dict):
             raise ValueError("engine config 条目必须是 JSON 对象")
         # Native EchoMem configs also contain fake VLM and model-only

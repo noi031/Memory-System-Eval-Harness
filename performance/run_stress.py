@@ -199,6 +199,15 @@ def build_parser() -> argparse.ArgumentParser:
         default=32,
         help="barrier Commit 最大同时在途数（默认 32，避免 4U8G 一次性打满）",
     )
+    g.add_argument(
+        "--barrier-drain-timeout-s",
+        type=float,
+        default=10.0,
+        help=(
+            "barrier 压测窗口结束后用于收集 Commit 终态的最大等待时间；"
+            "超出后记录 commit_timeout，不阻塞 Search 场景结束"
+        ),
+    )
     g = parser.add_argument_group("Load")
     g.add_argument(
         "--concurrency-steps",
@@ -246,6 +255,21 @@ def build_parser() -> argparse.ArgumentParser:
     )
     g.add_argument("--rps", type=float, default=0.0, help="fixed-rps 模式的总读速率")
     g.add_argument(
+        "--per-tenant-rps",
+        type=float,
+        default=0.0,
+        help="固定每租户读速率；与 --rps 互斥，正式公平性场景使用",
+    )
+    g.add_argument(
+        "--client-connection-error-abort-threshold",
+        type=int,
+        default=100,
+        help=(
+            "单场景累计本机 connection 错误达到该值后停止发压并标记 "
+            "CLIENT_RESOURCE_EXHAUSTED；0=不熔断"
+        ),
+    )
+    g.add_argument(
         "--commit-retry-max",
         type=int,
         default=0,
@@ -274,6 +298,12 @@ def build_parser() -> argparse.ArgumentParser:
         type=float,
         default=0.0,
         help="commit 固定速率（每分钟 commit 数；>0 时对写事务限速，K 场景用）",
+    )
+    g.add_argument(
+        "--per-tenant-commit-rpm",
+        type=float,
+        default=0.0,
+        help="固定每租户 Commit 速率；与 --commit-rpm 互斥，正式公平性场景使用",
     )
     g.add_argument(
         "--commit-barrier",
@@ -372,6 +402,8 @@ def _resolve_args(args: argparse.Namespace) -> dict[str, Any]:
         raise ValueError("--barrier-prepare-concurrency 必须 >= 1")
     if getattr(args, "barrier_wave_size", 32) < 1:
         raise ValueError("--barrier-wave-size 必须 >= 1")
+    if getattr(args, "barrier_drain_timeout_s", 10.0) < 0:
+        raise ValueError("--barrier-drain-timeout-s 必须 >= 0")
     commit_tenant_counts: list[int] | None = None
     if str(args.commit_tenant_counts or "").strip():
         try:
@@ -411,15 +443,36 @@ def _resolve_args(args: argparse.Namespace) -> dict[str, Any]:
         )
     if args.burst_commits < 1:
         raise ValueError("--burst-commits 必须 >= 1")
+    per_tenant_rps = float(getattr(args, "per_tenant_rps", 0.0) or 0.0)
+    per_tenant_commit_rpm = float(
+        getattr(args, "per_tenant_commit_rpm", 0.0) or 0.0
+    )
     if args.mode == "fixed-rps" and args.rps <= 0:
-        raise ValueError("--mode fixed-rps 需要 --rps > 0")
+        if per_tenant_rps <= 0:
+            raise ValueError("--mode fixed-rps 需要 --rps 或 --per-tenant-rps > 0")
     if args.rps > 0 and args.mode == "max-throughput":
         raise ValueError("--rps 仅在 --mode fixed-rps 下生效")
+    if args.rps > 0 and per_tenant_rps > 0:
+        raise ValueError("--rps 与 --per-tenant-rps 互斥")
+    if args.commit_rpm > 0 and per_tenant_commit_rpm > 0:
+        raise ValueError("--commit-rpm 与 --per-tenant-commit-rpm 互斥")
+    if per_tenant_rps < 0 or per_tenant_commit_rpm < 0:
+        raise ValueError("每租户速率不能为负数")
+    if getattr(args, "client_connection_error_abort_threshold", 100) < 0:
+        raise ValueError("--client-connection-error-abort-threshold 必须 >= 0")
     return {
         "scenario_ids": scenarios,
         "concurrency_steps": concurrency_steps,
         "mix_ratios": mix_ratios,
         "rps": args.rps if args.mode == "fixed-rps" else None,
+        "per_tenant_rps": (
+            per_tenant_rps
+            if args.mode == "fixed-rps" and per_tenant_rps > 0
+            else None
+        ),
+        "per_tenant_commit_rpm": (
+            per_tenant_commit_rpm if per_tenant_commit_rpm > 0 else None
+        ),
         "seed_dataset_path": seed_dataset_path,
         "commit_tenant_counts": commit_tenant_counts,
         "tenant_specs": tenant_specs,
@@ -473,10 +526,19 @@ def _run_special_scene(
     H: 多波 commit barrier（explicit 分布），波间 cooldown（热租户偏斜）
     K: 读+写线程按 --rps / --commit-rpm 固定速率（容量）
     """
-    started_wall = time.time()
+    gen.reset_client_diagnostics()
     records: list[Any] = []
+    started_wall = time.time()
     if scene.scene_id == "S":
+        # Prepare real sessions before opening the measured contention window.
+        # ``open``/``add`` may invoke the model-backed memory pipeline; doing
+        # that inline with the Search window can consume the case timeout
+        # before a single Commit has even arrived.
+        prepared, barrier_records = gen.prepare_commit_barrier(
+            scene, tenants, messages_per_session
+        )
         stop = threading.Event()
+        start_window = threading.Event()
         workers = max(1, len(tenants) * scene.per_tenant_conc)
         futures: list[Any] = []
         with ThreadPoolExecutor(
@@ -491,12 +553,34 @@ def _run_special_scene(
                         tenant,
                         scene_key=scene.key,
                         step_conc=scene.per_tenant_conc,
+                        start_event=start_window,
                     )
                 )
-            barrier_records = gen.run_commit_barrier(scene, tenants, messages_per_session)
-            time.sleep(scene.duration_s)
-            stop.set()
-            wait(futures)
+
+            def run_commit_window() -> list[Any]:
+                start_window.wait()
+                return gen.commit_prepared_barrier(
+                    scene,
+                    prepared,
+                    barrier_records,
+                    poll_timeout_s=gen.barrier_drain_timeout_s,
+                )
+
+            # Keep Commit in a separate producer path. Both paths are released
+            # together so the report can prove a real wall-clock overlap.
+            barrier_pool = ThreadPoolExecutor(
+                max_workers=1, thread_name_prefix="perf-commit-barrier"
+            )
+            try:
+                barrier_future = barrier_pool.submit(run_commit_window)
+                start_window.set()
+                time.sleep(scene.duration_s)
+                stop.set()
+                wait(futures)
+                barrier_records = barrier_future.result()
+            finally:
+                stop.set()
+                barrier_pool.shutdown(wait=True)
         for future in futures:
             records.extend(future.result())
         records.extend(barrier_records)
@@ -532,6 +616,20 @@ def _run_all_scenes(
     in ``main``. S/H/K run inside the matrix via ``_run_special_scene``.
     """
     matrix_ids = [sid for sid in resolved["scenario_ids"] if sid not in ("F", "I")]
+    # F/I are standalone probes. They must be runnable by themselves so a
+    # short capability check does not end in an unrelated "empty matrix"
+    # environment failure after the probe already produced evidence.
+    if not matrix_ids:
+        now = time.time()
+        return {
+            "records": [],
+            "scenes": {},
+            "scene_read_stats": {},
+            "consistency": {"status": "skipped"},
+            "reconciliation_data": [],
+            "window_first_t0": now,
+            "window_last_t1": now,
+        }
     runs = expand_matrix(
         scenario_ids=matrix_ids,
         concurrency_steps=resolved["concurrency_steps"],
@@ -747,7 +845,12 @@ def _build_signals(
 
     # 特性 3: 无内存泄漏（RSS 时间趋势）
     slope = (resources.get("rss_trend") or {}).get("slope_mb_per_min")
-    if slope is not None and slope >= RSS_LEAK_SLOPE_MB_PER_MIN:
+    trend = resources.get("rss_trend") or {}
+    if (
+        slope is not None
+        and slope >= RSS_LEAK_SLOPE_MB_PER_MIN
+        and float(trend.get("window_s") or 0.0) >= 60.0
+    ):
         signals.append(
             f"疑似内存泄漏: RSS 上升斜率 {slope} MB/min "
             f"(阈值 {RSS_LEAK_SLOPE_MB_PER_MIN} MB/min)"
@@ -877,7 +980,7 @@ def _print_terminal_summary(
             )
     print("  特性检查:")
     print(
-        f"    [1] commit 持久性: 202 接受 {durability.get('submit_ok_total')} 个, "
+        f"    [1] commit 持久性: 接受 {durability.get('submit_ok_total')} 个, "
         f"最终完成 {durability.get('accepted_done_ok')} 个, "
         f"接受后失败 {durability.get('guarantee_violations')} 个, "
         f"提交阶段拒绝 {durability.get('submit_rejected_total')} 次 (不重试)"
@@ -1077,11 +1180,21 @@ def main() -> None:
             timeout_s=args.timeout_s,
             commit_poll_timeout_s=args.commit_poll_timeout_s,
             rps=resolved["rps"] or None,
+            per_tenant_rps=resolved.get("per_tenant_rps"),
             commit_rpm=args.commit_rpm,
+            per_tenant_commit_rpm=(
+                args.per_tenant_commit_rpm
+                if args.per_tenant_commit_rpm > 0
+                else None
+            ),
             commit_retry_max=args.commit_retry_max,
             commit_retry_backoff_s=args.commit_retry_backoff_s,
             barrier_prepare_concurrency=args.barrier_prepare_concurrency,
             barrier_wave_size=args.barrier_wave_size,
+            barrier_drain_timeout_s=args.barrier_drain_timeout_s,
+            client_connection_error_abort_threshold=(
+                args.client_connection_error_abort_threshold
+            ),
         )
 
         try:
@@ -1191,6 +1304,12 @@ def main() -> None:
                     "effective_auth_mode": preparer.identity_mode(),
                     "tenant_config_count": len(resolved.get("tenant_specs") or []),
                     "scenario_ids": resolved["scenario_ids"],
+                    "per_tenant_rps": resolved.get("per_tenant_rps"),
+                    "per_tenant_commit_rpm": (
+                        args.per_tenant_commit_rpm
+                        if args.per_tenant_commit_rpm > 0
+                        else None
+                    ),
                     "concurrency_steps": resolved["concurrency_steps"],
                     "mix_ratios": [f"{r}:{w}" for r, w in resolved["mix_ratios"]],
                 },
@@ -1241,6 +1360,7 @@ def main() -> None:
                 ),
                 "fault_injection": fault_result,
                 "preflight": preflight_result,
+                "client_diagnostics": generator.client_diagnostics(),
             }
             summary["feature_verdicts"] = evaluate_features(summary)
 

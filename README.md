@@ -521,12 +521,13 @@ commit 成功保证）· `C` 读写混合（多档 read:write）· `D` 注入洪
 `performance/` 还提供两条互补路径（设计见
 `docs/performance-stress-test-design.md` §3.8–3.12）：
 
-### 调度专项七项验收
+### 调度专项六项 4U8G 验收
 
 截图中的调度要求使用 `scheduler_acceptance.py` 单独验收，不把普通
-A/B/C/D 压测结果当作专项结论。它按以下七项分别输出 `PASS`、`FAIL` 或
-`INCONCLUSIVE`：DAU/热租户容量、多规格配置、单租户故障隔离、Jain 公平性、
-Search 优先级、Commit kill-9 恢复重放、分层调度可观测性。
+A/B/C/D 压测结果当作专项结论。4U8G 本轮按以下六项分别输出 `PASS`、`FAIL` 或
+`INCONCLUSIVE`：DAU/热用户容量、单租户故障隔离、Jain 公平性、Search 优先级、
+Commit kill-9 恢复重放、分层调度可观测性。多规格对比保留为附加诊断，不计入
+本轮六项总体判定。
 
 ```bash
 python -m performance.scheduler_acceptance \
@@ -861,7 +862,7 @@ find "$STRESS_OUTPUT_DIR" -name summary.json -type f | sort
 最终应确认 `suite.json` 中 25 个场景均有结果；`acceptance.json` 中的
 `PASS`、`FAIL`、`INCONCLUSIVE` 要逐项查看，不能只看总准确率或退出码。
 
-### 七项目标统一自动化入口
+### 六项 4U8G 目标统一自动化入口
 
 使用 `performance/objective_suite.py` 可以按实例规格逐个执行容量、稳定性、
 公平性、Search 优先级、Commit 恢复和 `/metrics` 可观测性检查。真实服务器上先
@@ -894,15 +895,28 @@ python3 -m performance.objective_suite \
 更新后仍因旧 profile 名称导致恢复探针在启动阶段失败。
 
 `--quick` 只做 bounded smoke，并默认跳过真实模型灌种，专门快速验证调度、延迟和
-可观测性链路；因此不能用它证明记忆质量。需要把已有租户记忆也纳入测试时，可加
-`--quick-include-seed`。单场景默认最多运行 30 秒、总墙钟 120 秒、barrier 默认最多
-32 个 Commit；Commit 默认单次最多等待 30 秒、不重试，可按机器和目标调整。少于 32 个
-真实 Commit 只能作为 smoke 数据，不能验收 O5 严格优先级：
+可观测性链路；因此不能用它证明记忆质量。需要把真实租户记忆和 active-user/session
+证据纳入测试时，可加 `--quick-include-seed`。打开该选项后，每个场景灌入 1 个最小
+真实 session；为了不丢失子进程中的 session ID，quick 模式按场景独立灌种，不复用
+warm-up session。单场景默认最多运行 30 秒、总墙钟 180 秒、barrier 默认最多 32 个
+Commit；正式场景 Commit 默认单次最多等待 180 秒，并发波次默认 4，可通过
+`--quick-commit-timeout-s` 和 `--quick-barrier-wave-size` 调整。真实模型 warm-up
+另外使用 `--quick-seed-commit-timeout-s`（默认 180 秒），外层窗口至少为该值的 2 倍。
+warm-up 成功后所有场景复用同一批真实记忆；warm-up 失败时后续场景会标记
+`BLOCKED/seed_warmup_failed`，不会重复灌种，也不会把零请求伪装成性能结果。少于 32 个真实
+Commit 只能作为 smoke 数据，不能验收 O5 严格优先级：
+
+正式优先级和容量测试建议使用 `--mode fixed-rps --rps <读速率>`，并按需设置
+`--commit-rpm <写速率>`；`max-throughput` 仅用于单独的客户端极限诊断。为避免
+无上限建连先耗尽压测机临时端口，默认单场景累计 100 次 `connection` 错误后停止
+发压，并在 `summary.json` 写入 `client_diagnostics.verdict=CLIENT_RESOURCE_EXHAUSTED`。
+可通过 `--client-connection-error-abort-threshold 0` 关闭熔断，或传入其他非负阈值。
 
 默认 quick 场景为 `baseline`、`fairness-bounded`、`search-priority-blackbox`、
 `saturation`、`capacity-2`、`capacity-4`、`capacity-8`。它们用于快速拿到单租户基线、
 公平性、Search/Commit 并发、饱和和小规模容量阶梯的真实 HTTP 证据；其中
-`capacity-8` 用于尝试找到容量边界。PR397 的完整
+`capacity-8` 用于快速诊断；完整 4U8G 目录另外保留 `capacity-16`、`capacity-32`，
+用于正式运行寻找容量边界。quick 结果不能据此宣称最大容量。PR397 的完整
 A/B/C/D 矩阵以及大规模 barrier 不属于 quick，不能用 quick 结果替代完整验收。
 
 ```bash
@@ -924,7 +938,7 @@ O1 只有在“Search 成功容量档位 + 更高一档真实失败/超时/资�
 窗口内完成的容量阶梯上限，不直接等同于业务 DAU；O6 必须额外提供真实 container
 重启和 cursor/message-set 对账配置，并在 `commit_recovery` 中设置
 `"require_accepted_202": true`，否则没有在崩溃前明确收到 HTTP 202 的操作不能进入恢复验收；
-O7 必须实际抓到服务端 `/metrics` 四元组。
+O6 必须实际抓到服务端 `/metrics` 四元组。
 O4 会在 `search-priority-blackbox`、`tenant-skew` 等候选负载中选择租户覆盖最完整
 的一轮计算公平性，避免 quick 模式的小 barrier 结果遮蔽更完整的真实证据；如果
 该轮仍有租户没有 Commit 或 Search 样本，结果仍会保留为 `FAIL` 或 `INCONCLUSIVE`。
@@ -961,12 +975,11 @@ quick 模式默认把容量场景的 Commit 负载设为 0，避免容量测量�
 | 目标 | 还需要的真实证据 | 归属 |
 |---|---|---|
 | O1 | 至少一档成功的 `capacity-*`，再逐步增加租户直到 SLO 失败 | 测试平台场景与机器资源 |
-| O2 | 至少两种规格实际启动并各自完成同一组场景 | 部署调度与测试平台 profile |
-| O3 | 故障期间旁观租户的前后 Search P95 配对 | EchoMem/部署必须提供真实故障控制，平台负责采集 |
-| O4 | 同一稳态窗口内至少两个租户同时有 Commit 吞吐和 Search P95 | 测试平台负载与独立租户凭据 |
-| O5 | `search-priority-blackbox` 中同时存在 Commit 洪泛和 Search P95 | 测试平台场景，服务端负责实际调度 |
-| O6 | 202 Commit、真实 kill/restart、history/archive/cursor/幂等重放对账 | 部署提供 kill/restart 权限，EchoMem提供既有读接口 |
-| O7 | 每个实际 lane 都采到 queued/wait/exec/rejected 四元组，并有 engine fan-out 的 exec/skipped 证据；不要求把 `tenant_id` 放进指标标签 | EchoMem `/metrics` 暴露 bounded-label 指标，测试平台负责按 lane/fan-out 对账 |
+| O2 | 故障期间每个旁观租户都有前后 Search P95 配对 | EchoMem/部署必须提供真实故障控制，平台负责采集 |
+| O3 | 同一稳态窗口内至少两个租户同时有 Commit 吞吐和 Search P95 | 测试平台负载与独立租户凭据 |
+| O4 | `search-priority-blackbox` 中同时存在 Commit 洪泛、同套件基线和 Search P95 | 测试平台场景，服务端负责实际调度 |
+| O5 | 202 Commit、真实 kill/restart、history/archive/cursor/幂等重放对账 | 部署提供 kill/restart 权限，EchoMem提供既有读接口 |
+| O6 | 每个实际 lane 都采到 queued/wait/exec/rejected 四元组，并有 engine fan-out 的 exec/skipped 证据；不要求把 `tenant_id` 放进指标标签 | EchoMem `/metrics` 暴露 bounded-label 指标，测试平台负责按 lane/fan-out 对账 |
 
 公平性计算还要求被选中的同一负载窗口覆盖所有参与租户：每个租户都必须有
 Search 样本和 Commit 提交样本。缺少某个租户时只报告 `INCONCLUSIVE`，不会把

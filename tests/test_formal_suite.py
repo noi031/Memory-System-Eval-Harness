@@ -14,6 +14,7 @@ from performance.formal_suite import (
     _build_case_command,
     _build_seed_warmup_command,
     _derive_case_summary,
+    _auth_mode_validation_error,
     _seed_anchor_queries,
     _scale_explicit_tenant_counts,
     _write_case_csvs,
@@ -23,6 +24,18 @@ from performance.formal_suite import (
 
 
 class Report6ScenarioTests(unittest.TestCase):
+    def test_local_auth_is_rejected_for_multi_tenant_scenarios(self) -> None:
+        """A shared local identity must not produce fake isolation evidence."""
+        self.assertIsNotNone(
+            _auth_mode_validation_error(local_auth=True, required_tenants=4)
+        )
+        self.assertIsNone(
+            _auth_mode_validation_error(local_auth=True, required_tenants=1)
+        )
+        self.assertIsNone(
+            _auth_mode_validation_error(local_auth=False, required_tenants=4)
+        )
+
     def test_seed_anchor_queries_are_deterministic(self) -> None:
         self.assertEqual(
             "PERFANCHOR-0-0-0,PERFANCHOR-1-0-0,PERFANCHOR-2-0-0",
@@ -62,7 +75,7 @@ class Report6ScenarioTests(unittest.TestCase):
         scenarios = complete_scenarios()
 
         self.assertEqual(set(report6_scenarios()) | set(SCENARIOS), set(scenarios))
-        self.assertEqual(26, len(scenarios))
+        self.assertEqual(27, len(scenarios))
 
     def test_capacity_ladder_has_expected_points(self) -> None:
         scenarios = SCENARIOS
@@ -335,6 +348,7 @@ class FormalSuiteAdapterTests(unittest.TestCase):
         self.assertIn("run_stress.py", command[1])
         self.assertEqual("4", self._flag_value(command, "--tenants"))
         self.assertEqual("1", self._flag_value(command, "--seed-sessions-per-tenant"))
+        self.assertEqual("180.0", self._flag_value(command, "--commit-poll-timeout-s"))
         self.assertEqual("K", self._flag_value(command, "--scenarios"))
         self.assertIn("--preflight-config", command)
         self.assertIn("--no-metrics", command)
@@ -644,7 +658,7 @@ class FormalSuiteAdapterTests(unittest.TestCase):
             {"tenant_idx": "1", "op": "commit_done", "session_id": "s2", "status": "error", "stage_ms": "3000.0", "error_type": "commit_failed", "retry_after_s": "", "reason_code": ""},
             {"tenant_idx": "2", "op": "commit_submit", "session_id": "s3", "status": "ok", "stage_ms": "70.0", "error_type": "", "retry_after_s": "", "reason_code": ""},
             {"tenant_idx": "0", "op": "read", "session_id": "", "status": "ok", "stage_ms": "100.0", "error_type": "", "retry_after_s": "", "reason_code": ""},
-            {"tenant_idx": "1", "op": "read", "session_id": "", "status": "error", "stage_ms": "200.0", "error_type": "http_4xx", "retry_after_s": "1.0", "reason_code": "lane_full"},
+            {"tenant_idx": "1", "op": "read", "session_id": "", "status": "error", "stage_ms": "200.0", "error_type": "http_4xx", "http_status": "429", "retry_after_s": "1.0", "reason_code": "lane_full"},
             {"tenant_idx": "2", "op": "read", "session_id": "", "status": "error", "stage_ms": "300.0", "error_type": "timeout", "retry_after_s": "", "reason_code": ""},
         ]
         with tempfile.TemporaryDirectory() as directory:
@@ -678,7 +692,7 @@ class FormalSuiteAdapterTests(unittest.TestCase):
                 ],
                 list(search_rows[0].keys()),
             )
-            self.assertEqual(["200", "429", "500"], [row["status_code"] for row in search_rows])
+            self.assertEqual(["200", "429", "0"], [row["status_code"] for row in search_rows])
             self.assertEqual("1.0", search_rows[1]["retry_after_s"])
             self.assertEqual("lane_full", search_rows[1]["reason_code"])
 

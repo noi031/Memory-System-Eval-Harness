@@ -132,11 +132,8 @@ class ObjectiveSuiteTests(unittest.TestCase):
             recovery_configured=False,
             metrics_configured=False,
         )
-        self.assertTrue(all(item["status"] == "INCONCLUSIVE" for item in objectives if item["id"] != "O2"))
-        self.assertEqual(
-            "INCONCLUSIVE",
-            next(item["status"] for item in objectives if item["id"] == "O2"),
-        )
+        self.assertEqual(6, len(objectives))
+        self.assertTrue(all(item["status"] == "INCONCLUSIVE" for item in objectives))
 
     def test_probe_inconclusive_is_not_reported_as_process_failure(self) -> None:
         execution = {"status": "FAIL", "returncode": 2}
@@ -295,10 +292,22 @@ class ObjectiveSuiteTests(unittest.TestCase):
         )
         self.assertEqual(
             "INCONCLUSIVE",
-            next(item["status"] for item in objectives if item["id"] == "O6"),
+            next(item["status"] for item in objectives if item["id"] == "O5"),
         )
 
-        suite["commit_recovery"]["idempotency_reconciliation"] = {"status": "PASS"}
+        suite["commit_recovery"].update(
+            {
+                "accepted_202": True,
+                "recovered": True,
+                "commit_terminal": [{"state": "completed"}],
+                "order_reconciliation": {"status": "PASS"},
+                "idempotency_reconciliation": {"status": "INCONCLUSIVE"},
+                "idempotency_replay": {
+                    "same_archive": True,
+                    "replayed": False,
+                },
+            }
+        )
         objectives = objective_statuses(
             suite,
             recovery_configured=True,
@@ -306,7 +315,7 @@ class ObjectiveSuiteTests(unittest.TestCase):
         )
         self.assertEqual(
             "PASS",
-            next(item["status"] for item in objectives if item["id"] == "O6"),
+            next(item["status"] for item in objectives if item["id"] == "O5"),
         )
 
     def test_render_report(self) -> None:
@@ -314,7 +323,7 @@ class ObjectiveSuiteTests(unittest.TestCase):
             path = Path(directory) / "report.html"
             render_report({"created_at": "now", "profiles": []}, path)
             self.assertTrue(path.is_file())
-            self.assertIn("七项目标", path.read_text(encoding="utf-8"))
+            self.assertIn("六项 4U8G 目标", path.read_text(encoding="utf-8"))
 
     def test_single_profile_does_not_pass_multi_spec(self) -> None:
         objectives = objective_statuses(
@@ -329,8 +338,8 @@ class ObjectiveSuiteTests(unittest.TestCase):
             recovery_configured=False,
             metrics_configured=False,
         )
-        o2 = next(item for item in objectives if item["id"] == "O2")
-        self.assertEqual("INCONCLUSIVE", o2["status"])
+        self.assertEqual(6, len(objectives))
+        self.assertTrue(all(item["status"] == "INCONCLUSIVE" for item in objectives))
 
     def test_only_completed_formal_runs_count_as_completed_profile_evidence(self) -> None:
         suite = {

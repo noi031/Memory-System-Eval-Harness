@@ -252,6 +252,24 @@ def main() -> int:
                 degradations[tenant_id] = (float(degraded) - float(baseline)) / float(baseline)
         result["bystander_p95_degradation"] = max(degradations.values(), default=None)
         result["degradation_by_tenant"] = degradations
+        result["bystander_tenants"] = {
+            tenant_id: {
+                "baseline_p95_s": (
+                    (before.get("by_tenant", {}).get(tenant_id) or {}).get("p95_s")
+                ),
+                "fault_p95_s": (
+                    (during.get("by_tenant", {}).get(tenant_id) or {}).get("p95_s")
+                ),
+                "degradation": degradations.get(tenant_id),
+                "baseline_submitted": (
+                    (before.get("by_tenant", {}).get(tenant_id) or {}).get("submitted", 0)
+                ),
+                "fault_submitted": (
+                    (during.get("by_tenant", {}).get(tenant_id) or {}).get("submitted", 0)
+                ),
+            }
+            for tenant_id in bystanders
+        }
         complete = (
             enable.get("status") == PASS
             and disable.get("status") == PASS

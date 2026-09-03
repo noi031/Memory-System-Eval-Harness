@@ -102,6 +102,17 @@ SCENARIOS: dict[str, dict[str, Any]] = {
         "sessions_per_tenant": 4,
         "messages_per_session": 3,
     },
+    "fairness-steady": {
+        "label": "四租户正式稳态公平性（每租户固定速率）",
+        "tenants": 4,
+        "duration_s": 300,
+        "search_rps_per_tenant": 2.0,
+        "commit_rpm_per_tenant": 2.0,
+        "sessions_per_tenant": 4,
+        "messages_per_session": 3,
+        "steady_state_fairness": True,
+        "min_commit_submitted_per_tenant": 6,
+    },
     "commit-storm": {
         "label": "Commit 压力",
         "tenants": 4,
@@ -375,6 +386,7 @@ FOUR_U8G_SCENARIOS.update({
     for name in (
         "baseline",
         "mixed",
+        "fairness-steady",
         "commit-barrier",
         "saturation",
         "tenant-skew",
@@ -382,9 +394,17 @@ FOUR_U8G_SCENARIOS.update({
         "capacity-2",
         "capacity-4",
         "capacity-8",
+        "capacity-16",
+        "capacity-32",
     )
 })
-for _capacity_name in ("capacity-2", "capacity-4", "capacity-8"):
+for _capacity_name in (
+    "capacity-2",
+    "capacity-4",
+    "capacity-8",
+    "capacity-16",
+    "capacity-32",
+):
     # Capacity is a Search-only measurement in quick mode.  Keep this
     # override on the bounded 4U8G catalog as well as the base catalog;
     # otherwise the profile replacement loses the explicit zero rate and
@@ -404,7 +424,9 @@ FOUR_U8G_SCENARIOS["fairness-bounded"] = {
     "fairness_bounded": True,
     # Fairness needs enough arrivals for every tenant; use the same minimum
     # bounded sample as the strict priority gate.
-    "quick_barrier_count_cap": 32,
+    # Two Commit arrivals per tenant are enough for a bounded Jain sample and
+    # keep this real-model smoke case inside the one-hour budget.
+    "quick_barrier_count_cap": 8,
 }
 SCENARIO_PROFILES["4u8g"] = FOUR_U8G_SCENARIOS
 
@@ -440,8 +462,14 @@ def _build_seed_warmup_command(
     config_path: Path,
     output: Path,
     tenant_count: int,
+    seed_commit_timeout_s: float | None = None,
 ) -> list[str]:
     """Build one real-model seed run shared by quick scheduler cases."""
+    effective_seed_timeout = (
+        float(seed_commit_timeout_s)
+        if seed_commit_timeout_s is not None
+        else max(180.0, float(getattr(args, "commit_timeout_s", 0.0) or 0.0))
+    )
     command = [
         sys.executable,
         str(RUNNER),
@@ -460,7 +488,7 @@ def _build_seed_warmup_command(
         "--messages-per-session",
         "3",
         "--commit-poll-timeout-s",
-        str(args.commit_timeout_s),
+        str(effective_seed_timeout),
         "--commit-retry-max",
         str(args.commit_max_attempts),
         "--commit-retry-backoff-s",
@@ -510,6 +538,18 @@ def _identity_is_independent(tenants: list[dict[str, Any]]) -> bool:
             return False
         keys.append(key)
     return len(set(keys)) == len(keys)
+
+
+def _auth_mode_validation_error(
+    *, local_auth: bool, required_tenants: int
+) -> str | None:
+    """Reject a shared local identity before launching any child runner."""
+    if local_auth and required_tenants > 1:
+        return (
+            "选定场景需要多租户，但 --local-auth 只提供一个本地身份；"
+            "请使用可用的独立 tenant-config，或仅选择 tenants=1 的场景"
+        )
+    return None
 
 
 def run_case_process(
@@ -764,6 +804,8 @@ def _build_case_command(
         "4",
         "--barrier-wave-size",
         str(getattr(args, "barrier_wave_size", 32)),
+        "--barrier-drain-timeout-s",
+        str(getattr(args, "barrier_drain_timeout_s", 10.0)),
     ]
     if getattr(args, "local_auth_mode", False):
         # EchoMem local auth resolves the configured default identity when no
@@ -783,6 +825,13 @@ def _build_case_command(
         cmd += ["--skip-seed"]
     if case.get("search_rps"):
         cmd += ["--mode", "fixed-rps", "--rps", str(case["search_rps"])]
+    if case.get("search_rps_per_tenant"):
+        cmd += [
+            "--mode",
+            "fixed-rps",
+            "--per-tenant-rps",
+            str(case["search_rps_per_tenant"]),
+        ]
     commit_rpm = case.get("commit_rpm")
     if getattr(args, "quick_mode", False) and "quick_commit_rpm" in case:
         commit_rpm = case["quick_commit_rpm"]
@@ -791,6 +840,11 @@ def _build_case_command(
     # no flag would make run_stress fall back to its non-zero default.
     if commit_rpm is not None:
         cmd += ["--commit-rpm", str(commit_rpm)]
+    if case.get("commit_rpm_per_tenant"):
+        cmd += [
+            "--per-tenant-commit-rpm",
+            str(case["commit_rpm_per_tenant"]),
+        ]
     if args.preflight_config:
         cmd += ["--preflight-config", args.preflight_config]
     if getattr(args, "search_queries", ""):
@@ -825,8 +879,32 @@ def _build_case_command(
                         int(case.get("commit_barrier_count", 0)),
                     )
                 )
+        # Explicit tenant distributions are a single barrier with a custom
+        # tenant allocation. Keep it on S so run_stress receives the explicit
+        # counts; H is reserved for multi-wave barriers.
+        if case.get("commit_tenant_distribution") == "explicit":
+            cmd += [
+                "--scenarios", "S",
+                "--commit-barrier",
+                "--commit-barrier-count", str(barrier_count),
+                "--commit-tenant-distribution", "explicit",
+                "--commit-tenant-counts",
+                ",".join(
+                    map(
+                        str,
+                        _scale_explicit_tenant_counts(
+                            list(map(int, case.get("commit_tenant_counts") or [])),
+                            effective_barrier_cap,
+                        ),
+                    )
+                ),
+                "--commit-barrier-waves",
+                str(case.get("commit_barrier_waves", 1) or 1),
+                "--commit-barrier-cooldown-s",
+                str(case.get("commit_barrier_cooldown_s", 0.0)),
+            ]
         # 洪峰窗口（report6 D：waves 为 1 且存在 burst 窗口）→ D 场景。
-        if case.get("commit_burst_window_s") and not (case.get("commit_barrier_waves") or 1) > 1:
+        elif case.get("commit_burst_window_s") and not (case.get("commit_barrier_waves") or 1) > 1:
             cmd += [
                 "--scenarios", "D",
                 "--burst-commits", str(barrier_count),
@@ -883,7 +961,18 @@ def _derive_case_summary(run_dir: Path, identity_independent: bool) -> dict[str,
     ok_commits = [row for row in commit_submits if row.get("status") == "ok"]
     commit_dones = [row for row in rows if row.get("op") == "commit_done"]
     ok_dones = [row for row in commit_dones if row.get("status") == "ok"]
-    fail_dones = [row for row in commit_dones if row.get("status") == "error"]
+    timeout_dones = [
+        row
+        for row in commit_dones
+        if row.get("status") == "error"
+        and row.get("error_type") == "commit_timeout"
+    ]
+    fail_dones = [
+        row
+        for row in commit_dones
+        if row.get("status") == "error"
+        and row.get("error_type") != "commit_timeout"
+    ]
 
     read_latencies = [
         value for value in (_ms_to_s(row.get("stage_ms")) for row in ok_reads)
@@ -1003,6 +1092,37 @@ def _derive_case_summary(run_dir: Path, identity_independent: bool) -> dict[str,
             ),
         },
     }
+    # A priority result is only valid when Search and Commit shared a real
+    # wall-clock window. Preserve that proof in the derived summary instead
+    # of letting the acceptance layer infer it from a scenario name.
+    def _timestamp_ms(row: dict[str, str]) -> float | None:
+        try:
+            value = float(row.get("ts_ms") or "")
+        except (TypeError, ValueError):
+            return None
+        return value if value == value else None
+
+    search_times = [
+        value for value in (_timestamp_ms(row) for row in reads)
+        if value is not None
+    ]
+    commit_times = [
+        value for value in (_timestamp_ms(row) for row in commit_submits)
+        if value is not None
+    ]
+    if search_times and commit_times:
+        search_start, search_end = min(search_times), max(search_times)
+        commit_start, commit_end = min(commit_times), max(commit_times)
+        overlap_ms = max(
+            0.0,
+            min(search_end, commit_end) - max(search_start, commit_start),
+        )
+        details["same_window_overlap"] = {
+            "search_window_ms": [search_start, search_end],
+            "commit_submit_window_ms": [commit_start, commit_end],
+            "overlap_ms": round(overlap_ms, 3),
+            "overlap_proven": overlap_ms > 0,
+        }
     for key in (
         "degradation",
         "isolation",
@@ -1120,7 +1240,9 @@ def _derive_case_summary(run_dir: Path, identity_independent: bool) -> dict[str,
                     "p99_s": _percentile(read_latencies, 99),
                 },
                 "rate_limited_count": sum(
-                    1 for row in reads if row.get("error_type") == "http_4xx"
+                    1
+                    for row in reads
+                    if str(row.get("http_status") or "").strip() == "429"
                 ),
                 "quality_asserted": int(search_quality.get("anchor_total") or 0),
                 "quality_failures": int(search_quality.get("quality_failures") or 0),
@@ -1129,9 +1251,12 @@ def _derive_case_summary(run_dir: Path, identity_independent: bool) -> dict[str,
                 "submitted": commit_submitted,
                 "completed": completed,
                 "failed": failed,
+                "timeout": len(timeout_dones),
                 "success_rate": commit_success_rate,
                 "rate_limited_count": sum(
-                    1 for row in commit_submits if row.get("error_type") == "http_4xx"
+                    1
+                    for row in commit_submits
+                    if str(row.get("http_status") or "").strip() == "429"
                 ),
             },
             "fairness": {
@@ -1163,6 +1288,9 @@ def _write_case_csvs(output: Path, rows: list[dict[str, str]]) -> None:
         if done is not None and done.get("status") == "ok":
             status = "completed"
             end_to_end = _ms_to_s(done.get("stage_ms"))
+        elif done is not None and done.get("error_type") == "commit_timeout":
+            status = "timeout"
+            end_to_end = _ms_to_s(done.get("stage_ms"))
         elif done is not None:
             status = "failed"
             end_to_end = _ms_to_s(done.get("stage_ms"))
@@ -1179,7 +1307,11 @@ def _write_case_csvs(output: Path, rows: list[dict[str, str]]) -> None:
                 "queue_wait_s": "",
                 "admission_wait_s": "",
                 "admission_queue_depth": "",
-                "request_id": session_id,
+                # Legacy result bundles predate per-request correlation.
+                # Retain the session id only as an explicit fallback so their
+                # CSV remains joinable; new runner output always uses the
+                # true HTTP X-Request-ID.
+                "request_id": row.get("request_id") or session_id,
             }
         )
     with (output / "commit_results.csv").open("w", newline="", encoding="utf-8") as handle:
@@ -1200,12 +1332,11 @@ def _write_case_csvs(output: Path, rows: list[dict[str, str]]) -> None:
             continue
         if row.get("status") == "ok":
             status_code = "200"
-        elif row.get("error_type") == "http_4xx" and (
-            row.get("retry_after_s") or row.get("reason_code")
-        ):
-            status_code = "429"
         else:
-            status_code = "500"
+            # Preserve the actual HTTP code. A transport timeout/connection
+            # failure is intentionally left as 0, not mislabeled as 429/500.
+            raw_status = str(row.get("http_status") or "").strip()
+            status_code = raw_status if raw_status.isdigit() else "0"
         service_s = _ms_to_s(row.get("stage_ms"))
         search_rows.append(
             {
@@ -1214,7 +1345,7 @@ def _write_case_csvs(output: Path, rows: list[dict[str, str]]) -> None:
                 "status_code": status_code,
                 "service_s": f"{service_s:.3f}" if service_s is not None else "",
                 "queue_wait_s": "",
-                "request_id": row.get("session_id") or "",
+                "request_id": row.get("request_id") or row.get("session_id") or "",
                 "retry_after_s": row.get("retry_after_s") or "",
                 "reason_code": row.get("reason_code") or "",
             }
@@ -1241,6 +1372,7 @@ def run_case(
     args: argparse.Namespace,
     case: dict[str, Any],
 ) -> dict[str, Any]:
+    started_at = now_iso()
     output = case_root / scenario / f"repeat-{repetition:02d}" / policy
     output.mkdir(parents=True, exist_ok=True)
     recovery_timeout_s = float(
@@ -1273,6 +1405,8 @@ def run_case(
                 "repetition": repetition,
                 "policy": policy,
                 "status": "ENV_ERROR",
+                "started_at": started_at,
+                "finished_at": now_iso(),
                 "runner_returncode": 125,
                 "duration_s": float(case["duration_s"]),
                 "case_timeout_s": float(args.case_timeout_s or 0),
@@ -1337,6 +1471,8 @@ def run_case(
                 "repetition": repetition,
                 "policy": policy,
                 "status": "RESET_FAILED",
+                "started_at": started_at,
+                "finished_at": now_iso(),
                 "runner_returncode": completed_reset.returncode,
                 "duration_s": duration_s,
                 "case_timeout_s": case_timeout_s,
@@ -1386,6 +1522,8 @@ def run_case(
             else derived["status"]
         ),
         "runner_returncode": completed.returncode,
+        "started_at": started_at,
+        "finished_at": now_iso(),
         "duration_s": duration_s,
         "case_timeout_s": case_timeout_s,
         "barrier_count_cap": barrier_count_cap,
@@ -1624,6 +1762,12 @@ def main() -> int:
         ),
     )
     parser.add_argument("--commit-timeout-s", type=float, default=120.0)
+    parser.add_argument(
+        "--seed-commit-timeout-s",
+        type=float,
+        default=180.0,
+        help="seed warmup 使用的真实 Commit 终态等待上限，默认 180 秒",
+    )
     parser.add_argument("--commit-max-attempts", type=int, default=3)
     parser.add_argument("--commit-retry-backoff-s", type=float, default=2.0)
     parser.add_argument(
@@ -1631,6 +1775,12 @@ def main() -> int:
         type=int,
         default=32,
         help="barrier Commit 最大同时在途数，默认 32",
+    )
+    parser.add_argument(
+        "--barrier-drain-timeout-s",
+        type=float,
+        default=10.0,
+        help="barrier Search 窗口结束后收集 Commit 终态的最大等待时间",
     )
     parser.add_argument(
         "--barrier-count-cap",
@@ -1664,6 +1814,11 @@ def main() -> int:
         "--reuse-existing-data",
         action="store_true",
         help="复用 tenant-config 对应租户的已有记忆，不重复注入真实模型",
+    )
+    parser.add_argument(
+        "--no-seed-reuse",
+        action="store_true",
+        help="每个场景独立灌入最小真实 session，保留 active-user 证据",
     )
     parser.add_argument(
         "--skip-seed",
@@ -1734,8 +1889,12 @@ def main() -> int:
         parser.error("--repeats must be >= 1")
     if args.case_timeout_s < 0:
         parser.error("--case-timeout-s must not be negative")
+    if args.seed_commit_timeout_s <= 0:
+        parser.error("--seed-commit-timeout-s must be > 0")
     if args.barrier_wave_size < 1:
         parser.error("--barrier-wave-size must be >= 1")
+    if args.barrier_drain_timeout_s < 0:
+        parser.error("--barrier-drain-timeout-s must be >= 0")
     if args.inter_case_recovery_timeout_s < 0:
         parser.error("--inter-case-recovery-timeout-s must not be negative")
     if args.health_poll_s <= 0:
@@ -1757,6 +1916,12 @@ def main() -> int:
     tenant_path = Path(args.tenant_config).expanduser().resolve()
     all_tenants = load_tenants(tenant_path)
     required_tenants = max(scenario_catalog[name]["tenants"] for name in scenario_names)
+    auth_mode_error = _auth_mode_validation_error(
+        local_auth=args.local_auth,
+        required_tenants=required_tenants,
+    )
+    if auth_mode_error:
+        parser.error(auth_mode_error)
     if len(all_tenants) < required_tenants:
         parser.error(
             f"tenant config has {len(all_tenants)} tenants, but selected scenarios require {required_tenants}"
@@ -1879,6 +2044,7 @@ def main() -> int:
         "repeats": args.repeats,
         "duration_cap_s": args.duration_cap_s,
         "case_timeout_s": args.case_timeout_s,
+        "seed_commit_timeout_s": args.seed_commit_timeout_s,
         "policies": list(POLICIES),
         "acceptance_targets": PR421_ACCEPTANCE_TARGETS,
         "preflight_config": (
@@ -1909,31 +2075,37 @@ def main() -> int:
     }
     # 用确定性顺序执行，便于重跑对比；服务端重置钩子负责固定数据/索引边界。
     auto_reuse_seed = (
-        bool(args.quick_mode)
+        bool(args.quick_mode or args.profile in {"4u8g", "complete", "report6"})
         and not bool(args.reuse_existing_data)
         and not bool(args.skip_seed)
+        and not bool(args.no_seed_reuse)
     )
     seed_ready = bool(args.reuse_existing_data or args.skip_seed)
+    seed_warmup_failed = False
     if auto_reuse_seed:
         max_seed_count = max(
             int(scenario_catalog[name]["tenants"]) for name in scenario_names
         )
         warmup_output = root / "_seed_warmup"
+        warmup_started_at = now_iso()
+        warmup_timeout_s = max(
+            180.0,
+            float(args.case_timeout_s or 0.0),
+            float(args.seed_commit_timeout_s) * 2.0,
+        )
         warmup_command = _build_seed_warmup_command(
             args,
             config_paths[max_seed_count],
             warmup_output / "run",
             max_seed_count,
+            args.seed_commit_timeout_s,
         )
         warmup_output.mkdir(parents=True, exist_ok=True)
         warmup_completed, warmup_timed_out = run_case_process(
             warmup_command,
-            timeout_s=max(
-                180.0,
-                float(args.case_timeout_s or 0.0),
-                float(args.commit_timeout_s) * 2.0,
-            ),
+            timeout_s=warmup_timeout_s,
         )
+        warmup_finished_at = now_iso()
         (warmup_output / "stdout.log").write_text(
             warmup_completed.stdout, encoding="utf-8"
         )
@@ -1954,8 +2126,13 @@ def main() -> int:
             and warmup_completed.returncode == 0
             and str(warmup_summary.get("status") or "") == "completed"
         )
+        seed_warmup_failed = not seed_ready
         manifest["seed_warmup"] = {
             "status": "completed" if seed_ready else "failed",
+            "started_at": warmup_started_at,
+            "finished_at": warmup_finished_at,
+            "timeout_s": warmup_timeout_s,
+            "seed_commit_timeout_s": args.seed_commit_timeout_s,
             "tenant_count": max_seed_count,
             "command": warmup_command,
             "returncode": warmup_completed.returncode,
@@ -1966,8 +2143,40 @@ def main() -> int:
         if seed_ready:
             args.reuse_existing_data = True
             args.search_queries = _seed_anchor_queries(max_seed_count)
+        else:
+            manifest["seed_warmup"]["failure_reason"] = (
+                "共享真实模型 seed warmup 未完成；后续场景不重复灌种，"
+                "避免把 seed 超时重复放大成整套结果"
+            )
     for scenario in scenario_names:
         case = scenario_catalog[scenario]
+        if seed_warmup_failed:
+            reason = (
+                "共享 seed warmup 失败，未执行该场景；"
+                "没有可复用的真实记忆，不能把零请求当作 EchoMem 性能结论"
+            )
+            for repetition in range(1, args.repeats + 1):
+                for policy in POLICIES:
+                    timestamp = now_iso()
+                    manifest["runs"].append({
+                        "scenario": scenario,
+                        "scenario_label": case["label"],
+                        "repetition": repetition,
+                        "policy": policy,
+                        "status": "BLOCKED",
+                        "started_at": timestamp,
+                        "finished_at": timestamp,
+                        "seed_reused": False,
+                        "seed_status": "failed",
+                        "blocked_reason": reason,
+                        "required_tenants": case["tenants"],
+                        "usable_tenants": len(all_tenants),
+                    })
+            print(
+                f"FORMAL_BLOCKED scenario={scenario} reason=seed_warmup_failed",
+                flush=True,
+            )
+            continue
         if case["tenants"] > len(all_tenants):
             reason = (
                 f"需要 {case['tenants']} 个通过鉴权的租户，当前只有 "
@@ -2010,17 +2219,54 @@ def main() -> int:
                     f"scenario={scenario} repeat={repetition} policy={policy}",
                     flush=True,
                 )
-                run = run_case(
-                    runner,
-                    root,
-                    scenario,
-                    repetition,
-                    policy,
-                    config_paths[case["tenants"]],
-                    args,
-                    case,
-                )
+                try:
+                    run = run_case(
+                        runner,
+                        root,
+                        scenario,
+                        repetition,
+                        policy,
+                        config_paths[case["tenants"]],
+                        args,
+                        case,
+                    )
+                except BaseException as exc:  # noqa: BLE001
+                    # A single probe must not discard the rest of the matrix.
+                    # Keep the exception in the manifest and continue so a
+                    # slow/hung barrier still leaves later Search/capacity
+                    # evidence available for review.
+                    run = {
+                        "scenario": scenario,
+                        "scenario_label": case["label"],
+                        "repetition": repetition,
+                        "policy": policy,
+                        "status": "HARNESS_ERROR",
+                        "runner_returncode": None,
+                        "duration_s": float(case["duration_s"]),
+                        "case_timeout_s": float(args.case_timeout_s or 0),
+                        "output_dir": str(
+                            (
+                                root
+                                / scenario
+                                / f"repeat-{repetition:02d}"
+                                / policy
+                            ).resolve()
+                        ),
+                        "summary": {},
+                        "failure_evidence": {
+                            "exception_type": type(exc).__name__,
+                            "exception": str(exc),
+                        },
+                    }
+                    print(
+                        f"FORMAL_CASE_ERROR scenario={scenario} "
+                        f"repeat={repetition} policy={policy} "
+                        f"error={type(exc).__name__}: {exc}",
+                        flush=True,
+                    )
                 run["seed_reused"] = case_reuses_seed
+                run["seed_status"] = "completed" if case_reuses_seed else "not_requested"
+                run["effective_commit_timeout_s"] = float(args.commit_timeout_s)
                 manifest["runs"].append(run)
                 print(
                     f"FORMAL_PROGRESS {len(manifest['runs'])}/{total_runs} "
@@ -2063,7 +2309,15 @@ def main() -> int:
     render_data_report(root / "suite.json", report_path)
     statuses = [str(run.get("status") or "NO_SUMMARY") for run in manifest["runs"]]
     if any(
-        status in {"ENVIRONMENT_ERROR", "ENV_ERROR", "RESET_FAILED", "NO_SUMMARY", "TIMEOUT", "FAIL"}
+        status in {
+            "ENVIRONMENT_ERROR",
+            "ENV_ERROR",
+            "RESET_FAILED",
+            "NO_SUMMARY",
+            "TIMEOUT",
+            "FAIL",
+            "HARNESS_ERROR",
+        }
         for status in statuses
     ) or acceptance["overall"] == "FAIL":
         overall = "FAIL"
@@ -2094,6 +2348,7 @@ def main() -> int:
             "policies": list(POLICIES),
             "commit_timeout_s": args.commit_timeout_s,
             "barrier_wave_size": args.barrier_wave_size,
+            "barrier_drain_timeout_s": args.barrier_drain_timeout_s,
             "skip_seed": args.skip_seed,
             "seed_sessions_per_tenant_override": args.seed_sessions_per_tenant,
         },
@@ -2104,7 +2359,14 @@ def main() -> int:
             "failed_runs": sum(status == "FAIL" for status in statuses),
             "inconclusive_runs": sum(status == "INCONCLUSIVE" for status in statuses),
             "environment_errors": sum(
-                status in {"ENVIRONMENT_ERROR", "ENV_ERROR", "RESET_FAILED", "NO_SUMMARY", "TIMEOUT"}
+                status in {
+                    "ENVIRONMENT_ERROR",
+                    "ENV_ERROR",
+                    "RESET_FAILED",
+                    "NO_SUMMARY",
+                    "TIMEOUT",
+                    "HARNESS_ERROR",
+                }
                 for status in statuses
             ),
             "suite_report": "suite.html",

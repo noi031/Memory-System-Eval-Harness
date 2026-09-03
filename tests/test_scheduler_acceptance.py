@@ -17,7 +17,7 @@ class SchedulerAcceptanceTests(unittest.TestCase):
     def test_missing_specialized_evidence_is_inconclusive(self) -> None:
         result = evaluate({"runs": []})
         self.assertEqual(INCONCLUSIVE, result["overall"])
-        self.assertEqual(7, len(result["checks"]))
+        self.assertEqual(6, len(result["checks"]))
         self.assertTrue(all(item["status"] == INCONCLUSIVE for item in result["checks"]))
 
     def test_priority_uses_blackbox_search_p95(self) -> None:
@@ -30,6 +30,12 @@ class SchedulerAcceptanceTests(unittest.TestCase):
                         "summary": {
                             "metrics": {
                                 "search": {"latency": {"p95_s": 1.2}},
+                            },
+                            "details": {
+                                "same_window_overlap": {
+                                    "overlap_proven": True,
+                                    "overlap_ms": 1000,
+                                }
                             }
                         },
                     }
@@ -49,6 +55,13 @@ class SchedulerAcceptanceTests(unittest.TestCase):
                             "metrics": {
                                 "search": {"latency": {"p95_s": 1.2}},
                                 "commit": {"submitted": 32},
+                            },
+                            "details": {
+                                "baseline_search_p95_s": 1.0,
+                                "same_window_overlap": {
+                                    "overlap_proven": True,
+                                    "overlap_ms": 1000,
+                                }
                             }
                         },
                         "status": "completed",
@@ -58,6 +71,45 @@ class SchedulerAcceptanceTests(unittest.TestCase):
         )
         check = next(item for item in result["checks"] if item["name"] == "Search 优先于 Commit")
         self.assertEqual(PASS, check["status"])
+
+    def test_priority_uses_completed_baseline_from_same_suite(self) -> None:
+        result = evaluate(
+            {
+                "runs": [
+                    {
+                        "scenario": "baseline",
+                        "status": "completed",
+                        "summary": {
+                            "metrics": {
+                                "search": {
+                                    "success_rate": 1.0,
+                                    "latency": {"p95_s": 1.0},
+                                }
+                            }
+                        },
+                    },
+                    {
+                        "scenario": "search-priority-blackbox",
+                        "status": "completed",
+                        "summary": {
+                            "metrics": {
+                                "search": {"latency": {"p95_s": 1.2}},
+                                "commit": {"submitted": 32},
+                            },
+                            "details": {
+                                "same_window_overlap": {
+                                    "overlap_proven": True,
+                                    "overlap_ms": 1000,
+                                }
+                            },
+                        },
+                    },
+                ]
+            }
+        )
+        check = next(item for item in result["checks"] if item["name"] == "Search 优先于 Commit")
+        self.assertEqual(PASS, check["status"])
+        self.assertEqual(1.0, check["observed"]["baseline_search_p95_s"])
 
     def test_priority_small_commit_sample_is_inconclusive(self) -> None:
         result = evaluate(
@@ -69,6 +121,13 @@ class SchedulerAcceptanceTests(unittest.TestCase):
                             "metrics": {
                                 "search": {"latency": {"p95_s": 1.2}},
                                 "commit": {"submitted": 8},
+                            },
+                            "details": {
+                                "baseline_search_p95_s": 1.0,
+                                "same_window_overlap": {
+                                    "overlap_proven": True,
+                                    "overlap_ms": 1000,
+                                }
                             }
                         },
                         "status": "completed",
@@ -111,6 +170,13 @@ class SchedulerAcceptanceTests(unittest.TestCase):
                         "metrics": {
                             "search": {"latency": {"p95_s": 5.01}},
                             "commit": {"submitted": 128},
+                        },
+                        "details": {
+                            "baseline_search_p95_s": 1.0,
+                            "same_window_overlap": {
+                                "overlap_proven": True,
+                                "overlap_ms": 1000,
+                            }
                         }
                     },
                 }]
@@ -304,7 +370,7 @@ class SchedulerAcceptanceTests(unittest.TestCase):
         self.assertEqual(INCONCLUSIVE, check["status"])
         self.assertEqual([4], check["observed"]["activity_missing_levels"])
 
-    def test_multi_spec_needs_two_completed_profiles(self) -> None:
+    def test_multi_spec_is_not_a_formal_4u8g_objective(self) -> None:
         result = evaluate(
             {
                 "instance_profiles": [
@@ -313,7 +379,23 @@ class SchedulerAcceptanceTests(unittest.TestCase):
                 ]
             }
         )
-        check = next(item for item in result["checks"] if item["name"] == "多规格实例调度配置")
+        self.assertEqual(6, len(result["checks"]))
+        self.assertNotIn(
+            "多规格实例调度配置",
+            {item["name"] for item in result["checks"]},
+        )
+
+    def test_fault_isolation_requires_per_bystander_evidence(self) -> None:
+        result = evaluate(
+            {"runs": []},
+            fault={
+                "tenant_fault_isolation": {
+                    "bystander_p95_degradation": 0.05,
+                    "fault_recovered": True,
+                }
+            },
+        )
+        check = next(item for item in result["checks"] if item["name"] == "单租户故障隔离")
         self.assertEqual(INCONCLUSIVE, check["status"])
 
     def test_legacy_commit_only_fairness_is_inconclusive(self) -> None:
@@ -339,15 +421,43 @@ class SchedulerAcceptanceTests(unittest.TestCase):
         check = next(item for item in result["checks"] if item["name"] == "Commit kill-9 恢复与重放")
         self.assertEqual(INCONCLUSIVE, check["status"])
 
-    def test_recovery_fails_when_same_key_is_not_marked_replayed(self) -> None:
+    def test_recovery_accepts_same_archive_without_optional_replayed_flag(self) -> None:
         result = evaluate(
             {"runs": []},
             recovery={
-                "status": "INCONCLUSIVE",
+                "status": "PASS",
                 "recovered": True,
+                "accepted_202": True,
                 "message_set_reconciled": True,
                 "cursor_reconciliation": {"status": PASS},
+                "order_reconciliation": {"status": PASS},
+                "idempotency_reconciliation": {"status": "INCONCLUSIVE"},
+                "idempotency_replay": {
+                    "same_archive": True,
+                    "replayed": False,
+                },
+                "commit_terminal": [{"state": "completed"}],
+            },
+        )
+        check = next(item for item in result["checks"] if item["name"] == "Commit kill-9 恢复与重放")
+        self.assertEqual(PASS, check["status"])
+
+    def test_recovery_rejects_different_archive_on_same_key(self) -> None:
+        result = evaluate(
+            {"runs": []},
+            recovery={
+                "status": "PASS",
+                "recovered": True,
+                "accepted_202": True,
+                "message_set_reconciled": True,
+                "cursor_reconciliation": {"status": PASS},
+                "order_reconciliation": {"status": PASS},
                 "idempotency_reconciliation": {"status": "FAIL"},
+                "idempotency_replay": {
+                    "same_archive": False,
+                    "replayed": False,
+                },
+                "commit_terminal": [{"state": "completed"}],
             },
         )
         check = next(item for item in result["checks"] if item["name"] == "Commit kill-9 恢复与重放")
@@ -614,7 +724,72 @@ class SchedulerAcceptanceTests(unittest.TestCase):
             if item["name"] == "Commit/Search 公平性 Jain"
         )
         self.assertEqual(PASS, check["status"])
-        self.assertAlmostEqual(0.9259, check["observed"]["jain"], places=4)
+
+    def test_fairness_uses_per_window_commit_throughput(self) -> None:
+        result = evaluate(
+            {
+                "runs": [
+                    {
+                        "scenario": "fairness-bounded",
+                        "status": "completed",
+                        "duration_s": 10,
+                        "summary": {
+                            "metrics": {
+                                "per_tenant": {
+                                    "a": {
+                                        "commit": {"submitted": 10, "completed": 10},
+                                        "search": {
+                                            "submitted": 10,
+                                            "latency": {"p95_s": 1.0},
+                                        },
+                                    },
+                                    "b": {
+                                        "commit": {"submitted": 5, "completed": 5},
+                                        "search": {
+                                            "submitted": 10,
+                                            "latency": {"p95_s": 1.0},
+                                        },
+                                    },
+                                },
+                            }
+                        },
+                    },
+                    {
+                        "scenario": "fairness-bounded",
+                        "status": "completed",
+                        "duration_s": 20,
+                        "summary": {
+                            "metrics": {
+                                "per_tenant": {
+                                    "a": {
+                                        "commit": {"submitted": 20, "completed": 20},
+                                        "search": {
+                                            "submitted": 10,
+                                            "latency": {"p95_s": 1.0},
+                                        },
+                                    },
+                                    "b": {
+                                        "commit": {"submitted": 10, "completed": 10},
+                                        "search": {
+                                            "submitted": 10,
+                                            "latency": {"p95_s": 1.0},
+                                        },
+                                    },
+                                },
+                            }
+                        },
+                    },
+                ]
+            }
+        )
+        check = next(
+            item for item in result["checks"]
+            if item["name"] == "Commit/Search 公平性 Jain"
+        )
+        self.assertEqual(PASS, check["status"])
+        self.assertEqual(0.9, check["observed"]["commit_jain"])
+        self.assertEqual("completed_per_window", check["observed"]["tenants"]["a"]["commit_throughput_source"])
+        self.assertAlmostEqual(0.9, check["observed"]["jain"], places=4)
 
     def test_fairness_prefers_broader_tenant_coverage_over_priority_order(self) -> None:
         def run(scenario: str, tenants: dict[str, int]) -> dict:

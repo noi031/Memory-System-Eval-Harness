@@ -139,7 +139,7 @@ class EchoMemClient(BaseHTTPMemoryClient):
         if str(response.get("status") or "").lower() != "deleted":
             raise RuntimeError(f"account deletion was not confirmed: {response}")
 
-    def open_session(self, title: str = "") -> str:
+    def open_session(self, title: str = "", *, request_id: str = "") -> str:
         """Create a new session, return its id."""
         body: dict[str, Any] = {
             "agent_id": self.agent_id,
@@ -153,7 +153,7 @@ class EchoMemClient(BaseHTTPMemoryClient):
             body["title"] = title
         if self.workspace:
             body["workspace"] = self.workspace
-        resp = self._post("/api/sessions/open", body)
+        resp = self._post("/api/sessions/open", body, request_id=request_id)
         sid = resp.get("session_id") or resp.get("id") or ""
         if not sid:
             scope = resp.get("scope", {})
@@ -171,6 +171,8 @@ class EchoMemClient(BaseHTTPMemoryClient):
         content: str,
         created_at: str = "",
         role_id: str = "",
+        *,
+        request_id: str = "",
     ) -> dict[str, Any]:
         """Append one message to a session."""
         body: dict[str, Any] = {
@@ -187,14 +189,28 @@ class EchoMemClient(BaseHTTPMemoryClient):
             metadata["role_id"] = role_id
         if metadata:
             body["metadata"] = metadata
-        return self._post(f"/api/sessions/{session_id}/messages", body)
+        return self._post(
+            f"/api/sessions/{session_id}/messages",
+            body,
+            request_id=request_id,
+        )
 
-    def commit_session(self, session_id: str, keep_recent_count: int = 0) -> str:
+    def commit_session(
+        self,
+        session_id: str,
+        keep_recent_count: int = 0,
+        *,
+        request_id: str = "",
+    ) -> str:
         """Commit a session, return the archive_id."""
         body: dict[str, Any] = {
             "metadata": {"keep_recent_count": int(keep_recent_count or 0)}
         }
-        resp = self._post(f"/api/sessions/{session_id}/commit", body)
+        resp = self._post(
+            f"/api/sessions/{session_id}/commit",
+            body,
+            request_id=request_id,
+        )
         aid = resp.get("archive_id") or resp.get("task_id") or ""
         if not aid:
             result = resp.get("result", {})
@@ -268,6 +284,8 @@ class EchoMemClient(BaseHTTPMemoryClient):
         session_id: str = "",
         agent_id: str = "",
         timeout_s: float | None = None,
+        *,
+        request_id: str = "",
     ) -> tuple[list[SearchResult], dict[str, Any]]:
         """Search and also return response metadata for quality assertions.
 
@@ -285,7 +303,12 @@ class EchoMemClient(BaseHTTPMemoryClient):
         }
         if session_id:
             body["session_id"] = session_id
-        resp = self._post("/api/retrieval/search", body, timeout_s=timeout_s)
+        resp = self._post(
+            "/api/retrieval/search",
+            body,
+            timeout_s=timeout_s,
+            request_id=request_id,
+        )
         result = resp.get("result") if "result" in resp else resp
         items_raw = result.get("items", []) if isinstance(result, dict) else []
         items = [SearchResult.from_dict(item) for item in items_raw]

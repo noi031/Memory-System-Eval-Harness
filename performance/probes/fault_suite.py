@@ -21,8 +21,28 @@ def now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def run(command: list[str], output: Path) -> dict[str, Any]:
-    completed = subprocess.run(command, capture_output=True, text=True, check=False)
+def run(
+    command: list[str],
+    output: Path,
+    *,
+    timeout_s: float,
+) -> dict[str, Any]:
+    try:
+        completed = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=max(0.1, timeout_s),
+        )
+    except subprocess.TimeoutExpired as exc:
+        return {
+            "returncode": None,
+            "timed_out": True,
+            "timeout_s": timeout_s,
+            "stdout": (exc.stdout or "")[-8000:],
+            "stderr": (exc.stderr or "")[-8000:],
+        }
     payload: dict[str, Any] = {
         "returncode": completed.returncode,
         "stdout": completed.stdout[-8000:],
@@ -49,7 +69,15 @@ def main() -> int:
     )
     parser.add_argument("--auth-key", default="")
     parser.add_argument("--auth-header", default="X-Auth-Key")
+    parser.add_argument(
+        "--case-timeout-s",
+        type=float,
+        default=300.0,
+        help="每个故障/恢复/对账子探针的最大执行时间",
+    )
     args = parser.parse_args()
+    if args.case_timeout_s <= 0:
+        parser.error("--case-timeout-s must be > 0")
     plan = json.loads(args.plan.read_text(encoding="utf-8"))
     args.out_dir.mkdir(parents=True, exist_ok=True)
     cases: list[dict[str, Any]] = []
@@ -63,7 +91,10 @@ def main() -> int:
         for flag in ("command", "endpoint", "action", "container", "signal", "timeout_s"):
             if fault.get(flag) not in (None, ""):
                 command.extend([f"--{flag.replace('_', '-')}", str(fault[flag])])
-        cases.append({"kind": fault["kind"], "execution": run(command, output)})
+        cases.append({
+            "kind": fault["kind"],
+            "execution": run(command, output, timeout_s=args.case_timeout_s),
+        })
 
     fault_kinds = {
         str(case.get("kind", ""))
@@ -104,7 +135,10 @@ def main() -> int:
         for flag in ("pid", "container", "restart_command", "wait_s", "poll_s"):
             if recovery.get(flag) not in (None, ""):
                 command.extend([f"--{flag.replace('_', '-')}", str(recovery[flag])])
-        cases.append({"kind": "kill-9-recovery", "execution": run(command, output)})
+        cases.append({
+            "kind": "kill-9-recovery",
+            "execution": run(command, output, timeout_s=args.case_timeout_s),
+        })
 
     cursor = plan.get("cursor")
     if cursor and args.commit_csv:
@@ -118,7 +152,12 @@ def main() -> int:
             "--auth-key", args.auth_key, "--auth-header", args.auth_header,
             "--out", str(output),
         ]
-        cases.append({"kind": "cursor-reconciliation", "execution": run(command, output)})
+        if cursor.get("strict", False):
+            command.append("--strict")
+        cases.append({
+            "kind": "cursor-reconciliation",
+            "execution": run(command, output, timeout_s=args.case_timeout_s),
+        })
     elif cursor:
         cases.append({
             "kind": "cursor-reconciliation",
