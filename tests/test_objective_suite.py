@@ -75,7 +75,7 @@ class ObjectiveSuiteTests(unittest.TestCase):
         self.assertIn("capacity-2", QUICK_SCENARIOS)
         self.assertIn("capacity-8", QUICK_SCENARIOS)
         self.assertIn("fairness-bounded", QUICK_SCENARIOS)
-        self.assertNotIn("tenant-skew", QUICK_SCENARIOS)
+        self.assertIn("tenant-skew", QUICK_SCENARIOS)
         self.assertNotIn("A@1", QUICK_SCENARIOS)
         self.assertNotIn("B@1", QUICK_SCENARIOS)
         self.assertNotIn("D@1", QUICK_SCENARIOS)

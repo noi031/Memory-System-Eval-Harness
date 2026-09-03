@@ -46,7 +46,8 @@ FAIL = "FAIL"
 # complete catalog; quick mode is explicitly a smoke/diagnostic run.
 QUICK_SCENARIOS = (
     "baseline,fairness-bounded,search-priority-blackbox,"
-    "saturation,capacity-2,capacity-4,capacity-8"
+    "saturation,tenant-skew,capacity-2,capacity-4,capacity-8,"
+    "capacity-16,capacity-32"
 )
 
 
@@ -595,13 +596,17 @@ def _run_configured_probes(
             "performance.probes.commit_recovery_probe",
             "--base-url",
             base_url,
-            "--container",
-            str(recovery.get("container") or ""),
             "--tenant-config",
             str(tenant_path),
             "--out",
             str(output),
         ]
+        if recovery.get("container"):
+            command += ["--container", str(recovery["container"])]
+        if recovery.get("pid"):
+            command += ["--pid", str(recovery["pid"])]
+        if recovery.get("restart_command"):
+            command += ["--restart-command", str(recovery["restart_command"])]
         if recovery_tenant:
             command += ["--tenant", recovery_tenant]
         for key, flag in (
@@ -1154,6 +1159,13 @@ def main() -> int:
                         "--barrier-wave-size",
                         str(args.quick_barrier_wave_size),
                     ]
+                    if args.quick:
+                        # Keep the real-model warm-up bounded even when the
+                        # selected quick matrix contains 16/32-tenant
+                        # capacity probes.  Unseeded tenants still remain
+                        # valid for scheduler/capacity evidence, but the
+                        # report must retain that limitation explicitly.
+                        command += ["--quick-seed-tenant-cap", "4"]
                     if args.quick:
                         command += ["--quick-mode"]
                 include_quick_seed = bool(

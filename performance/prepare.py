@@ -296,6 +296,24 @@ def seed_tenant(
     active_session_ids: list[str] = []
     seed_messages = 0
     started = time.perf_counter()
+    if sessions <= 0:
+        # Even a skip-seed load needs a real session identity.  Without one,
+        # the runner sends session-less Search requests and capacity reports
+        # cannot distinguish active users from an empty preparation phase.
+        session_id = client.open_session(title=f"perf-active-{idx}")
+        active_session_ids.append(session_id)
+        return TenantContext(
+            idx=idx,
+            tenant_id=client.account,
+            user_id=client.user_id,
+            auth_key=client.auth_key,
+            client=client,
+            queries=queries,
+            active_session_ids=active_session_ids,
+            seed_sessions=0,
+            seed_messages=0,
+            seed_elapsed_s=time.perf_counter() - started,
+        )
     for session_idx in range(sessions):
         messages: list[tuple[str, str]] = []
         for msg_idx in range(messages_per_session):

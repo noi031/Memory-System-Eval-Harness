@@ -179,6 +179,35 @@ class Report6ScenarioTests(unittest.TestCase):
             command[command.index("--commit-barrier-count") + 1],
         )
 
+    def test_quick_fairness_uses_bounded_case_drain_timeout(self) -> None:
+        args = argparse.Namespace(
+            base_url="http://127.0.0.1:8010",
+            barrier_wave_size=32,
+            barrier_drain_timeout_s=10.0,
+            local_auth_mode=False,
+            reuse_existing_data=True,
+            preflight_config="",
+            no_server_metrics=False,
+            commit_timeout_s=75.0,
+            commit_max_attempts=0,
+            commit_retry_backoff_s=0.0,
+            quick_mode=True,
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "out"
+            command = _build_case_command(
+                args,
+                FOUR_U8G_SCENARIOS["fairness-bounded"],
+                Path(directory) / "tenants.json",
+                output,
+                15.0,
+                barrier_count_cap=32,
+            )
+        self.assertEqual(
+            "90.0",
+            command[command.index("--barrier-drain-timeout-s") + 1],
+        )
+
     def test_histogram_samples_count_as_metric_family_coverage(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

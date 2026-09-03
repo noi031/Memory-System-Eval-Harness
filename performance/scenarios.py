@@ -157,16 +157,24 @@ def expand_matrix(
     single_conc = concurrency_steps[0] if concurrency_steps else 1
     for sid in scenario_ids:
         if sid == "S":
+            counts = (
+                list(barrier_tenant_counts)
+                if barrier_distribution == "explicit" and barrier_tenant_counts
+                else None
+            )
+            s_commits = sum(counts) if counts is not None else barrier_commits
+            s_distribution = "explicit" if counts is not None else barrier_distribution
             runs.append(
                 SceneRun(
                     "S",
                     single_conc,
                     duration_s,
-                    burst_commits=barrier_commits or burst_commits,
+                    burst_commits=s_commits or burst_commits,
                     burst_window_s=burst_window_s,
-                    barrier_commits=barrier_commits,
-                    barrier_distribution=barrier_distribution,
+                    barrier_commits=s_commits,
+                    barrier_distribution=s_distribution,
                     barrier_zipf_exponent=barrier_zipf_exponent,
+                    barrier_tenant_counts=counts,
                     barrier_waves=barrier_waves,
                     barrier_cooldown_s=barrier_cooldown_s,
                 )

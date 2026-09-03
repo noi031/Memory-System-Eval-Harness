@@ -86,7 +86,10 @@ def _jain(values: list[float]) -> float | None:
     return (total * total) / (len(values) * sum(value * value for value in values))
 
 
-def _per_tenant_metrics(suite: dict[str, Any]) -> dict[str, dict[str, Any]]:
+def _per_tenant_metrics(
+    suite: dict[str, Any],
+    selected_runs: list[dict[str, Any]] | None = None,
+) -> dict[str, dict[str, Any]]:
     """Merge one run's per-tenant metrics without mixing unlike workloads."""
     # This helper is used by the fairness gate. Search-priority is intentionally
     # excluded: its uneven Commit completion is the expected consequence of
@@ -98,26 +101,38 @@ def _per_tenant_metrics(suite: dict[str, Any]) -> dict[str, dict[str, Any]]:
         "mixed",
         "commit-barrier",
     )
-    runs_by_scenario = {
-        scenario: [
-            run for run in _suite_runs(suite)
-            if str(run.get("scenario") or "") == scenario
-            and str(run.get("status") or "") == "completed"
-        ]
-        for scenario in candidate_scenarios
-    }
-    selected_scenario = next(
-        (
-            scenario
+    if selected_runs is None:
+        runs_by_scenario = {
+            scenario: [
+                run for run in _suite_runs(suite)
+                if str(run.get("scenario") or "") == scenario
+                and str(run.get("status") or "") == "completed"
+            ]
             for scenario in candidate_scenarios
-            if any(
-                isinstance((_run_summary(run).get("metrics") or {}).get("per_tenant"), dict)
-                for run in runs_by_scenario[scenario]
-            )
-        ),
-        "",
-    )
-    runs = runs_by_scenario[selected_scenario] if selected_scenario else []
+        }
+        selected_scenario = next(
+            (
+                scenario
+                for scenario in candidate_scenarios
+                if any(
+                    isinstance(
+                        (_run_summary(run).get("metrics") or {}).get("per_tenant"),
+                        dict,
+                    )
+                    for run in runs_by_scenario[scenario]
+                )
+            ),
+            "",
+        )
+        runs = runs_by_scenario[selected_scenario] if selected_scenario else []
+    else:
+        # The fairness gate has already selected one comparable workload.
+        # Re-selecting from the whole suite here can pull in capacity-32
+        # tenants and silently change the Jain denominator.
+        runs = [
+            run for run in selected_runs
+            if str(run.get("status") or "") == "completed"
+        ]
     merged: dict[str, dict[str, Any]] = {}
     for run in runs:
         metrics = _run_summary(run).get("metrics") or {}
@@ -490,7 +505,7 @@ def _fairness(suite: dict[str, Any]) -> dict[str, Any]:
         # to a different scenario's Search latency denominator.
         scoped_suite = dict(suite)
         scoped_suite["runs"] = selected_runs
-        tenant_metrics = _per_tenant_metrics(scoped_suite)
+        tenant_metrics = _per_tenant_metrics(scoped_suite, selected_runs)
         # A Jain score over only the tenants that happened to finish a
         # Commit is misleading: a tenant with no submitted/observed work has
         # silently disappeared from the denominator.  Fairness requires one

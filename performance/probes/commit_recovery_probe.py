@@ -145,7 +145,74 @@ def _docker_engine_post(path: str) -> tuple[int, str]:
         return 0, f"{type(exc).__name__}: {exc}"
 
 
-def kill_and_start(container: str, restart_wait_s: float) -> dict[str, Any]:
+def kill_and_start(
+    container: str,
+    restart_wait_s: float,
+    *,
+    pid: int = 0,
+    restart_command: str = "",
+) -> dict[str, Any]:
+    if pid:
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except ProcessLookupError:
+            return {
+                "kill_returncode": 1,
+                "kill_stderr": f"process {pid} does not exist",
+                "control_backend": "pid",
+                "pid": pid,
+            }
+        except OSError as exc:
+            return {
+                "kill_returncode": 1,
+                "kill_stderr": f"{type(exc).__name__}: {exc}",
+                "control_backend": "pid",
+                "pid": pid,
+            }
+        result: dict[str, Any] = {
+            "kill_returncode": 0,
+            "kill_stderr": "",
+            "killed_at": now(),
+            "control_backend": "pid",
+            "pid": pid,
+        }
+        if not restart_command:
+            result.update({
+                "start_returncode": 1,
+                "start_stderr": "restart_command is required when using --pid",
+                "restart_at": now(),
+            })
+            return result
+        try:
+            started = subprocess.Popen(
+                restart_command,
+                shell=True,
+                start_new_session=True,
+            )
+        except OSError as exc:
+            result.update({
+                "start_returncode": 1,
+                "start_stderr": f"{type(exc).__name__}: {exc}",
+                "restart_at": now(),
+            })
+            return result
+        result.update({
+            "start_returncode": 0,
+            "start_stderr": "",
+            "restart_at": now(),
+            "restart_pid": started.pid,
+            "restart_command_supplied": True,
+        })
+        if restart_wait_s > 0:
+            time.sleep(restart_wait_s)
+        return result
+
+    if not container:
+        return {
+            "kill_returncode": 1,
+            "kill_stderr": "container or pid is required",
+            "control_backend": "none",
+        }
     docker_cli = shutil.which("docker")
     killed = None
     if docker_cli:
@@ -231,7 +298,13 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--base-url", required=True)
     parser.add_argument("--health-url", default="")
-    parser.add_argument("--container", required=True)
+    parser.add_argument("--container", default="")
+    parser.add_argument("--pid", type=int, default=0)
+    parser.add_argument(
+        "--restart-command",
+        default=os.getenv("ECHOMEM_RESTART_COMMAND", ""),
+        help="本地 PID 恢复时启动 EchoMem 的命令",
+    )
     parser.add_argument("--tenant-config", required=True, type=Path)
     parser.add_argument("--tenant", default="stress-a")
     parser.add_argument("--kill-delay-s", type=float, default=0.5)
@@ -253,6 +326,8 @@ def main() -> int:
     )
     parser.add_argument("--out", required=True, type=Path)
     args = parser.parse_args()
+    if not args.container and not args.pid:
+        parser.error("either --container or --pid is required")
 
     started_at = now()
     health_url = args.health_url or args.base_url.rstrip("/") + "/health"
@@ -353,7 +428,12 @@ def main() -> int:
         "status_code": commit_box.get("status_code"),
     }
     result["accepted_202"] = commit_box.get("status_code") == 202
-    result["container_control"] = kill_and_start(args.container, 0)
+    result["container_control"] = kill_and_start(
+        args.container,
+        0,
+        pid=args.pid,
+        restart_command=args.restart_command,
+    )
     control_ok = recovery_control_ok(result["container_control"])
     result["container_control_ok"] = control_ok
     commit_thread.join(timeout=1.0)

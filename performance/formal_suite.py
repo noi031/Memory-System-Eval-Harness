@@ -427,6 +427,9 @@ FOUR_U8G_SCENARIOS["fairness-bounded"] = {
     # Two Commit arrivals per tenant are enough for a bounded Jain sample and
     # keep this real-model smoke case inside the one-hour budget.
     "quick_barrier_count_cap": 8,
+    # Real-model completion can exceed the generic 10-second barrier drain.
+    # This is still a bounded case-specific window, not a soak test.
+    "quick_barrier_drain_timeout_s": 90.0,
 }
 SCENARIO_PROFILES["4u8g"] = FOUR_U8G_SCENARIOS
 
@@ -805,7 +808,16 @@ def _build_case_command(
         "--barrier-wave-size",
         str(getattr(args, "barrier_wave_size", 32)),
         "--barrier-drain-timeout-s",
-        str(getattr(args, "barrier_drain_timeout_s", 10.0)),
+        str(
+            (
+                case.get(
+                    "quick_barrier_drain_timeout_s",
+                    getattr(args, "barrier_drain_timeout_s", 10.0),
+                )
+                if getattr(args, "quick_mode", False)
+                else getattr(args, "barrier_drain_timeout_s", 10.0)
+            )
+        ),
     ]
     if getattr(args, "local_auth_mode", False):
         # EchoMem local auth resolves the configured default identity when no
@@ -1837,6 +1849,15 @@ def main() -> int:
         ),
     )
     parser.add_argument(
+        "--quick-seed-tenant-cap",
+        type=int,
+        default=4,
+        help=(
+            "quick 模式真实灌种的租户上限；容量/调度场景仍可使用更多租户，"
+            "但未灌种租户只能用于黑盒调度和容量证据，不能宣称有热记忆"
+        ),
+    )
+    parser.add_argument(
         "--seed-sessions-per-tenant",
         type=int,
         default=None,
@@ -1901,6 +1922,8 @@ def main() -> int:
         parser.error("--health-poll-s must be > 0")
     if args.seed_sessions_per_tenant is not None and args.seed_sessions_per_tenant < 0:
         parser.error("--seed-sessions-per-tenant must be >= 0")
+    if args.quick_seed_tenant_cap < 1:
+        parser.error("--quick-seed-tenant-cap must be >= 1")
     if args.profile in {"report6", "4u8g", "complete"} and not args.preflight_config:
         parser.error(
             f"--profile {args.profile} requires --preflight-config with the actual EchoMem config.json"
@@ -2074,6 +2097,10 @@ def main() -> int:
         "runs": [],
     }
     # 用确定性顺序执行，便于重跑对比；服务端重置钩子负责固定数据/索引边界。
+    max_seed_count = max(
+        int(scenario_catalog[name]["tenants"]) for name in scenario_names
+    )
+    seed_tenant_count = max_seed_count
     auto_reuse_seed = (
         bool(args.quick_mode or args.profile in {"4u8g", "complete", "report6"})
         and not bool(args.reuse_existing_data)
@@ -2083,9 +2110,11 @@ def main() -> int:
     seed_ready = bool(args.reuse_existing_data or args.skip_seed)
     seed_warmup_failed = False
     if auto_reuse_seed:
-        max_seed_count = max(
-            int(scenario_catalog[name]["tenants"]) for name in scenario_names
-        )
+        if args.quick_mode:
+            seed_tenant_count = min(max_seed_count, args.quick_seed_tenant_cap)
+        if seed_tenant_count not in config_paths:
+            config_paths[seed_tenant_count] = config_dir / f"tenants-{seed_tenant_count}.json"
+            write_subset(config_paths[seed_tenant_count], all_tenants[:seed_tenant_count])
         warmup_output = root / "_seed_warmup"
         warmup_started_at = now_iso()
         warmup_timeout_s = max(
@@ -2095,9 +2124,9 @@ def main() -> int:
         )
         warmup_command = _build_seed_warmup_command(
             args,
-            config_paths[max_seed_count],
+            config_paths[seed_tenant_count],
             warmup_output / "run",
-            max_seed_count,
+            seed_tenant_count,
             args.seed_commit_timeout_s,
         )
         warmup_output.mkdir(parents=True, exist_ok=True)
@@ -2133,7 +2162,9 @@ def main() -> int:
             "finished_at": warmup_finished_at,
             "timeout_s": warmup_timeout_s,
             "seed_commit_timeout_s": args.seed_commit_timeout_s,
-            "tenant_count": max_seed_count,
+            "tenant_count": seed_tenant_count,
+            "requested_tenant_count": max_seed_count,
+            "tenant_cap_applied": seed_tenant_count < max_seed_count,
             "command": warmup_command,
             "returncode": warmup_completed.returncode,
             "timeout": warmup_timed_out,
@@ -2142,7 +2173,7 @@ def main() -> int:
         }
         if seed_ready:
             args.reuse_existing_data = True
-            args.search_queries = _seed_anchor_queries(max_seed_count)
+            args.search_queries = _seed_anchor_queries(seed_tenant_count)
         else:
             manifest["seed_warmup"]["failure_reason"] = (
                 "共享真实模型 seed warmup 未完成；后续场景不重复灌种，"
@@ -2211,7 +2242,7 @@ def main() -> int:
                 previous_queries = str(args.search_queries)
                 if case_reuses_seed:
                     args.reuse_existing_data = True
-                    args.search_queries = _seed_anchor_queries(int(case["tenants"]))
+                    args.search_queries = _seed_anchor_queries(seed_tenant_count)
                 completed_runs = len(manifest["runs"])
                 total_runs = len(scenario_names) * args.repeats * len(POLICIES)
                 print(

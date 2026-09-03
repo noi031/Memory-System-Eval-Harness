@@ -2337,6 +2337,24 @@ class BarrierTests(unittest.TestCase):
         counts = self._submit_counts(self._run(scene, 2))
         self.assertEqual(counts, {0: 7, 1: 3})
 
+    def test_explicit_distribution_is_preserved_for_s_scene(self) -> None:
+        runs = expand_matrix(
+            scenario_ids=["S"],
+            concurrency_steps=[1],
+            mix_ratios=[(1, 1)],
+            duration_s=1.0,
+            burst_commits=0,
+            burst_window_s=0.0,
+            barrier_commits=10,
+            barrier_distribution="explicit",
+            barrier_tenant_counts=[7, 3],
+        )
+        self.assertEqual(len(runs), 1)
+        self.assertEqual(runs[0].scene_id, "S")
+        self.assertEqual(runs[0].barrier_distribution, "explicit")
+        self.assertEqual(runs[0].barrier_tenant_counts, [7, 3])
+        self.assertEqual(runs[0].barrier_commits, 10)
+
     def test_explicit_count_length_mismatch_raises(self) -> None:
         scene = SceneRun(
             "H", 1, 60.0, barrier_commits=10,
