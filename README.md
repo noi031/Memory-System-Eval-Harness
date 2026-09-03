@@ -961,6 +961,21 @@ PR397 的写后可见性/持久化对账、Commit 状态机、冷暖 Search，�
 `suite_path`，然后执行 `objective_suite.py --skip-run`；该模式只读取
 `suite.json` 和已有探针制品。
 
+### 飞书机器人启动 4U8G 压测
+
+服务器 Web/飞书入口已将“压测”映射为真实 EchoMem 压测任务，并使用单并发队列。
+在群里 `@pr测试 压测` 会测试当前已部署的 4U8G EchoMem；也可以发送
+`@pr测试 压测 develop` 或 `@pr测试 压测 PR 274`，分别测试最新 develop
+或指定 PR 的临时实例。机器人先返回任务 ID 和详情页，运行中展示准备、压测、
+报告阶段，完成后回传 HTML 报告与原始结果；异常会回传任务详情、容器日志和
+可重试动作。
+
+该入口默认关闭 soak，不使用 fake/mock 模型，沿用服务器配置的真实 LLM、
+Embedding、`ECHOMEM_AUTO_COMMIT_THRESHOLD=20000` 和 4U8G 资源档位。测试结果
+保留三天，过期结果由服务器定时清理。正式六项结论以
+`objective-suite.html` / `suite.json` 为准，缺少真实故障控制或恢复证据时会标记
+`INCONCLUSIVE`，不会把缺失数据当作通过。
+
 quick 模式默认把容量场景的 Commit 负载设为 0，避免容量测量被后台写入拖住；
 容量场景的 `K` 负载在 `commit-rpm=0` 时严格只启动 Search worker，不会因为
 默认的读写线程拆分而偷偷发起 Commit；这保证容量档位测的是活跃用户的 Search

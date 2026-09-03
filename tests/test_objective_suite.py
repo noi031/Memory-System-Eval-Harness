@@ -7,6 +7,7 @@ from pathlib import Path
 
 from performance.objective_suite import (
     QUICK_SCENARIOS,
+    _append_quick_seed_options,
     _first_completed_commit_csv,
     _resolve_auth_key,
     _acquire_output_lock,
@@ -176,6 +177,21 @@ class ObjectiveSuiteTests(unittest.TestCase):
             )
             profile = load_profiles(path)[0]
             self.assertFalse(profile["quick_include_seed"])
+
+    def test_quick_seed_options_reuse_one_formal_warmup(self) -> None:
+        command = ["python", "-m", "performance.formal_suite"]
+        self.assertEqual(
+            command + ["--seed-sessions-per-tenant", "1"],
+            _append_quick_seed_options(command, include_seed=True),
+        )
+        self.assertNotIn("--no-seed-reuse", command)
+
+    def test_quick_seed_options_skip_seed_explicitly(self) -> None:
+        command = ["python", "-m", "performance.formal_suite"]
+        self.assertEqual(
+            command + ["--skip-seed", "--seed-sessions-per-tenant", "0"],
+            _append_quick_seed_options(command, include_seed=False),
+        )
 
     def test_recovery_profile_requires_accepted_202(self) -> None:
         profile_path = (

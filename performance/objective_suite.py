@@ -16,6 +16,7 @@ import html
 import json
 import os
 import shlex
+import signal
 import subprocess
 import sys
 import time
@@ -95,6 +96,19 @@ def load_env_file(path: Path) -> dict[str, str]:
     return values
 
 
+def _append_quick_seed_options(
+    command: list[str],
+    *,
+    include_seed: bool,
+) -> list[str]:
+    """Keep one real-model warm-up shared by the bounded scenario matrix."""
+    if include_seed:
+        command += ["--seed-sessions-per-tenant", "1"]
+    else:
+        command += ["--skip-seed", "--seed-sessions-per-tenant", "0"]
+    return command
+
+
 def run_command(
     command: list[str],
     *,
@@ -131,30 +145,52 @@ def run_command(
             "stderr": "objective suite wall-clock budget exhausted\n",
             "elapsed_s": 0.0,
         }
+    process = subprocess.Popen(
+        command,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        start_new_session=(os.name == "posix"),
+        env=child_env,
+    )
     try:
-        completed = subprocess.run(
-            command,
-            text=True,
-            capture_output=True,
-            timeout=timeout_s,
-            check=False,
-            env=child_env,
-        )
+        stdout, stderr = process.communicate(timeout=timeout_s)
         return {
-            "status": "PASS" if completed.returncode == 0 else "FAIL",
-            "returncode": completed.returncode,
+            "status": "PASS" if process.returncode == 0 else "FAIL",
+            "returncode": process.returncode,
             "command": safe_command(),
-            "stdout": completed.stdout[-12000:],
-            "stderr": completed.stderr[-12000:],
+            "stdout": (stdout or "")[-12000:],
+            "stderr": (stderr or "")[-12000:],
             "elapsed_s": (datetime.now(timezone.utc) - started).total_seconds(),
         }
     except subprocess.TimeoutExpired as exc:
+        if os.name == "posix":
+            try:
+                os.killpg(process.pid, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
+        else:
+            process.terminate()
+        try:
+            stdout, stderr = process.communicate(timeout=5)
+        except subprocess.TimeoutExpired:
+            if os.name == "posix":
+                try:
+                    os.killpg(process.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+            else:
+                process.kill()
+            stdout, stderr = process.communicate()
         return {
             "status": "TIMEOUT",
             "returncode": 124,
             "command": safe_command(),
-            "stdout": str(exc.stdout or "")[-12000:],
-            "stderr": str(exc.stderr or "")[-12000:],
+            "stdout": (stdout or str(exc.stdout or ""))[-12000:],
+            "stderr": (
+                (stderr or str(exc.stderr or ""))
+                + f"\nobjective suite child timeout after {timeout_s:.1f}s\n"
+            )[-12000:],
             "elapsed_s": (datetime.now(timezone.utc) - started).total_seconds(),
         }
 
@@ -1337,17 +1373,18 @@ def main() -> int:
                     or profile.get("quick_include_seed")
                 )
                 if args.quick and not include_quick_seed:
-                    command += ["--skip-seed", "--seed-sessions-per-tenant", "0"]
+                    _append_quick_seed_options(command, include_seed=False)
                 elif args.quick:
                     # Capacity/user evidence needs real session identities.
-                    # Keep one minimal seed session per case; reusing a
-                    # warm-up process would lose its session IDs in the child
-                    # runner and make active-user counts silently zero.
-                    command += [
-                        "--seed-sessions-per-tenant",
-                        "1",
-                        "--no-seed-reuse",
-                    ]
+                    # Seed once in formal_suite and reuse that completed
+                    # warm-up across the whole bounded matrix. Re-seeding
+                    # every capacity tier serializes real-model Commit
+                    # extraction and can make the diagnostic suite exceed
+                    # its wall-clock budget before any useful comparison is
+                    # produced. The runner still creates fresh sessions for
+                    # measured requests, so request evidence remains
+                    # scenario-local.
+                    _append_quick_seed_options(command, include_seed=True)
                 if bool(profile.get("allow_partial_tenants")):
                     command += ["--allow-partial-tenants"]
                 command_result["run"] = run_command(
