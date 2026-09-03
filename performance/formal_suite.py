@@ -1854,6 +1854,7 @@ def _finalize_suite_outputs(
     scenario_names: list[str],
     *,
     final_status: str = "completed",
+    final_reason: str = "",
 ) -> str:
     """Always materialize machine-readable and HTML output, including partial runs."""
     overall = _finalize_suite_outputs(
@@ -1865,6 +1866,8 @@ def _finalize_suite_outputs(
         final_status="completed",
     )
     report_path = root / "suite.html"
+    signal.signal(signal.SIGINT, previous_sigint)
+    signal.signal(signal.SIGTERM, previous_sigterm)
     print(report_path)
     return 0 if overall in {"PASS", "INCONCLUSIVE"} else 2
 
@@ -1873,6 +1876,7 @@ def _finalize_suite_outputs(
     manifest["finalization"] = {
         "status": final_status,
         "finished_at": now_iso(),
+        "reason": final_reason,
         "run_count": len(manifest.get("runs") or []),
         "expected_run_count": len(scenario_names) * args.repeats * len(POLICIES),
     }
@@ -2410,7 +2414,8 @@ def main() -> int:
                 args,
                 tenant_path,
                 scenario_names,
-                final_status="interrupted",
+        final_status="interrupted",
+                final_reason=reason,
             )
         finally:
             raise KeyboardInterrupt
@@ -2512,6 +2517,10 @@ def main() -> int:
                 "共享真实模型 seed warmup 未完成；后续场景不重复灌种，"
                 "避免把 seed 超时重复放大成整套结果"
             )
+        checkpoint(
+            "seed_ready" if seed_ready else "seed_failed",
+            "seed warmup completed" if seed_ready else "seed warmup failed",
+        )
     budget_exhausted = False
     total_runs = len(scenario_names) * args.repeats * len(POLICIES)
     for scenario_index, scenario in enumerate(scenario_names):
@@ -2681,10 +2690,7 @@ def main() -> int:
                 )
                 args.reuse_existing_data = previous_reuse
                 args.search_queries = previous_queries
-                (root / "suite.json").write_text(
-                    json.dumps(manifest, ensure_ascii=False, indent=2) + "\n",
-                    encoding="utf-8",
-                )
+                checkpoint()
             if budget_exhausted:
                 break
         if budget_exhausted:
