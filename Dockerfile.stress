@@ -10,6 +10,7 @@ COPY benchmarks /app/stress/benchmarks
 # scripts there while the implementation remains in the performance package.
 RUN mkdir -p /app/stress/echomem \
     && cp /app/stress/performance/formal_suite.py /app/stress/echomem/formal_suite.py \
+    && cp /app/stress/performance/formal_data_report.py /app/stress/echomem/formal_data_report.py \
     && cp /app/stress/performance/run_stress.py /app/stress/echomem/run_stress.py
 
 ENV PYTHONUNBUFFERED=1

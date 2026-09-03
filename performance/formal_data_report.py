@@ -322,8 +322,21 @@ def load_run(run: dict[str, Any], root: Path) -> dict[str, Any]:
             else None
         )
     return {
+        # Full 4U8G runs intentionally contain duplicate source scenario
+        # names from PR397 and PR421. Keep the namespaced key for reporting;
+        # acceptance still consumes the canonical source scenario separately.
+        "scenario_key": str(
+            run.get("scenario_key") or run.get("scenario") or "-"
+        ),
         "scenario": str(run.get("scenario") or "-"),
-        "scenario_label": str(run.get("scenario_label") or scenario_label(str(run.get("scenario") or "-"))),
+        "source_scenario": str(
+            run.get("source_scenario") or run.get("scenario") or "-"
+        ),
+        "plan_source": str(run.get("plan_source") or "-"),
+        "scenario_label": str(
+            run.get("scenario_label")
+            or scenario_label(str(run.get("source_scenario") or run.get("scenario") or "-"))
+        ),
         "repetition": run.get("repetition") or "-",
         "policy": str(run.get("policy") or "-"),
         "status": str(run.get("status") or summary.get("status") or "NO_SUMMARY"),
@@ -372,7 +385,10 @@ def time_buckets(group: dict[str, Any]) -> list[dict[str, Any]]:
 def group_runs(runs: list[dict[str, Any]]) -> list[dict[str, Any]]:
     groups: dict[tuple[str, str], list[dict[str, Any]]] = {}
     for run in runs:
-        groups.setdefault((run["scenario"], run["policy"]), []).append(run)
+        # PR397 and PR421 deliberately reuse names such as ``baseline`` and
+        # ``A@1``. Group by the namespaced scenario key so their metrics are
+        # never silently merged in the report.
+        groups.setdefault((run["scenario_key"], run["policy"]), []).append(run)
     result = []
     for (scenario, policy), items in sorted(groups.items()):
         commits = [row for item in items for row in item["commits"]]
@@ -389,7 +405,10 @@ def group_runs(runs: list[dict[str, Any]]) -> list[dict[str, Any]]:
         tenants = sorted({row["tenant"] for row in all_rows})
         result.append(
             {
+                "scenario_key": items[0]["scenario_key"],
                 "scenario": scenario,
+                "source_scenario": items[0]["source_scenario"],
+                "plan_source": items[0]["plan_source"],
                 "scenario_label": items[0]["scenario_label"],
                 "policy": policy,
                 "items": items,
@@ -566,6 +585,30 @@ def render(manifest_path: Path, output_path: Path) -> None:
     runs = [load_run(run, root) for run in manifest.get("runs") or []]
     groups = group_runs(runs)
     statuses = [run["status"] for run in runs]
+    expected_scenarios = [
+        str(item)
+        for item in (manifest.get("scenarios") or [])
+        if str(item).strip()
+    ]
+    expected_run_count = int(
+        (manifest.get("checkpoint") or {}).get("expected_run_count")
+        or manifest.get("expected_run_count")
+        or len(expected_scenarios) * int(manifest.get("repeats") or 1)
+    )
+    completed_scenario_keys = {
+        str(run.get("scenario_key") or run.get("scenario") or "")
+        for run in manifest.get("runs") or []
+        if str(run.get("status") or "").lower() == "completed"
+    }
+    actual_scenario_keys = {
+        str(run.get("scenario_key") or run.get("scenario") or "")
+        for run in manifest.get("runs") or []
+    }
+    pending_scenarios = [
+        scenario
+        for scenario in expected_scenarios
+        if scenario not in actual_scenario_keys
+    ]
     multi_tenant_runs = [
         run
         for run in runs
@@ -582,18 +625,51 @@ def render(manifest_path: Path, output_path: Path) -> None:
     server_total = sum(group["server_timed_total"] for group in groups)
     overall = (
         "FAIL" if any(status in {"FAIL", "ENVIRONMENT_ERROR", "RESET_FAILED", "NO_SUMMARY"} for status in statuses)
+        else "INCONCLUSIVE"
+        if len(runs) < expected_run_count
+        or str((manifest.get("checkpoint") or {}).get("status") or "").lower()
+        in {"running", "seed_ready", "seed_failed", "interrupted"}
         else "INCONCLUSIVE" if any(status == "INCONCLUSIVE" for status in statuses)
         else "PASS"
     )
     status_class = overall.lower().replace("_", "-")
     rows = "".join(
-        f"<tr><td>{esc(group['scenario_label'])}</td><td><b>{esc(policy_label(group['policy']))}</b></td>"
+        f"<tr><td>{esc(group['plan_source'])}</td><td>{esc(group['scenario_label'])}</td>"
+        f"<td><code>{esc(group['scenario_key'])}</code></td><td><b>{esc(policy_label(group['policy']))}</b></td>"
         f"<td>{len(group['items'])}</td><td>{esc(group['items'][0]['status'])}</td>"
         f"{metric_cells(group)}</tr>"
         for group in groups
     )
     detail = "".join(detail_block(group, root) for group in groups)
     acceptance_html = acceptance_block(manifest, root)
+    plan_counts: dict[str, dict[str, int]] = {}
+    for item in manifest.get("runs") or []:
+        plan = str(item.get("plan_source") or "unknown")
+        plan_counts.setdefault(plan, {"completed": 0, "total": 0})
+        plan_counts[plan]["total"] += 1
+        if str(item.get("status") or "").lower() == "completed":
+            plan_counts[plan]["completed"] += 1
+    plan_rows = "".join(
+        f"<tr><td>{esc(plan)}</td><td>{values['completed']}</td>"
+        f"<td>{values['total']}</td><td>{esc('进行中' if values['completed'] < values['total'] else '已完成')}</td></tr>"
+        for plan, values in sorted(plan_counts.items())
+    )
+    pending_rows = "".join(
+        f"<tr><td>{esc(item)}</td><td>待运行</td></tr>"
+        for item in pending_scenarios
+    )
+    progress_html = f"""
+<section class='section'><h2>37 场景执行进度</h2>
+<div class='notice'><b>当前覆盖：</b>{len(runs)}/{expected_run_count} 个运行单元；
+已完成场景键 {len(completed_scenario_keys)}/{len(expected_scenarios)}。
+未完成时套件不会显示为 PASS，缺失项只代表尚未执行，不代表 EchoMem 失败。</div>
+<div class='review-grid'><div><h3>按方案统计</h3><div class='scroll'><table>
+<thead><tr><th>方案</th><th>已完成</th><th>已落盘运行</th><th>状态</th></tr></thead>
+<tbody>{plan_rows or '<tr><td colspan=4>暂无数据</td></tr>'}</tbody></table></div></div>
+<div><h3>尚未落盘的场景</h3><div class='scroll'><table>
+<thead><tr><th>场景键</th><th>状态</th></tr></thead>
+<tbody>{pending_rows or '<tr><td colspan=2>没有缺失场景</td></tr>'}</tbody></table></div></div></div>
+</section>"""
     icon = (
         "<svg class='logo' viewBox='0 0 56 56' role='img' aria-label='EchoMem 压测报告'>"
         "<rect x='3' y='3' width='50' height='50' rx='13' fill='#17324d'/>"
@@ -636,7 +712,7 @@ details{{border-top:1px solid var(--line);padding:11px 0}}details:first-of-type{
 </style></head><body><main class='page'>
 <header class='top'>{icon}<div><h1>EchoMem 多租户压测数据报告</h1><small>真实 HTTP / 真实模型 · 生成于 {esc(datetime.now().astimezone().isoformat())}</small></div></header>
 <section class='hero {status_class}'><div><div class='label'>套件总判定</div><strong>{esc(overall)}</strong><div>{esc(evidence_note)}</div></div>
-<div class='hero-meta'>目标 <code>{esc(manifest.get('base_url'))}</code><br>{len(runs)} 次运行 · {len(groups)} 组策略/场景</div></section>
+<div class='hero-meta'>目标 <code>{esc(manifest.get('base_url'))}</code><br>{len(runs)}/{expected_run_count} 次运行 · {len(groups)} 组策略/场景</div></section>
 <div class='kpis'>
 <div class='kpi'><div class='label'>请求总数</div><div class='value'>{total_rows}</div><div class='note'>Commit + Search 原始请求</div></div>
 <div class='kpi'><div class='label'>延迟事件</div><div class='value'>{delayed_total}</div><div class='note'>每条请求可展开查看</div></div>
@@ -644,12 +720,13 @@ details{{border-top:1px solid var(--line);padding:11px 0}}details:first-of-type{
 <div class='kpi'><div class='label'>独立认证</div><div class='value'>{'是' if independent else '未确认'}</div><div class='note'>上线隔离结论的前提</div></div>
 <div class='kpi'><div class='label'>重复轮次</div><div class='value'>{esc(manifest.get('repeats'))}</div><div class='note'>每组数据同时保留原始轮次</div></div>
 </div>
+{progress_html}
 <section class='section'><h2>数据口径</h2><div class='notice'><b>先看这里：</b>Commit 的端到端时间从请求进入到最终完成；Search 使用请求端到端时间。客户端排队、服务端排队、服务端执行分别统计。服务端字段没有覆盖时显示为 <b>-</b>，不能据此推断服务端没有排队。{esc(admission_note)}</div>
 <p class='muted'>本报告展示均值、P50、P95、P99、最大值、完成率、延迟数、429 数和服务端证据覆盖率；策略只在相同场景、相同租户、相同负载和相同重复轮次之间比较。</p></section>
 <section class='section'><h2>场景 × 策略完整数值</h2><div class='scroll'><table><thead><tr>
-<th>场景</th><th>策略</th><th>轮次</th><th>状态</th><th>Commit 提交/完成</th><th>Commit 平均</th><th>Commit P50</th><th>Commit P95</th><th>Commit P99</th><th>Commit 最大</th>
+<th>方案</th><th>场景</th><th>场景键</th><th>策略</th><th>轮次</th><th>状态</th><th>Commit 提交/完成</th><th>Commit 平均</th><th>Commit P50</th><th>Commit P95</th><th>Commit P99</th><th>Commit 最大</th>
 <th>Search 提交/成功</th><th>Search 平均</th><th>Search P95</th><th>Search P99</th><th>Commit 客户端排队 P95</th><th>Search 客户端排队 P95</th><th>延迟事件</th><th>429</th><th>服务端时序覆盖</th></tr></thead>
-<tbody>{rows or '<tr><td colspan=19>没有运行数据</td></tr>'}</tbody></table></div></section>
+<tbody>{rows or '<tr><td colspan=21>没有运行数据</td></tr>'}</tbody></table></div></section>
 {acceptance_html}
 <section class='section'><h2>逐组详细数据</h2><p class='muted'>点击每一组展开：逐租户分位数、服务端排队/执行、延迟请求绝对时间、队列深度、状态和错误。</p>{detail or '<p>没有详细数据。</p>'}</section>
 <div class='footer'>数据源：<code>{esc(manifest_path)}</code> · 原始请求 CSV 和每轮报告位于同一目录。报告不把 INCONCLUSIVE 当作性能通过。</div>

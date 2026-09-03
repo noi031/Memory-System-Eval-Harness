@@ -4,10 +4,45 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from performance.formal_data_report import render
+from performance.formal_data_report import group_runs, render
 
 
 class FormalDataReportTests(unittest.TestCase):
+    def test_full_suite_keeps_same_named_plans_separate(self):
+        runs = [
+            {
+                "scenario_key": "pr397__baseline",
+                "scenario": "baseline",
+                "source_scenario": "baseline",
+                "plan_source": "pr397",
+                "scenario_label": "PR397 基线",
+                "policy": "server-observe",
+                "status": "completed",
+                "summary": {"metrics": {}},
+                "output_dir": "/tmp/pr397",
+                "commits": [],
+                "searches": [],
+            },
+            {
+                "scenario_key": "pr421__baseline",
+                "scenario": "baseline",
+                "source_scenario": "baseline",
+                "plan_source": "pr421",
+                "scenario_label": "PR421 基线",
+                "policy": "server-observe",
+                "status": "completed",
+                "summary": {"metrics": {}},
+                "output_dir": "/tmp/pr421",
+                "commits": [],
+                "searches": [],
+            },
+        ]
+        groups = group_runs(runs)
+        self.assertEqual(
+            ["pr397__baseline", "pr421__baseline"],
+            [group["scenario_key"] for group in groups],
+        )
+
     def test_report_keeps_numeric_detail_and_missing_server_evidence_visible(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)

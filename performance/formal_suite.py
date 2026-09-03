@@ -1861,8 +1861,34 @@ def _write_suite_checkpoint(
         "manifest": "suite.json",
     }
     manifest["checkpoint"] = checkpoint
+    # Keep the report useful while the matrix is still running.  The preview
+    # uses exactly the same acceptance evaluator as finalization, but remains
+    # explicitly labeled as partial evidence by the renderer.
+    try:
+        manifest["acceptance"] = evaluate_pr421_acceptance(manifest)
+    except Exception as exc:  # noqa: BLE001 - checkpoint must never stop a run
+        manifest["acceptance_preview_error"] = {
+            "error": f"{type(exc).__name__}: {exc}",
+            "updated_at": now_iso(),
+        }
     _write_json_atomic(root / "suite.json", manifest)
     _write_json_atomic(root / "checkpoint.json", checkpoint)
+    # Keep a browsable partial report available while a long matrix is
+    # running.  This intentionally does not evaluate a final suite status.
+    try:
+        try:
+            from .formal_data_report import render as render_data_report
+        except ImportError:
+            try:
+                from performance.formal_data_report import render as render_data_report
+            except ImportError:
+                from formal_data_report import render as render_data_report
+        render_data_report(root / "suite.json", root / "suite.html")
+    except Exception as exc:  # noqa: BLE001 - checkpoint must never stop a run
+        _write_json_atomic(
+            root / "checkpoint-render-error.json",
+            {"error": f"{type(exc).__name__}: {exc}", "updated_at": now_iso()},
+        )
 
 
 def _finalize_suite_outputs(
@@ -1896,7 +1922,10 @@ def _finalize_suite_outputs(
     try:
         from .formal_data_report import render as render_data_report
     except ImportError:
-        from formal_data_report import render as render_data_report
+        try:
+            from performance.formal_data_report import render as render_data_report
+        except ImportError:
+            from formal_data_report import render as render_data_report
     render_data_report(root / "suite.json", report_path)
 
     statuses = [
