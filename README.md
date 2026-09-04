@@ -913,10 +913,11 @@ echo $! >"$STRESS_OUTPUT_DIR/launcher.pid"
 `STRESS_CASE_TIMEOUT_S=0` 表示按场景时长 + Commit 轮询预算自动计算；只有诊断时
 才建议手动设置较小的超时。超时会记录为 `TIMEOUT`，不会伪装成 EchoMem 的业务失败。
 正式套件的共享 seed warmup 默认使用 2 个租户并发、600 秒 Commit 终态等待；
-这是为了避免真实模型 Commit 在多个租户同时灌种时排队过长，导致整套场景被
-错误阻断。可通过 `--seed-concurrency` 和 `--seed-commit-timeout-s` 调整。
-seed 失败时后续场景会标记为 `BLOCKED`，并在 `suite.json` 记录原因，不会生成
-没有真实记忆证据的“成功”结果。
+这是为了避免真实模型 Commit 在多个租户同时灌种时排队过长。seed 只为需要
+热缓存/记忆质量证据的场景准备，容量阶梯不会因为容量档位较大而额外灌种
+16/32 个租户。seed 失败时，平台仍会执行容量、调度、恢复和 `/metrics` 等
+不依赖预置记忆的真实黑盒场景；相关热缓存/记忆质量结论记录为 `INCONCLUSIVE`，
+不会把零请求包装成“成功”，也不会把 seed 故障连带成整套 `BLOCKED`。
 
 服务器系统 Python 低于 3.9，或没有 Harness 依赖时，必须使用 runner 镜像。
 该镜像的默认 entrypoint 是旧版 `runner.py`，执行 PR29 的完整套件时要显式覆盖
@@ -1027,8 +1028,9 @@ warm-up session。单场景默认最多运行 30 秒、总墙钟 180 秒、barri
 Commit；正式场景 Commit 默认单次最多等待 180 秒，并发波次默认 4，可通过
 `--quick-commit-timeout-s` 和 `--quick-barrier-wave-size` 调整。真实模型 warm-up
 另外使用 `--quick-seed-commit-timeout-s`（默认 180 秒），外层窗口至少为该值的 2 倍。
-warm-up 成功后所有场景复用同一批真实记忆；warm-up 失败时后续场景会标记
-`BLOCKED/seed_warmup_failed`，不会重复灌种，也不会把零请求伪装成性能结果。少于 32 个真实
+warm-up 成功后所有场景复用同一批真实记忆；warm-up 失败时后续场景会禁用
+本轮 seed 但继续采集可独立验证的真实请求，并在每个 run 记录
+`seed_status`、`seed_dependency` 和 `seed_evidence_status`。少于 32 个真实
 Commit 只能作为 smoke 数据，不能验收 O5 严格优先级：
 
 正式优先级和容量测试建议使用 `--mode fixed-rps --rps <读速率>`，并按需设置

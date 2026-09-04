@@ -646,6 +646,21 @@ def _priority(suite: dict[str, Any]) -> dict[str, Any]:
             {"runs": len(runs), "completed_runs": 0},
             "场景存在但没有已完成的真实运行结果",
         )
+    seed_statuses = {
+        str(run.get("seed_evidence_status") or "").lower()
+        for run in completed_runs
+    }
+    if "inconclusive" in seed_statuses:
+        return _result(
+            "Search 优先于 Commit",
+            INCONCLUSIVE,
+            "热缓存 Search P95 <= 5s 且有同到达窗口证据",
+            {
+                "runs": len(completed_runs),
+                "seed_evidence_statuses": sorted(seed_statuses),
+            },
+            "场景已产生真实请求，但共享记忆 seed 未完成，不能把无记忆负载的结果当作热缓存优先级结论",
+        )
     overlap_evidence = [
         ((_run_summary(run).get("details") or {}).get("same_window_overlap"))
         for run in completed_runs

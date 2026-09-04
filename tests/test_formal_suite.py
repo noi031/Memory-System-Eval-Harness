@@ -18,6 +18,8 @@ from performance.formal_suite import (
     _archive_case_attempt,
     _auth_mode_validation_error,
     _seed_anchor_queries,
+    _scenario_requires_seed,
+    _seed_dependency,
     _scale_explicit_tenant_counts,
     _write_case_csvs,
     complete_scenarios,
@@ -27,6 +29,24 @@ from performance.formal_suite import (
 
 
 class Report6ScenarioTests(unittest.TestCase):
+    def test_seed_dependency_is_limited_to_memory_backed_scenarios(self) -> None:
+        self.assertTrue(
+            _scenario_requires_seed(
+                {"label": "Search/Commit 同时到达（服务端优先级黑盒）"},
+                "search-priority-blackbox",
+            )
+        )
+        self.assertFalse(
+            _scenario_requires_seed(
+                {"label": "2 租户容量阶梯"},
+                "capacity-2",
+            )
+        )
+        self.assertEqual(
+            "not required; active session identity is enough for black-box load",
+            _seed_dependency({"label": "2 租户容量阶梯"}, "capacity-2")["purpose"],
+        )
+
     def test_only_pre_request_environment_failures_are_retryable(self) -> None:
         self.assertTrue(_retryable_case_status("ENV_ERROR"))
         self.assertTrue(_retryable_case_status("NO_SUMMARY"))

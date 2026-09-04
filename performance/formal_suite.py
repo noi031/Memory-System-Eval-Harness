@@ -42,6 +42,45 @@ from performance.probes.auth_preflight import run as run_auth_preflight
 # 正式运行复现在线客户端。压测端不施加 FIFO、优先级、lane 或租户公平调度。
 POLICIES = ("server-observe",)
 
+# A seed is useful for hot-cache/retrieval-quality observations, but it is
+# not a prerequisite for measuring admission, capacity, fairness, recovery,
+# or metrics. Keeping this dependency explicit prevents a slow real-model
+# warm-up from blocking unrelated black-box scheduler evidence.
+SEED_REQUIRED_SCENARIOS = {
+    "baseline",
+    "mixed",
+    "commit-storm",
+    "commit-barrier",
+    "saturation",
+    "tenant-skew",
+    "fairness-bounded",
+    "search-priority-blackbox",
+    "search-storm",
+}
+
+
+def _scenario_requires_seed(case: dict[str, Any], scenario: str = "") -> bool:
+    """Whether a scenario needs preloaded memory for its intended claim."""
+    source = str(case.get("_source_scenario") or scenario or "").strip()
+    return bool(
+        case.get("seed_required")
+        or source in SEED_REQUIRED_SCENARIOS
+        or (not source and str(case.get("label") or "").strip() in SEED_REQUIRED_SCENARIOS)
+    )
+
+
+def _seed_dependency(case: dict[str, Any], scenario: str = "") -> dict[str, Any]:
+    """Describe the seed dependency in every case manifest."""
+    required = _scenario_requires_seed(case, scenario)
+    return {
+        "required_for_intended_claim": required,
+        "purpose": (
+            "hot-cache/retrieval evidence"
+            if required
+            else "not required; active session identity is enough for black-box load"
+        ),
+    }
+
 # 正式套件的运行器。每个 case 作为独立子进程执行，产物落到 case 的 run/ 子目录。
 RUNNER = Path(__file__).with_name("run_stress.py")
 
@@ -2622,7 +2661,21 @@ def main() -> int:
     max_seed_count = max(
         int(scenario_catalog[name]["tenants"]) for name in scenario_names
     )
-    seed_tenant_count = max_seed_count
+    seed_scenario_names = [
+        name
+        for name in scenario_names
+        if _scenario_requires_seed(scenario_catalog[name], name)
+    ]
+    # Capacity-only scenarios may need 16/32 active identities, but they do
+    # not need 16/32 real-model Commit extractions. Warm up only the largest
+    # scenario whose intended claim actually depends on preloaded memory.
+    seed_tenant_count = max(
+        (
+            int(scenario_catalog[name]["tenants"])
+            for name in seed_scenario_names
+        ),
+        default=0,
+    )
     auto_reuse_seed = (
         bool(args.quick_mode or args.profile in {"4u8g", "4u8g-full", "complete", "report6"})
         and not bool(args.reuse_existing_data)
@@ -2633,89 +2686,103 @@ def main() -> int:
     seed_warmup_failed = False
     if auto_reuse_seed:
         if args.quick_mode:
-            seed_tenant_count = min(max_seed_count, args.quick_seed_tenant_cap)
-        if seed_tenant_count not in config_paths:
-            config_paths[seed_tenant_count] = config_dir / f"tenants-{seed_tenant_count}.json"
-            write_subset(config_paths[seed_tenant_count], all_tenants[:seed_tenant_count])
-        warmup_output = root / "_seed_warmup"
-        warmup_started_at = now_iso()
-        warmup_timeout_s = max(
-            180.0,
-            float(args.case_timeout_s or 0.0),
-            float(args.seed_commit_timeout_s) * 2.0,
-        )
-        warmup_command = _build_seed_warmup_command(
-            args,
-            config_paths[seed_tenant_count],
-            warmup_output / "run",
-            seed_tenant_count,
-            args.seed_commit_timeout_s,
-        )
-        warmup_output.mkdir(parents=True, exist_ok=True)
-        warmup_timeout_s = _budget_timeout(warmup_timeout_s, suite_deadline, minimum_s=0.0)
-        if warmup_timeout_s <= 0:
+            seed_tenant_count = min(seed_tenant_count, args.quick_seed_tenant_cap)
+        if seed_tenant_count <= 0:
+            # The selected matrix contains only capacity/other black-box
+            # scenarios. Do not spend real-model resources on an unused seed.
             seed_ready = False
-            warmup_completed = subprocess.CompletedProcess(
-                warmup_command,
-                124,
-                "",
-                "formal_suite: suite wall-clock budget exhausted before seed warmup\n",
-            )
-            warmup_timed_out = True
+            manifest["seed_warmup"] = {
+                "status": "not_required",
+                "tenant_count": 0,
+                "requested_tenant_count": max_seed_count,
+                "seed_scenarios": [],
+                "reason": "selected scenarios do not require preloaded memory",
+            }
+            checkpoint("seed_not_required", "no selected scenario requires seed")
         else:
-            warmup_completed, warmup_timed_out = run_case_process(
-                warmup_command,
-                timeout_s=warmup_timeout_s,
+            if seed_tenant_count not in config_paths:
+                config_paths[seed_tenant_count] = config_dir / f"tenants-{seed_tenant_count}.json"
+                write_subset(config_paths[seed_tenant_count], all_tenants[:seed_tenant_count])
+            warmup_output = root / "_seed_warmup"
+            warmup_started_at = now_iso()
+            warmup_timeout_s = max(
+                180.0,
+                float(args.case_timeout_s or 0.0),
+                float(args.seed_commit_timeout_s) * 2.0,
             )
-        warmup_finished_at = now_iso()
-        (warmup_output / "stdout.log").write_text(
-            warmup_completed.stdout, encoding="utf-8"
-        )
-        (warmup_output / "stderr.log").write_text(
-            warmup_completed.stderr, encoding="utf-8"
-        )
-        warmup_run_dir = _resolve_run_dir(warmup_output / "run")
-        warmup_summary = {}
-        if (warmup_run_dir / "summary.json").is_file():
-            try:
-                warmup_summary = json.loads(
-                    (warmup_run_dir / "summary.json").read_text(encoding="utf-8")
+            warmup_command = _build_seed_warmup_command(
+                args,
+                config_paths[seed_tenant_count],
+                warmup_output / "run",
+                seed_tenant_count,
+                args.seed_commit_timeout_s,
+            )
+            warmup_output.mkdir(parents=True, exist_ok=True)
+            warmup_timeout_s = _budget_timeout(warmup_timeout_s, suite_deadline, minimum_s=0.0)
+            if warmup_timeout_s <= 0:
+                seed_ready = False
+                warmup_completed = subprocess.CompletedProcess(
+                    warmup_command,
+                    124,
+                    "",
+                    "formal_suite: suite wall-clock budget exhausted before seed warmup\n",
                 )
-            except (OSError, json.JSONDecodeError):
-                warmup_summary = {}
-        seed_ready = (
-            not warmup_timed_out
-            and warmup_completed.returncode == 0
-            and str(warmup_summary.get("status") or "") == "completed"
-        )
-        seed_warmup_failed = not seed_ready
-        manifest["seed_warmup"] = {
-            "status": "completed" if seed_ready else "failed",
-            "started_at": warmup_started_at,
-            "finished_at": warmup_finished_at,
-            "timeout_s": warmup_timeout_s,
-            "seed_commit_timeout_s": args.seed_commit_timeout_s,
-            "tenant_count": seed_tenant_count,
-            "requested_tenant_count": max_seed_count,
-            "tenant_cap_applied": seed_tenant_count < max_seed_count,
-            "command": warmup_command,
-            "returncode": warmup_completed.returncode,
-            "timeout": warmup_timed_out,
-            "output_dir": str(warmup_output.resolve()),
-            "summary": warmup_summary,
-        }
-        if seed_ready:
-            args.reuse_existing_data = True
-            args.search_queries = _seed_anchor_queries(seed_tenant_count)
-        else:
-            manifest["seed_warmup"]["failure_reason"] = (
-                "共享真实模型 seed warmup 未完成；后续场景不重复灌种，"
-                "避免把 seed 超时重复放大成整套结果"
+                warmup_timed_out = True
+            else:
+                warmup_completed, warmup_timed_out = run_case_process(
+                    warmup_command,
+                    timeout_s=warmup_timeout_s,
+                )
+            warmup_finished_at = now_iso()
+            (warmup_output / "stdout.log").write_text(
+                warmup_completed.stdout, encoding="utf-8"
             )
-        checkpoint(
-            "seed_ready" if seed_ready else "seed_failed",
-            "seed warmup completed" if seed_ready else "seed warmup failed",
-        )
+            (warmup_output / "stderr.log").write_text(
+                warmup_completed.stderr, encoding="utf-8"
+            )
+            warmup_run_dir = _resolve_run_dir(warmup_output / "run")
+            warmup_summary = {}
+            if (warmup_run_dir / "summary.json").is_file():
+                try:
+                    warmup_summary = json.loads(
+                        (warmup_run_dir / "summary.json").read_text(encoding="utf-8")
+                    )
+                except (OSError, json.JSONDecodeError):
+                    warmup_summary = {}
+            seed_ready = (
+                not warmup_timed_out
+                and warmup_completed.returncode == 0
+                and str(warmup_summary.get("status") or "") == "completed"
+            )
+            seed_warmup_failed = not seed_ready
+            manifest["seed_warmup"] = {
+                "status": "completed" if seed_ready else "failed",
+                "started_at": warmup_started_at,
+                "finished_at": warmup_finished_at,
+                "timeout_s": warmup_timeout_s,
+                "seed_commit_timeout_s": args.seed_commit_timeout_s,
+                "tenant_count": seed_tenant_count,
+                "requested_tenant_count": max_seed_count,
+                "tenant_cap_applied": seed_tenant_count < max_seed_count,
+                "seed_scenarios": seed_scenario_names,
+                "command": warmup_command,
+                "returncode": warmup_completed.returncode,
+                "timeout": warmup_timed_out,
+                "output_dir": str(warmup_output.resolve()),
+                "summary": warmup_summary,
+            }
+            if seed_ready:
+                args.reuse_existing_data = True
+                args.search_queries = _seed_anchor_queries(seed_tenant_count)
+            else:
+                manifest["seed_warmup"]["failure_reason"] = (
+                    "共享真实模型 seed warmup 未完成；相关场景继续执行但只能将记忆质量/"
+                    "热缓存结论标为 INCONCLUSIVE，容量/调度类场景不应被连带阻断"
+                )
+            checkpoint(
+                "seed_ready" if seed_ready else "seed_failed",
+                "seed warmup completed" if seed_ready else "seed warmup failed",
+            )
     budget_exhausted = False
     total_runs = len(scenario_names) * args.repeats * len(POLICIES)
     for scenario_index, scenario in enumerate(scenario_names):
@@ -2738,33 +2805,6 @@ def main() -> int:
                             )
                         )
             break
-        if seed_warmup_failed:
-            reason = (
-                "共享 seed warmup 失败，未执行该场景；"
-                "没有可复用的真实记忆，不能把零请求当作 EchoMem 性能结论"
-            )
-            for repetition in range(1, args.repeats + 1):
-                for policy in POLICIES:
-                    timestamp = now_iso()
-                    manifest["runs"].append({
-                        "scenario": scenario,
-                        "scenario_label": case["label"],
-                        "repetition": repetition,
-                        "policy": policy,
-                        "status": "BLOCKED",
-                        "started_at": timestamp,
-                        "finished_at": timestamp,
-                        "seed_reused": False,
-                        "seed_status": "failed",
-                        "blocked_reason": reason,
-                        "required_tenants": case["tenants"],
-                        "usable_tenants": len(all_tenants),
-                    })
-            print(
-                f"FORMAL_BLOCKED scenario={scenario} reason=seed_warmup_failed",
-                flush=True,
-            )
-            continue
         if case["tenants"] > len(all_tenants):
             reason = (
                 f"需要 {case['tenants']} 个通过鉴权的租户，当前只有 "
@@ -2808,17 +2848,25 @@ def main() -> int:
                                     )
                                 )
                     break
-                # A quick scheduler/capacity suite should pay the real-model
-                # seed cost once per tenant envelope, not once per scenario.
-                # Reuse is safe when the current case needs no more tenants
-                # than a previously completed seed. Each case still creates
-                # its own sessions/requests and retains separate artifacts.
+                # A bounded suite pays the real-model seed cost once per
+                # tenant envelope, not once per scenario. If warm-up failed,
+                # run the black-box case with seed disabled so capacity,
+                # scheduling, recovery, and metrics evidence is still
+                # collected. The run manifest records the missing hot-memory
+                # precondition instead of turning the case into a zero-row
+                # BLOCKED placeholder.
+                requires_seed = _scenario_requires_seed(case, scenario)
                 case_reuses_seed = seed_ready
                 previous_reuse = bool(args.reuse_existing_data)
                 previous_queries = str(args.search_queries)
+                previous_skip_seed = bool(args.skip_seed)
                 if case_reuses_seed:
                     args.reuse_existing_data = True
                     args.search_queries = _seed_anchor_queries(seed_tenant_count)
+                    args.skip_seed = False
+                elif seed_warmup_failed:
+                    args.reuse_existing_data = False
+                    args.skip_seed = True
                 completed_runs = len(manifest["runs"])
                 total_runs = len(scenario_names) * args.repeats * len(POLICIES)
                 print(
@@ -2921,7 +2969,30 @@ def main() -> int:
                 # separately addressable on disk.
                 run["scenario"] = case.get("_source_scenario", scenario)
                 run["seed_reused"] = case_reuses_seed
-                run["seed_status"] = "completed" if case_reuses_seed else "not_requested"
+                run["seed_status"] = (
+                    "completed"
+                    if case_reuses_seed
+                    else "failed"
+                    if seed_warmup_failed
+                    else "not_requested"
+                )
+                run["seed_dependency"] = _seed_dependency(case, scenario)
+                run["seed_tenant_count"] = (
+                    seed_tenant_count if case_reuses_seed else 0
+                )
+                run["seed_evidence_status"] = (
+                    "complete"
+                    if case_reuses_seed
+                    else "inconclusive"
+                    if requires_seed
+                    else "not_required"
+                )
+                if seed_warmup_failed:
+                    run["seed_warning"] = (
+                        "shared seed warm-up failed; this run still collected real "
+                        "black-box requests, but hot-cache/retrieval-quality claims "
+                        "are INCONCLUSIVE"
+                    )
                 run["effective_commit_timeout_s"] = float(args.commit_timeout_s)
                 manifest["runs"].append(run)
                 print(
@@ -2933,6 +3004,7 @@ def main() -> int:
                 )
                 args.reuse_existing_data = previous_reuse
                 args.search_queries = previous_queries
+                args.skip_seed = previous_skip_seed
                 checkpoint()
             if budget_exhausted:
                 break
