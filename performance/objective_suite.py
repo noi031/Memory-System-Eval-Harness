@@ -1559,11 +1559,12 @@ def main() -> int:
                     if isinstance(preflight_payload, dict)
                     else {}
                 )
-                if (
-                    isinstance(auth_config, dict)
-                    and str(auth_config.get("mode") or "").lower() == "local"
-                ):
-                    command.append("--local-auth")
+                # The EchoMem config's internal auth mode is not the same as
+                # the wire authentication mode exposed by the deployment.
+                # For example, a service may load a local config while its
+                # HTTP gateway still requires independent X-API-Key tenant
+                # credentials.  Only an explicit profile/CLI setting may
+                # select --local-auth; never infer it from config.json.
                 if scenarios:
                     command += [
                         "--scenarios", scenarios,
