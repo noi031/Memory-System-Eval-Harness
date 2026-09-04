@@ -78,6 +78,71 @@ _USER_MSGS = (
     "压测数据显示检索延迟波动明显，需排查索引重建期间的查询路径。",
 )
 
+_NO_RECALL_QUERIES = (
+    "今天下午帮我整理一下会议纪要",
+    "把最新的日报发我",
+    "帮我查一下工单状态",
+    "我想看一下昨天的待办",
+    "把上周的结果汇总一下",
+    "提醒我明天开会",
+    "帮我找一下这个问题的联系人",
+    "给我看一下部署进度",
+)
+
+
+def build_search_query_pool(
+    *,
+    recall_queries: list[str],
+    no_recall_queries: list[str],
+    profile: str = "mixed",
+    recall_ratio: float = 0.7,
+) -> tuple[list[str], list[str]]:
+    """Build a Search query pool and its parallel kind labels.
+
+    ``profile``:
+      - recall-only: only recall-capable queries
+      - no-recall-only: only everyday queries that should usually not hit
+      - mixed: interleave recall and no-recall queries by ``recall_ratio``
+    """
+    recall = [query for query in recall_queries if query]
+    ordinary = [query for query in no_recall_queries if query]
+    profile = str(profile or "mixed").strip().lower()
+    if profile == "recall-only":
+        return recall, ["recall"] * len(recall)
+    if profile == "no-recall-only":
+        return ordinary, ["no_recall"] * len(ordinary)
+    if profile != "mixed":
+        raise ValueError(f"unknown search query profile: {profile}")
+    if not recall and not ordinary:
+        return [], []
+    if recall_ratio <= 0:
+        combined = ordinary
+        return combined, ["no_recall"] * len(combined)
+    if recall_ratio >= 1:
+        combined = recall
+        return combined, ["recall"] * len(combined)
+    recall_weight = max(1, int(round(recall_ratio * 100)))
+    ordinary_weight = max(1, int(round((1.0 - recall_ratio) * 100)))
+    cycle = ["recall"] * recall_weight + ["no_recall"] * ordinary_weight
+    combined: list[str] = []
+    kinds: list[str] = []
+    indices = {"recall": 0, "no_recall": 0}
+    sources = {"recall": recall, "no_recall": ordinary}
+    while indices["recall"] < len(recall) or indices["no_recall"] < len(ordinary):
+        progressed = False
+        for kind in cycle:
+            source = sources[kind]
+            idx = indices[kind]
+            if idx >= len(source):
+                continue
+            combined.append(source[idx])
+            kinds.append(kind)
+            indices[kind] = idx + 1
+            progressed = True
+        if not progressed:
+            break
+    return combined, kinds
+
 
 def _anchor(idx: int, session_idx: int, msg_idx: int) -> str:
     return f"{ANCHOR_PREFIX}-{idx}-{session_idx}-{msg_idx}"
@@ -193,6 +258,9 @@ class TenantContext:
     auth_key: str
     client: EchoMemClient
     queries: list[str] = field(default_factory=list)
+    query_kinds: list[str] = field(default_factory=list)
+    recall_queries: list[str] = field(default_factory=list)
+    no_recall_queries: list[str] = field(default_factory=list)
     active_session_ids: list[str] = field(default_factory=list)
     seed_sessions: int = 0
     seed_messages: int = 0
@@ -205,6 +273,9 @@ class TenantContext:
             "user_id": self.user_id,
             "auth_key_configured": bool(self.auth_key),
             "queries": len(self.queries),
+            "query_kinds": len(self.query_kinds),
+            "recall_queries": len(self.recall_queries),
+            "no_recall_queries": len(self.no_recall_queries),
             "active_session_ids": len(self.active_session_ids),
             "seed_sessions": self.seed_sessions,
             "seed_messages": self.seed_messages,
@@ -309,6 +380,9 @@ def seed_tenant(
             auth_key=client.auth_key,
             client=client,
             queries=queries,
+            query_kinds=["recall"] * len(queries),
+            recall_queries=list(queries),
+            no_recall_queries=list(_NO_RECALL_QUERIES),
             active_session_ids=active_session_ids,
             seed_sessions=0,
             seed_messages=0,
@@ -346,6 +420,9 @@ def seed_tenant(
         auth_key=client.auth_key,
         client=client,
         queries=queries,
+        query_kinds=["recall"] * len(queries),
+        recall_queries=list(queries),
+        no_recall_queries=list(_NO_RECALL_QUERIES),
         active_session_ids=active_session_ids,
         seed_sessions=sessions,
         seed_messages=seed_messages,
@@ -402,6 +479,9 @@ def seed_tenant_from_conversations(
         auth_key=client.auth_key,
         client=client,
         queries=queries,
+        query_kinds=["recall"] * len(queries),
+        recall_queries=list(queries),
+        no_recall_queries=list(_NO_RECALL_QUERIES),
         active_session_ids=active_session_ids,
         seed_sessions=len(batches),
         seed_messages=seed_messages,

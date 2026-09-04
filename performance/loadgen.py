@@ -174,6 +174,7 @@ class RequestRecord:
     # saturated): an empty result is a capacity artifact, not a recall
     # failure, and must not be counted as a quality failure.
     degraded: bool = False
+    query_kind: str = ""
 
     def to_csv_row(self) -> dict[str, Any]:
         return {
@@ -203,6 +204,7 @@ class RequestRecord:
             "real_recall": self.real_recall,
             "quality_ok": self.quality_ok,
             "degraded": self.degraded,
+            "query_kind": self.query_kind,
             "query": self.query,
         }
 
@@ -656,6 +658,7 @@ class LoadGenerator:
         step_conc: int,
         tenant_idx: int,
         session_id: str = "",
+        query_kind: str = "",
     ) -> RequestRecord:
         started = time.perf_counter()
         hit_count = 0
@@ -712,6 +715,7 @@ class LoadGenerator:
             real_recall=real_recall,
             quality_ok=quality_ok,
             degraded=degraded,
+            query_kind=query_kind,
         )
 
     # -- worker loops ------------------------------------------------------
@@ -727,6 +731,7 @@ class LoadGenerator:
     ) -> list[RequestRecord]:
         records: list[RequestRecord] = []
         queries = tenant.queries or ["hello"]
+        query_kinds = tenant.query_kinds or ["fallback"] * len(queries)
         active_sessions = tenant.active_session_ids
         cursor = 0
         if start_event is not None:
@@ -736,6 +741,7 @@ class LoadGenerator:
             if limiter is not None:
                 limiter.acquire()
             query = queries[cursor % len(queries)]
+            query_kind = query_kinds[cursor % len(query_kinds)] if query_kinds else "fallback"
             session_id = (
                 active_sessions[cursor % len(active_sessions)]
                 if active_sessions
@@ -750,6 +756,7 @@ class LoadGenerator:
                     step_conc=step_conc,
                     tenant_idx=tenant.idx,
                     session_id=session_id,
+                    query_kind=query_kind,
                 )
             )
             if record.error_type == "connection" and self.note_client_connection_error():

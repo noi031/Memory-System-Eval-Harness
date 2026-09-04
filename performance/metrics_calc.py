@@ -1371,6 +1371,31 @@ def search_quality_summary(
     # the latency or hit statistics.
     recalled = [rec for rec in passed if rec.hit_count >= 1]
     hit_counts = [rec.hit_count for rec in recalled]
+
+    def _by_kind(kind: str) -> dict[str, Any]:
+        selected = [rec for rec in reads if str(rec.query_kind or "unknown") == kind]
+        if not selected:
+            return {
+                "count": 0,
+                "ok": 0,
+                "error": 0,
+                "hit_p50": None,
+                "hit_p95": None,
+                "p95_ms": None,
+            }
+        recalled_selected = [rec for rec in selected if rec.hit_count >= 1 and rec.quality_ok]
+        hit_counts_selected = [rec.hit_count for rec in recalled_selected]
+        return {
+            "count": len(selected),
+            "ok": sum(1 for rec in selected if rec.status == "ok"),
+            "error": sum(1 for rec in selected if rec.status != "ok"),
+            "hit_p50": percentile(sorted(hit_counts_selected), 0.5) if hit_counts_selected else None,
+            "hit_p95": percentile(sorted(hit_counts_selected), 0.95) if hit_counts_selected else None,
+            "p95_ms": _op_stats([rec.stage_ms for rec in selected]).get("p95_ms"),
+        }
+
+    query_kind_counts = Counter(str(rec.query_kind or "unknown") for rec in reads)
+    query_kind_stats = {kind: _by_kind(kind) for kind in sorted(query_kind_counts)}
     return {
         "total": len(reads),
         "anchor_total": len(anchor),
@@ -1389,6 +1414,8 @@ def search_quality_summary(
         "hit_count_p50": percentile(sorted(hit_counts), 0.5) if hit_counts else None,
         "hit_count_p95": percentile(sorted(hit_counts), 0.95) if hit_counts else None,
         "gated_read_stats": _op_stats([rec.stage_ms for rec in recalled]),
+        "query_kind_counts": dict(query_kind_counts),
+        "query_kind_stats": query_kind_stats,
     }
 
 

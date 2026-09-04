@@ -80,6 +80,7 @@ from performance.perf_mock_provider import (
 )
 from performance.perf_preflight import run_preflight
 from performance.prepare import (
+    build_search_query_pool,
     TenantPreparer,
     load_locomo_seed_batches,
     load_tenant_specs,
@@ -180,6 +181,18 @@ def build_parser() -> argparse.ArgumentParser:
             "Search 查询词，逗号分隔；skip-seed/复用已有数据时用于恢复查询池。"
             "未提供时使用 hello，并在结果中标记为 fallback"
         ),
+    )
+    g.add_argument(
+        "--search-query-profile",
+        choices=["mixed", "recall-only", "no-recall-only"],
+        default=os.getenv("ECHOMEM_SEARCH_QUERY_PROFILE", "mixed"),
+        help="Search 负载类型: mixed=召回+普通混合, recall-only=只测记忆召回, no-recall-only=只测普通用户查询",
+    )
+    g.add_argument(
+        "--search-recall-ratio",
+        type=float,
+        default=float(os.getenv("ECHOMEM_SEARCH_RECALL_RATIO", "0.7")),
+        help="mixed 模式下 recall 查询占比（0~1）",
     )
     g.add_argument(
         "--seed-concurrency",
@@ -1155,16 +1168,33 @@ def main() -> None:
                 ),
             )
             fallback_queries = list(resolved.get("search_queries") or []) or ["hello"]
-            if (args.skip_seed or getattr(args, "reuse_existing_data", False)):
-                for tenant in tenants:
-                    if not tenant.queries:
-                        tenant.queries = list(fallback_queries)
-                        logger.warning(
-                            "skip-seed 未恢复已有查询池，使用 fallback Search 查询: "
-                            "tenant_idx=%d queries=%s",
-                            tenant.idx,
-                            ",".join(fallback_queries),
-                        )
+            for tenant in tenants:
+                recall_queries = list(tenant.recall_queries or tenant.queries or [])
+                no_recall_queries = list(tenant.no_recall_queries or fallback_queries)
+                if args.skip_seed or getattr(args, "reuse_existing_data", False):
+                    if not recall_queries:
+                        recall_queries = list(fallback_queries)
+                    if not no_recall_queries:
+                        no_recall_queries = list(fallback_queries)
+                queries, query_kinds = build_search_query_pool(
+                    recall_queries=recall_queries,
+                    no_recall_queries=no_recall_queries,
+                    profile=args.search_query_profile,
+                    recall_ratio=args.search_recall_ratio,
+                )
+                if not queries:
+                    queries = list(fallback_queries)
+                    query_kinds = ["fallback"] * len(queries)
+                tenant.queries = queries
+                tenant.query_kinds = query_kinds
+                logger.info(
+                    "tenant_idx=%d search pool profile=%s recall=%d no_recall=%d total=%d",
+                    tenant.idx,
+                    args.search_query_profile,
+                    len(recall_queries),
+                    len(no_recall_queries),
+                    len(queries),
+                )
         except BaseException:
             # prepare 阶段失败也要清掉已 provision 的租户（seed 中途失败时
             # preparer 仍持有它们的 client）；清完再向上抛。

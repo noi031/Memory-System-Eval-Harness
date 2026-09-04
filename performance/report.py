@@ -43,6 +43,7 @@ CSV_HEADERS = [
     "real_recall",
     "quality_ok",
     "degraded",
+    "query_kind",
     "query",
 ]
 
@@ -972,6 +973,9 @@ def _extended_evidence_section(summary: dict[str, Any]) -> str:
             ("hit_count P50/P95", f"{quality.get('hit_count_p50')} / {quality.get('hit_count_p95')}"),
             ("实际召回 read 的 P95 (ms)", str(gated.get("p95_ms"))),
         ]
+        kind_stats = quality.get("query_kind_stats") or {}
+        if kind_stats:
+            rows.append(("query kind 覆盖", ", ".join(f"{k}={v.get('count')}" for k, v in kind_stats.items())))
         blocks.append(
             "<h3>search 质量断言（特性 6，支撑事实）</h3>"
             + _note("锚词查询必须可召回（hit_count≥1），干净空结果计为假通过/失败；若服务端标记 degraded"
