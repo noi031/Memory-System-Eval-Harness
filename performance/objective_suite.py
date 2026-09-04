@@ -390,11 +390,27 @@ def _resolve_tenant_id(tenant_config: Path, requested: str) -> str:
 
 
 def _resolve_profile_path(value: str, profiles_path: Path) -> str:
-    """Resolve relative profile paths next to the profile manifest."""
+    """Resolve deployment paths without duplicating the profile directory.
+
+    Example manifests live under ``performance/`` but historically used both
+    ``tenants.json`` and ``performance/tenants.json``. Resolving only beside
+    the manifest turns the latter into ``performance/performance/...``. Try
+    the path beside the manifest first, then the repository root, and keep the
+    original relative value as a final fallback for diagnostics.
+    """
     if not value:
         return ""
     path = Path(value).expanduser()
-    return str(path if path.is_absolute() else (profiles_path.parent / path).resolve())
+    if path.is_absolute():
+        return str(path)
+    candidates = [
+        profiles_path.parent / path,
+        profiles_path.parent.parent / path,
+    ]
+    for candidate in candidates:
+        if candidate.exists():
+            return str(candidate.resolve())
+    return str((profiles_path.parent / path).resolve())
 
 
 def _materialize_fault_plan(

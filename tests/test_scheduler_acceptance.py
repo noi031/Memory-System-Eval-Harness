@@ -160,6 +160,50 @@ class SchedulerAcceptanceTests(unittest.TestCase):
         check = next(item for item in result["checks"] if item["name"] == "Search 优先于 Commit")
         self.assertEqual(INCONCLUSIVE, check["status"])
 
+    def test_fairness_prefers_equal_rate_steady_window(self) -> None:
+        def run(scenario: str, tenant_count: int = 4) -> dict:
+            per_tenant = {
+                str(index): {
+                    "commit": {"submitted": 10, "completed": 10},
+                    "search": {
+                        "submitted": 10,
+                        "latency": {"p95_s": 1.0 + index * 0.01},
+                    },
+                }
+                for index in range(tenant_count)
+            }
+            return {
+                "scenario": scenario,
+                "status": "completed",
+                "duration_s": 30,
+                "summary": {
+                    "metrics": {
+                        "per_tenant": per_tenant,
+                        "fairness": {
+                            "commit_completed_per_tenant": {
+                                key: value["commit"]["completed"]
+                                for key, value in per_tenant.items()
+                            }
+                        },
+                    }
+                },
+            }
+
+        result = evaluate(
+            {
+                "runs": [
+                    run("tenant-skew"),
+                    run("fairness-steady"),
+                ]
+            }
+        )
+        check = next(
+            item for item in result["checks"]
+            if item["name"] == "Commit/Search 公平性 Jain"
+        )
+        self.assertEqual(PASS, check["status"])
+        self.assertEqual("fairness-steady", check["observed"]["scenario"])
+
     def test_priority_fails_when_completed_case_exceeds_search_p95_target(self) -> None:
         result = evaluate(
             {
@@ -203,6 +247,54 @@ class SchedulerAcceptanceTests(unittest.TestCase):
         )
         check = next(item for item in result["checks"] if item["name"] == "DAU / 最大热用户容量")
         self.assertEqual(INCONCLUSIVE, check["status"])
+
+    def test_capacity_accepts_namespaced_source_scenario(self) -> None:
+        result = evaluate(
+            {
+                "instance_profile": "4U8G",
+                "runs": [
+                    {
+                        "scenario": "capacity-4",
+                        "scenario_key": "pr421__capacity-4",
+                        "source_scenario": "capacity-4",
+                        "status": "completed",
+                        "summary": {
+                            "metrics": {
+                                "search": {"submitted": 4, "success_rate": 1.0},
+                            },
+                            "details": {
+                                "user_activity": {
+                                    "active_user_count": 4,
+                                    "hot_user_proxy": {"request_count": 4},
+                                }
+                            },
+                        },
+                    },
+                    {
+                        "scenario": "capacity-8",
+                        "scenario_key": "pr421__capacity-8",
+                        "source_scenario": "capacity-8",
+                        "status": "completed",
+                        "summary": {
+                            "metrics": {
+                                "search": {"submitted": 8, "success_rate": 0.0},
+                            },
+                            "details": {
+                                "user_activity": {
+                                    "active_user_count": 8,
+                                    "hot_user_proxy": {"request_count": 8},
+                                }
+                            },
+                        },
+                    },
+                ],
+            }
+        )
+        check = next(
+            item for item in result["checks"]
+            if item["name"] == "DAU / 最大热用户容量"
+        )
+        self.assertEqual(PASS, check["status"])
 
     def test_capacity_success_only_proves_lower_bound(self) -> None:
         result = evaluate(

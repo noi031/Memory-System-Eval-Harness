@@ -6,10 +6,11 @@ set -euo pipefail
 # acceptance run used before a longer stability experiment.
 root_dir="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
 cd "$root_dir"
-python_major="$(python3 -c 'import sys; print(sys.version_info[0])' 2>/dev/null || echo 0)"
-python_minor="$(python3 -c 'import sys; print(sys.version_info[1])' 2>/dev/null || echo 0)"
+python_bin="${STRESS_PYTHON:-python3}"
+python_major="$("$python_bin" -c 'import sys; print(sys.version_info[0])' 2>/dev/null || echo 0)"
+python_minor="$("$python_bin" -c 'import sys; print(sys.version_info[1])' 2>/dev/null || echo 0)"
 if [ "$python_major" -lt 3 ] || { [ "$python_major" -eq 3 ] && [ "$python_minor" -lt 9 ]; }; then
-  echo "ERROR: Harness requires Python >= 3.9; detected $(python3 --version 2>&1 || true)." >&2
+  echo "ERROR: Harness requires Python >= 3.9; detected $("$python_bin" --version 2>&1 || true)." >&2
   echo "Run this script inside the echomem-stress-runner image; see README.md section 6." >&2
   exit 78
 fi
@@ -37,7 +38,7 @@ fi
 
 mkdir -p "$out_dir"
 
-python3 -m performance.formal_suite \
+"$python_bin" -m performance.formal_suite \
   --base-url "$base_url" \
   --tenant-config "$tenant_config" \
   --preflight-config "$preflight_config" \

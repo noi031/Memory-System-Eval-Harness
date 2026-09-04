@@ -147,6 +147,9 @@ SCENARIOS: dict[str, dict[str, Any]] = {
         "tenants": 4,
         "duration_s": 300,
         "search_rps_per_tenant": 2.0,
+        # Keep Search and Commit on the same steady-state window with an
+        # explicit per-tenant rate. Without this field run_stress falls back
+        # to zero Commit arrivals, making the Jain denominator meaningless.
         "commit_rpm_per_tenant": 2.0,
         "sessions_per_tenant": 4,
         "messages_per_session": 3,
@@ -814,7 +817,17 @@ def _resolve_run_dir(run_dir: Path) -> Path:
         child for child in run_dir.iterdir()
         if child.is_dir() and (child / "summary.json").is_file()
     ]
-    return children[0] if len(children) == 1 else run_dir
+    if len(children) == 1:
+        return children[0]
+    if len(children) > 1:
+        # A resumed or externally copied runner can leave more than one
+        # timestamp directory. Pick the newest completed summary instead of
+        # silently treating a valid run as NO_SUMMARY.
+        return max(
+            children,
+            key=lambda child: (child / "summary.json").stat().st_mtime,
+        )
+    return run_dir
 
 
 def _ms_to_s(value: Any) -> float | None:

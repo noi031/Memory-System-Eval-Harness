@@ -189,9 +189,15 @@ export ECHOMEM_CONFIG=/etc/echomem/4u8g/config.json
 export STRESS_PROFILES=/etc/echomem/performance-profiles.json
 export ECHOMEM_BASE_URL=http://127.0.0.1:8010
 export STRESS_PROFILE_NAME=4U8G
+export STRESS_PYTHON=python3  # runner 容器内使用 Python >= 3.9；也可填绝对路径
 
 ./performance/run_4u8g_six_metrics.sh
 ```
+
+如果宿主机的 `python3` 低于 3.9，不要降级或改写 Harness 语法；把 Harness
+挂载到已有 runner 容器中执行，或设置 `STRESS_PYTHON` 为 runner 内的 Python
+路径。宿主机只负责启动 EchoMem 和保存结果，避免旧解释器把环境问题误报为
+业务测试失败。
 
 脚本会调用 `performance.objective_suite`，只运行 4U8G profile；完整模式默认
 使用 PR397/report(6) 与 PR421 的场景目录，soak 不在默认场景中。每个场景会

@@ -20,6 +20,7 @@ set -euo pipefail
 
 root_dir="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
 cd "$root_dir"
+python_bin="${STRESS_PYTHON:-python3}"
 
 profiles="${STRESS_PROFILES:-$root_dir/performance/instance-profiles.example.json}"
 config="${ECHOMEM_CONFIG:?set ECHOMEM_CONFIG to the actual EchoMem config.json}"
@@ -33,7 +34,7 @@ if [ -n "${STRESS_ENV_FILE:-}" ]; then
 fi
 
 if [ "${STRESS_QUICK:-0}" = "1" ]; then
-  python3 -m performance.objective_suite \
+  "$python_bin" -m performance.objective_suite \
     --profiles "$profiles" \
     --profile "$profile_name" \
     --base-url "$base_url" \
@@ -44,7 +45,7 @@ if [ "${STRESS_QUICK:-0}" = "1" ]; then
     --max-wall-clock-s "$max_wall_clock" \
     "${env_args[@]}"
 else
-  python3 -m performance.objective_suite \
+  "$python_bin" -m performance.objective_suite \
     --profiles "$profiles" \
     --profile "$profile_name" \
     --base-url "$base_url" \

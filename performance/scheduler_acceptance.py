@@ -205,10 +205,18 @@ def _metric(summary: dict[str, Any], *path: str) -> Any:
 
 
 def _capacity(suite: dict[str, Any]) -> dict[str, Any]:
+    def scenario_name(run: dict[str, Any]) -> str:
+        """Use the canonical source name while accepting namespaced manifests."""
+        return str(
+            run.get("source_scenario")
+            or run.get("scenario")
+            or ""
+        ).strip()
+
     names = {
-        str(run.get("scenario") or "")
+        scenario_name(run)
         for run in _suite_runs(suite)
-        if str(run.get("scenario") or "").startswith("capacity-")
+        if scenario_name(run).startswith("capacity-")
     }
     levels = sorted(
         (int(name.split("-", 1)[1]) for name in names if name.split("-", 1)[1].isdigit()),
@@ -237,7 +245,7 @@ def _capacity(suite: dict[str, Any]) -> dict[str, Any]:
     activity_by_level: dict[str, dict[str, Any]] = {}
     activity_missing_levels: list[int] = []
     for run in _suite_runs(suite):
-        scenario = str(run.get("scenario") or "")
+        scenario = scenario_name(run)
         metrics = (_run_summary(run).get("metrics") or {})
         if scenario.startswith("capacity-"):
             level_text = scenario.split("-", 1)[1]
@@ -443,6 +451,7 @@ def _fairness(suite: dict[str, Any]) -> dict[str, Any]:
         for run in _suite_runs(suite):
             runs_by_scenario.setdefault(str(run.get("scenario") or ""), []).append(run)
         candidate_scenarios = [
+            "fairness-steady",
             "tenant-skew",
             "tenant-skew-bounded",
             "fairness-bounded",
@@ -471,8 +480,21 @@ def _fairness(suite: dict[str, Any]) -> dict[str, Any]:
                 candidates.append(
                     (len(tenant_ids), -priority, scenario)
                 )
+        # ``fairness-steady`` is the only scenario whose offered load is
+        # explicitly equal per tenant. Prefer it whenever it has evidence;
+        # a skew/barrier workload is useful for isolation and hot-tenant
+        # behavior, but is not a valid denominator for the fairness claim.
+        steady_candidate = next(
+            (
+                item for item in candidates
+                if item[2] == "fairness-steady"
+            ),
+            None,
+        )
         selected_scenario = (
-            max(candidates, key=lambda item: (item[0], item[1]))[2]
+            steady_candidate[2]
+            if steady_candidate is not None
+            else max(candidates, key=lambda item: (item[0], item[1]))[2]
             if candidates
             else ""
         )

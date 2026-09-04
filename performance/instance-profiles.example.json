@@ -18,6 +18,18 @@
         "engine_path": "",
         "fault_path": ""
       },
+      "missing_cases": {
+        "enabled": true,
+        "max_tenants": 1,
+        "commit_timeout_s": 15,
+        "search_timeout_s": 10,
+        "visibility_timeout_s": 20
+      },
+      "concurrent_commit": {
+        "enabled": true,
+        "concurrency": 4,
+        "timeout_s": 120
+      },
       "commit_recovery": {
         "container": "${ECHOMEM_CONTAINER:-echomem-4u8g}",
         "tenant": "stress-a",

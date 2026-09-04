@@ -100,6 +100,7 @@ class ObjectiveSuiteTests(unittest.TestCase):
         self.assertIn("--full", text)
         self.assertIn("--profile", text)
         self.assertIn("STRESS_QUICK", text)
+        self.assertIn("STRESS_PYTHON", text)
         self.assertNotIn("--scenarios soak", text)
 
     def test_load_profiles(self) -> None:
@@ -141,6 +142,22 @@ class ObjectiveSuiteTests(unittest.TestCase):
                 os.environ.pop("ECHOMEM_CONTAINER", None)
             else:
                 os.environ["ECHOMEM_CONTAINER"] = previous
+
+    def test_resolve_profile_path_accepts_repo_relative_paths(self) -> None:
+        from performance.objective_suite import _resolve_profile_path
+
+        repo_root = Path(__file__).resolve().parents[1]
+        profiles_path = repo_root / "performance" / "instance-profiles.example.json"
+        resolved = Path(
+            _resolve_profile_path(
+                "performance/tenants.example.json",
+                profiles_path,
+            )
+        )
+        self.assertEqual(
+            (repo_root / "performance" / "tenants.example.json").resolve(),
+            resolved,
+        )
 
     def test_load_env_file_accepts_export_and_comments(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -190,6 +207,10 @@ class ObjectiveSuiteTests(unittest.TestCase):
         for name in ("capacity-2", "capacity-4", "capacity-8", "capacity-16", "capacity-32"):
             with self.subTest(name=name):
                 self.assertEqual(0.0, SCENARIOS[name]["commit_rpm"])
+
+    def test_fairness_steady_has_explicit_per_tenant_commit_rate(self) -> None:
+        self.assertEqual(2.0, SCENARIOS["fairness-steady"]["commit_rpm_per_tenant"])
+        self.assertEqual(2.0, SCENARIOS["fairness-steady"]["search_rps_per_tenant"])
 
     def test_normal_4u8g_entry_uses_full_37_case_profile(self) -> None:
         self.assertEqual("4u8g-full", _formal_profile_name("4U8G", quick=False))
