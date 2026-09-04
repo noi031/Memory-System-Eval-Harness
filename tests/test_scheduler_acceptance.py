@@ -348,6 +348,55 @@ class SchedulerAcceptanceTests(unittest.TestCase):
         )
         self.assertEqual(PASS, check["status"])
 
+    def test_capacity_completed_levels_use_source_scenario_for_namespaced_runs(self) -> None:
+        result = evaluate(
+            {
+                "instance_profile": "4U8G",
+                "runs": [
+                    {
+                        "scenario": "capacity-4",
+                        "scenario_key": "pr421__capacity-4",
+                        "source_scenario": "capacity-4",
+                        "status": "completed",
+                        "summary": {
+                            "metrics": {
+                                "search": {"submitted": 4, "success_rate": 1.0},
+                            },
+                            "details": {
+                                "user_activity": {
+                                    "active_user_count": 4,
+                                    "hot_user_proxy": {"request_count": 2},
+                                }
+                            },
+                        },
+                    },
+                    {
+                        "scenario": "capacity-8",
+                        "scenario_key": "pr421__capacity-8",
+                        "source_scenario": "capacity-8",
+                        "status": "completed",
+                        "summary": {
+                            "metrics": {
+                                "search": {"submitted": 8, "success_rate": 0.0},
+                            },
+                            "details": {
+                                "user_activity": {
+                                    "active_user_count": 8,
+                                    "hot_user_proxy": {"request_count": 1},
+                                }
+                            },
+                        },
+                    },
+                ],
+            }
+        )
+        check = next(
+            item for item in result["checks"]
+            if item["name"] == "DAU / 最大热用户容量"
+        )
+        self.assertEqual(PASS, check["status"])
+        self.assertEqual([4, 8], check["observed"]["completed_capacity_levels"])
+
     def test_capacity_success_only_proves_lower_bound(self) -> None:
         result = evaluate(
             {

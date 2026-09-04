@@ -232,11 +232,11 @@ def _capacity(suite: dict[str, Any]) -> dict[str, Any]:
         )
     profile = suite.get("instance_profile") or suite.get("config", {}).get("instance_profile")
     completed_levels = sorted(
-        int(str(run.get("scenario")).split("-", 1)[1])
+        int(scenario_name(run).split("-", 1)[1])
         for run in _suite_runs(suite)
-        if str(run.get("scenario") or "").startswith("capacity-")
+        if scenario_name(run).startswith("capacity-")
         and str(run.get("status") or "") == "completed"
-        and str(run.get("scenario")).split("-", 1)[1].isdigit()
+        and scenario_name(run).split("-", 1)[1].isdigit()
     )
     valid_levels = []
     invalid_levels = []

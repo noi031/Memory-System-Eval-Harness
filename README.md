@@ -1231,6 +1231,14 @@ lane/租户就算覆盖”的误判：
 暴露的 bounded-label 集合；缺失项会在 `observed.missing_lanes` 或
 `observed.missing_fanout_engines` 中明确列出。
 
+formal suite 生成的每个场景 `search_results.csv` 还会保留请求级的
+`end_to_end_s`、`error_type`、`error_class`、`error_detail`、`Retry-After`、
+`reason_code`、查询类型和召回命中字段；`commit_results.csv` 会保留 HTTP 状态、
+重试次数和拒绝原因。这样限流/拒绝验收使用的是原始 HTTP 证据，而不是只看
+场景退出码。`limit_failure_sweep` 中的 `workers` 是所有阶梯的最大并发上限，
+不是固定并发值；例如 levels 为 `16,64,128,256` 且上限为 256 时，实际会依次
+使用 16、64、128、256 并发，避免把四档测试误跑成同一档。
+
 故障隔离的 `endpoint` 会收到
 `{"action":"enable|disable","target_tenant":"...","tenant":"..."}`；命令控制
 支持 `{action}`、`{target_tenant}` 和 `{tenant}` 占位符。故障采样即使发生

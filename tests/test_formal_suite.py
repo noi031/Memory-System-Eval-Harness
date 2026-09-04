@@ -26,9 +26,16 @@ from performance.formal_suite import (
     FOUR_U8G_FULL_SCENARIOS,
     report6_scenarios,
 )
+from performance.probes.limit_failure_sweep import workers_for_level
 
 
 class Report6ScenarioTests(unittest.TestCase):
+    def test_limit_sweep_worker_cap_preserves_levels(self) -> None:
+        self.assertEqual(16, workers_for_level(16, 256))
+        self.assertEqual(64, workers_for_level(64, 256))
+        self.assertEqual(128, workers_for_level(128, 256))
+        self.assertEqual(256, workers_for_level(256, 256))
+        self.assertEqual(32, workers_for_level(64, 32))
     def test_seed_dependency_is_limited_to_memory_backed_scenarios(self) -> None:
         self.assertTrue(
             _scenario_requires_seed(
@@ -837,6 +844,8 @@ class FormalSuiteAdapterTests(unittest.TestCase):
                     "tenant", "session_id", "status", "end_to_end_s", "archive_id",
                     "queue_wait_s",
                     "admission_wait_s", "admission_queue_depth", "request_id",
+                    "http_status", "error_type", "retry_count", "retried",
+                    "retry_total_wait_ms", "retry_after_s", "reason_code",
                 ],
                 list(commit_rows[0].keys()),
             )
@@ -853,12 +862,15 @@ class FormalSuiteAdapterTests(unittest.TestCase):
                 search_rows = list(csv.DictReader(handle))
             self.assertEqual(
                 [
-                    "tenant", "session_id", "status_code", "service_s", "queue_wait_s",
-                    "request_id", "retry_after_s", "reason_code",
+                    "tenant", "session_id", "status_code", "service_s", "end_to_end_s",
+                    "queue_wait_s", "request_id", "error_type", "error_class",
+                    "error_detail", "retry_after_s", "reason_code", "query_kind",
+                    "query", "hit_count", "real_recall", "degraded", "quality_ok",
                 ],
                 list(search_rows[0].keys()),
             )
             self.assertEqual(["200", "429", "0"], [row["status_code"] for row in search_rows])
+            self.assertEqual("0.200", search_rows[1]["end_to_end_s"])
             self.assertEqual("1.0", search_rows[1]["retry_after_s"])
             self.assertEqual("lane_full", search_rows[1]["reason_code"])
 

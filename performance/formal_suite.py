@@ -1552,6 +1552,13 @@ def _write_case_csvs(output: Path, rows: list[dict[str, str]]) -> None:
                 # CSV remains joinable; new runner output always uses the
                 # true HTTP X-Request-ID.
                 "request_id": row.get("request_id") or session_id,
+                "http_status": row.get("http_status") or "",
+                "error_type": row.get("error_type") or "",
+                "retry_count": row.get("retry_count") or "0",
+                "retried": row.get("retried") or "false",
+                "retry_total_wait_ms": row.get("retry_total_wait_ms") or "0",
+                "retry_after_s": row.get("retry_after_s") or "",
+                "reason_code": row.get("reason_code") or "",
             }
         )
     with (output / "commit_results.csv").open("w", newline="", encoding="utf-8") as handle:
@@ -1561,6 +1568,8 @@ def _write_case_csvs(output: Path, rows: list[dict[str, str]]) -> None:
                 "tenant", "session_id", "status", "end_to_end_s",
                 "archive_id",
                 "queue_wait_s", "admission_wait_s", "admission_queue_depth", "request_id",
+                "http_status", "error_type", "retry_count", "retried",
+                "retry_total_wait_ms", "retry_after_s", "reason_code",
             ],
         )
         writer.writeheader()
@@ -1584,10 +1593,20 @@ def _write_case_csvs(output: Path, rows: list[dict[str, str]]) -> None:
                 "session_id": row.get("session_id") or "",
                 "status_code": status_code,
                 "service_s": f"{service_s:.3f}" if service_s is not None else "",
+                "end_to_end_s": f"{service_s:.3f}" if service_s is not None else "",
                 "queue_wait_s": "",
                 "request_id": row.get("request_id") or row.get("session_id") or "",
+                "error_type": row.get("error_type") or "",
+                "error_class": row.get("error_class") or "",
+                "error_detail": row.get("error_detail") or "",
                 "retry_after_s": row.get("retry_after_s") or "",
                 "reason_code": row.get("reason_code") or "",
+                "query_kind": row.get("query_kind") or "",
+                "query": row.get("query") or "",
+                "hit_count": row.get("hit_count") or "0",
+                "real_recall": row.get("real_recall") or "false",
+                "degraded": row.get("degraded") or "false",
+                "quality_ok": row.get("quality_ok") or "true",
             }
         )
     with (output / "search_results.csv").open("w", newline="", encoding="utf-8") as handle:
@@ -1595,7 +1614,10 @@ def _write_case_csvs(output: Path, rows: list[dict[str, str]]) -> None:
             handle,
             fieldnames=[
                 "tenant", "session_id", "status_code", "service_s",
-                "queue_wait_s", "request_id", "retry_after_s", "reason_code",
+                "end_to_end_s", "queue_wait_s", "request_id",
+                "error_type", "error_class", "error_detail",
+                "retry_after_s", "reason_code", "query_kind", "query",
+                "hit_count", "real_recall", "degraded", "quality_ok",
             ],
         )
         writer.writeheader()

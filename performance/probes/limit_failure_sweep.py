@@ -25,6 +25,17 @@ except ImportError:
     )
 
 
+def workers_for_level(level: int, configured_cap: int = 0) -> int:
+    """Return the concurrency for one sweep level.
+
+    A configured ``workers`` value is intentionally a ceiling.  Treating it
+    as a fixed value makes every level identical and invalidates the sweep.
+    """
+    level = max(1, int(level))
+    cap = int(configured_cap or 0)
+    return max(1, min(level, cap)) if cap > 0 else level
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--base-url", required=True)
@@ -70,8 +81,11 @@ def main() -> int:
         )
     rows = []
     for workers in levels:
-        # Keep each level bounded while making the arrival burst visible.
-        effective_workers = args.workers if args.workers > 0 else workers
+        # ``--workers`` is an upper bound, not a replacement for the level.
+        # Otherwise a configured value such as 256 would silently run every
+        # 16/64/128/256 level at the same concurrency and the sweep would not
+        # measure a capacity boundary at all.
+        effective_workers = workers_for_level(workers, args.workers)
         default_count = min(512, max(32, effective_workers * 2))
         counts = {
             "search": args.search_count if args.search_count > 0 else default_count,
