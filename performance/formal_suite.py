@@ -153,6 +153,7 @@ SCENARIOS: dict[str, dict[str, Any]] = {
         "commit_rpm_per_tenant": 2.0,
         "sessions_per_tenant": 4,
         "messages_per_session": 3,
+        "search_query_profile": "no-recall-only",
         "steady_state_fairness": True,
         "min_commit_submitted_per_tenant": 6,
     },
@@ -2747,7 +2748,11 @@ def main() -> int:
         and not bool(args.skip_seed)
         and not bool(args.no_seed_reuse)
     )
-    seed_ready = bool(args.reuse_existing_data or args.skip_seed)
+    # ``--reuse-existing-data`` means that the configured tenants already have
+    # usable memory and may be reused. ``--skip-seed`` is different: it
+    # explicitly requests empty-session black-box traffic and must never be
+    # converted into a seed reuse decision.
+    seed_ready = bool(args.reuse_existing_data and not args.skip_seed)
     seed_warmup_failed = False
     if auto_reuse_seed:
         if args.quick_mode:
@@ -2930,6 +2935,9 @@ def main() -> int:
                     args.search_queries = _seed_anchor_queries(seed_tenant_count)
                     args.skip_seed = False
                 elif seed_warmup_failed:
+                    args.reuse_existing_data = False
+                    args.skip_seed = True
+                elif args.skip_seed:
                     args.reuse_existing_data = False
                     args.skip_seed = True
                 elif not requires_seed:

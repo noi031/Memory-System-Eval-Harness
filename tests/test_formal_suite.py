@@ -563,6 +563,26 @@ class FormalSuiteAdapterTests(unittest.TestCase):
             )
             self.assertIn("--skip-seed", command)
 
+    def test_capacity_skip_seed_keeps_no_recall_profile(self) -> None:
+        case = {
+            **SCENARIOS["capacity-2"],
+            "search_query_profile": "no-recall-only",
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "out"
+            command = _build_case_command(
+                self._args(skip_seed=True),
+                case,
+                output.parent / "tenants.json",
+                output,
+                15.0,
+            )
+        self.assertIn("--skip-seed", command)
+        self.assertEqual(
+            "no-recall-only",
+            self._flag_value(command, "--search-query-profile"),
+        )
+
     def test_build_case_command_overrides_seed_session_count(self) -> None:
         case = {
             "tenants": 4,
