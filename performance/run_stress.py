@@ -169,6 +169,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="locomo 样本过滤器: 单个 sample_id / 逗号分隔多个 / all (默认 conv-30)",
     )
     g.add_argument("--seed-sessions-per-tenant", type=int, default=5, help="每租户种子 session 数 (locomo 源时由数据集会话数决定)")
+    g.add_argument(
+        "--active-sessions-per-tenant",
+        type=int,
+        default=1,
+        help="无 seed 时每租户创建的真实空 session 数，用于容量/活跃用户代理",
+    )
     g.add_argument("--messages-per-session", type=int, default=10, help="每个 session 的消息条数 (写事务也用它)")
     g.add_argument(
         "--skip-seed",
@@ -1213,6 +1219,7 @@ def main() -> None:
                 0 if args.skip_seed else args.seed_sessions_per_tenant,
                 args.messages_per_session,
                 args.commit_poll_timeout_s,
+                active_sessions_per_tenant=args.active_sessions_per_tenant,
                 locomo_batches=(
                     load_locomo_seed_batches(
                         resolved["seed_dataset_path"], args.sample_filter
@@ -1441,7 +1448,14 @@ def main() -> None:
                 },
                 "data_scale": {
                     "tenants": len(tenants),
+                    "tenant_count": len(tenants),
                     "sessions_per_tenant": args.seed_sessions_per_tenant,
+                    "active_sessions_per_tenant": args.active_sessions_per_tenant,
+                    "active_user_count": sum(len(tenant.active_session_ids) for tenant in tenants),
+                    "active_users_by_tenant": {
+                        str(tenant.idx): len(tenant.active_session_ids)
+                        for tenant in tenants
+                    },
                     "skip_seed": args.skip_seed,
                     "messages_per_session": args.messages_per_session,
                     "queries_per_tenant": [len(tenant.queries) for tenant in tenants],

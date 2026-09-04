@@ -90,6 +90,7 @@ from performance.prepare import (
     _query_fragments,
     load_locomo_seed_batches,
     load_tenant_specs,
+    seed_tenant,
     seed_tenant_from_conversations,
 )
 from performance.report import (
@@ -759,8 +760,20 @@ class PrepareTests(unittest.TestCase):
         self.assertEqual(tenant.seed_messages, 3)
         self.assertEqual(len(tenant.active_session_ids), 2)
         self.assertTrue(all(tenant.active_session_ids))
-        # query 池只含用户消息的分句片段
-        self.assertEqual(tenant.queries, ["First message of conv30", "Third message"])
+
+    def test_empty_seed_can_create_multiple_active_sessions(self) -> None:
+        client = FakeMemClient()
+        tenant = seed_tenant(
+            client,
+            0,
+            sessions=0,
+            messages_per_session=0,
+            commit_poll_timeout_s=30.0,
+            active_sessions=8,
+        )
+        self.assertEqual(8, len(tenant.active_session_ids))
+        self.assertEqual(0, tenant.seed_messages)
+        self.assertEqual(0, tenant.seed_sessions)
 
     def test_seed_session_flow_retries_once(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

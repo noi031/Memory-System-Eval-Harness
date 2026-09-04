@@ -1066,7 +1066,7 @@ python3 -m performance.objective_suite \
   --out-dir results/objective-suite-custom
 ```
 
-正式数据去掉 `--quick`。O1 按活跃用户的 Search SLO 评估容量，Commit 洪泛由 O5 单独验收；
+正式数据去掉 `--quick`。O1 按活跃 session 数对应的活跃用户代理和 Search SLO 评估容量，Commit 洪泛由 O5 单独验收；
 容量档位超时只有在超时前已实际发出 Search 请求时才算边界；准备阶段或 Commit 阶段卡住不能冒充 Search 容量上限。
 O1 只有在“Search 成功容量档位 + 更高一档真实失败/超时/资源边界”
 同时存在时才会判定为 PASS；如果所有已跑档位都成功，报告只给出“至少支持到 N”
@@ -1148,6 +1148,12 @@ Embedding、`ECHOMEM_AUTO_COMMIT_THRESHOLD=20000` 和 4U8G 资源档位。测试
 容量场景的 `K` 负载在 `commit-rpm=0` 时严格只启动 Search worker，不会因为
 默认的读写线程拆分而偷偷发起 Commit；这保证容量档位测的是活跃用户的 Search
 边界，而不是异步 Commit 的完成时间。
+容量场景中的 `capacity_active_users` 是目标活跃用户代理数，`tenants` 是真实独立租户数，
+`active_sessions_per_tenant` 是每租户创建的真实空 session 数。比如 `capacity-32`
+使用 4 个独立租户、每租户 8 个 session，得到 32 个活跃用户代理；它不要求准备 32
+个 API key，也不把“租户数”冒充“DAU”。结果中的 `data_scale.active_user_count`、
+`active_users_by_tenant` 和 `tenant_details[*].active_session_ids` 用于复核实际创建和参与
+压测的身份数量。
 `fairness-bounded`、`search-priority-blackbox`、`saturation` 等需要真实竞争样本的
 场景会使用有界 barrier 上限（默认 32 个 Commit）；少于 32 个只能报告
 `INCONCLUSIVE`，不能验收严格 Search 优先级。quick 模式如果打开真实模型灌种，

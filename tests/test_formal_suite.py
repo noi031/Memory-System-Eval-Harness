@@ -123,7 +123,24 @@ class Report6ScenarioTests(unittest.TestCase):
 
         self.assertEqual(
             {2, 4, 8, 16, 32},
-            {scenarios[f"capacity-{count}"]["tenants"] for count in (2, 4, 8, 16, 32)},
+            {
+                scenarios[f"capacity-{count}"]["capacity_active_users"]
+                for count in (2, 4, 8, 16, 32)
+            },
+        )
+        self.assertEqual(
+            {2, 4},
+            {
+                scenarios[f"capacity-{count}"]["tenants"]
+                for count in (2, 4, 8, 16, 32)
+            },
+        )
+        self.assertEqual(
+            {1, 2, 4, 8},
+            {
+                scenarios[f"capacity-{count}"]["active_sessions_per_tenant"]
+                for count in (2, 4, 8, 16, 32)
+            },
         )
         self.assertTrue(
             all(
@@ -298,7 +315,10 @@ class Report6ScenarioTests(unittest.TestCase):
 
         for count in (2, 4, 8, 16, 32):
             self.assertIn(f"capacity-{count}", scenarios)
-            self.assertEqual(count, scenarios[f"capacity-{count}"]["tenants"])
+            self.assertLessEqual(scenarios[f"capacity-{count}"]["tenants"], 4)
+            self.assertEqual(
+                count, scenarios[f"capacity-{count}"]["capacity_active_users"]
+            )
 
     def test_instance_profile_example_matches_available_machine_sizes(self) -> None:
         path = (
@@ -465,6 +485,25 @@ class FormalSuiteAdapterTests(unittest.TestCase):
             duration_s=15.0,
         )
         self.assertEqual("0.0", self._flag_value(command, "--commit-rpm"))
+        self.assertEqual(
+            "1",
+            self._flag_value(command, "--active-sessions-per-tenant"),
+        )
+
+    def test_capacity_command_uses_active_session_target(self) -> None:
+        args = self._args()
+        command = _build_case_command(
+            args,
+            SCENARIO_PROFILES["4u8g"]["capacity-32"],
+            Path("/tmp/tenants.json"),
+            Path("/tmp/out"),
+            duration_s=15.0,
+        )
+        self.assertEqual("4", self._flag_value(command, "--tenants"))
+        self.assertEqual(
+            "8",
+            self._flag_value(command, "--active-sessions-per-tenant"),
+        )
 
     def test_build_case_command_can_reuse_existing_data_without_seed(self) -> None:
         case = {

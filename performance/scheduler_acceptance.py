@@ -243,6 +243,7 @@ def _capacity(suite: dict[str, Any]) -> dict[str, Any]:
     timeout_levels = []
     hot_user_candidates: list[int] = []
     activity_by_level: dict[str, dict[str, Any]] = {}
+    capacity_targets: dict[str, int] = {}
     activity_missing_levels: list[int] = []
     for run in _suite_runs(suite):
         scenario = scenario_name(run)
@@ -252,6 +253,14 @@ def _capacity(suite: dict[str, Any]) -> dict[str, Any]:
             if not level_text.isdigit():
                 continue
             level = int(level_text)
+            scenario_config = run.get("scenario_config")
+            if isinstance(scenario_config, dict):
+                try:
+                    capacity_targets[str(level)] = int(
+                        scenario_config.get("capacity_active_users") or level
+                    )
+                except (TypeError, ValueError):
+                    capacity_targets[str(level)] = level
             activity = (_run_summary(run).get("details") or {}).get("user_activity")
             if isinstance(activity, dict):
                 activity_by_level[str(level)] = activity
@@ -332,7 +341,16 @@ def _capacity(suite: dict[str, Any]) -> dict[str, Any]:
             "timeout_capacity_levels": sorted(set(timeout_levels)),
             "activity_missing_levels": sorted(set(activity_missing_levels)),
             "capacity_boundary_levels": sorted(set(boundary_levels)),
-            "max_completed_active_user_proxy": max_valid_level,
+            "capacity_target_active_users": {
+                key: capacity_targets[key]
+                for key in sorted(capacity_targets, key=int)
+            },
+            "max_valid_capacity_level": max_valid_level,
+            "max_valid_active_user_count": (
+                capacity_targets.get(str(max_valid_level), max_valid_level)
+                if max_valid_level is not None
+                else None
+            ),
             "max_hot_user_proxy": max(hot_user_candidates, default=None),
             "user_activity_by_capacity_level": activity_by_level,
             "max_measured_active_user_count": max(

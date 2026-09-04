@@ -363,6 +363,56 @@ class SchedulerAcceptanceTests(unittest.TestCase):
         self.assertEqual(PASS, check["status"])
         self.assertEqual([8], check["observed"]["capacity_boundary_levels"])
 
+    def test_capacity_reports_active_user_target_separately_from_tenants(self) -> None:
+        result = evaluate(
+            {
+                "instance_profile": "4U8G",
+                "runs": [
+                    {
+                        "scenario": "capacity-4",
+                        "status": "completed",
+                        "scenario_config": {
+                            "tenant_count": 4,
+                            "capacity_active_users": 4,
+                        },
+                        "summary": {
+                            "metrics": {
+                                "search": {"submitted": 4, "success_rate": 1.0},
+                            },
+                            "details": {
+                                "user_activity": {
+                                    "active_user_count": 4,
+                                    "hot_user_proxy": {"request_count": 4},
+                                }
+                            },
+                        },
+                    },
+                    {
+                        "scenario": "capacity-8",
+                        "status": "completed",
+                        "scenario_config": {
+                            "tenant_count": 4,
+                            "capacity_active_users": 8,
+                        },
+                        "summary": {
+                            "metrics": {
+                                "search": {"submitted": 8, "success_rate": 0.5},
+                            }
+                        },
+                    },
+                ],
+            }
+        )
+        check = next(
+            item for item in result["checks"]
+            if item["name"] == "DAU / 最大热用户容量"
+        )
+        self.assertEqual(4, check["observed"]["max_valid_active_user_count"])
+        self.assertEqual(
+            {"4": 4, "8": 8},
+            check["observed"]["capacity_target_active_users"],
+        )
+
     def test_capacity_does_not_require_commit_success(self) -> None:
         result = evaluate(
             {

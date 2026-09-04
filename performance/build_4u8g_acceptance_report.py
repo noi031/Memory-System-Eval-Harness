@@ -100,6 +100,18 @@ def run_record(run: dict[str, Any]) -> dict[str, Any]:
         if isinstance(details.get("pr421_metric_coverage"), dict)
         else {}
     )
+    scenario_config = run.get("scenario_config") if isinstance(run.get("scenario_config"), dict) else {}
+    # formal_suite keeps the capacity target in the scenario catalog. Accept
+    # both the enriched manifest field and the older run shape.
+    capacity_active_users = (
+        run.get("capacity_active_users")
+        or scenario_config.get("capacity_active_users")
+    )
+    tenant_count = (
+        run.get("tenant_count")
+        or scenario_config.get("tenant_count")
+        or scenario_config.get("tenants")
+    )
     return {
         "scenario": run.get("scenario"),
         "label": run.get("scenario_label") or run.get("scenario"),
@@ -121,6 +133,8 @@ def run_record(run: dict[str, Any]) -> dict[str, Any]:
         "commit_rate_limited": commit.get("rate_limited_count"),
         "commit_success_rate": commit.get("success_rate"),
         "active_users": activity.get("active_user_count"),
+        "capacity_active_users": capacity_active_users,
+        "tenant_count": tenant_count,
         "hot_user": (activity.get("hot_user_proxy") or {}).get("request_count"),
         "overlap": (details.get("same_window_overlap") or {}).get("overlap_proven"),
         "overlap_ms": (details.get("same_window_overlap") or {}).get("overlap_ms"),
@@ -204,8 +218,8 @@ def build(args: argparse.Namespace) -> Path:
     recovery = read_json(args.recovery, {}) if args.recovery else {}
     coverage = metric_coverage(records)
 
-    # O1: the run reached 4 active users and the 8-user case timed out, but
-    # this is not a formal maximum without a clean next successful/failed edge.
+    # O1 is reported in active-user proxies, not tenant-count labels. A
+    # successful point alone is still only a lower bound.
     capacity = {
         record["scenario"]: record
         for record in records
@@ -213,7 +227,7 @@ def build(args: argparse.Namespace) -> Path:
     }
     max_observed_capacity = max(
         (
-            int(name.split("-", 1)[1])
+            int(record["active_users"] or 0)
             for name, record in capacity.items()
             if int(record["search_submitted"] or 0) > 0
             and int(record["active_users"] or 0) > 0
@@ -222,7 +236,7 @@ def build(args: argparse.Namespace) -> Path:
     )
     max_99pct_capacity = max(
         (
-            int(name.split("-", 1)[1])
+            int(record["active_users"] or 0)
             for name, record in capacity.items()
             if record["status"] == "completed"
             and int(record["search_submitted"] or 0) > 0
@@ -232,6 +246,8 @@ def build(args: argparse.Namespace) -> Path:
     )
     capacity_active_users = {
         int(name.split("-", 1)[1]): {
+            "capacity_target_active_users": record.get("capacity_active_users"),
+            "tenant_count": record.get("tenant_count"),
             "active_users": record["active_users"],
             "hot_user_requests": record["hot_user"],
             "search_submitted": record["search_submitted"],
@@ -260,8 +276,9 @@ def build(args: argparse.Namespace) -> Path:
     )
     o1_status = INCONCLUSIVE
     o1_reason = (
-        f"本轮容量场景实际观察到 {max_observed_capacity} 租户；"
-        f"按 Search 成功率 >=99% 的严格口径，合格档位为 {max_99pct_capacity}；"
+        f"本轮容量场景使用活跃 session 作为用户代理，最大实测活跃用户数为 "
+        f"{max_capacity_active_users}，最大热用户请求数为 {max_capacity_hot_requests}；"
+        f"按 Search 成功率 >=99% 的严格口径，合格容量档位为 {max_99pct_capacity}；"
         "尚未形成可复核的“合格档+下一档明确失败”容量边界。"
     )
 
@@ -401,7 +418,8 @@ def build(args: argparse.Namespace) -> Path:
     )
     generated_at = suite_payload.get("created_at") or "2026-09-03"
     capacity_rows = "".join(
-        f"<tr><td>{level}</td>"
+        f"<tr><td>{esc(item.get('capacity_target_active_users') or level)}</td>"
+        f"<td>{esc(item.get('tenant_count') or '-')}</td>"
         f"<td>{esc(item.get('status'))}</td>"
         f"<td>{esc(item.get('active_users'))}</td>"
         f"<td>{esc(item.get('hot_user_requests'))}</td>"
@@ -410,7 +428,7 @@ def build(args: argparse.Namespace) -> Path:
         for level, item in sorted(capacity_active_users.items())
     )
     if not capacity_rows:
-        capacity_rows = "<tr><td colspan='6' class='empty'>没有 capacity-* 场景记录</td></tr>"
+        capacity_rows = "<tr><td colspan='7' class='empty'>没有 capacity-* 场景记录</td></tr>"
     fairness_rows = ""
     if fairness_record:
         fairness_rows = "".join(
@@ -461,14 +479,14 @@ ul{{margin:8px 0;padding-left:20px}}details{{margin-top:10px}}summary{{cursor:po
 <header><div><div class="muted">黑盒验收 / 4U8G</div><h1>EchoMem 六项指标实测报告</h1><div class="muted">develop · 4U8G · 真实模型 · soak 关闭</div></div>
 <div class="meta">生成时间：{esc(generated_at)}<br>测试对象：EchoMem develop<br>服务版本：0.4.3</div></header>
 <div class="grid">{objective_cards}</div>
-<section><h2>结论先看</h2><p>本轮正式场景共完成 {len(records)} 个，其中容量场景实际观察到 {max_observed_capacity} 租户；按 99% Search 成功率严格口径暂无合格容量档。服务端 Search 大多有响应，但真实 Commit 抽取/队列等待和限流是主要干扰来源。</p>
+<section><h2>结论先看</h2><p>本轮正式场景共完成 {len(records)} 个，其中容量场景实际观察到最多 {max_observed_capacity} 个活跃用户代理；按 99% Search 成功率严格口径暂无合格容量边界。服务端 Search 大多有响应，但真实 Commit 抽取/队列等待和限流是主要干扰来源。</p>
 <p>当前不能把六项全部判定为通过：O2 缺少真实故障控制，O3 不是稳态固定速率，O4 洪泛中有大量拒绝/超时，O5 只完成一次恢复且幂等重放未充分证明，O6 的 lane 四元组或 fan-out 覆盖仍不完整。</p></section>
 <section class="scroll"><h2>本轮场景数据</h2>
 <p class="muted">Search 分母包含失败和限流请求；Commit 的提交、完成、失败、超时分别列出，不用完成数替代提交数。</p>
 <table><thead><tr><th>场景</th><th>用途</th><th>状态</th><th>Search 请求</th><th>成功/提交</th><th>成功率</th><th>HTTP 错误</th><th>限流</th><th>质量失败</th><th>Search P95(ms)</th><th>Commit 提交</th><th>完成</th><th>失败</th><th>超时</th><th>CPU 均值</th><th>RSS 峰值(MB)</th><th>原始制品</th></tr></thead><tbody>{"".join(scenario_rows)}</tbody></table></section>
 <section><h2>Search P95 可视化</h2><p class="muted">横向柱状图按场景展示客户端 Search P95；它只表示延迟，不代表记忆质量。</p>{chart}</section>
 <section><h2>容量与公平性明细</h2>
-<div class="two"><div><h3>容量阶梯（只看 capacity 场景）</h3><table><thead><tr><th>租户档位</th><th>状态</th><th>Active users</th><th>热用户请求</th><th>Search 成功/提交</th><th>错误</th></tr></thead><tbody>{capacity_rows}</tbody></table></div>
+<div class="two"><div><h3>容量阶梯（只看 capacity 场景）</h3><table><thead><tr><th>目标活跃用户</th><th>真实租户数</th><th>状态</th><th>实测 Active users</th><th>热用户请求</th><th>Search 成功/提交</th><th>错误</th></tr></thead><tbody>{capacity_rows}</tbody></table></div>
 <div><h3>fairness-bounded 每租户数据</h3><table><thead><tr><th>租户</th><th>Commit 提交</th><th>完成</th><th>Search 提交</th><th>成功</th><th>P95(ms)</th></tr></thead><tbody>{fairness_rows}</tbody></table></div></div>
 <div class="two"><div><h3>公平性计算</h3><p>本轮每租户 Commit 完成数：{esc(tenant_commit or '-')}。</p><p>Commit Jain：<strong>{num(commit_jain, 4)}</strong></p><p>Search latency utility Jain：<strong>{num(search_jain, 4)}</strong></p><p class="muted">计算公式：Jain(x) = (Σx)² / (n × Σx²)。当前仍标记 INCONCLUSIVE，因为 bounded barrier 不是正式稳态固定速率窗口。</p></div>
 <div><h2>优先级对照</h2><p>Baseline Search P95：{num((baseline["search_p95_s"] if baseline else None) * 1000)} ms</p><p>洪泛 Search P95：{num((priority["search_p95_s"] if priority else None) * 1000)} ms</p><p>劣化倍数：<strong>{num(priority_ratio, 3)}x</strong></p><p>重叠窗口：{esc(priority["overlap_ms"] if priority else None)} ms；不能单凭“Search 没完全超时”证明严格优先级。</p></div></section>

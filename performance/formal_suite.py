@@ -206,8 +206,10 @@ SCENARIOS: dict[str, dict[str, Any]] = {
         "messages_per_session": 3,
     },
     "capacity-16": {
-        "label": "16 租户容量阶梯",
-        "tenants": 16,
+        "label": "16 活跃用户容量阶梯（4 租户 × 4 session）",
+        "tenants": 4,
+        "capacity_active_users": 16,
+        "active_sessions_per_tenant": 4,
         "duration_s": 300,
         "search_rps": 16.0,
         # Capacity is a Search-only measurement. Commit completion belongs
@@ -219,8 +221,10 @@ SCENARIOS: dict[str, dict[str, Any]] = {
         "messages_per_session": 3,
     },
     "capacity-2": {
-        "label": "2 租户容量阶梯",
+        "label": "2 活跃用户容量阶梯（2 租户 × 1 session）",
         "tenants": 2,
+        "capacity_active_users": 2,
+        "active_sessions_per_tenant": 1,
         "duration_s": 180,
         "search_rps": 2.0,
         "commit_rpm": 0.0,
@@ -229,8 +233,10 @@ SCENARIOS: dict[str, dict[str, Any]] = {
         "messages_per_session": 3,
     },
     "capacity-4": {
-        "label": "4 租户容量阶梯",
+        "label": "4 活跃用户容量阶梯（4 租户 × 1 session）",
         "tenants": 4,
+        "capacity_active_users": 4,
+        "active_sessions_per_tenant": 1,
         "duration_s": 180,
         "search_rps": 4.0,
         "commit_rpm": 0.0,
@@ -239,8 +245,10 @@ SCENARIOS: dict[str, dict[str, Any]] = {
         "messages_per_session": 3,
     },
     "capacity-8": {
-        "label": "8 租户容量阶梯",
-        "tenants": 8,
+        "label": "8 活跃用户容量阶梯（4 租户 × 2 session）",
+        "tenants": 4,
+        "capacity_active_users": 8,
+        "active_sessions_per_tenant": 2,
         "duration_s": 180,
         "search_rps": 8.0,
         "commit_rpm": 0.0,
@@ -248,8 +256,10 @@ SCENARIOS: dict[str, dict[str, Any]] = {
         "messages_per_session": 3,
     },
     "capacity-32": {
-        "label": "32 租户容量阶梯",
-        "tenants": 32,
+        "label": "32 活跃用户容量阶梯（4 租户 × 8 session）",
+        "tenants": 4,
+        "capacity_active_users": 32,
+        "active_sessions_per_tenant": 8,
         "duration_s": 300,
         "search_rps": 32.0,
         "commit_rpm": 0.0,
@@ -758,6 +768,13 @@ def _budget_exhausted_run(
     return {
         "scenario": scenario,
         "scenario_label": case["label"],
+        "scenario_config": {
+            "tenant_count": int(case.get("tenants") or 1),
+            "capacity_active_users": case.get("capacity_active_users"),
+            "active_sessions_per_tenant": int(
+                case.get("active_sessions_per_tenant") or 1
+            ),
+        },
         "repetition": repetition,
         "policy": policy,
         "status": "TIMEOUT",
@@ -950,6 +967,14 @@ def _build_case_command(
         str(output / "run"),
         "--seed-sessions-per-tenant",
         str(seed_sessions),
+        "--active-sessions-per-tenant",
+        str(
+            int(
+                getattr(args, "active_sessions_per_tenant", None)
+                or case.get("active_sessions_per_tenant")
+                or 1
+            )
+        ),
         "--messages-per-session",
         str(case.get("messages_per_session", 10)),
         "--commit-poll-timeout-s",
@@ -2371,6 +2396,15 @@ def main() -> int:
         ),
     )
     parser.add_argument(
+        "--active-sessions-per-tenant",
+        type=int,
+        default=None,
+        help=(
+            "无 seed 的容量场景为每租户创建的真实空 session 数；"
+            "用于把 active session 作为活跃用户压测代理"
+        ),
+    )
+    parser.add_argument(
         "--preflight-config",
         default=os.getenv("ECHOMEM_CONFIG", ""),
         help="EchoMem config.json to validate before the suite starts",
@@ -2446,6 +2480,11 @@ def main() -> int:
         parser.error("--health-poll-s must be > 0")
     if args.seed_sessions_per_tenant is not None and args.seed_sessions_per_tenant < 0:
         parser.error("--seed-sessions-per-tenant must be >= 0")
+    if (
+        args.active_sessions_per_tenant is not None
+        and args.active_sessions_per_tenant < 1
+    ):
+        parser.error("--active-sessions-per-tenant must be >= 1")
     if args.quick_seed_tenant_cap < 1:
         parser.error("--quick-seed-tenant-cap must be >= 1")
     if args.profile in {"report6", "4u8g", "4u8g-full", "complete"} and not args.preflight_config:

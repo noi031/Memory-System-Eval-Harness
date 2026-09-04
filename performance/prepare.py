@@ -467,6 +467,7 @@ def seed_tenant(
     commit_poll_timeout_s: float,
     *,
     poll_interval_s: float = 1.0,
+    active_sessions: int = 1,
 ) -> TenantContext:
     """Inject seed conversations and build the tenant's query pool.
 
@@ -481,11 +482,11 @@ def seed_tenant(
     seed_messages = 0
     started = time.perf_counter()
     if sessions <= 0:
-        # Even a skip-seed load needs a real session identity.  Without one,
-        # the runner sends session-less Search requests and capacity reports
-        # cannot distinguish active users from an empty preparation phase.
-        session_id = client.open_session(title=f"perf-active-{idx}")
-        active_session_ids.append(session_id)
+        # Capacity/admission cases need real session identities but must not
+        # pay for model-backed seed Commit.  Open empty sessions instead.
+        for session_idx in range(max(1, int(active_sessions))):
+            session_id = client.open_session(title=f"perf-active-{idx}-{session_idx}")
+            active_session_ids.append(session_id)
         return TenantContext(
             idx=idx,
             tenant_id=client.account,
@@ -660,6 +661,7 @@ class TenantPreparer:
         commit_poll_timeout_s: float,
         *,
         locomo_batches: list[list[dict[str, Any]]] | None = None,
+        active_sessions_per_tenant: int = 1,
     ) -> list[TenantContext]:
         """Provision/bind identities and seed tenants with bounded parallelism.
 
@@ -688,6 +690,7 @@ class TenantPreparer:
                     messages_per_session,
                     commit_poll_timeout_s,
                     locomo_batches,
+                    active_sessions_per_tenant,
                 )
 
             with ThreadPoolExecutor(
@@ -716,6 +719,7 @@ class TenantPreparer:
                         messages_per_session,
                         commit_poll_timeout_s,
                         locomo_batches,
+                        active_sessions_per_tenant,
                     )
                 )
         elif self.auth_mode == "static":
@@ -736,6 +740,7 @@ class TenantPreparer:
                     messages_per_session,
                     commit_poll_timeout_s,
                     locomo_batches,
+                    active_sessions_per_tenant,
                 )
             )
         else:
@@ -782,6 +787,7 @@ class TenantPreparer:
         messages_per_session: int,
         commit_poll_timeout_s: float,
         locomo_batches: list[list[dict[str, Any]]] | None,
+        active_sessions_per_tenant: int,
     ) -> TenantContext:
         if locomo_batches:
             return seed_tenant_from_conversations(
@@ -796,4 +802,5 @@ class TenantPreparer:
             seed_sessions,
             messages_per_session,
             commit_poll_timeout_s,
+            active_sessions=active_sessions_per_tenant,
         )
