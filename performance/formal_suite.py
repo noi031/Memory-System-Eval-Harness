@@ -219,6 +219,7 @@ SCENARIOS: dict[str, dict[str, Any]] = {
         "quick_commit_rpm": 0.0,
         "sessions_per_tenant": 2,
         "messages_per_session": 3,
+        "search_query_profile": "no-recall-only",
     },
     "capacity-2": {
         "label": "2 活跃用户容量阶梯（2 租户 × 1 session）",
@@ -231,6 +232,7 @@ SCENARIOS: dict[str, dict[str, Any]] = {
         "quick_commit_rpm": 0.0,
         "sessions_per_tenant": 2,
         "messages_per_session": 3,
+        "search_query_profile": "no-recall-only",
     },
     "capacity-4": {
         "label": "4 活跃用户容量阶梯（4 租户 × 1 session）",
@@ -243,6 +245,7 @@ SCENARIOS: dict[str, dict[str, Any]] = {
         "quick_commit_rpm": 0.0,
         "sessions_per_tenant": 2,
         "messages_per_session": 3,
+        "search_query_profile": "no-recall-only",
     },
     "capacity-8": {
         "label": "8 活跃用户容量阶梯（4 租户 × 2 session）",
@@ -254,6 +257,7 @@ SCENARIOS: dict[str, dict[str, Any]] = {
         "commit_rpm": 0.0,
         "sessions_per_tenant": 2,
         "messages_per_session": 3,
+        "search_query_profile": "no-recall-only",
     },
     "capacity-32": {
         "label": "32 活跃用户容量阶梯（4 租户 × 8 session）",
@@ -265,6 +269,7 @@ SCENARIOS: dict[str, dict[str, Any]] = {
         "commit_rpm": 0.0,
         "sessions_per_tenant": 2,
         "messages_per_session": 3,
+        "search_query_profile": "no-recall-only",
     },
     "search-priority-blackbox": {
         "label": "Search/Commit 同时到达（服务端优先级黑盒）",
@@ -1046,6 +1051,8 @@ def _build_case_command(
         cmd += ["--preflight-config", args.preflight_config]
     if getattr(args, "search_queries", ""):
         cmd += ["--search-queries", str(args.search_queries)]
+    if case.get("search_query_profile"):
+        cmd += ["--search-query-profile", str(case["search_query_profile"])]
     if args.no_server_metrics:
         cmd += ["--no-metrics"]
     if case.get("commit_barrier"):

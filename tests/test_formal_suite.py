@@ -522,6 +522,10 @@ class FormalSuiteAdapterTests(unittest.TestCase):
             "8",
             self._flag_value(command, "--active-sessions-per-tenant"),
         )
+        self.assertEqual(
+            "no-recall-only",
+            self._flag_value(command, "--search-query-profile"),
+        )
 
     def test_build_case_command_can_reuse_existing_data_without_seed(self) -> None:
         case = {
