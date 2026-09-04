@@ -66,7 +66,7 @@ class EvalConfigDefaultsTests(unittest.TestCase):
         self.assertEqual(cfg.agent_plugin, "bare_llm")
         # LLM
         self.assertEqual(cfg.llm_base_url, "")
-        self.assertEqual(cfg.llm_model, "doubao-seed-2.0-pro")
+        self.assertEqual(cfg.llm_model, "deepseek-v4-flash-0731")
         self.assertEqual(cfg.llm_api_key, "")
         self.assertEqual(cfg.llm_temperature, 0.7)
         self.assertEqual(cfg.llm_max_tokens, 2048)
@@ -244,8 +244,8 @@ class AddLlmArgsTests(unittest.TestCase):
         with patch("os.getenv", side_effect=lambda k, d=None: d):
             add_llm_args(parser)
         ns = parser.parse_args([])
-        self.assertEqual(ns.llm_base_url, "")
-        self.assertEqual(ns.llm_model, "doubao-seed-2.0-pro")
+        self.assertEqual(ns.llm_base_url, "https://dashscope.aliyuncs.com/compatible-mode/v1")
+        self.assertEqual(ns.llm_model, "deepseek-v4-flash-0731")
         self.assertEqual(ns.llm_api_key, "")
         self.assertEqual(ns.llm_temperature, 0.7)
         self.assertEqual(ns.llm_max_tokens, 2048)
@@ -535,7 +535,7 @@ class BuildConfigFromArgsTests(unittest.TestCase):
         self.assertEqual(cfg.memory_backend, "echomem")
         self.assertEqual(cfg.agent_plugin, "bare_llm")
         self.assertEqual(cfg.llm_base_url, "")
-        self.assertEqual(cfg.llm_model, "doubao-seed-2.0-pro")
+        self.assertEqual(cfg.llm_model, "deepseek-v4-flash-0731")
         self.assertEqual(cfg.llm_api_key, "")
         self.assertEqual(cfg.llm_temperature, 0.7)
         self.assertEqual(cfg.llm_max_tokens, 2048)
@@ -723,7 +723,9 @@ class EndToEndParamsTests(unittest.TestCase):
         add_eval_args(parser)
         with patch("os.getenv", side_effect=lambda k, d=None: d):
             add_llm_args(parser)
-        ns = parser.parse_args(["--llm-api-key", "k", "--llm-model", "m"])
+        ns = parser.parse_args(
+            ["--llm-base-url", "", "--llm-api-key", "k", "--llm-model", "m"],
+        )
         cfg = build_config_from_args(ns)
         with self.assertRaisesRegex(ValueError, "missing LLM base URL"):
             validate_eval_config(cfg)

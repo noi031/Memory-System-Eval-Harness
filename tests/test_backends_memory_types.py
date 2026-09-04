@@ -350,16 +350,16 @@ class BaseHTTPMemoryClientDoRequestTests(unittest.TestCase):
         with patch("urllib.request.urlopen", mock_open), patch("time.sleep"):
             with self.assertRaises(urllib.error.URLError):
                 client._do_request(self.req)
-        self.assertEqual(2, mock_open.call_count)
+        self.assertEqual(3, mock_open.call_count)
 
-    def test_max_retries_zero_raises_runtime_error(self) -> None:
+    def test_max_retries_zero_single_attempt_raises_last_error(self) -> None:
         err = urllib.error.URLError("refused")
         mock_open = MagicMock(side_effect=err)
         client = _ConcreteClient("http://test", max_retries=0)
         with patch("urllib.request.urlopen", mock_open), patch("time.sleep"):
-            with self.assertRaises(RuntimeError):
+            with self.assertRaises(urllib.error.URLError):
                 client._do_request(self.req)
-        self.assertEqual(0, mock_open.call_count)
+        self.assertEqual(1, mock_open.call_count)
 
     def test_5xx_exhausted_re_raises_http_error(self) -> None:
         err = _http_error(500, b"err")
@@ -369,7 +369,7 @@ class BaseHTTPMemoryClientDoRequestTests(unittest.TestCase):
             with self.assertRaises(urllib.error.HTTPError) as ctx:
                 client._do_request(self.req)
         self.assertEqual(500, ctx.exception.code)
-        self.assertEqual(2, mock_open.call_count)
+        self.assertEqual(3, mock_open.call_count)
 
 
 # ------------------------------------------------------------------ #

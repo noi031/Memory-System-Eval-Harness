@@ -241,7 +241,7 @@ class EchoMemMCPPlugin(AgentPlugin):
         self._llm = LLMClient(
             base_url=config.get("llm_base_url", ""),
             api_key=config.get("llm_api_key", ""),
-            model=config.get("llm_model", "doubao-seed-2.0-pro"),
+            model=config.get("llm_model", "deepseek-v4-flash-0731"),
             temperature=config.get("llm_temperature", 0.7),
             max_tokens=config.get("llm_max_tokens", 2048),
             timeout_s=config.get("llm_timeout_s", 120.0),

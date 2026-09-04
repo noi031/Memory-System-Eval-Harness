@@ -306,7 +306,7 @@ def build_config_from_args(args) -> EvalConfig:
         memory_backend=getattr(args, "memory_backend", "echomem"),
         agent_plugin=getattr(args, "agent_plugin", "bare_llm"),
         llm_base_url=getattr(args, "llm_base_url", ""),
-        llm_model=getattr(args, "llm_model", "doubao-seed-2.0-pro"),
+        llm_model=getattr(args, "llm_model", "deepseek-v4-flash-0731"),
         llm_api_key=getattr(args, "llm_api_key", ""),
         llm_temperature=getattr(args, "llm_temperature", 0.7),
         llm_max_tokens=getattr(args, "llm_max_tokens", 2048),

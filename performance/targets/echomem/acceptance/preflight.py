@@ -14,7 +14,7 @@ Config shape (JSON)::
 
     {"engines": [
         {"id": "atomic_engine", "kind": "llm", "api_key_env": "ARK_API_KEY",
-         "api_base": "https://...", "model": "doubao-seed-2.0-pro"}
+         "api_base": "https://...", "model": "deepseek-v4-flash-0731"}
     ]}
 
 A bare list of engine dicts is accepted too, as is the native EchoMem

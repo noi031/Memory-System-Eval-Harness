@@ -51,7 +51,7 @@ class LLMClient:
         self,
         base_url: str,
         api_key: str,
-        model: str = "doubao-seed-2.0-pro",
+        model: str = "deepseek-v4-flash-0731",
         temperature: float = 0.7,
         max_tokens: int = 2048,
         timeout_s: float = 120.0,
