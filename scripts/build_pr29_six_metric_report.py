@@ -36,7 +36,9 @@ OBJECTIVES = (
 )
 
 
-def load(path: Path) -> dict[str, Any]:
+def load(path: Path | None) -> dict[str, Any]:
+    if path is None:
+        return {}
     try:
         value = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
@@ -78,6 +80,22 @@ def load_formal_artifacts(formal: Path) -> dict[str, dict[str, Any]]:
         if artifact:
             artifacts[key] = artifact
     return artifacts
+
+
+def find_run_artifact(formal: Path, scenario: str, filename: str) -> Path | None:
+    """Find a normalized or timestamped artifact for one scenario."""
+    case_root = formal / str(scenario) / "repeat-01" / "server-observe"
+    direct = case_root / filename
+    if direct.is_file():
+        return direct
+    matches = sorted(case_root.glob(f"run/*/{filename}"))
+    return matches[-1] if matches else None
+
+
+def first_runner_config(formal: Path) -> dict[str, Any]:
+    """Read one non-secret runner config for report context."""
+    matches = sorted(formal.glob("*/repeat-01/server-observe/run/*/config.json"))
+    return load(matches[0]) if matches else {}
 
 
 def esc(value: Any) -> str:
@@ -177,11 +195,58 @@ def main() -> int:
         }
         formal = root / "4U8G" / "formal"
         formal_manifest = load(formal / "suite.json")
+        probe_artifacts = load_formal_artifacts(formal)
+        if probe_artifacts:
+            formal_manifest = {
+                **formal_manifest,
+                **probe_artifacts,
+                # Re-evaluation must use the same declared coverage contract
+                # as the objective-suite run, otherwise report regeneration
+                # can silently downgrade or change O6.
+                "fairness_expectations": profile.get("fairness_expectations", {}),
+                "observability_expectations": profile.get("observability", {}),
+            }
+            acceptance = evaluate_scheduler_acceptance(
+                formal_manifest,
+                capability=formal_manifest.get("capability_probe"),
+                recovery=formal_manifest.get("commit_recovery"),
+                fault=formal_manifest.get("fault_suite"),
+            )
+            objective_name_to_id = {
+                "DAU / 最大热用户容量": "O1",
+                "单租户故障隔离": "O2",
+                "Commit/Search 公平性 Jain": "O3",
+                "Search 优先于 Commit": "O4",
+                "Commit kill-9 恢复与重放": "O5",
+                "分层/分租户调度可观测性": "O6",
+            }
+            objectives = {
+                objective_name_to_id.get(str(item.get("name")), str(item.get("name"))): {
+                    **item,
+                    "id": objective_name_to_id.get(
+                        str(item.get("name")), str(item.get("name"))
+                    ),
+                }
+                for item in acceptance.get("checks") or []
+                if isinstance(item, dict)
+            }
     auth = formal_manifest.get("auth_preflight") or {}
     scenarios = []
+    manifest_runs = {
+        str(item.get("scenario_key") or item.get("scenario") or ""): item
+        for item in formal_manifest.get("runs") or []
+        if isinstance(item, dict)
+    }
     for name in formal_manifest.get("scenarios") or []:
         path = formal / str(name) / "repeat-01" / "server-observe"
-        summary = load(path / "summary.json")
+        run_record = manifest_runs.get(str(name), {})
+        summary = (
+            run_record.get("summary")
+            if isinstance(run_record.get("summary"), dict)
+            else load(path / "summary.json")
+        )
+        if not summary:
+            summary = load(find_run_artifact(formal, str(name), "summary.json"))
         metrics = summary.get("metrics") or {}
         search = metrics.get("search") or {}
         commit = metrics.get("commit") or {}
@@ -191,7 +256,11 @@ def main() -> int:
         scenarios.append(
             {
                 "name": name,
-                "status": summary.get("status") or "not-run",
+                "status": (
+                    run_record.get("status")
+                    or summary.get("status")
+                    or "not-run"
+                ),
                 "search_submitted": search.get("submitted", 0),
                 "search_succeeded": search.get("succeeded", 0),
                 "search_success_rate": search.get("success_rate"),
@@ -200,7 +269,12 @@ def main() -> int:
                 "commit_success_rate": commit.get("success_rate"),
                 "search_p95": search_latency.get("p95_s"),
                 "commit_p95": commit_latency.get("p95_s"),
-                "duration_s": summary.get("duration_s"),
+                "duration_s": (
+                    run_record.get("duration_s")
+                    if run_record.get("duration_s") is not None
+                    else summary.get("duration_s")
+                ),
+                "blocked_reason": run_record.get("blocked_reason") or "",
                 "error_count": (
                     summary.get("error_count")
                     if summary.get("error_count") is not None
@@ -212,6 +286,23 @@ def main() -> int:
                 ),
             }
         )
+    scenario_metric_links = "".join(
+        link(
+            find_run_artifact(formal, str(item["name"]), "metrics_samples.csv")
+            or formal
+            / str(item["name"])
+            / "repeat-01/server-observe/metrics_samples.csv",
+            output,
+            f"{item['name']} metrics_samples.csv",
+        )
+        for item in scenarios
+        if find_run_artifact(formal, str(item["name"]), "metrics_samples.csv")
+        or (
+            formal
+            / str(item["name"])
+            / "repeat-01/server-observe/metrics_samples.csv"
+        ).is_file()
+    )
 
     cards = "".join(
         f"<article class='card'><div class='id'>{esc(ident)}</div>"
@@ -229,7 +320,8 @@ def main() -> int:
         f"<td>{esc(item['search_p95'])} s"
         f"<br><span class='muted'>Commit {esc(item['commit_p95'])} s</span></td>"
         f"<td>{esc(item['duration_s'])} s</td>"
-        f"<td>{esc(item['error_count'])}</td></tr>"
+        f"<td>{esc(item['error_count'])}"
+        f"<br><span class='muted'>{esc(item['blocked_reason'])}</span></td></tr>"
         for item in scenarios
     )
     artifact_paths = (
@@ -265,27 +357,38 @@ def main() -> int:
         ),
         (formal / "probes" / "capability-probe.json", "probes/capability-probe.json"),
         (formal / "probes" / "commit-recovery.json", "probes/commit-recovery.json"),
-        (formal / "fairness-bounded/repeat-01/server-observe/search_results.csv",
-         "fairness Search CSV"),
-        (formal / "fairness-bounded/repeat-01/server-observe/commit_results.csv",
-         "fairness Commit CSV"),
-        (formal / "search-priority-blackbox/repeat-01/server-observe/search_results.csv",
-         "priority Search CSV"),
-        (formal / "search-priority-blackbox/repeat-01/server-observe/commit_results.csv",
-         "priority Commit CSV"),
+        (
+            find_run_artifact(formal, "fairness-bounded", "search_results.csv")
+            or formal / "fairness-bounded/repeat-01/server-observe/search_results.csv",
+            "fairness Search CSV",
+        ),
+        (
+            find_run_artifact(formal, "fairness-bounded", "commit_results.csv")
+            or formal / "fairness-bounded/repeat-01/server-observe/commit_results.csv",
+            "fairness Commit CSV",
+        ),
+        (
+            find_run_artifact(formal, "search-priority-blackbox", "search_results.csv")
+            or formal / "search-priority-blackbox/repeat-01/server-observe/search_results.csv",
+            "priority Search CSV",
+        ),
+        (
+            find_run_artifact(formal, "search-priority-blackbox", "commit_results.csv")
+            or formal / "search-priority-blackbox/repeat-01/server-observe/commit_results.csv",
+            "priority Commit CSV",
+        ),
     )
     artifacts = "".join(link(path, output, label) for path, label in artifact_paths)
     configured = formal_manifest.get("scenarios") or []
     coverage = f"{len(scenarios)}/{len(configured)}"
     model = load(root / "echomem-config-real-4u8g.json")
     if not model and direct_formal:
-        candidates = sorted(formal.glob("*/repeat-01/server-observe/run/*/config.json"))
-        if candidates:
-            model = load(candidates[0])
+        model = first_runner_config(formal)
     if not model and direct_formal:
         candidates = sorted(formal.glob("*/repeat-01/server-observe/config.json"))
         if candidates:
             model = load(candidates[0])
+    runner_config = first_runner_config(formal)
     llm = ((model.get("model") or {}).get("llm") or {}).get("model", "-")
     embedding = ((model.get("model") or {}).get("embedding") or {}).get("model", "-")
     observed_rows = "".join(
@@ -329,55 +432,104 @@ def main() -> int:
     o3_jain = o3.get("jain")
     o4_ratio = o4.get("priority_ratio") or o4.get("degradation_ratio")
     o1_max = o1.get("max_completed_active_user_count") or o1.get("max_measured_active_user_count")
+    chart_max = max(
+        (float(item["search_p95"]) for item in scenarios if item["search_p95"] is not None),
+        default=0.0,
+    )
+    scenario_chart = "".join(
+        f"<div class='chart-row'><span>{esc(item['name'])}</span>"
+        f"<i style='width:{(float(item['search_p95']) / chart_max * 100.0) if chart_max else 0:.1f}%'></i>"
+        f"<b>{esc(item['search_p95'])}s</b></div>"
+        for item in scenarios
+        if item["search_p95"] is not None
+    )
+    metric_scene_count = sum(
+        1
+        for item in scenarios
+        if find_run_artifact(formal, str(item["name"]), "metrics_samples.csv")
+    )
+    seed_warmup = formal_manifest.get("seed_warmup") or {}
+    seed_status = str(seed_warmup.get("status") or "unknown")
+    fault_configured = bool(
+        (profile.get("fault_isolation") or {}).get("enabled")
+        or profile.get("fault_plan")
+    )
+    capacity_completed = [
+        item["name"]
+        for item in scenarios
+        if str(item["name"]).startswith("capacity-")
+        and str(item["status"]).lower() == "completed"
+    ]
+    capacity_blocked = [
+        item["name"]
+        for item in scenarios
+        if str(item["name"]).startswith("capacity-")
+        and str(item["status"]).lower() == "blocked"
+    ]
     module_rows = [
         (
             "认证 / 多租户",
             f"有效凭据 {auth.get('passed', 0)}/{auth.get('tenant_count', 0)}；"
             "其余租户返回 401。",
+            "auth / tenant_config",
             "测试平台输入与部署凭据",
             "补齐独立租户凭据后才能继续 8/16/32 档位和故障旁观租户测试。",
         ),
         (
             "容量阶梯",
-            "capacity-2、capacity-4 有 Search 样本；更高档位未形成有效失败边界。",
+            f"已完成 {', '.join(capacity_completed) or '无'}；"
+            f"阻断 {', '.join(capacity_blocked) or '无'}，未形成最大容量失败边界。",
+            "session / active-user / admission",
             "测试平台场景 / 4U8G 资源",
             "继续执行 8、16、32，记录达到 SLO 的最后一档和下一档真实失败。",
         ),
         (
             "检索 / Search",
-            "本轮有真实 Search 延迟，但 seed recall 预验证未形成热记忆证据。",
+            f"真实 Search 场景 {metric_scene_count} 个；共享 seed 状态为 {seed_status}，"
+            "当前不能把无记忆请求当作热缓存结果。",
+            "recall / model / index",
             "测试数据准备与 EchoMem 检索链路",
             "先保证 seed Commit 完成并用 marker Search 验证命中，再判定热缓存准确率和优先级。",
         ),
         (
             "路由 / 调度",
             "公平窗口有 4 租户 Commit/Search 竞争；Priority 窗口有真实并发，但热记忆前提不足。",
+            "router / scheduler / tenant_coordination",
             "测试平台负载 + EchoMem 调度",
             "保留到达/完成时间、在途 Commit 和 Search P95，避免只凭客户端返回判定优先级。",
         ),
         (
             "Commit / 持久化",
             "202、kill-9、重启、completed、history/archive/cursor 顺序对账均有证据。",
+            "commit_pipeline / storage / control_store",
             "EchoMem 现有接口 + 测试平台恢复探针",
             "增加重复样本；同幂等键虽返回同 archive，但 replayed 标记为 false，需单独确认契约。",
         ),
         (
             "Metrics / 可观测性",
-            "lane 指标族存在，但实际 lane 四元组不完整，fan-out 指标无实样本。",
+            f"/metrics 能力探针可访问；{metric_scene_count} 个场景有原始采样，"
+            "但 lane/fan-out 覆盖仍需按实际负载补齐。",
+            "observability / metrics / engine_state",
             "EchoMem /metrics 与测试平台触发负载",
             "用真实拒绝、等待和引擎 fan-out 负载触发每个指标，再采集完整四元组。",
         ),
         (
             "故障控制面",
-            "未配置真实单租户依赖故障控制 URL/命令，O2 无前后 P95 配对数据。",
+            (
+                "已配置故障控制计划，但仍需检查每个旁观租户前后 P95。"
+                if fault_configured
+                else "未配置真实单租户依赖故障控制 URL/命令，O2 无前后 P95 配对数据。"
+            ),
+            "fault control / deployment",
             "部署侧控制面 + 测试平台采集",
             "提供只作用于目标租户的 500/429/timeout/connection-refused 控制，并保留时间线。",
         ),
     ]
     module_html = "".join(
         f"<tr><td><b>{esc(module)}</b></td><td>{esc(evidence)}</td>"
-        f"<td>{esc(owner)}</td><td>{esc(action)}</td></tr>"
-        for module, evidence, owner, action in module_rows
+        f"<td><code>{esc(config_path)}</code></td><td>{esc(owner)}</td>"
+        f"<td>{esc(action)}</td></tr>"
+        for module, evidence, config_path, owner, action in module_rows
     )
 
     document = f"""<!doctype html>
@@ -398,8 +550,9 @@ table{{width:100%;border-collapse:collapse}}th,td{{padding:8px;border-bottom:1px
 .viz h3{{margin-top:0}}.legend-item{{display:inline-flex;align-items:center;margin:0 12px 8px 0;gap:5px;font-size:12px}}.dot{{width:10px;height:10px;border-radius:50%;display:inline-block}}.dot.pass{{background:var(--green)}}.dot.fail{{background:var(--red)}}.dot.inconclusive{{background:var(--amber)}}
 .big-number{{font-size:28px;font-weight:800;color:var(--teal);margin:4px 0}}.meter{{display:block;height:9px;background:#e6edef;margin:7px 0 11px;border-radius:2px;overflow:hidden}}.meter i{{display:block;height:100%;background:var(--teal)}}.meter.green i{{background:var(--green)}}.meter.amber i{{background:var(--amber)}}.meter.red i{{background:var(--red)}}
 .capacity{{display:flex;align-items:flex-end;gap:10px;height:72px;border-bottom:1px solid var(--line);padding:0 8px}}.capacity-point{{display:flex;flex-direction:column;align-items:center;gap:5px;color:var(--muted);font-size:11px}}.capacity-point i{{display:block;width:18px;height:42px;background:var(--amber);border-radius:2px 2px 0 0}}.capacity-point i.done{{background:var(--green)}}.capacity-point i.blocked{{background:#d8e2e7}}
+.chart{{display:grid;gap:7px;max-width:880px}}.chart-row{{display:grid;grid-template-columns:190px minmax(80px,1fr) 70px;align-items:center;gap:8px;font-size:12px}}.chart-row i{{display:block;height:14px;background:var(--teal);border-radius:2px;min-width:2px}}.chart-row b{{font-size:12px;color:var(--muted)}}
 .callout{{border-left:4px solid var(--teal);background:#eef7f9;padding:12px 14px}}ul{{padding-left:20px}}a{{color:var(--teal)}}
-@media(max-width:1050px){{.cards{{grid-template-columns:repeat(2,1fr)}}.dashboard{{grid-template-columns:1fr}}}}@media(max-width:520px){{.cards{{grid-template-columns:1fr}}main{{padding:18px 10px}}}}
+@media(max-width:1050px){{.cards{{grid-template-columns:repeat(2,1fr)}}.dashboard{{grid-template-columns:1fr}}}}@media(max-width:520px){{.cards{{grid-template-columns:1fr}}.chart-row{{grid-template-columns:120px minmax(60px,1fr) 58px}}main{{padding:18px 10px}}}}
 </style></head><body><main>
 <h1>PR29 4U8G 六项指标真实黑盒测试</h1>
 <p class="sub">生成时间：{esc(suite.get("created_at"))} · 场景覆盖：{coverage} · 默认不含 soak</p>
@@ -418,6 +571,9 @@ table{{width:100%;border-collapse:collapse}}th,td{{padding:8px;border-bottom:1px
 <div class="muted">Search 洪泛/基线比</div><b>{esc(o4_ratio or "-")}</b>
 {metric_bar(float(o4_ratio) if o4_ratio is not None else None, 2, "amber")}</div>
 </div></section>
+<section><h2>Search P95 场景对比</h2>
+<p class="muted">每根条代表一个已产生真实 Search 样本的场景；没有样本的阻断场景不参与比例缩放。</p>
+<div class="chart">{scenario_chart or "<span class='muted'>暂无 Search P95 数据</span>"}</div></section>
 <section><h2>运行环境</h2><table>
 <tr><th>项目</th><th>值</th></tr>
 <tr><td>测试平台</td><td>Memory-System-Eval-Harness PR29</td></tr>
@@ -425,6 +581,12 @@ table{{width:100%;border-collapse:collapse}}th,td{{padding:8px;border-bottom:1px
 <tr><td>LLM</td><td>{esc(llm)}（真实模型）</td></tr>
 <tr><td>Embedding</td><td>{esc(embedding)}（真实模型）</td></tr>
 <tr><td>独立凭据</td><td>{esc(auth.get("passed", 0))}/{esc(auth.get("tenant_count", 0))}</td></tr>
+<tr><td>Search 配置</td><td>{esc(runner_config.get("search_query_profile") or "-")}；
+recall 比例 {esc(runner_config.get("search_recall_ratio") or "-")}；
+seed {esc(not runner_config.get("skip_seed", True))}</td></tr>
+<tr><td>Commit 配置</td><td>轮询超时 {esc(runner_config.get("commit_poll_timeout_s") or "-")}s；
+重试 {esc(runner_config.get("commit_retry_max") or "-")} 次；
+barrier {esc(runner_config.get("commit_barrier"))}</td></tr>
 </table></section>
 <section><h2>场景明细</h2><p class="muted">Search 和 Commit 均按“提交数/成功或完成数”展示；成功率、P95、耗时和错误数直接来自场景 summary.json。</p>
 <table><thead><tr><th>场景</th><th>运行状态</th><th>Search</th><th>Commit</th><th>延迟 P95</th><th>耗时</th><th>错误数</th></tr></thead>
@@ -433,7 +595,7 @@ table{{width:100%;border-collapse:collapse}}th,td{{padding:8px;border-bottom:1px
 <table><thead><tr><th>指标</th><th>状态</th><th>判定说明</th><th>观测数据</th></tr></thead>
 <tbody>{observed_rows}</tbody></table></section>
 <section><h2>按 config.json 模块归因</h2>
-<table><thead><tr><th>模块</th><th>当前真实证据</th><th>归属</th><th>下一步</th></tr></thead>
+<table><thead><tr><th>模块</th><th>当前真实证据</th><th>config.json 对应区域</th><th>归属</th><th>下一步</th></tr></thead>
 <tbody>{module_html}</tbody></table>
 <div class="callout"><b>归因原则：</b>没有真实故障控制、热记忆命中或指标样本时，只能说明测试前提/证据缺失；
 不能直接写成 EchoMem 内部未实现。只有 HTTP 404 或真实服务行为明确违反契约时，才建议修改 EchoMem。</div></section>
@@ -446,6 +608,7 @@ table{{width:100%;border-collapse:collapse}}th,td{{padding:8px;border-bottom:1px
 </tbody></table>
 <p class="muted">本轮没有新增 PR449 提交：现有证据不足以证明 EchoMem 内部行为违反契约，先修复部署/测试前提后再复测。</p></section>
 <section><h2>原始证据</h2><ul>{artifacts}</ul>
+<p class="muted">各场景原始 Prometheus 采样：</p><ul>{scenario_metric_links or "<li>暂无 metrics_samples.csv</li>"}</ul>
 <p class="muted">报告只引用运行目录内存在的文件，不写入 API key、密码或环境变量值。</p></section>
 </main></body></html>"""
     output.parent.mkdir(parents=True, exist_ok=True)

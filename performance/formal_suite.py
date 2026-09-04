@@ -1624,6 +1624,14 @@ def _write_case_csvs(output: Path, rows: list[dict[str, str]]) -> None:
         writer.writerows(search_rows)
 
 
+def _preserve_run_artifacts(output: Path, run_dir: Path) -> None:
+    """Copy raw request and Prometheus timelines beside normalized artifacts."""
+    for filename in ("metrics_samples.csv", "requests.csv"):
+        source = run_dir / filename
+        if source.is_file():
+            shutil.copyfile(source, output / filename)
+
+
 def run_case(
     runner: Path,
     case_root: Path,
@@ -1792,6 +1800,7 @@ def run_case(
     run_dir = _resolve_run_dir(output / "run")
     rows = _read_requests_csv(run_dir / "requests.csv")
     _write_case_csvs(output, rows)
+    _preserve_run_artifacts(output, run_dir)
     derived = _derive_case_summary(run_dir, args.identity_independent)
     if timed_out:
         derived["status"] = "TIMEOUT"

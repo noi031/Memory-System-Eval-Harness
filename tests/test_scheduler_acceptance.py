@@ -72,6 +72,92 @@ class SchedulerAcceptanceTests(unittest.TestCase):
         self.assertEqual(["recall_engine"], check["observed"]["missing_lanes"])
         self.assertEqual([], check["observed"]["missing_fanout_engines"])
 
+    def test_observability_merges_partial_samples_across_scenarios(self):
+        result = evaluate(
+            {
+                "observability_expectations": {
+                    "lanes": ["commit"],
+                    "fanout_engines": ["recall"],
+                },
+                "runs": [
+                    {
+                        "scenario": "baseline",
+                        "status": "completed",
+                        "summary": {
+                            "details": {
+                                "pr421_metric_coverage": {
+                                    "lane_quartets": {
+                                        "commit": {
+                                            "queued": True,
+                                            "wait": True,
+                                            "exec": False,
+                                            "rejected": False,
+                                        }
+                                    },
+                                    "fanout_engines": {
+                                        "recall": {"exec": True, "skipped": False}
+                                    },
+                                }
+                            }
+                        },
+                    },
+                    {
+                        "scenario": "saturation",
+                        "status": "completed",
+                        "summary": {
+                            "details": {
+                                "pr421_metric_coverage": {
+                                    "lane_quartets": {
+                                        "commit": {
+                                            "queued": False,
+                                            "wait": False,
+                                            "exec": True,
+                                            "rejected": True,
+                                        }
+                                    },
+                                    "fanout_engines": {
+                                        "recall": {"exec": False, "skipped": True}
+                                    },
+                                }
+                            }
+                        },
+                    },
+                ],
+            },
+            capability={
+                "checks": [{
+                    "name": "Prometheus B7 metrics",
+                    "status": "PASS",
+                    "present": {
+                        "lane_queued": True,
+                        "lane_wait": True,
+                        "lane_exec": True,
+                        "lane_rejected": True,
+                        "engine_exec": True,
+                        "engine_skipped": True,
+                    },
+                }],
+            },
+        )
+        check = next(
+            item for item in result["checks"]
+            if item["name"] == "分层/分租户调度可观测性"
+        )
+        self.assertEqual(PASS, check["status"])
+        self.assertEqual(
+            {
+                "queued": True,
+                "wait": True,
+                "exec": True,
+                "rejected": True,
+            },
+            check["observed"]["lane_quartets"]["commit"],
+        )
+        self.assertEqual(
+            {"exec": True, "skipped": True},
+            check["observed"]["fanout_engines"]["recall"],
+        )
+
     def test_priority_uses_blackbox_search_p95(self) -> None:
         result = evaluate(
             {

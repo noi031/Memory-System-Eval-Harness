@@ -21,6 +21,7 @@ from performance.formal_suite import (
     _scenario_requires_seed,
     _seed_dependency,
     _scale_explicit_tenant_counts,
+    _preserve_run_artifacts,
     _write_case_csvs,
     complete_scenarios,
     FOUR_U8G_FULL_SCENARIOS,
@@ -30,6 +31,25 @@ from performance.probes.limit_failure_sweep import workers_for_level
 
 
 class Report6ScenarioTests(unittest.TestCase):
+    def test_preserve_run_artifacts_copies_raw_metrics(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            run_dir = root / "run" / "timestamp"
+            output = root / "case"
+            run_dir.mkdir(parents=True)
+            output.mkdir()
+            (run_dir / "metrics_samples.csv").write_text(
+                "timestamp,metric,value,labels\n",
+                encoding="utf-8",
+            )
+            (run_dir / "requests.csv").write_text(
+                "op,status\nread,ok\n",
+                encoding="utf-8",
+            )
+            _preserve_run_artifacts(output, run_dir)
+            self.assertTrue((output / "metrics_samples.csv").is_file())
+            self.assertTrue((output / "requests.csv").is_file())
+
     def test_limit_sweep_worker_cap_preserves_levels(self) -> None:
         self.assertEqual(16, workers_for_level(16, 256))
         self.assertEqual(64, workers_for_level(64, 256))

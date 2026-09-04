@@ -958,16 +958,27 @@ def _observability(capability: dict[str, Any], suite: dict[str, Any]) -> dict[st
     for item in coverage:
         for lane, quartet in (item.get("lane_quartets") or {}).items():
             if isinstance(quartet, dict):
-                lane_quartets[str(lane)] = {
-                    key: bool(quartet.get(key))
-                    for key in ("queued", "wait", "exec", "rejected")
-                }
+                existing = lane_quartets.setdefault(
+                    str(lane),
+                    {
+                        "queued": False,
+                        "wait": False,
+                        "exec": False,
+                        "rejected": False,
+                    },
+                )
+                # Coverage is accumulated across scenario samples. Do not
+                # let a later, partial sample erase evidence observed earlier.
+                for key in ("queued", "wait", "exec", "rejected"):
+                    existing[key] = bool(existing[key] or quartet.get(key))
         for engine, observations in (item.get("fanout_engines") or {}).items():
             if isinstance(observations, dict):
-                fanout_engines[str(engine)] = {
-                    "exec": bool(observations.get("exec")),
-                    "skipped": bool(observations.get("skipped")),
-                }
+                existing = fanout_engines.setdefault(
+                    str(engine),
+                    {"exec": False, "skipped": False},
+                )
+                for key in ("exec", "skipped"):
+                    existing[key] = bool(existing[key] or observations.get(key))
         for tenant, data in (item.get("per_tenant_quartets") or {}).items():
             if not isinstance(data, dict):
                 continue
