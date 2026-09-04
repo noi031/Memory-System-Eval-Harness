@@ -451,6 +451,24 @@ def _metric_glossary(summary: dict[str, Any]) -> str:
             f"最大比 {_fmt(max(fairness_ratios))}x" if fairness_ratios else "单租户 / 无数据",
         ),
         (
+            "Commit 吞吐 Jain",
+            "按租户分别统计同一窗口内 completed Commit 吞吐，再计算 Jain；1.0 表示完全均衡",
+            (
+                "按场景见「租户公平性」表；不与 Search 延迟混算"
+                if fairness
+                else "未测量"
+            ),
+        ),
+        (
+            "Search 延迟效用 Jain",
+            "按租户将 Search P95 转为 1000 ÷ P95(ms) 的效用后计算 Jain；1.0 表示延迟完全均衡",
+            (
+                "按场景见「租户公平性」表；原始 P95 仍单独保留"
+                if fairness
+                else "未测量"
+            ),
+        ),
+        (
             "租户最慢多等 (ms)",
             "slowest_waits_extra_ms：最慢租户比最快租户多等的读 P95 时长",
             "见「特性量化分析」",
@@ -851,8 +869,33 @@ def build_html(summary: dict[str, Any], chart_series: dict[str, Any]) -> str:
         ]
         blocks.append(
             "<h3>租户公平性（特性 2，支撑事实）</h3>"
-            + _note("租户间读 P95 最大 / 最小比 ≥ 3x 判不均衡；变异系数 CV = 各租户 P95 标准差 ÷ 均值。")
-            + _stat_table(rows, ["场景", "租户数", "P95 max/min 比", "P95 变异系数", "结论"])
+            + _note(
+                "公平性只比较不同租户；Commit 吞吐 Jain 与 Search 延迟效用 Jain 分开计算。"
+                "Search 延迟先转换为 1000 ÷ P95(ms) 的效用，不能直接把原始延迟当作越大越好。"
+            )
+            + _stat_table(
+                [
+                    (
+                        key,
+                        str(len(fair.get("tenants", []))),
+                        str(fair.get("p95_max_min_ratio", "")),
+                        str(fair.get("p95_cv", "")),
+                        str(fair.get("commit_throughput_jain", "")),
+                        str(fair.get("search_latency_utility_jain", "")),
+                        "均衡" if fair.get("balanced") else "不均衡",
+                    )
+                    for key, fair in fairness.items()
+                ],
+                [
+                    "场景",
+                    "租户数",
+                    "读 P95 max/min 比",
+                    "读 P95 CV",
+                    "Commit 吞吐 Jain",
+                    "Search 延迟效用 Jain",
+                    "结论",
+                ],
+            )
         )
 
     # -- 扩展目标支撑事实：重试 / 对账 / 质量断言 / 隔离 / 错误类型 / 故障注入 / 预检 --

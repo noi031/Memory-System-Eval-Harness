@@ -16,6 +16,7 @@ from performance.objective_suite import (
     _resolve_tenant_id,
     _formal_run_counts,
     _formal_coverage,
+    _formal_submitted_operations,
     _formal_profile_name,
     load_env_file,
     load_profiles,
@@ -189,16 +190,75 @@ class ObjectiveSuiteTests(unittest.TestCase):
             "repeats": 1,
             "policies": ["server-observe"],
             "runs": [
-                {"scenario_key": "pr397__A@1", "status": "TIMEOUT"},
-                {"scenario_key": "pr421__baseline", "status": "completed"},
+                {
+                    "scenario_key": "pr397__A@1",
+                    "status": "completed",
+                    "summary": {"metrics": {"search": {"submitted": 4}}},
+                },
+                {
+                    "scenario_key": "pr421__baseline",
+                    "status": "completed",
+                    "summary": {"metrics": {"commit": {"submitted": 2}}},
+                },
             ],
         }
         coverage = _formal_coverage(suite)
         self.assertEqual(2, coverage["expected_runs"])
         self.assertEqual(2, coverage["manifest_runs"])
-        self.assertEqual({"TIMEOUT": 1, "COMPLETED": 1}, coverage["status_counts"])
-        self.assertEqual(1, coverage["timeout_runs"])
+        self.assertEqual({"COMPLETED": 2}, coverage["status_counts"])
+        self.assertEqual(2, coverage["evidence_runs"])
         self.assertEqual("complete", coverage["status"])
+
+    def test_manifest_placeholders_do_not_count_as_evidence_coverage(self) -> None:
+        suite = {
+            "scenarios": ["case-a", "case-b", "case-c"],
+            "repeats": 1,
+            "policies": ["server-observe"],
+            "runs": [
+                {
+                    "scenario_key": "case-a",
+                    "status": "completed",
+                    "summary": {
+                        "metrics": {
+                            "search": {"submitted": 3},
+                            "commit": {"submitted": 0},
+                        }
+                    },
+                },
+                {
+                    "scenario_key": "case-b",
+                    "status": "completed",
+                    "summary": {
+                        "metrics": {
+                            "search": {"submitted": 0},
+                            "commit": {"submitted": 0},
+                        }
+                    },
+                },
+                {
+                    "scenario_key": "case-c",
+                    "status": "TIMEOUT",
+                    "summary": {
+                        "metrics": {
+                            "search": {"submitted": 0},
+                            "commit": {"submitted": 0},
+                        }
+                    },
+                },
+            ],
+        }
+        self.assertEqual(3, _formal_submitted_operations(suite["runs"][0]))
+        self.assertEqual(0, _formal_submitted_operations(suite["runs"][1]))
+        coverage = _formal_coverage(suite)
+        self.assertEqual(3, coverage["manifest_runs"])
+        self.assertEqual(2, coverage["completed_runs"])
+        self.assertEqual(1, coverage["evidence_runs"])
+        self.assertEqual(1, coverage["empty_completed_runs"])
+        self.assertEqual("partial", coverage["status"])
+        self.assertEqual(
+            ["case-b", "case-c"],
+            coverage["evidence_missing_scenarios"],
+        )
 
     def test_first_completed_commit_csv_finds_real_artifact(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

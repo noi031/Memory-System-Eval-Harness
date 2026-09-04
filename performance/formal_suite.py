@@ -15,6 +15,7 @@ import csv
 import json
 import os
 import signal
+import shutil
 import statistics
 import subprocess
 import sys
@@ -519,7 +520,7 @@ def _build_seed_warmup_command(
         "--commit-retry-backoff-s",
         str(args.commit_retry_backoff_s),
         "--seed-concurrency",
-        str(args.seed_concurrency),
+        str(getattr(args, "seed_concurrency", 2)),
         "--tenant-config",
         str(config_path),
         "--scenarios",
@@ -734,6 +735,26 @@ def _read_requests_csv(path: Path) -> list[dict[str, str]]:
         return []
     with path.open(newline="", encoding="utf-8") as handle:
         return list(csv.DictReader(handle))
+
+
+def _submitted_operations(run: dict[str, Any]) -> int:
+    """Count operations with real HTTP request records in a case summary."""
+    summary = run.get("summary")
+    if not isinstance(summary, dict):
+        return 0
+    metrics = summary.get("metrics")
+    if not isinstance(metrics, dict):
+        return 0
+    total = 0
+    for operation in ("search", "commit"):
+        item = metrics.get(operation)
+        if not isinstance(item, dict):
+            continue
+        try:
+            total += max(0, int(item.get("submitted") or 0))
+        except (TypeError, ValueError):
+            continue
+    return total
 
 
 def _resolve_run_dir(run_dir: Path) -> Path:
@@ -1074,6 +1095,7 @@ def _derive_case_summary(run_dir: Path, identity_independent: bool) -> dict[str,
     ]
     search_quality = native.get("search_quality") or {}
     native_durability = native.get("commit_durability") or {}
+    native_fairness = native.get("tenant_fairness") or {}
 
     submitted = len(reads)
     succeeded = len(ok_reads)
@@ -1355,6 +1377,27 @@ def _derive_case_summary(run_dir: Path, identity_independent: bool) -> dict[str,
             },
             "fairness": {
                 "commit_completed_per_tenant": completed_by_tenant,
+                "by_scene": {
+                    str(scene): {
+                        "commit_throughput_per_tenant": value.get(
+                            "commit_throughput_per_tenant", {}
+                        ),
+                        "commit_throughput_jain": value.get(
+                            "commit_throughput_jain"
+                        ),
+                        "search_latency_utility_per_tenant": value.get(
+                            "search_latency_utility_per_tenant", {}
+                        ),
+                        "search_latency_utility_jain": value.get(
+                            "search_latency_utility_jain"
+                        ),
+                        "search_p95_max_min_ratio": value.get(
+                            "p95_max_min_ratio"
+                        ),
+                    }
+                    for scene, value in native_fairness.items()
+                    if isinstance(value, dict)
+                },
             },
             "per_tenant": per_tenant,
         },
@@ -1664,6 +1707,26 @@ def run_case(
     }
 
 
+def _retryable_case_status(status: Any) -> bool:
+    """Whether a case can be retried before the target produced real rows."""
+    return str(status or "").upper() in {
+        "ENV_ERROR",
+        "NO_SUMMARY",
+        "HARNESS_ERROR",
+    }
+
+
+def _archive_case_attempt(output: Path, attempt: int) -> Path | None:
+    """Preserve a failed attempt before retrying the same case directory."""
+    if not output.exists():
+        return None
+    archived = output.with_name(f"attempt-{attempt:02d}")
+    if archived.exists():
+        shutil.rmtree(archived)
+    output.rename(archived)
+    return archived
+
+
 def fmt_seconds(value: Any) -> str:
     try:
         return f"{float(value):.3f}s"
@@ -1916,6 +1979,11 @@ def _finalize_suite_outputs(
     ]
     manifest_run_count = len(statuses)
     completed_run_count = sum(status == "COMPLETED" for status in statuses)
+    evidence_run_count = sum(
+        status == "COMPLETED" and _submitted_operations(run) > 0
+        for status, run in zip(statuses, manifest.get("runs") or [])
+    )
+    empty_completed_run_count = completed_run_count - evidence_run_count
     manifest["finalization"] = {
         "status": final_status,
         "finished_at": now_iso(),
@@ -1923,12 +1991,17 @@ def _finalize_suite_outputs(
         "run_count": manifest_run_count,
         "expected_run_count": expected_run_count,
         "completed_run_count": completed_run_count,
+        "evidence_run_count": evidence_run_count,
+        "empty_completed_run_count": empty_completed_run_count,
         "failed_run_count": sum(status in {"FAIL", "HARNESS_ERROR", "NO_SUMMARY"} for status in statuses),
         "timeout_run_count": sum(status == "TIMEOUT" for status in statuses),
         "blocked_run_count": sum(status == "BLOCKED" for status in statuses),
         "coverage_status": (
             "complete"
-            if manifest_run_count >= expected_run_count
+            if (
+                manifest_run_count >= expected_run_count
+                and evidence_run_count >= expected_run_count
+            )
             else "partial"
         ),
     }
@@ -2139,8 +2212,23 @@ def main() -> int:
     parser.add_argument(
         "--max-wall-clock-s",
         type=float,
-        default=10800.0,
-        help="整轮正式套件最大 wall-clock 时间；超时后不再启动新场景",
+        default=21600.0,
+        help="整轮正式套件最大 wall-clock 时间；默认 6 小时，超时后不再启动新场景",
+    )
+    parser.add_argument(
+        "--case-retries",
+        type=int,
+        default=2,
+        help=(
+            "场景发生无业务样本的环境错误时的重试次数；只重试 "
+            "ENV_ERROR/NO_SUMMARY/HARNESS_ERROR，默认 2"
+        ),
+    )
+    parser.add_argument(
+        "--case-retry-backoff-s",
+        type=float,
+        default=5.0,
+        help="场景环境错误重试之间的等待秒数，默认 5 秒",
     )
     parser.add_argument(
         "--barrier-count-cap",
@@ -2272,6 +2360,10 @@ def main() -> int:
         parser.error("--case-timeout-s must not be negative")
     if args.max_wall_clock_s <= 0:
         parser.error("--max-wall-clock-s must be > 0")
+    if args.case_retries < 0:
+        parser.error("--case-retries must be >= 0")
+    if args.case_retry_backoff_s < 0:
+        parser.error("--case-retry-backoff-s must be >= 0")
     if args.seed_commit_timeout_s <= 0:
         parser.error("--seed-commit-timeout-s must be > 0")
     if args.seed_concurrency < 1:
@@ -2721,52 +2813,93 @@ def main() -> int:
                     f"scenario={scenario} repeat={repetition} policy={policy}",
                     flush=True,
                 )
-                try:
-                    run = run_case(
-                        runner,
-                        root,
-                        scenario,
-                        repetition,
-                        policy,
-                        config_paths[case["tenants"]],
-                        args,
-                        case,
-                        deadline=suite_deadline,
+                case_output = (
+                    root / scenario / f"repeat-{repetition:02d}" / policy
+                )
+                attempts: list[dict[str, Any]] = []
+                run: dict[str, Any]
+                for attempt in range(1, args.case_retries + 2):
+                    if attempt > 1:
+                        remaining = _remaining_budget(suite_deadline)
+                        if remaining is not None and remaining <= 0:
+                            break
+                        if args.case_retry_backoff_s > 0:
+                            time.sleep(
+                                min(
+                                    args.case_retry_backoff_s,
+                                    max(0.0, remaining or args.case_retry_backoff_s),
+                                )
+                            )
+                        archived = _archive_case_attempt(case_output, attempt - 1)
+                        if archived is not None:
+                            print(
+                                f"FORMAL_RETRY_ARCHIVED scenario={scenario} "
+                                f"attempt={attempt - 1} path={archived}",
+                                flush=True,
+                            )
+                    try:
+                        run = run_case(
+                            runner,
+                            root,
+                            scenario,
+                            repetition,
+                            policy,
+                            config_paths[case["tenants"]],
+                            args,
+                            case,
+                            deadline=suite_deadline,
+                        )
+                    except BaseException as exc:  # noqa: BLE001
+                        # A single probe must not discard the rest of the matrix.
+                        # Preserve the exception and let the bounded retry
+                        # policy decide whether another attempt is useful.
+                        run = {
+                            "scenario": scenario,
+                            "scenario_label": case["label"],
+                            "repetition": repetition,
+                            "policy": policy,
+                            "status": "HARNESS_ERROR",
+                            "runner_returncode": None,
+                            "duration_s": float(case["duration_s"]),
+                            "case_timeout_s": float(args.case_timeout_s or 0),
+                            "output_dir": str(case_output.resolve()),
+                            "summary": {},
+                            "failure_evidence": {
+                                "exception_type": type(exc).__name__,
+                                "exception": str(exc),
+                            },
+                        }
+                        print(
+                            f"FORMAL_CASE_ERROR scenario={scenario} "
+                            f"repeat={repetition} policy={policy} "
+                            f"attempt={attempt} "
+                            f"error={type(exc).__name__}: {exc}",
+                            flush=True,
+                        )
+                    attempts.append(
+                        {
+                            "attempt": attempt,
+                            "status": run.get("status"),
+                            "runner_returncode": run.get("runner_returncode"),
+                            "output_dir": run.get("output_dir"),
+                            "failure_evidence": run.get("failure_evidence", {}),
+                        }
                     )
-                except BaseException as exc:  # noqa: BLE001
-                    # A single probe must not discard the rest of the matrix.
-                    # Keep the exception in the manifest and continue so a
-                    # slow/hung barrier still leaves later Search/capacity
-                    # evidence available for review.
-                    run = {
-                        "scenario": scenario,
-                        "scenario_label": case["label"],
-                        "repetition": repetition,
-                        "policy": policy,
-                        "status": "HARNESS_ERROR",
-                        "runner_returncode": None,
-                        "duration_s": float(case["duration_s"]),
-                        "case_timeout_s": float(args.case_timeout_s or 0),
-                        "output_dir": str(
-                            (
-                                root
-                                / scenario
-                                / f"repeat-{repetition:02d}"
-                                / policy
-                            ).resolve()
-                        ),
-                        "summary": {},
-                        "failure_evidence": {
-                            "exception_type": type(exc).__name__,
-                            "exception": str(exc),
-                        },
-                    }
+                    if not _retryable_case_status(run.get("status")):
+                        break
+                    if attempt >= args.case_retries + 1:
+                        break
                     print(
-                        f"FORMAL_CASE_ERROR scenario={scenario} "
+                        f"FORMAL_CASE_RETRY scenario={scenario} "
                         f"repeat={repetition} policy={policy} "
-                        f"error={type(exc).__name__}: {exc}",
+                        f"attempt={attempt}/{args.case_retries + 1} "
+                        f"status={run.get('status')}",
                         flush=True,
                     )
+                if attempts:
+                    run["attempts"] = attempts
+                    run["attempt_count"] = len(attempts)
+                    run["retry_count"] = max(0, len(attempts) - 1)
                 run["scenario_key"] = scenario
                 run["source_scenario"] = case.get("_source_scenario", scenario)
                 run["plan_source"] = case.get("_plan_source", "")

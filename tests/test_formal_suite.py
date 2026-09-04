@@ -14,6 +14,8 @@ from performance.formal_suite import (
     _build_case_command,
     _build_seed_warmup_command,
     _derive_case_summary,
+    _retryable_case_status,
+    _archive_case_attempt,
     _auth_mode_validation_error,
     _seed_anchor_queries,
     _scale_explicit_tenant_counts,
@@ -25,6 +27,24 @@ from performance.formal_suite import (
 
 
 class Report6ScenarioTests(unittest.TestCase):
+    def test_only_pre_request_environment_failures_are_retryable(self) -> None:
+        self.assertTrue(_retryable_case_status("ENV_ERROR"))
+        self.assertTrue(_retryable_case_status("NO_SUMMARY"))
+        self.assertTrue(_retryable_case_status("HARNESS_ERROR"))
+        self.assertFalse(_retryable_case_status("completed"))
+        self.assertFalse(_retryable_case_status("FAIL"))
+        self.assertFalse(_retryable_case_status("TIMEOUT"))
+
+    def test_case_retry_archives_previous_artifacts(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "case"
+            output.mkdir()
+            (output / "summary.json").write_text("old", encoding="utf-8")
+            archived = _archive_case_attempt(output, 1)
+            self.assertEqual(output.with_name("attempt-01"), archived)
+            self.assertTrue((archived / "summary.json").is_file())
+            self.assertFalse(output.exists())
+
     def test_local_auth_is_rejected_for_multi_tenant_scenarios(self) -> None:
         """A shared local identity must not produce fake isolation evidence."""
         self.assertIsNotNone(

@@ -142,6 +142,49 @@ class FormalDataReportTests(unittest.TestCase):
             self.assertIn("服务端观察模式", document)
             self.assertIn("req-1", document)
 
+    def test_report_marks_empty_completed_run_as_no_evidence(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            run_dir = root / "case-a"
+            run_dir.mkdir()
+            (run_dir / "search_results.csv").write_text(
+                "tenant,status_code,service_s\ntenant-a,200,0.2\n",
+                encoding="utf-8",
+            )
+            manifest = {
+                "created_at": "2026-08-26T00:00:00Z",
+                "base_url": "http://127.0.0.1:8010",
+                "expected_run_count": 2,
+                "runs": [
+                    {
+                        "scenario_key": "pr397__A@1",
+                        "scenario": "A@1",
+                        "plan_source": "pr397",
+                        "scenario_label": "PR397 A@1",
+                        "status": "completed",
+                        "output_dir": str(run_dir),
+                        "summary": {"metrics": {"search": {"submitted": 1}}},
+                    },
+                    {
+                        "scenario_key": "pr421__baseline",
+                        "scenario": "baseline",
+                        "plan_source": "pr421",
+                        "scenario_label": "PR421 baseline",
+                        "status": "completed",
+                        "output_dir": str(root / "empty"),
+                        "summary": {"metrics": {}},
+                    },
+                ],
+            }
+            suite_path = root / "suite.json"
+            output_path = root / "suite.html"
+            suite_path.write_text(json.dumps(manifest), encoding="utf-8")
+            render(suite_path, output_path)
+            document = output_path.read_text(encoding="utf-8")
+            self.assertIn("evidence", document)
+            self.assertIn("no-evidence", document)
+            self.assertIn("有真实业务样本", document)
+
 
 if __name__ == "__main__":
     unittest.main()

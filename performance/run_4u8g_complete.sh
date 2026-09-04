@@ -22,7 +22,9 @@ commit_timeout_s="${STRESS_COMMIT_TIMEOUT_S:-600}"
 case_timeout_s="${STRESS_CASE_TIMEOUT_S:-0}"
 barrier_wave_size="${STRESS_BARRIER_WAVE_SIZE:-32}"
 barrier_drain_timeout_s="${STRESS_BARRIER_DRAIN_TIMEOUT_S:-600}"
-max_wall_clock_s="${STRESS_MAX_WALL_CLOCK_S:-10800}"
+max_wall_clock_s="${STRESS_MAX_WALL_CLOCK_S:-21600}"
+case_retries="${STRESS_CASE_RETRIES:-2}"
+case_retry_backoff_s="${STRESS_CASE_RETRY_BACKOFF_S:-5}"
 
 # The full 4U8G profile runs 12 PR397/report(6) cases plus the 25-case
 # PR421 catalog. The long soak case remains excluded from the routine run.
@@ -47,6 +49,8 @@ python3 -m performance.formal_suite \
   --barrier-wave-size "$barrier_wave_size" \
   --barrier-drain-timeout-s "$barrier_drain_timeout_s" \
   --max-wall-clock-s "$max_wall_clock_s" \
+  --case-retries "$case_retries" \
+  --case-retry-backoff-s "$case_retry_backoff_s" \
   --out-dir "$out_dir"
 
 printf '4U8G complete suite: %s\n' "$out_dir"

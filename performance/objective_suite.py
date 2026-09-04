@@ -893,8 +893,37 @@ def _formal_run_counts(suite: dict[str, Any]) -> tuple[int, int]:
     return completed, submitted
 
 
+def _formal_submitted_operations(run: dict[str, Any]) -> int:
+    """Count real operations recorded by one formal-suite run."""
+    summary = run.get("summary")
+    if not isinstance(summary, dict):
+        return 0
+    metrics = summary.get("metrics")
+    if not isinstance(metrics, dict):
+        return 0
+    total = 0
+    for operation in ("search", "commit"):
+        item = metrics.get(operation)
+        if isinstance(item, dict):
+            try:
+                total += max(0, int(item.get("submitted") or 0))
+            except (TypeError, ValueError):
+                continue
+    return total
+
+
 def _formal_coverage(suite: dict[str, Any]) -> dict[str, Any]:
-    """Summarize formal-suite coverage without treating partial data as done."""
+    """Summarize formal-suite coverage without treating placeholders as data.
+
+    ``formal_suite`` may materialize a TIMEOUT/BLOCKED record for every
+    remaining case so that a partial run is auditable.  Those records are
+    useful evidence, but they do not prove that the case actually ran.
+    Coverage therefore has two dimensions:
+
+    * manifest coverage: one record exists for every configured case;
+    * evidence coverage: the record completed and contains at least one
+      submitted real HTTP operation.
+    """
     configured = [
         str(item).strip()
         for item in (suite.get("scenarios") or [])
@@ -912,6 +941,15 @@ def _formal_coverage(suite: dict[str, Any]) -> dict[str, Any]:
     completed = sum(
         1 for item in runs if str(item.get("status") or "").lower() == "completed"
     )
+    evidence_runs = sum(
+        1
+        for item in runs
+        if (
+            str(item.get("status") or "").lower() == "completed"
+            and _formal_submitted_operations(item) > 0
+        )
+    )
+    empty_completed_runs = completed - evidence_runs
     status_counts: dict[str, int] = {}
     for item in runs:
         status = str(item.get("status") or "NO_SUMMARY").upper()
@@ -922,10 +960,20 @@ def _formal_coverage(suite: dict[str, Any]) -> dict[str, Any]:
     }
     expected_keys = set(configured)
     missing = sorted(expected_keys - observed_keys)
+    evidence_missing = sorted(
+        str(item.get("scenario_key") or item.get("scenario") or "")
+        for item in runs
+        if (
+            str(item.get("status") or "").lower() != "completed"
+            or _formal_submitted_operations(item) <= 0
+        )
+    )
     return {
         "expected_runs": expected,
         "manifest_runs": actual,
         "completed_runs": completed,
+        "evidence_runs": evidence_runs,
+        "empty_completed_runs": empty_completed_runs,
         "status_counts": status_counts,
         "failed_runs": sum(
             status_counts.get(status, 0)
@@ -934,7 +982,12 @@ def _formal_coverage(suite: dict[str, Any]) -> dict[str, Any]:
         "timeout_runs": status_counts.get("TIMEOUT", 0),
         "blocked_runs": status_counts.get("BLOCKED", 0),
         "missing_scenarios": missing,
-        "status": "complete" if expected > 0 and actual >= expected else "partial",
+        "evidence_missing_scenarios": evidence_missing,
+        "status": (
+            "complete"
+            if expected > 0 and actual >= expected and evidence_runs >= expected
+            else "partial"
+        ),
     }
 
 
@@ -1144,12 +1197,20 @@ def render_report(result: dict[str, Any], path: Path) -> None:
             f"{html.escape(str(coverage.get('expected_runs', 0)))} 个结果，"
             f"状态 <strong>{html.escape(str(coverage.get('status', 'unknown')))}</strong>"
             f"；完成 {html.escape(str(coverage.get('completed_runs', 0)))}，"
+            f"真实证据 {html.escape(str(coverage.get('evidence_runs', 0)))}，"
+            f"空完成记录 {html.escape(str(coverage.get('empty_completed_runs', 0)))}，"
             f"超时 {html.escape(str(coverage.get('timeout_runs', 0)))}，"
             f"阻断 {html.escape(str(coverage.get('blocked_runs', 0)))}"
             + (
                 "；缺失："
                 + html.escape(", ".join(str(item) for item in missing))
                 if missing
+                else ""
+            )
+            + (
+                "；证据缺失："
+                + html.escape(", ".join(str(item) for item in coverage.get("evidence_missing_scenarios") or []))
+                if coverage.get("evidence_missing_scenarios")
                 else ""
             )
             + "</p>"

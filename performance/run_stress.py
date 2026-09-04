@@ -1278,7 +1278,10 @@ def main() -> None:
             )
             degradation = _build_degradation(all_data["scenes"], all_data["scene_read_stats"])
             durability = commit_durability(all_data["records"])
-            fairness = tenant_fairness(all_data["records"])
+            fairness = tenant_fairness(
+                all_data["records"],
+                wall_s=max(0.0, t_last - t_first),
+            )
             signals = _build_signals(
                 args,
                 all_data["scenes"],

@@ -599,6 +599,63 @@ def detail_block(group: dict[str, Any], root: Path) -> str:
     )
 
 
+def scenario_summary_block(groups: list[dict[str, Any]], root: Path) -> str:
+    """Render one concrete, data-first row for every executed scenario."""
+    rows: list[str] = []
+    for group in groups:
+        items = group["items"]
+        duration = sum(float(item.get("duration_s") or 0) for item in items)
+        tenants = len(group["tenants"])
+        commit_submitted = len(group["commits"])
+        commit_completed = len(group["commit_success"])
+        search_submitted = len(group["searches"])
+        search_succeeded = len(group["search_success"])
+        has_real_samples = (commit_submitted + search_submitted) > 0
+        retries = sum(int(item.get("retry_count") or 0) for item in items)
+        raw_links: list[str] = []
+        for item in items:
+            try:
+                relative = item["output_dir"].relative_to(root)
+            except ValueError:
+                relative = Path(item["output_dir"].name)
+            if (item["output_dir"] / "report.html").is_file():
+                raw_links.append(
+                    f"<a href='{esc(str(relative / 'report.html'))}'>原始报告</a>"
+                )
+            if (item["output_dir"] / "summary.json").is_file():
+                raw_links.append(
+                    f"<a href='{esc(str(relative / 'summary.json'))}'>JSON</a>"
+                )
+        status = str(items[0].get("status") or "-")
+        rows.append(
+            f"<tr><td><b>{esc(group['plan_source'])}</b></td>"
+            f"<td>{esc(group['scenario_label'])}<br><code>{esc(group['scenario_key'])}</code></td>"
+            f"<td>{status_badge(status)}<br>"
+            f"{status_badge('evidence' if has_real_samples else 'no-evidence')}</td>"
+            f"<td>{len(items)}</td><td>{seconds(duration)}</td><td>{tenants}</td>"
+            f"<td>{commit_submitted}/{commit_completed}<br><small>{ratio_percent(commit_completed, commit_submitted)}</small></td>"
+            f"<td>{search_submitted}/{search_succeeded}<br><small>{ratio_percent(search_succeeded, search_submitted)}</small></td>"
+            f"<td>{seconds(group['commit_latency']['p95'])}</td>"
+            f"<td>{seconds(group['search_latency']['p95'])}</td>"
+            f"<td>{len(group['delayed'])}</td><td>{group['rate_limited']}</td>"
+            f"<td>{group['server_timed_count']}/{group['server_timed_total']}</td>"
+            f"<td>{retries}</td><td>{' · '.join(raw_links) or '-'}</td></tr>"
+        )
+    return f"""
+<section class='section'><h2>场景执行摘要</h2>
+<div class='notice'><b>逐场景明细：</b>每一行对应一个 PR397/PR421 场景。
+Commit 和 Search 均按“提交数/成功数”展示，下面的小字是成功率；
+`evidence` 表示该场景有真实 HTTP 请求，`no-evidence` 表示只有占位记录或未发出请求，
+不能计入完整覆盖。</div>
+<div class='scroll'><table><thead><tr>
+<th>方案</th><th>场景</th><th>状态 / 证据</th><th>轮次</th><th>耗时</th><th>租户数</th>
+<th>Commit 提交/成功</th><th>Search 提交/成功</th><th>Commit P95</th>
+<th>Search P95</th><th>延迟事件</th><th>429</th><th>服务端时序覆盖</th>
+<th>重试次数</th><th>原始数据</th></tr></thead>
+<tbody>{''.join(rows) or '<tr><td colspan=15>没有场景数据</td></tr>'}</tbody></table></div>
+</section>"""
+
+
 def render(manifest_path: Path, output_path: Path) -> None:
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     root = manifest_path.parent.resolve()
@@ -706,17 +763,39 @@ def render(manifest_path: Path, output_path: Path) -> None:
         str(run.get("status") or "").lower() == "completed"
         for run in manifest.get("runs") or []
     )
+    evidence_completed = sum(
+        str(run.get("status") or "").lower() == "completed"
+        and sum(
+            int(
+                (
+                    ((run.get("summary") or {}).get("metrics") or {})
+                    .get(operation, {})
+                    .get("submitted", 0)
+                )
+                or 0
+            )
+            for operation in ("search", "commit")
+        ) > 0
+        for run in manifest.get("runs") or []
+    )
     execution_status = (
-        "已完成"
-        if execution_completed == expected_run_count
-        else f"未完成（{execution_completed}/{expected_run_count}）"
+        "已完成且有业务证据"
+        if evidence_completed == expected_run_count
+        else (
+            f"记录齐全，但业务证据不足（{evidence_completed}/{expected_run_count}）"
+            if execution_completed == expected_run_count
+            else (
+                f"未完成（记录 {execution_completed}/{expected_run_count}，"
+                f"业务证据 {evidence_completed}/{expected_run_count}）"
+            )
+        )
     )
     # A completed runner only means the scenario was collected. The acceptance
     # matrix is the source of truth for whether the test objectives passed.
     overall = str(acceptance.get("overall") or "").upper() or (
         "FAIL" if any(status in {"FAIL", "ENVIRONMENT_ERROR", "RESET_FAILED", "NO_SUMMARY"} for status in statuses)
         else "INCONCLUSIVE"
-        if execution_completed < expected_run_count
+        if execution_completed < expected_run_count or evidence_completed < expected_run_count
         else "PASS"
     )
     status_class = overall.lower().replace("_", "-")
@@ -772,9 +851,10 @@ def render(manifest_path: Path, output_path: Path) -> None:
     )
     progress_html = f"""
 <section class='section'><h2>37 场景执行进度</h2>
-<div class='notice'><b>当前覆盖：</b>{len(runs)}/{expected_run_count} 个运行单元；
-已完成场景键 {len(completed_scenario_keys)}/{len(expected_scenarios)}。
-未完成时套件不会显示为 PASS，缺失项只代表尚未执行，不代表 EchoMem 失败。</div>
+<div class='notice'><b>当前覆盖：</b>运行记录 {len(runs)}/{expected_run_count}；
+已完成记录 {execution_completed}/{expected_run_count}；有真实业务样本
+{evidence_completed}/{expected_run_count}。未产生请求的占位记录只代表尚未执行，
+不代表 EchoMem 失败。</div>
 <div class='review-grid'><div><h3>按方案统计</h3><div class='scroll'><table>
 <thead><tr><th>方案</th><th>已完成</th><th>已落盘运行</th><th>状态</th></tr></thead>
 <tbody>{plan_rows or '<tr><td colspan=4>暂无数据</td></tr>'}</tbody></table></div></div>
@@ -846,6 +926,7 @@ details{{border-top:1px solid var(--line);padding:11px 0}}details:first-of-type{
 <div class='kpi'><div class='label'>重复轮次</div><div class='value'>{esc(manifest.get('repeats'))}</div><div class='note'>每组数据同时保留原始轮次</div></div>
 </div>
 {progress_html}
+{scenario_summary_block(groups, root)}
 <section class='section'><h2>数据口径</h2><div class='notice'><b>先看这里：</b>Commit 的端到端时间从请求进入到最终完成；Search 使用请求端到端时间。客户端排队、服务端排队、服务端执行分别统计。服务端字段没有覆盖时显示为 <b>-</b>，不能据此推断服务端没有排队。{esc(admission_note)}</div>
 <p class='muted'>本报告展示均值、P50、P95、P99、最大值、完成率、延迟数、429 数和服务端证据覆盖率；策略只在相同场景、相同租户、相同负载和相同重复轮次之间比较。</p></section>
 <section class='section'><h2>场景 × 策略完整数值</h2><div class='scroll'><table><thead><tr>

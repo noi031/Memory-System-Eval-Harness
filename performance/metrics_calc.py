@@ -330,23 +330,56 @@ def commit_durability(records: list[RequestRecord]) -> dict[str, Any]:
     }
 
 
-def tenant_fairness(records: list[RequestRecord]) -> dict[str, Any]:
-    """租户公平性：按场景×租户的读延迟与吞吐均衡度。
+def jain_fairness(values: Iterable[float]) -> float | None:
+    """Return Jain's index for non-negative tenant rates/utilities.
 
-    For every scene, per-tenant read P50/P95 and QPS are compared. The
-    ``p95_max_min_ratio`` is the spread across tenants; a ratio high
-    enough to indicate one tenant starving others is reported.
+    Jain's index is defined across tenants, never across operation types.
+    A minimum of two positive observations is required; zero-throughput
+    tenants remain in the denominator when they are part of the window.
+    """
+    usable = [float(value) for value in values if value is not None and value >= 0]
+    if len(usable) < 2:
+        return None
+    denominator = len(usable) * sum(value * value for value in usable)
+    if denominator == 0:
+        return None
+    total = sum(usable)
+    return round((total * total) / denominator, 4)
+
+
+def tenant_fairness(
+    records: list[RequestRecord],
+    *,
+    wall_s: float | None = None,
+) -> dict[str, Any]:
+    """租户公平性：分别计算 Commit 吞吐和 Search 延迟公平性。
+
+    The fairness population is the set of tenants in each scene. Commit
+    throughput and Search latency are deliberately separate dimensions:
+    Commit uses completed operations per second, while Search converts P95
+    latency into an inverse utility (``1 / p95``) before applying Jain.
+    The legacy read P95 spread fields are retained for compatibility.
     """
     per_scene: dict[str, dict[int, list[float]]] = {}
+    commit_counts: dict[str, dict[int, int]] = {}
     for rec in records:
-        if rec.op != "read":
-            continue
-        per_scene.setdefault(rec.scene_key, {}).setdefault(rec.tenant_idx, []).append(rec.stage_ms)
+        if rec.op == "read" and rec.status == "ok":
+            per_scene.setdefault(rec.scene_key, {}).setdefault(rec.tenant_idx, []).append(
+                rec.stage_ms
+            )
+        elif rec.op == "commit_done" and rec.status == "ok":
+            commit_counts.setdefault(rec.scene_key, {}).setdefault(rec.tenant_idx, 0)
+            commit_counts[rec.scene_key][rec.tenant_idx] += 1
 
     result: dict[str, Any] = {}
-    for scene_key, tenant_map in per_scene.items():
+    scene_keys = set(per_scene) | set(commit_counts)
+    for scene_key in scene_keys:
+        tenant_map = per_scene.get(scene_key, {})
+        scene_commit_counts = commit_counts.get(scene_key, {})
+        tenant_ids = set(tenant_map) | set(scene_commit_counts)
         rows: list[dict[str, Any]] = []
-        for tenant_idx, stages in tenant_map.items():
+        for tenant_idx in sorted(tenant_ids):
+            stages = tenant_map.get(tenant_idx, [])
             ordered = sorted(stages)
             rows.append(
                 {
@@ -355,23 +388,50 @@ def tenant_fairness(records: list[RequestRecord]) -> dict[str, Any]:
                     "p50_ms": percentile(ordered, 0.5),
                     "p95_ms": percentile(ordered, 0.95),
                     "p99_ms": percentile(ordered, 0.99),
+                    "commit_completed": scene_commit_counts.get(tenant_idx, 0),
                 }
             )
         if len(rows) < 2:
-            result[scene_key] = {"tenants": rows, "p95_max_min_ratio": None, "balanced": True}
+            result[scene_key] = {
+                "tenants": rows,
+                "p95_max_min_ratio": None,
+                "balanced": True,
+                "commit_throughput_per_tenant": {},
+                "commit_throughput_jain": None,
+                "search_latency_utility_per_tenant": {},
+                "search_latency_utility_jain": None,
+            }
             continue
-        p95s = [row["p95_ms"] or 0.0 for row in rows]
+        p95s = [row["p95_ms"] for row in rows if row["p95_ms"] is not None]
         positive = [v for v in p95s if v > 0]
         ratio = None
         if len(positive) >= 2:
             ratio = round(max(positive) / min(positive), 3)
-        mean = sum(p95s) / len(p95s)
-        variance = sum((v - mean) ** 2 for v in p95s) / len(p95s)
+        mean = sum(p95s) / len(p95s) if p95s else 0.0
+        variance = (
+            sum((v - mean) ** 2 for v in p95s) / len(p95s)
+            if p95s
+            else 0.0
+        )
+        duration = wall_s if wall_s and wall_s > 0 else 1.0
+        commit_rates = {
+            str(row["tenant_idx"]): round(row["commit_completed"] / duration, 6)
+            for row in rows
+        }
+        search_utilities = {
+            str(row["tenant_idx"]): round(1000.0 / row["p95_ms"], 6)
+            for row in rows
+            if row["p95_ms"] is not None and row["p95_ms"] > 0
+        }
         result[scene_key] = {
             "tenants": rows,
             "p95_max_min_ratio": ratio,
-            "p95_cv": round(variance**0.5 / mean, 3) if mean > 0 else None,
+            "p95_cv": round(variance**0.5 / mean, 3) if mean > 0 and p95s else None,
             "balanced": ratio is None or ratio < FAIRNESS_MAX_MIN_RATIO,
+            "commit_throughput_per_tenant": commit_rates,
+            "commit_throughput_jain": jain_fairness(commit_rates.values()),
+            "search_latency_utility_per_tenant": search_utilities,
+            "search_latency_utility_jain": jain_fairness(search_utilities.values()),
         }
     return result
 

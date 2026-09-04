@@ -886,6 +886,12 @@ find "$STRESS_OUTPUT_DIR" -name summary.json -type f | sort
 `completed_run_count`、`timeout_run_count`、`blocked_run_count` 和每个场景的
 真实请求样本；`TIMEOUT`/`BLOCKED` 不能当作通过。
 
+完整套件对每个场景默认允许 2 次环境级重试（总共最多 3 次尝试），只针对
+`ENV_ERROR`、`NO_SUMMARY`、`HARNESS_ERROR` 这类在未产生业务请求前退出的情况；
+每次失败尝试会保存在该场景目录的 `attempt-01/`、`attempt-02/` 中，最终尝试
+仍写入场景主目录。功能性 `FAIL`、已有真实请求的 `TIMEOUT` 和成功结果不会被
+重试或覆盖。可用 `--case-retries N` 与 `--case-retry-backoff-s` 调整。
+
 ### 六项 4U8G 目标统一自动化入口
 
 使用 `performance/objective_suite.py` 可以按实例规格逐个执行容量、稳定性、
@@ -902,7 +908,9 @@ python3 -m performance.objective_suite \
 ```
 
 `--full` 是正式 4U8G 入口：会运行 PR397 的 12 个场景和 PR421 的 25 个场景，
-总计 37 个场景（默认不包含 soak），默认总墙钟预算为 3 小时。不要在正式验收
+总计 37 个场景（默认不包含 soak），默认总墙钟预算为 6 小时。37 个场景需要逐个
+保留真实模型和真实 HTTP 样本；可以通过 `--max-wall-clock-s` 显式缩短，但缩短后的
+结果只能按实际完成覆盖解读。不要在正式验收
 命令中加 `--quick`；`--quick` 仅用于快速诊断子集，不能作为完整测试结果。
 报告中的场景覆盖必须显示 `37/37`，否则本轮只能算部分结果。
 

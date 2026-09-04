@@ -61,6 +61,7 @@ from performance.metrics_calc import (
     search_quality_summary,
     summarize_records,
     tenant_fairness,
+    jain_fairness,
 )
 from performance.monitor import (
     CPU_SECONDS,
@@ -277,6 +278,11 @@ class SummarizeTests(unittest.TestCase):
         self.assertEqual(result["slowest_tenant_p95_ms"], 200.0)
         self.assertEqual(result["slowest_tenant_p99_ms"], 400.0)
         self.assertEqual(result["slowest_waits_extra_ms"], 180.0)
+
+    def test_jain_fairness_is_across_tenants(self) -> None:
+        self.assertEqual(jain_fairness([10, 10, 10, 10]), 1.0)
+        self.assertAlmostEqual(jain_fairness([40, 5, 5, 5]), 0.4515, places=4)
+        self.assertIsNone(jain_fairness([10]))
 
 
 class ScenarioMatrixTests(unittest.TestCase):
@@ -944,6 +950,25 @@ class FeatureGuaranteeTests(unittest.TestCase):
         fair = result["A@1"]
         self.assertLess(fair["p95_max_min_ratio"], 3.0)
         self.assertTrue(fair["balanced"])
+
+    def test_tenant_fairness_separates_commit_and_search_dimensions(self) -> None:
+        records = [
+            self._rec("read", f"a-{i}", stage=50.0, idx=0, scene="fair")
+            for i in range(10)
+        ] + [
+            self._rec("read", f"b-{i}", stage=100.0, idx=1, scene="fair")
+            for i in range(10)
+        ] + [
+            self._rec("commit_done", f"ca-{i}", stage=10.0, idx=0, scene="fair")
+            for i in range(10)
+        ] + [
+            self._rec("commit_done", f"cb-{i}", stage=10.0, idx=1, scene="fair")
+            for i in range(10)
+        ]
+        fair = tenant_fairness(records, wall_s=10.0)["fair"]
+        self.assertEqual(fair["commit_throughput_per_tenant"], {"0": 1.0, "1": 1.0})
+        self.assertEqual(fair["commit_throughput_jain"], 1.0)
+        self.assertEqual(fair["search_latency_utility_jain"], 0.9)
 
     def test_rss_trend_slope(self) -> None:
         # 每秒 +1MB：斜率 = 60 MB/min
