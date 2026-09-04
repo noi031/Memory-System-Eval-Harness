@@ -3,21 +3,55 @@ from __future__ import annotations
 import csv
 import json
 import tempfile
+import threading
 import unittest
 from unittest.mock import patch
 from pathlib import Path
 
-from performance.probes.cursor_reconcile import reconcile
-from performance.probes.cursor_reconcile import values_from_payload
-from performance.probes._client import extract_message
-from performance.probes._client import EchoMemHTTP
-from performance.probes.commit_recovery_probe import decode_fs_read_payload
-from performance.probes.commit_recovery_probe import recovery_control_ok
-from performance.scheduler_acceptance import evaluate as evaluate_scheduler_acceptance
-from performance.probes.capability_probe import classify_probe, run as run_capability
-from performance.probes.capability_probe import request as capability_request
-from performance.probes.blackbox_contract_probe import request as blackbox_request
-from performance.probes.fault_injection import NOT_IMPLEMENTED, run_control
+from performance.targets.echomem.acceptance.scheduler import (
+    evaluate as evaluate_scheduler_acceptance,
+)
+from performance.ctx import Ctx
+from performance.targets.echomem.probes._client import extract_message
+from performance.targets.echomem.probes._client import EchoMemHTTP
+from performance.targets.echomem.probes.blackbox_contract import (
+    request as blackbox_request,
+)
+from performance.targets.echomem.probes.capability import (
+    classify_probe,
+    request as capability_request,
+    run as run_capability,
+)
+from performance.targets.echomem.probes.commit_recovery import (
+    decode_fs_read_payload,
+    recovery_control_ok,
+)
+from performance.targets.echomem.probes.cursor_reconcile import (
+    run as run_reconcile,
+    values_from_payload,
+)
+from performance.targets.echomem.probes.fault_injection import run_control
+
+
+def _probe_ctx(base_url: str, **params):
+    checks = []
+    ctx = Ctx(
+        scene="failure_tools",
+        worker_id=0,
+        tenant_idx=0,
+        headers={},
+        base_url=base_url,
+        read_timeout_s=5,
+        params=params,
+        duration_s=0,
+        stop=threading.Event(),
+        record_fn=lambda r: None,
+        seq_fn=lambda: 0,
+        choose_fn=lambda items: None,
+        phases=[],
+        checks=checks,
+    )
+    return ctx, checks
 
 
 class FailureToolTests(unittest.TestCase):
@@ -66,29 +100,21 @@ class FailureToolTests(unittest.TestCase):
             "NOT_IMPLEMENTED",
             classify_probe("optional", {"status_code": 404, "payload": {}})["status"],
         )
-        class Args:
-            base_url = "http://127.0.0.1:1"
-            auth_key = ""
-            auth_key_env = "MISSING_KEY"
-            auth_header = "X-API-Key"
-            health_path = "/health"
-            metrics_path = "/metrics"
-            cursor_path = ""
-            operation_path = ""
-            operation_keys = ["operation_id"]
-            conflict_path = ""
-            conflict_keys = ["version"]
-            ttl_path = ""
-            ttl_keys = ["ttl_seconds"]
-            engine_path = ""
-            engine_keys = ["status"]
-            fault_path = ""
-            fault_keys = ["status"]
-            session_id = ""
-            timeout_s = 0.01
-        result = run_capability(Args())
-        self.assertEqual("INCONCLUSIVE", result["status"])
-        self.assertGreaterEqual(result["summary"]["inconclusive"], 6)
+        ctx, checks = _probe_ctx(
+            "http://127.0.0.1:1",
+            auth_key="",
+            auth_key_env="MISSING_KEY",
+            auth_header="X-API-Key",
+            health_path="/health",
+            metrics_path="/metrics",
+            timeout_s=0.01,
+        )
+        run_capability(ctx)
+        self.assertTrue(checks)
+        self.assertTrue(all(check.status == "INCONCLUSIVE" for check in checks))
+        self.assertGreaterEqual(
+            sum(1 for check in checks if check.status == "INCONCLUSIVE"), 6
+        )
 
     def test_cursor_payload_extracts_nested_operation_and_archive(self) -> None:
         messages, archives, operations = values_from_payload({
@@ -197,15 +223,15 @@ class FailureToolTests(unittest.TestCase):
         self.assertEqual("commit-key-1", args[2]["idempotency_key"])
 
     def test_fault_control_without_real_control_is_inconclusive(self) -> None:
-        class Args:
-            command = ""
-            endpoint = ""
-            container = ""
-            action = ""
-            signal = "KILL"
-            timeout_s = 1
-
-        self.assertEqual("INCONCLUSIVE", run_control(Args())["status"])
+        result = run_control({
+            "command": "",
+            "endpoint": "",
+            "container": "",
+            "action": "",
+            "signal": "KILL",
+            "timeout_s": 1,
+        })
+        self.assertEqual("INCONCLUSIVE", result["status"])
 
     def test_cursor_reconcile_compares_message_set(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -221,17 +247,17 @@ class FailureToolTests(unittest.TestCase):
                     "message_ids": json.dumps(["m1", "m2"]),
                 })
 
-            class Args:
-                commit_csv = commits
-                cursor_url_template = ""
-                base_url = ""
-                cursor_uri_template = "echo://sessions/{session}/current/commit_cursor.json"
-                auth_key = ""
-                auth_header = "X-API-Key"
-                timeout_s = 1
-
-            result = reconcile(Args())
-            self.assertEqual("INCONCLUSIVE", result["status"])
+            ctx, checks = _probe_ctx(
+                "",
+                commit_csv=str(commits),
+                cursor_uri_template="echo://sessions/{session}/current/commit_cursor.json",
+                auth_key="",
+                auth_header="X-API-Key",
+                timeout_s=1,
+            )
+            run_reconcile(ctx)
+            self.assertEqual(["reconcile"], [check.name for check in checks])
+            self.assertEqual("INCONCLUSIVE", checks[0].status)
 
 
 if __name__ == "__main__":

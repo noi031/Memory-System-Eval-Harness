@@ -1,0 +1,26 @@
+# EchoMem 通用负载画像（四个场景共用）。
+# workers/duration 为示例量级；A/B/C/D 场景语义在 scenes/*.py 中。
+# 场景特有参数（top_k、messages_per_session、burst_* 等）放在 params，
+# 由场景代码通过 ctx.params 读取。C 场景的读写拆分用 --mix read=8,write=1 覆盖。
+name: echomem-basic
+description: EchoMem 通用负载画像（四场景共用，示例量级）
+target:
+  base_url: ${ECHOMEM_BASE_URL:-http://127.0.0.1:8010}
+  headers:
+    X-Auth-Key: ${ECHOMEM_AUTH_KEY:-}
+  read_timeout_s: 30
+load:
+  workers: 16
+  duration_s: 60
+params:
+  top_k: 5
+  messages_per_session: 10
+  commit_poll_timeout_s: 600
+  burst_commits: 32
+  burst_window_s: 10
+  queries:
+    - 什么是记忆
+    - 用户今天的心情怎么样
+    - 帮我总结一下最近的对话
+    - 上个月的项目进展
+    - 用户的偏好是什么

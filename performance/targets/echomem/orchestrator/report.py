@@ -1,0 +1,106 @@
+"""objective-suite.html 渲染：逐 profile 目标表 O1-O7 + 探针证据明细。
+
+自包含 HTML：状态按 PASS/FAIL/TIMEOUT/INCONCLUSIVE 着色，探针证据以
+``<details>`` 折叠展示检查项表与制品路径。只依据实际运行证据判定，缺少
+部署控制或服务端指标时保持 INCONCLUSIVE。
+"""
+
+from __future__ import annotations
+
+import html
+import json
+from pathlib import Path
+from typing import Any
+
+_PROBE_LABELS = (
+    ("capability_probe", "能力探针"),
+    ("blackbox_contract_probe", "黑盒契约探针"),
+    ("missing_cases", "PR397 黑盒一致性探针"),
+    ("concurrent_commit", "并发 Commit 探针"),
+    ("fault_isolation", "单租户故障隔离探针"),
+    ("limit_failure_sweep", "真实限流阶梯"),
+    ("commit_recovery", "Commit 崩溃恢复探针"),
+    ("fault_suite", "故障套件"),
+)
+
+
+def render_objective_suite_html(result: dict[str, Any]) -> str:
+    """把 objective-suite.json 渲染为自包含 HTML 字符串。"""
+    rows = []
+    for profile in result.get("profiles") or []:
+        for objective in profile.get("objectives") or []:
+            rows.append(
+                "<tr>"
+                f"<td>{html.escape(str(profile.get('name')))}</td>"
+                f"<td>{html.escape(str(objective.get('id')))} "
+                f"{html.escape(str(objective.get('name')))}</td>"
+                f"<td class='{html.escape(str(objective.get('status')).lower())}'>"
+                f"{html.escape(str(objective.get('status')))}</td>"
+                f"<td>{html.escape(str(objective.get('reason')))}"
+                f"<br><code>{html.escape(json.dumps(objective.get('observed', {}), ensure_ascii=False, sort_keys=True))}</code></td>"
+                f"<td>{html.escape(str(objective.get('owner') or '测试平台'))}</td>"
+                f"<td><code>{html.escape(str(objective.get('evidence')))}</code></td>"
+                "</tr>"
+            )
+    details = []
+    for profile in result.get("profiles") or []:
+        details.append(f"<h3>{html.escape(str(profile.get('name')))}</h3>")
+        for key, label in _PROBE_LABELS:
+            payload = profile.get(key)
+            if not isinstance(payload, dict):
+                continue
+            checks_detail = payload.get("checks") or payload.get("cases") or []
+            details.append(
+                f"<details><summary>{label}："
+                f"<strong>{html.escape(str(payload.get('status', '未返回')))}</strong>"
+                "</summary>"
+            )
+            if payload.get("reason"):
+                details.append(f"<p>{html.escape(str(payload['reason']))}</p>")
+            if isinstance(checks_detail, list) and checks_detail:
+                details.append(
+                    "<table><thead><tr><th>检查项</th><th>状态</th><th>HTTP/耗时</th>"
+                    "<th>说明</th></tr></thead><tbody>"
+                )
+                for item in checks_detail:
+                    item = item if isinstance(item, dict) else {}
+                    execution = item.get("execution") if isinstance(item.get("execution"), dict) else {}
+                    nested = execution.get("result") if isinstance(execution.get("result"), dict) else {}
+                    details.append(
+                        "<tr>"
+                        f"<td>{html.escape(str(item.get('name') or item.get('kind') or 'case'))}</td>"
+                        f"<td>{html.escape(str(item.get('status') or nested.get('status') or ''))}</td>"
+                        f"<td>{html.escape(str(item.get('http_status') or item.get('elapsed_s') or ''))}</td>"
+                        f"<td>{html.escape(str(item.get('reason') or nested.get('reason') or ''))}</td>"
+                        "</tr>"
+                    )
+                details.append("</tbody></table>")
+            details.append(
+                f"<p class='muted'>制品：<code>{html.escape(str(payload.get('path', '')))}</code></p></details>"
+            )
+    return f"""<!doctype html>
+<html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>EchoMem 七项目标自动化验收</title>
+<style>
+body{{font:14px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;color:#17212b;background:#f5f7f8;margin:0}}
+main{{max-width:1280px;margin:auto;padding:28px 18px 56px}}section{{background:#fff;border:1px solid #dfe6ea;padding:18px;margin-top:14px}}
+h1{{margin:0 0 6px;font-size:25px}}.muted{{color:#687784}}table{{border-collapse:collapse;width:100%}}
+th,td{{border-bottom:1px solid #e7ecef;padding:9px;text-align:left;vertical-align:top}}th{{background:#f7f9fa}}
+.pass{{color:#197c62;font-weight:700}}.fail,.timeout{{color:#b6403b;font-weight:700}}.inconclusive{{color:#9a6a00;font-weight:700}}
+code{{background:#f0f3f5;padding:2px 4px}}.scroll{{overflow:auto}}
+</style><main>
+<section><h1>EchoMem 七项目标自动化验收</h1>
+<div class="muted">生成时间：{html.escape(str(result.get("created_at", "")))} · 真实 HTTP：是 · mock 模型：否</div>
+<p>报告只依据实际运行证据判定；缺少部署控制或服务端指标时标记为 INCONCLUSIVE，不推断为通过。</p></section>
+<section class="scroll"><h2>逐 profile 目标状态</h2>
+<table><thead><tr><th>Profile</th><th>目标</th><th>状态</th><th>说明</th><th>归属</th><th>证据</th></tr></thead>
+<tbody>{"".join(rows)}</tbody></table></section>
+<section class="scroll"><h2>探针与黑盒证据明细</h2>
+<p class="muted">这里显示真实 HTTP 探针实际检查到的内容。没有真实输入、控制能力或服务端观测时，状态保持 INCONCLUSIVE。</p>
+{"".join(details)}</section>
+</main></html>"""
+
+
+def write_objective_suite_html(result: dict[str, Any], path: Path) -> None:
+    """把渲染结果写入 ``path``。"""
+    path.write_text(render_objective_suite_html(result), encoding="utf-8")

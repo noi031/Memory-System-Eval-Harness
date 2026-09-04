@@ -1,7 +1,9 @@
-"""Performance stress-testing of memory backends (EchoMem).
+"""Generic HTTP scenario load-testing engine.
 
-Independent of benchmarks/dynamic: measures throughput, latency, injection
-(write) cost, mixed read/write degradation, and server resources (CPU/RSS)
-under multi-tenant concurrency. The server side is observed read-only through
-its Prometheus /metrics endpoint; no server-side change is required.
+A scenario is Python code (task functions driven by the engine's worker
+pool and ``ctx`` API); a load profile is YAML data (target, worker
+count, duration, mix, arrival, params).  The engine has no knowledge of
+a specific backend.
 """
+
+__version__ = "0.2.0"

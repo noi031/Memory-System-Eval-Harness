@@ -5,8 +5,37 @@ import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from performance.formal_suite import _usable_tenants
-from performance.probes.auth_preflight import key_fingerprint, run
+from performance.ctx import Ctx
+from performance.targets.echomem.probes.auth_preflight import key_fingerprint, run
+
+
+def _probe_ctx(base_url: str, **params):
+    checks = []
+    ctx = Ctx(
+        scene="auth_preflight",
+        worker_id=0,
+        tenant_idx=0,
+        headers={},
+        base_url=base_url,
+        read_timeout_s=5,
+        params=params,
+        duration_s=0,
+        stop=threading.Event(),
+        record_fn=lambda r: None,
+        seq_fn=lambda: 0,
+        choose_fn=lambda items: None,
+        phases=[],
+        checks=checks,
+    )
+    return ctx, checks
+
+
+def _transport_failed(checks) -> bool:
+    # A per-tenant check that never reached the server reports http_status
+    # null. Windows can abort a concurrent localhost connection
+    # (WSAECONNABORTED 10053) while a ThreadingHTTPServer is under parallel
+    # load; that is an environment flake, not a probe verdict.
+    return any('"http_status": null' in check.detail for check in checks)
 
 
 class AuthPreflightTests(unittest.TestCase):
@@ -54,38 +83,33 @@ class AuthPreflightTests(unittest.TestCase):
             os.environ["OK_KEY"] = "valid-key"
             os.environ["BAD_KEY"] = "invalid-key"
             try:
-                result = run(
-                    f"http://127.0.0.1:{server.server_port}",
-                    config,
-                    timeout_s=1,
-                )
+                checks = []
+                for _attempt in range(3):
+                    ctx, checks = _probe_ctx(
+                        f"http://127.0.0.1:{server.server_port}",
+                        tenant_config=str(config),
+                        timeout_s=1,
+                    )
+                    run(ctx)
+                    if not _transport_failed(checks):
+                        break
             finally:
                 for name, value in old_values.items():
                     if value is None:
                         os.environ.pop(name, None)
                     else:
                         os.environ[name] = value
-            self.assertEqual("PARTIAL", result["status"])
-            self.assertEqual(1, result["passed"])
-            self.assertEqual(1, result["failed"])
-            self.assertEqual(["ok"], result["usable_tenant_ids"])
-            encoded = json.dumps(result)
+            by_name = {check.name: check for check in checks}
+            self.assertEqual({"ok", "bad"}, set(by_name))
+            self.assertEqual("PASS", by_name["ok"].status)
+            self.assertEqual("FAIL", by_name["bad"].status)
+            encoded = json.dumps([(check.reason, check.detail) for check in checks])
             self.assertNotIn("valid-key", encoded)
             self.assertNotIn("invalid-key", encoded)
         finally:
             config.unlink(missing_ok=True)
             server.shutdown()
             server.server_close()
-
-    def test_usable_tenants_filters_by_preflight_identity(self):
-        tenants = [
-            {"tenant_id": "a", "auth_key": "key-a"},
-            {"tenant_id": "b", "auth_key": "key-b"},
-        ]
-        self.assertEqual(
-            [tenants[0]],
-            _usable_tenants(tenants, {"usable_tenant_ids": ["a"]}),
-        )
 
 
 if __name__ == "__main__":
