@@ -19,7 +19,7 @@
         "fault_path": ""
       },
       "commit_recovery": {
-        "container": "echomem-4u8g",
+        "container": "${ECHOMEM_CONTAINER:-echomem-4u8g}",
         "tenant": "stress-a",
         "kill_delay_s": 0.5,
         "messages": 12,
@@ -31,7 +31,7 @@
         "enabled": false,
         "target_tenant": "stress-a",
         "bystander_tenants": "stress-b,stress-c,stress-d",
-        "endpoint": "http://127.0.0.1:8010/fault/control",
+        "endpoint": "${ECHOMEM_FAULT_CONTROL_URL}",
         "samples": 8,
         "workers": 8,
         "timeout_s": 20,

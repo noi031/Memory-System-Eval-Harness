@@ -254,6 +254,8 @@ def run_preflight(
     config_path: str | Path,
     *,
     timeout_s: float = 20.0,
+    retry_attempts: int = 3,
+    retry_backoff_s: float = 1.0,
 ) -> dict[str, Any]:
     """Run the full preflight gate; returns a structured, secret-free result.
 
@@ -272,10 +274,18 @@ def run_preflight(
             "digest": "",
         }
     env_errors = check_env(engines)
-    probes = [probe_endpoint(engine, timeout_s=timeout_s) for engine in engines]
-    failures = [
-        entry for entry in probes if entry["status"] != "ok"
-    ]
+    attempts = max(1, int(retry_attempts))
+    probes: list[dict[str, Any]] = []
+    attempts_used = 0
+    for attempt in range(1, attempts + 1):
+        attempts_used = attempt
+        probes = [probe_endpoint(engine, timeout_s=timeout_s) for engine in engines]
+        failures = [entry for entry in probes if entry["status"] != "ok"]
+        if not failures or not _retryable_probe_failure(failures[0]):
+            break
+        if attempt < attempts:
+            time.sleep(max(0.0, float(retry_backoff_s)) * attempt)
+    failures = [entry for entry in probes if entry["status"] != "ok"]
     if env_errors:
         return {
             "ok": False,
@@ -283,6 +293,7 @@ def run_preflight(
             "engines_checked": len(engines),
             "engines": probes,
             "digest": config_digest(engines),
+            "probe_attempts": attempts_used,
         }
     if failures:
         return {
@@ -291,6 +302,7 @@ def run_preflight(
             "engines_checked": len(engines),
             "engines": probes,
             "digest": config_digest(engines),
+            "probe_attempts": attempts_used,
         }
     return {
         "ok": True,
@@ -298,7 +310,27 @@ def run_preflight(
         "engines_checked": len(engines),
         "engines": probes,
         "digest": config_digest(engines),
+        "probe_attempts": attempts_used,
     }
+
+
+def _retryable_probe_failure(entry: dict[str, Any]) -> bool:
+    """Retry only transient transport failures, never deterministic HTTP errors."""
+    if entry.get("code") is not None:
+        return False
+    error = str(entry.get("error") or "").lower()
+    return any(
+        marker in error
+        for marker in (
+            "nodename nor servname",
+            "name or service not known",
+            "temporary failure in name resolution",
+            "timed out",
+            "connection refused",
+            "network is unreachable",
+            "urlopen error",
+        )
+    )
 
 
 def main() -> None:

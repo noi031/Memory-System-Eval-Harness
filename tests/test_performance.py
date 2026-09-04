@@ -78,6 +78,7 @@ from performance.perf_preflight import (
     config_digest,
     parse_engine_configs,
     probe_endpoint,
+    _retryable_probe_failure,
     run_preflight,
 )
 from performance.prepare import (
@@ -2110,6 +2111,18 @@ class PreflightTests(unittest.TestCase):
         result = run_preflight("/nonexistent/preflight.json")
         self.assertFalse(result["ok"])
         self.assertIn("配置读取失败", result["error"])
+
+    def test_preflight_retries_only_transport_failures(self) -> None:
+        self.assertTrue(
+            _retryable_probe_failure(
+                {"code": None, "error": "endpoint 不可达/超时: <urlopen error [Errno 8] nodename nor servname provided, or not known>"}
+            )
+        )
+        self.assertFalse(
+            _retryable_probe_failure(
+                {"code": 401, "error": "HTTP 401（模型不可用）"}
+            )
+        )
 
     def test_probe_endpoint_against_mock(self) -> None:
         provider = MockProvider(port=0)

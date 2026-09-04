@@ -31,7 +31,7 @@
         "timeout_s": 120
       },
       "commit_recovery": {
-        "container": "echomem-pr449-fresh-4u8g",
+        "container": "${ECHOMEM_CONTAINER:-echomem-stress-target}",
         "tenant": "stress-a",
         "require_accepted_202": true,
         "kill_delay_s": 0.5,
@@ -44,7 +44,7 @@
         "enabled": false,
         "target_tenant": "stress-a",
         "bystander_tenants": "stress-b,stress-c,stress-d",
-        "endpoint": "",
+        "endpoint": "${ECHOMEM_FAULT_CONTROL_URL}",
         "samples": 8,
         "workers": 8,
         "timeout_s": 20,

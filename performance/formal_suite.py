@@ -515,6 +515,8 @@ def _build_seed_warmup_command(
         str(args.commit_max_attempts),
         "--commit-retry-backoff-s",
         str(args.commit_retry_backoff_s),
+        "--seed-concurrency",
+        str(args.seed_concurrency),
         "--tenant-config",
         str(config_path),
         "--scenarios",
@@ -1904,12 +1906,28 @@ def _finalize_suite_outputs(
     """Always materialize machine-readable and HTML output, including partial runs."""
     acceptance = evaluate_pr421_acceptance(manifest)
     manifest["acceptance"] = acceptance
+    expected_run_count = len(scenario_names) * args.repeats * len(POLICIES)
+    statuses = [
+        str(run.get("status") or "NO_SUMMARY").upper()
+        for run in manifest.get("runs") or []
+    ]
+    manifest_run_count = len(statuses)
+    completed_run_count = sum(status == "COMPLETED" for status in statuses)
     manifest["finalization"] = {
         "status": final_status,
         "finished_at": now_iso(),
         "reason": final_reason,
-        "run_count": len(manifest.get("runs") or []),
-        "expected_run_count": len(scenario_names) * args.repeats * len(POLICIES),
+        "run_count": manifest_run_count,
+        "expected_run_count": expected_run_count,
+        "completed_run_count": completed_run_count,
+        "failed_run_count": sum(status in {"FAIL", "HARNESS_ERROR", "NO_SUMMARY"} for status in statuses),
+        "timeout_run_count": sum(status == "TIMEOUT" for status in statuses),
+        "blocked_run_count": sum(status == "BLOCKED" for status in statuses),
+        "coverage_status": (
+            "complete"
+            if manifest_run_count >= expected_run_count
+            else "partial"
+        ),
     }
     _write_json_atomic(root / "suite.json", manifest)
     _write_json_atomic(root / "acceptance.json", acceptance)
@@ -1982,12 +2000,20 @@ def _finalize_suite_outputs(
             "barrier_drain_timeout_s": args.barrier_drain_timeout_s,
             "skip_seed": args.skip_seed,
             "seed_sessions_per_tenant_override": args.seed_sessions_per_tenant,
+            "seed_concurrency": args.seed_concurrency,
+            "seed_commit_timeout_s": args.seed_commit_timeout_s,
         },
         "details": {
-            "run_count": len(manifest.get("runs") or []),
-            "expected_run_count": len(scenario_names) * args.repeats * len(POLICIES),
+            "run_count": manifest_run_count,
+            "expected_run_count": expected_run_count,
+            "completed_run_count": completed_run_count,
+            "coverage_status": manifest["finalization"]["coverage_status"],
             "plan_sources": manifest.get("plan_sources") or {},
             "failed_runs": sum(status == "FAIL" for status in statuses),
+            "timeout_runs": sum(status == "TIMEOUT" for status in statuses),
+            "blocked_runs": sum(
+                status in {"BLOCKED", "blocked"} for status in statuses
+            ),
             "inconclusive_runs": sum(
                 status in {"INCONCLUSIVE", "NOT_IMPLEMENTED", "BLOCKED", "blocked"}
                 for status in statuses
@@ -2090,6 +2116,12 @@ def main() -> int:
     parser.add_argument("--commit-max-attempts", type=int, default=3)
     parser.add_argument("--commit-retry-backoff-s", type=float, default=2.0)
     parser.add_argument(
+        "--seed-concurrency",
+        type=int,
+        default=2,
+        help="正式 seed warmup 的租户级并发数；默认 2，避免真实 Commit 相互堆积",
+    )
+    parser.add_argument(
         "--barrier-wave-size",
         type=int,
         default=32,
@@ -2098,13 +2130,13 @@ def main() -> int:
     parser.add_argument(
         "--barrier-drain-timeout-s",
         type=float,
-        default=10.0,
-        help="barrier Search 窗口结束后收集 Commit 终态的最大等待时间",
+        default=600.0,
+        help="barrier Search 窗口结束后收集 Commit 终态的最大等待时间；正式模式默认 600 秒",
     )
     parser.add_argument(
         "--max-wall-clock-s",
         type=float,
-        default=3600.0,
+        default=10800.0,
         help="整轮正式套件最大 wall-clock 时间；超时后不再启动新场景",
     )
     parser.add_argument(
@@ -2239,6 +2271,8 @@ def main() -> int:
         parser.error("--max-wall-clock-s must be > 0")
     if args.seed_commit_timeout_s <= 0:
         parser.error("--seed-commit-timeout-s must be > 0")
+    if args.seed_concurrency < 1:
+        parser.error("--seed-concurrency must be >= 1")
     if args.barrier_wave_size < 1:
         parser.error("--barrier-wave-size must be >= 1")
     if args.barrier_drain_timeout_s < 0:
@@ -2767,110 +2801,6 @@ def main() -> int:
     report_path = root / "suite.html"
     signal.signal(signal.SIGINT, previous_sigint)
     signal.signal(signal.SIGTERM, previous_sigterm)
-    print(report_path)
-    return 0 if overall in {"PASS", "INCONCLUSIVE"} else 2
-
-    acceptance = evaluate_pr421_acceptance(manifest)
-    manifest["acceptance"] = acceptance
-    (root / "suite.json").write_text(
-        json.dumps(manifest, ensure_ascii=False, indent=2) + "\n",
-        encoding="utf-8",
-    )
-    (root / "acceptance.json").write_text(
-        json.dumps(acceptance, ensure_ascii=False, indent=2) + "\n",
-        encoding="utf-8",
-    )
-    (root / "model_analysis_input.json").write_text(
-        json.dumps(
-            build_model_analysis_input(manifest, acceptance),
-            ensure_ascii=False,
-            indent=2,
-        )
-        + "\n",
-        encoding="utf-8",
-    )
-    report_path = root / "suite.html"
-    try:
-        from .formal_data_report import render as render_data_report
-    except ImportError:
-        from formal_data_report import render as render_data_report
-    render_data_report(root / "suite.json", report_path)
-    statuses = [str(run.get("status") or "NO_SUMMARY") for run in manifest["runs"]]
-    if any(
-        status in {
-            "ENVIRONMENT_ERROR",
-            "ENV_ERROR",
-            "RESET_FAILED",
-            "NO_SUMMARY",
-            "TIMEOUT",
-            "FAIL",
-            "HARNESS_ERROR",
-        }
-        for status in statuses
-    ) or acceptance["overall"] == "FAIL":
-        overall = "FAIL"
-    elif any(status in {"INCONCLUSIVE", "NOT_IMPLEMENTED"} for status in statuses) or acceptance["overall"] in {"INCONCLUSIVE", "NOT_IMPLEMENTED"}:
-        overall = "INCONCLUSIVE"
-    else:
-        overall = "PASS"
-    suite_summary = {
-        "status": overall,
-        "test_type": "formal_stress_suite",
-        "base_url": args.base_url,
-        "created_at": manifest["created_at"],
-        "finished_at": now_iso(),
-        "parameters": {
-            "tenant_config": str(tenant_path),
-            "profile": args.profile,
-            "instance_profile": args.instance_profile,
-            "plan_sources": (
-                ["PR397/report(6)", "PR421"] if args.profile == "complete"
-                else ["PR397/report(6)"] if args.profile == "report6"
-                else ["PR397/report(6)", "PR421"]
-                if args.profile == "4u8g"
-                else ["PR421"] if args.profile == "pr421"
-                else ["report(4)"]
-            ),
-            "scenarios": scenario_names,
-            "repeats": args.repeats,
-            "policies": list(POLICIES),
-            "commit_timeout_s": args.commit_timeout_s,
-            "max_wall_clock_s": args.max_wall_clock_s,
-            "barrier_wave_size": args.barrier_wave_size,
-            "barrier_drain_timeout_s": args.barrier_drain_timeout_s,
-            "skip_seed": args.skip_seed,
-            "seed_sessions_per_tenant_override": args.seed_sessions_per_tenant,
-        },
-        "details": {
-            "run_count": len(manifest["runs"]),
-            "expected_run_count": len(scenario_names) * args.repeats * len(POLICIES),
-            "plan_sources": manifest["plan_sources"],
-            "failed_runs": sum(status == "FAIL" for status in statuses),
-            "inconclusive_runs": sum(status == "INCONCLUSIVE" for status in statuses),
-            "environment_errors": sum(
-                status in {
-                    "ENVIRONMENT_ERROR",
-                    "ENV_ERROR",
-                    "RESET_FAILED",
-                    "NO_SUMMARY",
-                    "TIMEOUT",
-                    "HARNESS_ERROR",
-                }
-                for status in statuses
-            ),
-            "suite_report": "suite.html",
-            "suite_manifest": "suite.json",
-            "acceptance_report": "acceptance.json",
-            "model_analysis_input": "model_analysis_input.json",
-            "acceptance_overall": acceptance["overall"],
-        },
-        "aggregates": aggregate_runs(manifest["runs"]),
-        "acceptance": acceptance,
-    }
-    (root / "summary.json").write_text(
-        json.dumps(suite_summary, ensure_ascii=False, indent=2) + "\n",
-        encoding="utf-8",
-    )
     print(report_path)
     return 0 if overall in {"PASS", "INCONCLUSIVE"} else 2
 

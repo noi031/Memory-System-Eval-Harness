@@ -48,6 +48,10 @@ def percent(value: Any) -> str:
         return "-"
 
 
+def ratio_percent(numerator: int, denominator: int) -> str:
+    return f"{numerator / denominator * 100:.2f}%" if denominator else "-"
+
+
 def percentile(values: list[float], p: float) -> float | None:
     if not values:
         return None
@@ -155,6 +159,22 @@ def status_badge(value: Any) -> str:
     text = esc(value)
     css = str(value or "UNKNOWN").lower().replace("_", "-")
     return f"<span class='badge {css}'>{text}</span>"
+
+
+def missing_value(kind: str, group: dict[str, Any]) -> str:
+    """Explain why a metric cell has no numeric sample."""
+    if kind == "commit" and not group["commits"]:
+        return "无 Commit 请求"
+    if kind == "search" and not group["searches"]:
+        return "无 Search 请求"
+    if any(str(item.get("status") or "").upper() == "TIMEOUT" for item in group["items"]):
+        return "场景超时，无有效样本"
+    return "未采集到有效样本"
+
+
+def metric_or_reason(value: Any, kind: str, group: dict[str, Any]) -> str:
+    rendered = seconds(value)
+    return rendered if rendered != "-" else f"<span title='{esc(missing_value(kind, group))}'>-</span>"
 
 
 def acceptance_block(manifest: dict[str, Any], root: Path) -> str:
@@ -482,12 +502,12 @@ def metric_cells(group: dict[str, Any]) -> str:
     sq = group["search_queue"]
     return (
         f"<td>{len(group['commits'])}/{len(group['commit_success'])}</td>"
-        f"<td>{seconds(c['mean'])}</td><td>{seconds(c['p50'])}</td>"
-        f"<td>{seconds(c['p95'])}</td><td>{seconds(c['p99'])}</td><td>{seconds(c['max'])}</td>"
+        f"<td>{metric_or_reason(c['mean'], 'commit', group)}</td><td>{metric_or_reason(c['p50'], 'commit', group)}</td>"
+        f"<td>{metric_or_reason(c['p95'], 'commit', group)}</td><td>{metric_or_reason(c['p99'], 'commit', group)}</td><td>{metric_or_reason(c['max'], 'commit', group)}</td>"
         f"<td>{len(group['searches'])}/{len(group['search_success'])}</td>"
-        f"<td>{seconds(s['mean'])}</td><td>{seconds(s['p95'])}</td>"
-        f"<td>{seconds(s['p99'])}</td>"
-        f"<td>{seconds(cq['p95'])}</td><td>{seconds(sq['p95'])}</td>"
+        f"<td>{metric_or_reason(s['mean'], 'search', group)}</td><td>{metric_or_reason(s['p95'], 'search', group)}</td>"
+        f"<td>{metric_or_reason(s['p99'], 'search', group)}</td>"
+        f"<td>{metric_or_reason(cq['p95'], 'commit', group)}</td><td>{metric_or_reason(sq['p95'], 'search', group)}</td>"
         f"<td>{len(group['delayed'])}</td><td>{group['rate_limited']}</td>"
         f"<td>{group['server_timed_count']}/{group['server_timed_total']}</td>"
     )
@@ -623,16 +643,92 @@ def render(manifest_path: Path, output_path: Path) -> None:
     delayed_total = sum(len(group["delayed"]) for group in groups)
     server_count = sum(group["server_timed_count"] for group in groups)
     server_total = sum(group["server_timed_total"] for group in groups)
-    overall = (
+    total_commits = sum(len(group["commits"]) for group in groups)
+    total_commit_success = sum(len(group["commit_success"]) for group in groups)
+    total_searches = sum(len(group["searches"]) for group in groups)
+    total_search_success = sum(len(group["search_success"]) for group in groups)
+    aggregate_by_scenario = {
+        str(item.get("scenario") or ""): item
+        for item in (manifest.get("summary", {}).get("aggregates") or [])
+    }
+    if not aggregate_by_scenario:
+        summary_path = root / "summary.json"
+        if summary_path.is_file():
+            try:
+                summary_data = json.loads(summary_path.read_text(encoding="utf-8"))
+                aggregate_by_scenario = {
+                    str(item.get("scenario") or ""): item
+                    for item in summary_data.get("aggregates") or []
+                }
+            except (OSError, json.JSONDecodeError):
+                aggregate_by_scenario = {}
+    search_rates = [
+        (str(item.get("scenario") or ""), item.get("search_succeeded", 0), item.get("search_submitted", 0))
+        for item in aggregate_by_scenario.values()
+        if (item.get("search_submitted") or 0) > 0
+    ]
+    worst_search = min(search_rates, key=lambda item: item[1] / item[2]) if search_rates else ("-", 0, 0)
+    capacity_summary = []
+    for capacity in (2, 4, 8, 16, 32):
+        item = aggregate_by_scenario.get(f"capacity-{capacity}") or {}
+        status = next(
+            (str(run.get("status") or "-") for run in runs if run["scenario"] == f"capacity-{capacity}"),
+            "-",
+        )
+        capacity_summary.append(
+            f"{capacity} 租户：{status}，Search {item.get('search_succeeded', 0)}/{item.get('search_submitted', 0)}"
+        )
+    acceptance = manifest.get("acceptance") or {}
+    if not acceptance.get("overall"):
+        acceptance_path = root / "acceptance.json"
+        if acceptance_path.is_file():
+            try:
+                acceptance = json.loads(acceptance_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                acceptance = {}
+    execution_completed = sum(
+        str(run.get("status") or "").lower() == "completed"
+        for run in manifest.get("runs") or []
+    )
+    execution_status = (
+        "已完成"
+        if execution_completed == expected_run_count
+        else f"未完成（{execution_completed}/{expected_run_count}）"
+    )
+    # A completed runner only means the scenario was collected. The acceptance
+    # matrix is the source of truth for whether the test objectives passed.
+    overall = str(acceptance.get("overall") or "").upper() or (
         "FAIL" if any(status in {"FAIL", "ENVIRONMENT_ERROR", "RESET_FAILED", "NO_SUMMARY"} for status in statuses)
         else "INCONCLUSIVE"
-        if len(runs) < expected_run_count
-        or str((manifest.get("checkpoint") or {}).get("status") or "").lower()
-        in {"running", "seed_ready", "seed_failed", "interrupted"}
-        else "INCONCLUSIVE" if any(status == "INCONCLUSIVE" for status in statuses)
+        if execution_completed < expected_run_count
         else "PASS"
     )
     status_class = overall.lower().replace("_", "-")
+    timeout_runs = [
+        str(run.get("scenario_key") or run.get("scenario") or "-")
+        for run in manifest.get("runs") or []
+        if str(run.get("status") or "").upper() == "TIMEOUT"
+    ]
+    failed_checks = [
+        str(item.get("name") or "-")
+        for item in acceptance.get("checks") or []
+        if str(item.get("status") or "").upper() == "FAIL"
+    ]
+    inconclusive_checks = [
+        str(item.get("name") or "-")
+        for item in acceptance.get("checks") or []
+        if str(item.get("status") or "").upper() == "INCONCLUSIVE"
+    ]
+    search_success_check = next(
+        (
+            item for item in acceptance.get("checks") or []
+            if str(item.get("name") or "") == "Search success rate"
+        ),
+        {},
+    )
+    reported_search_rate = search_success_check.get("observed")
+    if not isinstance(reported_search_rate, (int, float)):
+        reported_search_rate = worst_search[1] / worst_search[2] if worst_search[2] else None
     rows = "".join(
         f"<tr><td>{esc(group['plan_source'])}</td><td>{esc(group['scenario_label'])}</td>"
         f"<td><code>{esc(group['scenario_key'])}</code></td><td><b>{esc(policy_label(group['policy']))}</b></td>"
@@ -701,7 +797,7 @@ def render(manifest_path: Path, output_path: Path) -> None:
 *{{box-sizing:border-box}}body{{margin:0;background:var(--bg);color:var(--ink);font:14px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC",sans-serif}}
 .page{{max-width:1560px;margin:auto;padding:28px 18px 60px}}.top{{display:flex;align-items:center;gap:13px;margin-bottom:18px}}.logo{{width:52px;height:52px;flex:none}}
 h1{{margin:0;font-size:25px;line-height:1.15}}h2{{font-size:18px;margin:0 0 12px}}h3{{font-size:14px;margin:18px 0 9px}}.muted,small{{color:var(--muted)}}
-.hero,.section,.kpi{{background:var(--paper);border:1px solid var(--line);border-radius:8px}}.hero{{padding:18px 20px;border-left:5px solid var(--amber);display:flex;justify-content:space-between;gap:18px}}.hero.pass{{border-left-color:var(--green)}}.hero.fail{{border-left-color:var(--red)}}.hero strong{{font-size:22px}}.hero-meta{{text-align:right;color:var(--muted)}}
+.hero,.section,.kpi{{background:var(--paper);border:1px solid var(--line);border-radius:8px}}.hero{{padding:18px 20px;border-left:5px solid var(--amber);display:flex;justify-content:space-between;gap:18px}}.hero.pass{{border-left-color:var(--green)}}.hero.fail{{border-left-color:var(--red)}}.hero strong{{font-size:22px}}.hero-meta{{text-align:right;color:var(--muted)}}.conclusion{{border-left:5px solid var(--red);background:#fffafa}}.conclusion h2{{margin-bottom:8px}}.conclusion p{{margin:6px 0}}.conclusion b{{color:var(--red)}}.conclusion ul{{margin:8px 0 0;padding-left:20px}}
 .kpis{{display:grid;grid-template-columns:repeat(5,1fr);gap:10px;margin:12px 0}}.kpi{{padding:14px 15px}}.label{{color:var(--muted);font-size:12px}}.value{{font-size:23px;font-weight:800;margin-top:3px}}.note{{font-size:12px;color:var(--muted)}}
 .section{{padding:18px 19px;margin-top:12px}}.notice{{padding:11px 13px;background:var(--amber-bg);border-left:4px solid var(--amber);color:#6c5117;margin-bottom:12px}}
 .scroll{{overflow:auto}}table{{width:100%;border-collapse:collapse;font-size:12px;white-space:nowrap}}th,td{{padding:8px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}}th{{background:#fafbfc;color:var(--muted);font-weight:700}}
@@ -711,7 +807,20 @@ details{{border-top:1px solid var(--line);padding:11px 0}}details:first-of-type{
 .footer{{margin-top:14px;color:var(--muted);font-size:12px}}@media(max-width:900px){{.hero{{display:block}}.hero-meta{{text-align:left;margin-top:10px}}.kpis{{grid-template-columns:repeat(2,1fr)}}.metric-grid{{grid-template-columns:repeat(2,1fr)}}.review-grid{{grid-template-columns:1fr}}}}
 </style></head><body><main class='page'>
 <header class='top'>{icon}<div><h1>EchoMem 多租户压测数据报告</h1><small>真实 HTTP / 真实模型 · 生成于 {esc(datetime.now().astimezone().isoformat())}</small></div></header>
-<section class='hero {status_class}'><div><div class='label'>套件总判定</div><strong>{esc(overall)}</strong><div>{esc(evidence_note)}</div></div>
+<section class='section conclusion'><h2>整体结论</h2>
+<p><b>结论：本次 4U8G 压测没有通过验收。</b> 测试套件已进入最终收尾，但只有 {execution_completed}/{expected_run_count} 个运行单元真正完成，验收总判定为 {esc(overall)}；剩余 3 个容量场景超时。</p>
+<p>全量请求层面共记录 <b>{total_searches}</b> 次 Search、成功 <b>{total_search_success}</b> 次（{ratio_percent(total_search_success, total_searches)}），以及 <b>{total_commits}</b> 次 Commit、最终完成 <b>{total_commit_success}</b> 次（{ratio_percent(total_commit_success, total_commits)}）。但 Search 的总体平均值不能掩盖最差轮次：按验收矩阵正式口径，最低成功率为 <b>{percent(reported_search_rate)}</b>，低于 99% 目标；表格中的聚合值用于定位问题，不替代验收口径。</p>
+<p><b>容量与性能：</b>{esc('；'.join(capacity_summary))}。因此当前数据只能说明 2/4 租户档位产生了部分样本，不能推出 8/16/32 租户的最大 DAU 或最大热用户量。</p>
+<p><b>稳定性与优先级：</b>在部分混合、饱和和热租户场景中出现 Search 错误或约 30 秒超时；Search/Commit 优先级黑盒场景虽然有 Search 样本，但 Commit 没有形成最终完成样本，且服务端时序覆盖为 0，不能证明服务端严格优先。</p>
+<p><b>公平性与恢复：</b>公平性所需的多租户 Commit 完成吞吐不足，Jain 指数无法计算；已接受 Commit 的 100% 恢复重放、不丢序也没有 cursor/message-set 对账和真实 kill-9 恢复证据，所以这些项目必须标记为 INCONCLUSIVE，而不是 PASS。</p>
+<p><b>可观测性：</b>目前只发现 lane 四元组的指标名称，缺少 fan-out 指标，且本次请求的服务端排队/执行时序覆盖为 {server_count}/{server_total}；因此无法用这份报告证明“每层、每租户”的完整可观测性。</p>
+<ul>
+<li>主要失败项：{esc('、'.join(failed_checks) or '无')}</li>
+<li>仍不能下结论：{esc('、'.join(inconclusive_checks) or '无')}</li>
+<li>超时场景：{esc('、'.join(timeout_runs) or '无')}</li>
+</ul>
+<p class='muted'>报告中的空白（-）主要有三种含义：该场景没有对应操作；场景超时或没有形成有效样本；服务端没有返回完整时序指标。它们表示“没有证据”，不是“指标为 0”或“服务端一定没有问题”。下一步应优先补齐容量场景的超时原因、Commit 最终状态对账、真实故障/kill-9 控制，以及服务端指标导出。</p></section>
+<section class='hero {status_class}'><div><div class='label'>验收总判定</div><strong>{esc(overall)}</strong><div>执行状态：{esc(execution_status)} · {esc(evidence_note)}</div></div>
 <div class='hero-meta'>目标 <code>{esc(manifest.get('base_url'))}</code><br>{len(runs)}/{expected_run_count} 次运行 · {len(groups)} 组策略/场景</div></section>
 <div class='kpis'>
 <div class='kpi'><div class='label'>请求总数</div><div class='value'>{total_rows}</div><div class='note'>Commit + Search 原始请求</div></div>

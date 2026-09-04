@@ -15,6 +15,8 @@ from performance.objective_suite import (
     _preserve_probe_status,
     _resolve_tenant_id,
     _formal_run_counts,
+    _formal_coverage,
+    _formal_profile_name,
     load_env_file,
     load_profiles,
     objective_statuses,
@@ -30,7 +32,7 @@ from performance.probes.limit_failure_probe import (
     metrics_coverage,
     response_error_detail,
 )
-from performance.formal_suite import SCENARIOS
+from performance.formal_suite import SCENARIOS, _build_seed_warmup_command
 
 
 class ObjectiveSuiteTests(unittest.TestCase):
@@ -39,6 +41,40 @@ class ObjectiveSuiteTests(unittest.TestCase):
             path = Path(directory) / "profiles.json"
             path.write_text(json.dumps({"profiles": [{"name": "4U8G"}]}), encoding="utf-8")
             self.assertEqual(["4U8G"], [item["name"] for item in load_profiles(path)])
+
+    def test_load_profiles_expands_runtime_deployment_values(self) -> None:
+        import os
+
+        previous = os.environ.get("ECHOMEM_CONTAINER")
+        os.environ["ECHOMEM_CONTAINER"] = "echomem-current"
+        try:
+            with tempfile.TemporaryDirectory() as directory:
+                path = Path(directory) / "profiles.json"
+                path.write_text(
+                    json.dumps(
+                        {
+                            "profiles": [
+                                {
+                                    "name": "4U8G",
+                                    "commit_recovery": {
+                                        "container": "${ECHOMEM_CONTAINER}"
+                                    },
+                                }
+                            ]
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+                profile = load_profiles(path)[0]
+                self.assertEqual(
+                    "echomem-current",
+                    profile["commit_recovery"]["container"],
+                )
+        finally:
+            if previous is None:
+                os.environ.pop("ECHOMEM_CONTAINER", None)
+            else:
+                os.environ["ECHOMEM_CONTAINER"] = previous
 
     def test_load_env_file_accepts_export_and_comments(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -83,6 +119,81 @@ class ObjectiveSuiteTests(unittest.TestCase):
         self.assertNotIn("soak", QUICK_SCENARIOS)
         self.assertEqual(0.0, SCENARIOS["capacity-2"]["quick_commit_rpm"])
         self.assertEqual(0.0, SCENARIOS["capacity-4"]["quick_commit_rpm"])
+
+    def test_normal_4u8g_entry_uses_full_37_case_profile(self) -> None:
+        self.assertEqual("4u8g-full", _formal_profile_name("4U8G", quick=False))
+        self.assertEqual("4u8g", _formal_profile_name("4U8G", quick=True))
+        self.assertEqual("complete", _formal_profile_name("8U16G", quick=False))
+
+    def test_full_seed_warmup_uses_bounded_concurrency_and_long_timeout(self) -> None:
+        args = type(
+            "Args",
+            (),
+            {
+                "base_url": "http://127.0.0.1:8015",
+                "commit_max_attempts": 3,
+                "commit_retry_backoff_s": 2.0,
+                "seed_concurrency": 2,
+                "preflight_config": "/tmp/config.json",
+                "no_server_metrics": False,
+                "commit_timeout_s": 600.0,
+            },
+        )()
+        command = _build_seed_warmup_command(
+            args,
+            Path("/tmp/tenants-32.json"),
+            Path("/tmp/seed/run"),
+            32,
+            600.0,
+        )
+        self.assertIn("--seed-concurrency", command)
+        self.assertEqual("2", command[command.index("--seed-concurrency") + 1])
+        self.assertEqual(
+            "600.0",
+            command[command.index("--commit-poll-timeout-s") + 1],
+        )
+
+    def test_partial_formal_manifest_is_not_complete_coverage(self) -> None:
+        suite = {
+            "scenarios": ["pr397__A@1", "pr397__B@1", "pr421__baseline"],
+            "repeats": 1,
+            "policies": ["server-observe"],
+            "runs": [
+                {
+                    "scenario_key": "pr397__A@1",
+                    "scenario": "A@1",
+                    "status": "completed",
+                },
+            ],
+        }
+        coverage = _formal_coverage(suite)
+        self.assertEqual(3, coverage["expected_runs"])
+        self.assertEqual(1, coverage["manifest_runs"])
+        self.assertEqual(1, coverage["completed_runs"])
+        self.assertEqual({"COMPLETED": 1}, coverage["status_counts"])
+        self.assertEqual(0, coverage["timeout_runs"])
+        self.assertEqual("partial", coverage["status"])
+        self.assertEqual(
+            ["pr397__B@1", "pr421__baseline"],
+            coverage["missing_scenarios"],
+        )
+
+    def test_full_formal_manifest_has_complete_coverage(self) -> None:
+        suite = {
+            "scenarios": ["pr397__A@1", "pr421__baseline"],
+            "repeats": 1,
+            "policies": ["server-observe"],
+            "runs": [
+                {"scenario_key": "pr397__A@1", "status": "TIMEOUT"},
+                {"scenario_key": "pr421__baseline", "status": "completed"},
+            ],
+        }
+        coverage = _formal_coverage(suite)
+        self.assertEqual(2, coverage["expected_runs"])
+        self.assertEqual(2, coverage["manifest_runs"])
+        self.assertEqual({"TIMEOUT": 1, "COMPLETED": 1}, coverage["status_counts"])
+        self.assertEqual(1, coverage["timeout_runs"])
+        self.assertEqual("complete", coverage["status"])
 
     def test_first_completed_commit_csv_finds_real_artifact(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -332,6 +443,31 @@ class ObjectiveSuiteTests(unittest.TestCase):
         self.assertEqual(
             "PASS",
             next(item["status"] for item in objectives if item["id"] == "O5"),
+        )
+
+    def test_fault_isolation_probe_is_wired_into_objective_evaluator(self) -> None:
+        suite = {
+            "fault_isolation": {
+                "status": "PASS",
+                "fault_recovered": True,
+                "bystander_p95_degradation": 0.12,
+                "bystander_tenants": {
+                    "tenant-b": {
+                        "baseline_p95_s": 1.0,
+                        "fault_p95_s": 1.12,
+                        "degradation": 0.12,
+                    }
+                },
+            }
+        }
+        objectives = objective_statuses(
+            suite,
+            recovery_configured=False,
+            metrics_configured=False,
+        )
+        self.assertEqual(
+            "PASS",
+            next(item["status"] for item in objectives if item["id"] == "O2"),
         )
 
     def test_render_report(self) -> None:

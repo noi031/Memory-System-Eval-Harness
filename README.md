@@ -824,6 +824,11 @@ echo $! >"$STRESS_OUTPUT_DIR/launcher.pid"
 因此总样本仍是 260 个，但不会把 260 个真实任务一次性压入 EchoMem。
 `STRESS_CASE_TIMEOUT_S=0` 表示按场景时长 + Commit 轮询预算自动计算；只有诊断时
 才建议手动设置较小的超时。超时会记录为 `TIMEOUT`，不会伪装成 EchoMem 的业务失败。
+正式套件的共享 seed warmup 默认使用 2 个租户并发、600 秒 Commit 终态等待；
+这是为了避免真实模型 Commit 在多个租户同时灌种时排队过长，导致整套场景被
+错误阻断。可通过 `--seed-concurrency` 和 `--seed-commit-timeout-s` 调整。
+seed 失败时后续场景会标记为 `BLOCKED`，并在 `suite.json` 记录原因，不会生成
+没有真实记忆证据的“成功”结果。
 
 服务器系统 Python 低于 3.9，或没有 Harness 依赖时，必须使用 runner 镜像。
 该镜像的默认 entrypoint 是旧版 `runner.py`，执行 PR29 的完整套件时要显式覆盖
@@ -874,8 +879,12 @@ cat "$STRESS_OUTPUT_DIR/acceptance.json"
 find "$STRESS_OUTPUT_DIR" -name summary.json -type f | sort
 ```
 
-最终应确认 `suite.json` 中 25 个场景均有结果；`acceptance.json` 中的
+最终应确认 `suite.json` 中 37 个场景均有结果；`acceptance.json` 中的
 `PASS`、`FAIL`、`INCONCLUSIVE` 要逐项查看，不能只看总准确率或退出码。
+完整 4U8G 套件还必须检查 `suite.json.finalization`：
+`run_count == expected_run_count` 只表示每个场景有记录，仍需同时查看
+`completed_run_count`、`timeout_run_count`、`blocked_run_count` 和每个场景的
+真实请求样本；`TIMEOUT`/`BLOCKED` 不能当作通过。
 
 ### 六项 4U8G 目标统一自动化入口
 
@@ -889,8 +898,13 @@ python3 -m performance.objective_suite \
   --profiles performance/instance-profiles.example.json \
   --profile 4U8G \
   --out-dir results/objective-suite-$(date +%Y%m%d_%H%M%S) \
-  --quick
+  --full
 ```
+
+`--full` 是正式 4U8G 入口：会运行 PR397 的 12 个场景和 PR421 的 25 个场景，
+总计 37 个场景（默认不包含 soak），默认总墙钟预算为 3 小时。不要在正式验收
+命令中加 `--quick`；`--quick` 仅用于快速诊断子集，不能作为完整测试结果。
+报告中的场景覆盖必须显示 `37/37`，否则本轮只能算部分结果。
 
 服务器如果把 EchoMem 的真实模型凭据放在 Docker env 文件中，评测入口也要加载同一份
 env 文件，保证 formal suite 和探针使用的模型环境与 EchoMem 服务一致：
@@ -901,7 +915,7 @@ python3 -m performance.objective_suite \
   --profile 4U8G \
   --env-file /opt/echomem-stress/formal-run-4u8g.env \
   --out-dir results/objective-suite-$(date +%Y%m%d_%H%M%S) \
-  --quick
+  --full
 ```
 
 `--env-file` 只读取简单的 `KEY=VALUE`/`export KEY=VALUE` 行，密钥不会写入
@@ -975,6 +989,23 @@ PR397 的写后可见性/持久化对账、Commit 状态机、冷暖 Search，�
 如果只想重新审计已有结果而不重新发请求，可在 profile 中填写
 `suite_path`，然后执行 `objective_suite.py --skip-run`；该模式只读取
 `suite.json` 和已有探针制品。
+
+如果完整 formal suite 已经跑完，只需要补测故障隔离、拒绝响应、kill-9
+恢复或 `/metrics` 能力，可以使用缺口入口。它复用已有的 `suite.json`，不会
+重新发送 37 个真实模型场景：
+
+```bash
+STRESS_SUITE_PATH=/data/formal/suite.json \
+STRESS_PROFILES=performance/instance-profile-4u8g.audit.server.example.json \
+STRESS_ENV_FILE=/opt/echomem-stress/formal-run-4u8g.env \
+./performance/run_4u8g_gaps.sh
+```
+
+`commit_recovery.container` 支持 `${ECHOMEM_CONTAINER}` 环境变量；服务器必须
+填写当前实际的 EchoMem 容器名，不能沿用历史任务的容器名。故障隔离只有在
+`fault_isolation.enabled=true` 且提供真实故障控制 URL/命令时才会执行；没有
+控制面时报告为 `INCONCLUSIVE`，不会把测试平台自身缺少控制能力判定为 EchoMem
+故障。
 
 ### 飞书机器人启动 4U8G 压测
 

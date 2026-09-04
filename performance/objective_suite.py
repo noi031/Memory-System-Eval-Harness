@@ -55,6 +55,13 @@ QUICK_SCENARIOS = (
 )
 
 
+def _formal_profile_name(profile_name: str, *, quick: bool) -> str:
+    """Select the scenario catalog for one objective-suite profile."""
+    if str(profile_name).upper() == "4U8G":
+        return "4u8g" if quick else "4u8g-full"
+    return "complete"
+
+
 def now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -64,7 +71,29 @@ def load_profiles(path: Path) -> list[dict[str, Any]]:
     profiles = payload.get("profiles") if isinstance(payload, dict) else payload
     if not isinstance(profiles, list) or not profiles:
         raise ValueError("profiles config must contain a non-empty profiles list")
-    return [item for item in profiles if isinstance(item, dict) and item.get("name")]
+    def expand(value: Any) -> Any:
+        if isinstance(value, str):
+            # Support both ${NAME} and ${NAME:-fallback} for deployment-only
+            # values such as the current EchoMem container name.
+            import re
+
+            def replace(match: re.Match[str]) -> str:
+                name = match.group(1)
+                fallback = match.group(2)
+                return os.environ.get(name, fallback or match.group(0))
+
+            return re.sub(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-(.*?))?\}", replace, value)
+        if isinstance(value, list):
+            return [expand(item) for item in value]
+        if isinstance(value, dict):
+            return {str(key): expand(item) for key, item in value.items()}
+        return value
+
+    return [
+        expand(item)
+        for item in profiles
+        if isinstance(item, dict) and item.get("name")
+    ]
 
 
 def load_env_file(path: Path) -> dict[str, str]:
@@ -864,6 +893,51 @@ def _formal_run_counts(suite: dict[str, Any]) -> tuple[int, int]:
     return completed, submitted
 
 
+def _formal_coverage(suite: dict[str, Any]) -> dict[str, Any]:
+    """Summarize formal-suite coverage without treating partial data as done."""
+    configured = [
+        str(item).strip()
+        for item in (suite.get("scenarios") or [])
+        if str(item).strip()
+    ]
+    repeats = max(1, int(suite.get("repeats") or 1))
+    policies = [
+        str(item).strip()
+        for item in (suite.get("policies") or ["server-observe"])
+        if str(item).strip()
+    ]
+    expected = len(configured) * repeats * max(1, len(policies))
+    runs = [item for item in (suite.get("runs") or []) if isinstance(item, dict)]
+    actual = len(runs)
+    completed = sum(
+        1 for item in runs if str(item.get("status") or "").lower() == "completed"
+    )
+    status_counts: dict[str, int] = {}
+    for item in runs:
+        status = str(item.get("status") or "NO_SUMMARY").upper()
+        status_counts[status] = status_counts.get(status, 0) + 1
+    observed_keys = {
+        str(item.get("scenario_key") or item.get("scenario") or "")
+        for item in runs
+    }
+    expected_keys = set(configured)
+    missing = sorted(expected_keys - observed_keys)
+    return {
+        "expected_runs": expected,
+        "manifest_runs": actual,
+        "completed_runs": completed,
+        "status_counts": status_counts,
+        "failed_runs": sum(
+            status_counts.get(status, 0)
+            for status in ("FAIL", "HARNESS_ERROR", "NO_SUMMARY")
+        ),
+        "timeout_runs": status_counts.get("TIMEOUT", 0),
+        "blocked_runs": status_counts.get("BLOCKED", 0),
+        "missing_scenarios": missing,
+        "status": "complete" if expected > 0 and actual >= expected else "partial",
+    }
+
+
 def acceptance_by_name(suite: dict[str, Any]) -> dict[str, dict[str, Any]]:
     acceptance = suite.get("acceptance") or {}
     return {
@@ -905,7 +979,16 @@ def objective_statuses(
             == PASS
         )
     strict_acceptance = evaluate_scheduler_acceptance(
-        suite,
+        {
+            **suite,
+            # Keep the standalone fault-isolation artifact on the stable
+            # contract consumed by the six-objective evaluator.
+            "tenant_fault_isolation": (
+                suite.get("tenant_fault_isolation")
+                if isinstance(suite.get("tenant_fault_isolation"), dict)
+                else suite.get("fault_isolation")
+            ),
+        },
         capability=capability,
         recovery=recovery_for_scheduler,
         fault=fault_suite,
@@ -1053,6 +1136,24 @@ def render_report(result: dict[str, Any], path: Path) -> None:
     details = []
     for profile in result.get("profiles") or []:
         details.append(f"<h3>{html.escape(str(profile.get('name')))}</h3>")
+        coverage = profile.get("coverage") or {}
+        missing = coverage.get("missing_scenarios") or []
+        details.append(
+            "<p><strong>场景覆盖：</strong>"
+            f"{html.escape(str(coverage.get('manifest_runs', 0)))}/"
+            f"{html.escape(str(coverage.get('expected_runs', 0)))} 个结果，"
+            f"状态 <strong>{html.escape(str(coverage.get('status', 'unknown')))}</strong>"
+            f"；完成 {html.escape(str(coverage.get('completed_runs', 0)))}，"
+            f"超时 {html.escape(str(coverage.get('timeout_runs', 0)))}，"
+            f"阻断 {html.escape(str(coverage.get('blocked_runs', 0)))}"
+            + (
+                "；缺失："
+                + html.escape(", ".join(str(item) for item in missing))
+                if missing
+                else ""
+            )
+            + "</p>"
+        )
         for key, label in (
             ("capability_probe", "能力探针"),
             ("blackbox_contract_probe", "黑盒契约探针"),
@@ -1099,8 +1200,8 @@ def render_report(result: dict[str, Any], path: Path) -> None:
     if isinstance(optional_profiles, list):
         details.append(
             "<details><summary>附加诊断：多规格实例对比（不计入六项总体判定）</summary>"
-            "<table><thead><tr><th>规格</th><th>状态</th><th>完成场景</th>"
-            "<th>提交场景</th></tr></thead><tbody>"
+            "<table><thead><tr><th>规格</th><th>状态</th><th>覆盖</th>"
+            "<th>完成场景</th><th>提交场景</th></tr></thead><tbody>"
         )
         for item in optional_profiles:
             if not isinstance(item, dict):
@@ -1109,6 +1210,9 @@ def render_report(result: dict[str, Any], path: Path) -> None:
                 "<tr>"
                 f"<td>{html.escape(str(item.get('name') or ''))}</td>"
                 f"<td>{html.escape(str(item.get('status') or ''))}</td>"
+                f"<td>{html.escape(str(item.get('coverage_status') or 'unknown'))} "
+                f"({html.escape(str(item.get('completed_runs') or 0))}/"
+                f"{html.escape(str(item.get('expected_runs') or 0))})</td>"
                 f"<td>{html.escape(str(item.get('completed_runs') or 0))}</td>"
                 f"<td>{html.escape(str(item.get('submitted_runs') or 0))}</td>"
                 "</tr>"
@@ -1165,6 +1269,11 @@ def main() -> int:
     parser.add_argument("--profile", default="", help="只运行一个 profile；默认运行全部")
     parser.add_argument("--out-dir", required=True, type=Path)
     parser.add_argument("--quick", action="store_true", help="bounded smoke matrix")
+    parser.add_argument(
+        "--full",
+        action="store_true",
+        help="强制完整模式；4U8G 运行 PR397 12 个 + PR421 25 个场景，不得与 --quick 同时使用",
+    )
     parser.add_argument("--scenarios", default="", help="覆盖场景列表，逗号分隔")
     parser.add_argument("--quick-duration-cap-s", type=float, default=30.0)
     parser.add_argument("--quick-case-timeout-s", type=float, default=180.0)
@@ -1202,17 +1311,30 @@ def main() -> int:
         action="store_true",
         help="quick 默认跳过真实模型灌种；打开后保留灌种",
     )
-    parser.add_argument("--timeout-s", type=float, default=7200.0)
+    parser.add_argument(
+        "--timeout-s",
+        type=float,
+        default=14400.0,
+        help="objective suite 外层超时；正式 4U8G 默认给足完整场景和探针预算",
+    )
     parser.add_argument(
         "--max-wall-clock-s",
         type=float,
-        default=3600.0,
-        help="所有 profile 与探针共享的最大 wall-clock 时间；默认 3600 秒",
+        default=10800.0,
+        help="所有 profile 与探针共享的最大 wall-clock 时间；默认 10800 秒",
     )
     parser.add_argument(
         "--skip-run",
         action="store_true",
         help="只根据已有 suite.json 生成总报告",
+    )
+    parser.add_argument(
+        "--gaps-only",
+        action="store_true",
+        help=(
+            "只运行配置的黑盒补测探针并复用已有 suite.json；"
+            "不重新执行 formal suite，需配合 --suite-path 或 profile.suite_path"
+        ),
     )
     parser.add_argument(
         "--suite-path",
@@ -1230,6 +1352,14 @@ def main() -> int:
         ),
     )
     args = parser.parse_args()
+    if args.full and args.quick:
+        parser.error("--full 与 --quick 不能同时使用")
+    if args.full and args.scenarios:
+        parser.error("--full 不能与 --scenarios 同时使用；请使用 profile 的完整场景目录")
+    if args.full:
+        args.quick = False
+    if args.gaps_only:
+        args.skip_run = True
     if args.timeout_s <= 0:
         parser.error("--timeout-s must be > 0")
     if args.max_wall_clock_s <= 0:
@@ -1252,6 +1382,11 @@ def main() -> int:
         profiles = [item for item in profiles if str(item["name"]) == args.profile]
     if not profiles:
         parser.error("没有匹配的 profile")
+    if args.gaps_only and args.suite_path is None and not any(
+        str(item.get("suite_path") or item.get("suite") or "").strip()
+        for item in profiles
+    ):
+        parser.error("--gaps-only 需要 --suite-path 或 profile.suite_path")
 
     args.out_dir.mkdir(parents=True, exist_ok=True)
     output_lock = None
@@ -1313,15 +1448,29 @@ def main() -> int:
                     "--preflight-config",
                     preflight_config,
                     "--profile",
-                    # A quick run on the single available 4U8G instance uses
-                    # the bounded catalog.  The full catalog includes long
-                    # report(6) and capacity cases that are useful for formal
-                    # acceptance but make a diagnostic run look stuck.
-                    "4u8g" if args.quick and name.upper() == "4U8G" else "complete",
+                    # Quick 4U8G uses the bounded catalog. A normal 4U8G
+                    # run must use the explicit 37-case catalog: PR397 has
+                    # 12 scenarios and PR421 has 25. The legacy ``complete``
+                    # profile is a smaller historical catalog.
+                    _formal_profile_name(name, quick=args.quick),
                     "--instance-profile",
                     name,
                     "--repeats",
                     "1",
+                    "--commit-timeout-s",
+                    str(args.quick_commit_timeout_s if args.quick else 600.0),
+                    "--seed-commit-timeout-s",
+                    str(args.quick_seed_commit_timeout_s if args.quick else 600.0),
+                    "--commit-max-attempts",
+                    str(args.quick_commit_max_attempts if args.quick else 3),
+                    "--commit-retry-backoff-s",
+                    str(args.quick_commit_retry_backoff_s if args.quick else 2.0),
+                    "--seed-concurrency",
+                    str(4 if args.quick else 2),
+                    "--barrier-wave-size",
+                    str(args.quick_barrier_wave_size if args.quick else 32),
+                    "--barrier-drain-timeout-s",
+                    str(10.0 if args.quick else 600.0),
                     "--out-dir",
                     str(profile_dir / "formal"),
                 ]
@@ -1342,14 +1491,6 @@ def main() -> int:
                         "--duration-cap-s", str(args.quick_duration_cap_s),
                         "--case-timeout-s", str(args.quick_case_timeout_s),
                         "--barrier-count-cap", str(args.quick_barrier_count_cap),
-                        "--commit-timeout-s", str(args.quick_commit_timeout_s),
-                        "--seed-commit-timeout-s",
-                        str(args.quick_seed_commit_timeout_s),
-                        "--commit-max-attempts", str(args.quick_commit_max_attempts),
-                        "--commit-retry-backoff-s",
-                        str(args.quick_commit_retry_backoff_s),
-                        "--barrier-wave-size",
-                        str(args.quick_barrier_wave_size),
                     ]
                     if args.quick:
                         # Keep the real-model warm-up bounded even when the
@@ -1434,9 +1575,10 @@ def main() -> int:
         command_result.update(probe_commands)
 
         completed_runs, submitted_runs = _formal_run_counts(suite)
+        coverage = _formal_coverage(suite)
         profile_execution_status = (
             "completed"
-            if completed_runs > 0
+            if coverage["status"] == "complete"
             else str(command_result.get("run", {}).get("status") or "not_run")
         )
         output_profiles.append({
@@ -1446,6 +1588,7 @@ def main() -> int:
             "profile_execution_status": profile_execution_status,
             "completed_runs": completed_runs,
             "submitted_runs": submitted_runs,
+            "coverage": coverage,
             **probe_artifacts,
             "command": command_result,
             "objectives": objective_statuses(
@@ -1456,6 +1599,7 @@ def main() -> int:
                         "name": name,
                         "status": profile_execution_status,
                         "completed_runs": completed_runs,
+                        "coverage": coverage,
                     }],
                 },
                 recovery_configured=bool(profile.get("commit_recovery")),
@@ -1469,6 +1613,12 @@ def main() -> int:
             "status": str(profile.get("profile_execution_status") or ""),
             "completed_runs": int(profile.get("completed_runs") or 0),
             "submitted_runs": int(profile.get("submitted_runs") or 0),
+            "expected_runs": int(
+                (profile.get("coverage") or {}).get("expected_runs") or 0
+            ),
+            "coverage_status": str(
+                (profile.get("coverage") or {}).get("status") or "unknown"
+            ),
         }
         for profile in output_profiles
     ]
@@ -1489,7 +1639,11 @@ def main() -> int:
     )
     render_report(result, args.out_dir / "objective-suite.html")
     print(args.out_dir / "objective-suite.html")
-    return 0 if output_profiles else 2
+    return 0 if output_profiles and all(
+        (item.get("coverage") or {}).get("status") == "complete"
+        or args.skip_run
+        for item in output_profiles
+    ) else 2
 
 
 if __name__ == "__main__":
