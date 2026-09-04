@@ -120,6 +120,11 @@ class ObjectiveSuiteTests(unittest.TestCase):
         self.assertEqual(0.0, SCENARIOS["capacity-2"]["quick_commit_rpm"])
         self.assertEqual(0.0, SCENARIOS["capacity-4"]["quick_commit_rpm"])
 
+    def test_capacity_catalog_disables_commit_for_full_runs(self) -> None:
+        for name in ("capacity-2", "capacity-4", "capacity-8", "capacity-16", "capacity-32"):
+            with self.subTest(name=name):
+                self.assertEqual(0.0, SCENARIOS[name]["commit_rpm"])
+
     def test_normal_4u8g_entry_uses_full_37_case_profile(self) -> None:
         self.assertEqual("4u8g-full", _formal_profile_name("4U8G", quick=False))
         self.assertEqual("4u8g", _formal_profile_name("4U8G", quick=True))

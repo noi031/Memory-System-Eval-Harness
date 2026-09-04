@@ -669,15 +669,31 @@ def render(manifest_path: Path, output_path: Path) -> None:
     ]
     worst_search = min(search_rates, key=lambda item: item[1] / item[2]) if search_rates else ("-", 0, 0)
     capacity_summary = []
+    capacity_timeout_count = 0
+    capacity_with_samples = 0
     for capacity in (2, 4, 8, 16, 32):
         item = aggregate_by_scenario.get(f"capacity-{capacity}") or {}
         status = next(
             (str(run.get("status") or "-") for run in runs if run["scenario"] == f"capacity-{capacity}"),
             "-",
         )
+        if status.upper() == "TIMEOUT":
+            capacity_timeout_count += 1
+        if int(item.get("search_submitted") or 0) > 0:
+            capacity_with_samples += 1
         capacity_summary.append(
             f"{capacity} 租户：{status}，Search {item.get('search_succeeded', 0)}/{item.get('search_submitted', 0)}"
         )
+    capacity_sentence = (
+        "；".join(capacity_summary)
+        + f"。其中 {capacity_with_samples}/5 个容量档位产生了 Search 样本"
+        + (
+            f"，{capacity_timeout_count} 个档位因场景超时未产生样本"
+            if capacity_timeout_count
+            else ""
+        )
+        + "。"
+    )
     acceptance = manifest.get("acceptance") or {}
     if not acceptance.get("overall"):
         acceptance_path = root / "acceptance.json"
@@ -808,9 +824,9 @@ details{{border-top:1px solid var(--line);padding:11px 0}}details:first-of-type{
 </style></head><body><main class='page'>
 <header class='top'>{icon}<div><h1>EchoMem 多租户压测数据报告</h1><small>真实 HTTP / 真实模型 · 生成于 {esc(datetime.now().astimezone().isoformat())}</small></div></header>
 <section class='section conclusion'><h2>整体结论</h2>
-<p><b>结论：本次 4U8G 压测没有通过验收。</b> 测试套件已进入最终收尾，但只有 {execution_completed}/{expected_run_count} 个运行单元真正完成，验收总判定为 {esc(overall)}；剩余 3 个容量场景超时。</p>
+<p><b>结论：本次 4U8G 压测没有通过验收。</b> 测试套件已进入最终收尾，但只有 {execution_completed}/{expected_run_count} 个运行单元真正完成，验收总判定为 {esc(overall)}；容量场景状态见下方动态汇总。</p>
 <p>全量请求层面共记录 <b>{total_searches}</b> 次 Search、成功 <b>{total_search_success}</b> 次（{ratio_percent(total_search_success, total_searches)}），以及 <b>{total_commits}</b> 次 Commit、最终完成 <b>{total_commit_success}</b> 次（{ratio_percent(total_commit_success, total_commits)}）。但 Search 的总体平均值不能掩盖最差轮次：按验收矩阵正式口径，最低成功率为 <b>{percent(reported_search_rate)}</b>，低于 99% 目标；表格中的聚合值用于定位问题，不替代验收口径。</p>
-<p><b>容量与性能：</b>{esc('；'.join(capacity_summary))}。因此当前数据只能说明 2/4 租户档位产生了部分样本，不能推出 8/16/32 租户的最大 DAU 或最大热用户量。</p>
+<p><b>容量与性能：</b>{esc(capacity_sentence)} 只有产生有效 Search 样本并通过 SLO 的档位才能作为容量证据，不能把超时前没有发出请求的档位当作“容量为 0”。</p>
 <p><b>稳定性与优先级：</b>在部分混合、饱和和热租户场景中出现 Search 错误或约 30 秒超时；Search/Commit 优先级黑盒场景虽然有 Search 样本，但 Commit 没有形成最终完成样本，且服务端时序覆盖为 0，不能证明服务端严格优先。</p>
 <p><b>公平性与恢复：</b>公平性所需的多租户 Commit 完成吞吐不足，Jain 指数无法计算；已接受 Commit 的 100% 恢复重放、不丢序也没有 cursor/message-set 对账和真实 kill-9 恢复证据，所以这些项目必须标记为 INCONCLUSIVE，而不是 PASS。</p>
 <p><b>可观测性：</b>目前只发现 lane 四元组的指标名称，缺少 fan-out 指标，且本次请求的服务端排队/执行时序覆盖为 {server_count}/{server_total}；因此无法用这份报告证明“每层、每租户”的完整可观测性。</p>

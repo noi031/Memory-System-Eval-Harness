@@ -167,7 +167,10 @@ SCENARIOS: dict[str, dict[str, Any]] = {
         "tenants": 16,
         "duration_s": 300,
         "search_rps": 16.0,
-        "commit_rpm": 2.0,
+        # Capacity is a Search-only measurement. Commit completion belongs
+        # to the durability/priority scenarios and must not extend the
+        # capacity case timeout.
+        "commit_rpm": 0.0,
         "quick_commit_rpm": 0.0,
         "sessions_per_tenant": 2,
         "messages_per_session": 3,
@@ -177,7 +180,7 @@ SCENARIOS: dict[str, dict[str, Any]] = {
         "tenants": 2,
         "duration_s": 180,
         "search_rps": 2.0,
-        "commit_rpm": 2.0,
+        "commit_rpm": 0.0,
         "quick_commit_rpm": 0.0,
         "sessions_per_tenant": 2,
         "messages_per_session": 3,
@@ -187,7 +190,7 @@ SCENARIOS: dict[str, dict[str, Any]] = {
         "tenants": 4,
         "duration_s": 180,
         "search_rps": 4.0,
-        "commit_rpm": 2.0,
+        "commit_rpm": 0.0,
         "quick_commit_rpm": 0.0,
         "sessions_per_tenant": 2,
         "messages_per_session": 3,
@@ -197,7 +200,7 @@ SCENARIOS: dict[str, dict[str, Any]] = {
         "tenants": 8,
         "duration_s": 180,
         "search_rps": 8.0,
-        "commit_rpm": 2.0,
+        "commit_rpm": 0.0,
         "sessions_per_tenant": 2,
         "messages_per_session": 3,
     },
@@ -206,7 +209,7 @@ SCENARIOS: dict[str, dict[str, Any]] = {
         "tenants": 32,
         "duration_s": 300,
         "search_rps": 32.0,
-        "commit_rpm": 2.0,
+        "commit_rpm": 0.0,
         "sessions_per_tenant": 2,
         "messages_per_session": 3,
     },
@@ -926,7 +929,7 @@ def _build_case_command(
     commit_rpm = case.get("commit_rpm")
     if getattr(args, "quick_mode", False) and "quick_commit_rpm" in case:
         commit_rpm = case["quick_commit_rpm"]
-    # ``0`` is meaningful in quick capacity cases: it disables background
+    # ``0`` is meaningful in capacity cases: it disables background
     # Commit generation so the capacity probe measures Search only. Passing
     # no flag would make run_stress fall back to its non-zero default.
     if commit_rpm is not None:

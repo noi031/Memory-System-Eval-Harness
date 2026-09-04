@@ -1022,7 +1022,7 @@ Embedding、`ECHOMEM_AUTO_COMMIT_THRESHOLD=20000` 和 4U8G 资源档位。测试
 `objective-suite.html` / `suite.json` 为准，缺少真实故障控制或恢复证据时会标记
 `INCONCLUSIVE`，不会把缺失数据当作通过。
 
-quick 模式默认把容量场景的 Commit 负载设为 0，避免容量测量被后台写入拖住；
+容量场景（quick 和 full）都把 Commit 负载固定为 0，避免容量测量被后台写入拖住；
 容量场景的 `K` 负载在 `commit-rpm=0` 时严格只启动 Search worker，不会因为
 默认的读写线程拆分而偷偷发起 Commit；这保证容量档位测的是活跃用户的 Search
 边界，而不是异步 Commit 的完成时间。
