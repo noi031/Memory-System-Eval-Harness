@@ -153,7 +153,7 @@ def retry_decision(
 
 @dataclass
 class RequestRecord:
-    """One measured operation. ``ts_ms`` is time.time()*1000 at completion."""
+    """One measured operation with wall-clock start and completion times."""
 
     scene_key: str
     step_conc: int
@@ -163,6 +163,7 @@ class RequestRecord:
     status: str  # ok | error
     error_type: str  # "" | timeout | http_4xx | http_5xx | connection | other
     ts_ms: float
+    start_ts_ms: float | None = None
     request_id: str = ""
     http_status: int | None = None
     session_id: str = ""
@@ -204,6 +205,11 @@ class RequestRecord:
             "error_type": self.error_type,
             "http_status": self.http_status,
             "ts_ms": round(self.ts_ms, 3),
+            "start_ts_ms": (
+                round(self.start_ts_ms, 3)
+                if self.start_ts_ms is not None
+                else None
+            ),
             "request_id": self.request_id,
             "session_id": self.session_id,
             "archive_id": self.archive_id,
@@ -325,6 +331,11 @@ def run_write_transaction(
     def record(
         op: str, ms: float, status: str, error_type: str = "", **extra_fields: Any
     ) -> None:
+        completed_ts_ms = time.time() * 1000
+        start_ts_ms = extra_fields.pop(
+            "start_ts_ms",
+            completed_ts_ms - max(0.0, float(ms)),
+        )
         records.append(
             RequestRecord(
                 scene_key=scene_key,
@@ -334,7 +345,8 @@ def run_write_transaction(
                 stage_ms=ms,
                 status=status,
                 error_type=error_type,
-                ts_ms=time.time() * 1000,
+                ts_ms=completed_ts_ms,
+                start_ts_ms=start_ts_ms,
                 request_id=str(extra_fields.pop("request_id", "") or transaction_id),
                 session_id=result.session_id,
                 extra=extra,
@@ -734,6 +746,7 @@ class LoadGenerator:
             status=status,
             error_type=error,
             ts_ms=time.time() * 1000,
+            start_ts_ms=time.time() * 1000 - (time.perf_counter() - started) * 1000,
             http_status=http_status,
             request_id=request_id,
             reason_code=reason_code,

@@ -37,6 +37,58 @@ from performance.formal_suite import SCENARIOS, _build_seed_warmup_command
 
 
 class ObjectiveSuiteTests(unittest.TestCase):
+    def test_runtime_overrides_replace_stale_profile_target(self) -> None:
+        import argparse
+        from performance.objective_suite import load_profiles
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "profiles.json"
+            path.write_text(
+                json.dumps(
+                    {
+                        "profiles": [
+                            {
+                                "name": "4U8G",
+                                "base_url": "http://old:8010",
+                                "preflight_config": "/old/config.json",
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            profiles = load_profiles(path)
+            args = argparse.Namespace(
+                base_url="http://new:8010",
+                preflight_config="/new/config.json",
+            )
+            for profile in profiles:
+                if args.base_url:
+                    profile["base_url"] = args.base_url
+                if args.preflight_config:
+                    profile["preflight_config"] = args.preflight_config
+            self.assertEqual("http://new:8010", profiles[0]["base_url"])
+            self.assertEqual("/new/config.json", profiles[0]["preflight_config"])
+
+    def test_priority_evidence_uses_request_intervals(self) -> None:
+        from performance.formal_suite import _derive_case_summary
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "summary.json").write_text(
+                json.dumps({"status": "completed"}), encoding="utf-8"
+            )
+            (root / "requests.csv").write_text(
+                "op,status,stage_ms,ts_ms,start_ts_ms,tenant_idx,scene\n"
+                "read,ok,100,1200,1100,0,S\n"
+                "commit_submit,ok,200,1300,1100,0,S\n",
+                encoding="utf-8",
+            )
+            result = _derive_case_summary(root, identity_independent=True)
+            overlap = result["details"]["same_window_overlap"]
+            self.assertTrue(overlap["overlap_proven"])
+            self.assertEqual("request start/end intervals", overlap["basis"])
+
     def test_six_metric_entrypoint_is_self_contained_and_no_soak_by_default(self) -> None:
         script = (
             Path(__file__).resolve().parents[1]

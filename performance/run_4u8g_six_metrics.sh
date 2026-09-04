@@ -36,6 +36,8 @@ if [ "${STRESS_QUICK:-0}" = "1" ]; then
   python3 -m performance.objective_suite \
     --profiles "$profiles" \
     --profile "$profile_name" \
+    --base-url "$base_url" \
+    --preflight-config "$config" \
     --out-dir "$out_dir" \
     --quick \
     --timeout-s "$max_wall_clock" \
@@ -45,11 +47,12 @@ else
   python3 -m performance.objective_suite \
     --profiles "$profiles" \
     --profile "$profile_name" \
+    --base-url "$base_url" \
+    --preflight-config "$config" \
     --out-dir "$out_dir" \
     --full \
     --timeout-s "$max_wall_clock" \
     --max-wall-clock-s "$max_wall_clock" \
-    --scenarios "" \
     "${env_args[@]}"
 fi
 

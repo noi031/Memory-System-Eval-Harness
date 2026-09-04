@@ -28,7 +28,7 @@
         "poll_s": 2
       },
       "fault_isolation": {
-        "enabled": false,
+        "enabled": true,
         "target_tenant": "stress-a",
         "bystander_tenants": "stress-b,stress-c,stress-d",
         "endpoint": "${ECHOMEM_FAULT_CONTROL_URL}",

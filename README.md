@@ -220,6 +220,11 @@ export STRESS_QUICK=1
                                         服务端 /metrics 原始采样
 ```
 
+逐请求 `requests.csv` 还会记录 `start_ts_ms` 和 `ts_ms`：前者是请求开始时间，
+后者是完成时间。Search 优先级场景会用这两个时间组成请求区间，只有 Search 与
+Commit 区间真实重叠时，才允许继续判断洪泛期间的 Search P95；不能用“两个请求都
+完成过”代替同时竞争证据。
+
 重点检查 `objective-suite.json` 中的 `coverage` 和六个 `O1` 到 `O6`：
 
 - `PASS`：有足够真实请求和对应证据，并满足阈值；

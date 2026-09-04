@@ -1218,26 +1218,39 @@ def _derive_case_summary(run_dir: Path, identity_independent: bool) -> dict[str,
             return None
         return value if value == value else None
 
-    search_times = [
-        value for value in (_timestamp_ms(row) for row in reads)
-        if value is not None
+    def _request_interval(row: dict[str, str]) -> tuple[float, float] | None:
+        end = _timestamp_ms(row)
+        if end is None:
+            return None
+        try:
+            start = float(row.get("start_ts_ms") or "")
+        except (TypeError, ValueError):
+            start = end - max(0.0, float(row.get("stage_ms") or 0.0))
+        if start != start:
+            return None
+        return min(start, end), max(start, end)
+
+    search_intervals = [
+        interval for interval in (_request_interval(row) for row in reads)
+        if interval is not None
     ]
-    commit_times = [
-        value for value in (_timestamp_ms(row) for row in commit_submits)
-        if value is not None
+    commit_intervals = [
+        interval
+        for interval in (_request_interval(row) for row in commit_submits)
+        if interval is not None
     ]
-    if search_times and commit_times:
-        search_start, search_end = min(search_times), max(search_times)
-        commit_start, commit_end = min(commit_times), max(commit_times)
-        overlap_ms = max(
-            0.0,
-            min(search_end, commit_end) - max(search_start, commit_start),
-        )
+    if search_intervals and commit_intervals:
+        search_start = min(interval[0] for interval in search_intervals)
+        search_end = max(interval[1] for interval in search_intervals)
+        commit_start = min(interval[0] for interval in commit_intervals)
+        commit_end = max(interval[1] for interval in commit_intervals)
+        overlap_ms = max(0.0, min(search_end, commit_end) - max(search_start, commit_start))
         details["same_window_overlap"] = {
             "search_window_ms": [search_start, search_end],
             "commit_submit_window_ms": [commit_start, commit_end],
             "overlap_ms": round(overlap_ms, 3),
             "overlap_proven": overlap_ms > 0,
+            "basis": "request start/end intervals",
         }
     for key in (
         "degradation",

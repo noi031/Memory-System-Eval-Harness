@@ -1328,6 +1328,16 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Run EchoMem objective acceptance suite")
     parser.add_argument("--profiles", required=True, type=Path)
     parser.add_argument("--profile", default="", help="只运行一个 profile；默认运行全部")
+    parser.add_argument(
+        "--base-url",
+        default="",
+        help="覆盖 profile 中的 EchoMem 地址（仅当前运行生效）",
+    )
+    parser.add_argument(
+        "--preflight-config",
+        default="",
+        help="覆盖 profile 中的实际 EchoMem config.json（仅当前运行生效）",
+    )
     parser.add_argument("--out-dir", required=True, type=Path)
     parser.add_argument("--quick", action="store_true", help="bounded smoke matrix")
     parser.add_argument(
@@ -1443,6 +1453,14 @@ def main() -> int:
         profiles = [item for item in profiles if str(item["name"]) == args.profile]
     if not profiles:
         parser.error("没有匹配的 profile")
+    # A deployment command must be able to bind the harness to the same
+    # address/configuration used by EchoMem without editing a shared example
+    # profile. This prevents stale local templates from being used silently.
+    for profile in profiles:
+        if args.base_url:
+            profile["base_url"] = args.base_url
+        if args.preflight_config:
+            profile["preflight_config"] = args.preflight_config
     if args.gaps_only and args.suite_path is None and not any(
         str(item.get("suite_path") or item.get("suite") or "").strip()
         for item in profiles
