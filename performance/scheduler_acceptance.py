@@ -553,6 +553,16 @@ def _fairness(suite: dict[str, Any]) -> dict[str, Any]:
         # in the selected scenario.
         expected_tenants: set[str] = set()
         observed_tenants: set[str] = set()
+        fairness_expectations = suite.get("fairness_expectations")
+        declared_tenants = (
+            fairness_expectations.get("tenant_ids")
+            if isinstance(fairness_expectations, dict)
+            else None
+        )
+        if isinstance(declared_tenants, list):
+            expected_tenants.update(
+                str(item).strip() for item in declared_tenants if str(item).strip()
+            )
         for run in selected_runs:
             summary = _run_summary(run)
             metrics = summary.get("metrics") or {}
@@ -983,18 +993,47 @@ def _observability(capability: dict[str, Any], suite: dict[str, Any]) -> dict[st
     # The active EchoMem configuration determines which scheduler lanes are
     # real for this run. Disabled optional engines must not be reported as
     # missing, while a run with no lane observations remains inconclusive.
-    expected_lanes = set(lane_quartets)
+    expectations = suite.get("observability_expectations")
+    declared_lanes = (
+        expectations.get("lanes")
+        if isinstance(expectations, dict)
+        else None
+    )
+    expected_lanes = {
+        str(item).strip()
+        for item in declared_lanes or []
+        if str(item).strip()
+    } or set(lane_quartets)
+    declared_engines = (
+        expectations.get("fanout_engines")
+        if isinstance(expectations, dict)
+        else None
+    )
+    expected_fanout_engines = {
+        str(item).strip()
+        for item in declared_engines or []
+        if str(item).strip()
+    }
     missing_lanes = sorted(expected_lanes - set(complete_lanes))
     complete_fanout_engines = sorted(
         engine for engine, observations in fanout_engines.items()
         if observations.get("exec") and observations.get("skipped")
+    )
+    missing_fanout_engines = sorted(
+        expected_fanout_engines - set(complete_fanout_engines)
     )
     if (missing or not expected_lanes) and not coverage:
         return _result(
             "分层/分租户调度可观测性",
             INCONCLUSIVE,
             "每个实际 lane 有 queued/wait/exec/rejected 四元组，且有 fan-out 证据",
-            {"missing": missing},
+            {
+                "missing": missing,
+                "expected_lanes": sorted(expected_lanes),
+                "expected_fanout_engines": sorted(expected_fanout_engines),
+                "missing_lanes": sorted(expected_lanes),
+                "missing_fanout_engines": sorted(expected_fanout_engines),
+            },
             (
                 "没有采到任何实际 lane 的 Prometheus B7 覆盖证据"
                 if not expected_lanes
@@ -1009,6 +1048,9 @@ def _observability(capability: dict[str, Any], suite: dict[str, Any]) -> dict[st
         "missing_lanes": missing_lanes,
         "fanout_engines": fanout_engines,
         "complete_fanout_engines": complete_fanout_engines,
+        "expected_lanes": sorted(expected_lanes),
+        "expected_fanout_engines": sorted(expected_fanout_engines),
+        "missing_fanout_engines": missing_fanout_engines,
         "legacy_tenant_lanes": legacy_tenant_lanes,
     }
     legacy_complete_tenants = [
@@ -1019,6 +1061,7 @@ def _observability(capability: dict[str, Any], suite: dict[str, Any]) -> dict[st
         not missing
         and not missing_lanes
         and bool(complete_fanout_engines)
+        and not missing_fanout_engines
     ) or (
         # Accept old artifacts only when they explicitly contain the legacy
         # per-tenant evidence and no bounded-label violation was recorded.

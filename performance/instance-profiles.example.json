@@ -51,6 +51,19 @@
         "timeout_s": 20,
         "control_timeout_s": 30
       },
+      "fairness_expectations": {
+        "tenant_ids": ["stress-a", "stress-b", "stress-c", "stress-d"]
+      },
+      "observability": {
+        "lanes": [
+          "recall_engine",
+          "recall_intent_llm",
+          "recall_query_embedding",
+          "recall_rerank",
+          "commit"
+        ],
+        "fanout_engines": ["recall", "commit"]
+      },
       "fault_plan": "fault-plan.example.json",
       "limit_failure_sweep": {
         "levels": "16,64,128,256",

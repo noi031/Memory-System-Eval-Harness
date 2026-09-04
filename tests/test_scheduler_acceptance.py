@@ -20,6 +20,58 @@ class SchedulerAcceptanceTests(unittest.TestCase):
         self.assertEqual(6, len(result["checks"]))
         self.assertTrue(all(item["status"] == INCONCLUSIVE for item in result["checks"]))
 
+    def test_declared_observability_lanes_cannot_be_hidden_by_missing_samples(self):
+        result = evaluate(
+            {
+                "observability_expectations": {
+                    "lanes": ["commit", "recall_engine"],
+                    "fanout_engines": ["recall"],
+                },
+                "capability_probe": {
+                    "checks": [{
+                        "name": "Prometheus B7 metrics",
+                        "status": "PASS",
+                        "present": {
+                            "lane_queued": True,
+                            "lane_wait": True,
+                            "lane_exec": True,
+                            "lane_rejected": True,
+                            "engine_exec": True,
+                            "engine_skipped": True,
+                        },
+                    }],
+                },
+                "runs": [{
+                    "scenario": "fairness-steady",
+                    "status": "completed",
+                    "summary": {
+                        "details": {
+                            "pr421_metric_coverage": {
+                                "lane_quartets": {
+                                    "commit": {
+                                        "queued": True,
+                                        "wait": True,
+                                        "exec": True,
+                                        "rejected": True,
+                                    }
+                                },
+                                "fanout_engines": {
+                                    "recall": {"exec": True, "skipped": True}
+                                },
+                            }
+                        }
+                    },
+                }],
+            }
+        )
+        check = next(
+            item for item in result["checks"]
+            if item["name"] == "分层/分租户调度可观测性"
+        )
+        self.assertEqual(INCONCLUSIVE, check["status"])
+        self.assertEqual(["recall_engine"], check["observed"]["missing_lanes"])
+        self.assertEqual([], check["observed"]["missing_fanout_engines"])
+
     def test_priority_uses_blackbox_search_p95(self) -> None:
         result = evaluate(
             {

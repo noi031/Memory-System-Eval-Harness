@@ -186,6 +186,33 @@ class ObjectiveSuiteTests(unittest.TestCase):
                 load_env_file(path),
             )
 
+    def test_profile_expectations_are_forwarded_to_acceptance(self) -> None:
+        from performance.scheduler_acceptance import evaluate
+
+        suite = {
+            "runs": [],
+            "fairness_expectations": {"tenant_ids": ["a", "b"]},
+            "observability_expectations": {
+                "lanes": ["commit"],
+                "fanout_engines": ["recall"],
+            },
+        }
+        result = evaluate(suite)
+        fairness = next(
+            item for item in result["checks"]
+            if item["name"] == "Commit/Search 公平性 Jain"
+        )
+        observability = next(
+            item for item in result["checks"]
+            if item["name"] == "分层/分租户调度可观测性"
+        )
+        self.assertEqual(["a", "b"], fairness["observed"].get("expected_tenants"))
+        self.assertEqual(["commit"], observability["observed"].get("expected_lanes"))
+        self.assertEqual(
+            ["recall"],
+            observability["observed"].get("expected_fanout_engines"),
+        )
+
     def test_resolve_tenant_id_falls_back_when_profile_is_stale(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "tenants.json"

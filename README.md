@@ -1174,6 +1174,32 @@ Embedding、`ECHOMEM_AUTO_COMMIT_THRESHOLD=20000` 和 4U8G 资源档位。测试
 | O5 | 202 Commit、真实 kill/restart、history/archive/cursor/幂等重放对账 | 部署提供 kill/restart 权限，EchoMem提供既有读接口 |
 | O6 | 每个实际 lane 都采到 queued/wait/exec/rejected 四元组，并有 engine fan-out 的 exec/skipped 证据；不要求把 `tenant_id` 放进指标标签 | EchoMem `/metrics` 暴露 bounded-label 指标，测试平台负责按 lane/fan-out 对账 |
 
+配置文件可以进一步声明验收时的预期集合，避免“只要出现过一个
+lane/租户就算覆盖”的误判：
+
+```json
+{
+  "fairness_expectations": {
+    "tenant_ids": ["stress-a", "stress-b", "stress-c", "stress-d"]
+  },
+  "observability": {
+    "lanes": ["recall_engine", "recall_intent_llm", "recall_query_embedding", "recall_rerank", "commit"],
+    "fanout_engines": ["recall", "commit"]
+  }
+}
+```
+
+`fairness_expectations.tenant_ids` 会被放入 Jain 指数分母。声明的租户没有
+同一公平性窗口的 Commit 或 Search 样本时，结果保持 `INCONCLUSIVE`，不会被
+自动排除。`observability.lanes` 和 `fanout_engines` 用于列出本次部署应该
+暴露的 bounded-label 集合；缺失项会在 `observed.missing_lanes` 或
+`observed.missing_fanout_engines` 中明确列出。
+
+故障隔离的 `endpoint` 会收到
+`{"action":"enable|disable","target_tenant":"...","tenant":"..."}`；命令控制
+支持 `{action}`、`{target_tenant}` 和 `{tenant}` 占位符。故障采样即使发生
+客户端异常也会进入 `finally` 执行 disable，防止真实故障状态污染后续场景。
+
 公平性计算还要求被选中的同一负载窗口覆盖所有参与租户：每个租户都必须有
 Search 样本和 Commit 提交样本。缺少某个租户时只报告 `INCONCLUSIVE`，不会把
 没有到达或没有完成的租户从 Jain 分母中删除。

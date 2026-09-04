@@ -1733,6 +1733,8 @@ def main() -> int:
                 {
                     **suite,
                     "profile_name": name,
+                    "fairness_expectations": profile.get("fairness_expectations", {}),
+                    "observability_expectations": profile.get("observability", {}),
                     "instance_profiles": [{
                         "name": name,
                         "status": profile_execution_status,

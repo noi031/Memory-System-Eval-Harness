@@ -158,6 +158,24 @@ class Report6ScenarioTests(unittest.TestCase):
         self.assertGreater(case["search_rps"], 0)
         self.assertEqual(0.0, case["commit_rpm"])
 
+    def test_fault_isolation_command_can_receive_target_tenant(self) -> None:
+        from performance.probes.fault_isolation_probe import control
+
+        result = control(
+            {
+                "command": (
+                    "python3 -c \"import sys; "
+                    "assert '{target_tenant}' == 'stress-a'; "
+                    "assert '{tenant}' == 'stress-a'; "
+                    "assert '{action}' == 'enable'\""
+                )
+            },
+            action="enable",
+            target_tenant="stress-a",
+            timeout_s=5,
+        )
+        self.assertEqual("PASS", result["status"])
+
     def test_barrier_count_cap_bounds_quick_command(self) -> None:
         args = argparse.Namespace(
             base_url="http://127.0.0.1:8010",
