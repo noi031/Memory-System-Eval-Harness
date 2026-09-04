@@ -19,6 +19,7 @@ from performance.objective_suite import (
     _formal_coverage,
     _formal_submitted_operations,
     _formal_profile_name,
+    _probe_plan,
     load_env_file,
     load_profiles,
     objective_statuses,
@@ -157,6 +158,22 @@ class ObjectiveSuiteTests(unittest.TestCase):
                 os.environ.pop("ECHOMEM_CONTAINER", None)
             else:
                 os.environ["ECHOMEM_CONTAINER"] = previous
+
+    def test_probe_plan_keeps_missing_controls_explicit(self) -> None:
+        plan = _probe_plan(
+            {
+                "capability_probe": {"enabled": True},
+                "fault_isolation": {"enabled": False},
+                "commit_recovery": {"container": "target"},
+            }
+        )
+        by_name = {item["name"]: item for item in plan}
+        self.assertEqual("scheduled", by_name["blackbox_probe"]["status"])
+        self.assertTrue(by_name["blackbox_probe"]["configured"])
+        self.assertEqual("scheduled", by_name["capability_probe"]["status"])
+        self.assertEqual("not_configured", by_name["fault_isolation"]["status"])
+        self.assertEqual("scheduled", by_name["commit_recovery"]["status"])
+        self.assertEqual("O2", by_name["fault_isolation"]["objectives"])
 
     def test_resolve_profile_path_accepts_repo_relative_paths(self) -> None:
         from performance.objective_suite import _resolve_profile_path

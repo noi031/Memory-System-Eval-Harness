@@ -14,6 +14,7 @@ set -euo pipefail
 #   STRESS_ENV_FILE     KEY=VALUE file for the real-model subprocesses
 #   STRESS_QUICK=1      bounded diagnostic run; not a full acceptance result
 #   STRESS_MAX_WALL_CLOCK_S
+#   STRESS_PROBE_BUDGET_S default 900; reserved for post-suite probes
 #
 # The profile controls the actual tenant credentials, fault/restart controls,
 # and metrics endpoint. No API key is written to the result artifacts.
@@ -28,6 +29,7 @@ base_url="${ECHOMEM_BASE_URL:-http://127.0.0.1:8010}"
 profile_name="${STRESS_PROFILE_NAME:-4U8G}"
 out_dir="${STRESS_OUTPUT_DIR:-$root_dir/results/performance/4u8g-six-metrics-$(date +%Y%m%d_%H%M%S)}"
 max_wall_clock="${STRESS_MAX_WALL_CLOCK_S:-10800}"
+probe_budget="${STRESS_PROBE_BUDGET_S:-900}"
 env_args=()
 if [ -n "${STRESS_ENV_FILE:-}" ]; then
   env_args=(--env-file "$STRESS_ENV_FILE")
@@ -43,6 +45,7 @@ if [ "${STRESS_QUICK:-0}" = "1" ]; then
     --quick \
     --timeout-s "$max_wall_clock" \
     --max-wall-clock-s "$max_wall_clock" \
+    --probe-budget-s "$probe_budget" \
     "${env_args[@]}"
 else
   "$python_bin" -m performance.objective_suite \
@@ -54,6 +57,7 @@ else
     --full \
     --timeout-s "$max_wall_clock" \
     --max-wall-clock-s "$max_wall_clock" \
+    --probe-budget-s "$probe_budget" \
     "${env_args[@]}"
 fi
 

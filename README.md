@@ -1012,6 +1012,12 @@ python3 -m performance.objective_suite \
 命令中加 `--quick`；`--quick` 仅用于快速诊断子集，不能作为完整测试结果。
 报告中的场景覆盖必须显示 `37/37`，否则本轮只能算部分结果。
 
+正式入口默认从总预算中预留 900 秒给 formal 结束后的能力、限流、故障和
+kill-9 恢复补测，避免 formal 场景耗尽时间后 O2/O5/O6 没有机会执行。可用
+`--probe-budget-s` 调整；设为 `0` 才会取消预留。报告的“补测计划”会列出
+每个探针对应的目标、是否配置和实际状态；没有真实控制端点的项目仍显示
+`INCONCLUSIVE`，不会伪造通过。
+
 服务器如果把 EchoMem 的真实模型凭据放在 Docker env 文件中，评测入口也要加载同一份
 env 文件，保证 formal suite 和探针使用的模型环境与 EchoMem 服务一致：
 
@@ -1031,9 +1037,10 @@ python3 -m performance.objective_suite \
 
 `--quick` 只做 bounded smoke，并默认跳过真实模型灌种，专门快速验证调度、延迟和
 可观测性链路；因此不能用它证明记忆质量。需要把真实租户记忆和 active-user/session
-证据纳入测试时，可加 `--quick-include-seed`。打开该选项后，每个场景灌入 1 个最小
-真实 session；为了不丢失子进程中的 session ID，quick 模式按场景独立灌种，不复用
-warm-up session。单场景默认最多运行 30 秒、总墙钟 180 秒、barrier 默认最多 32 个
+证据纳入测试时，可加 `--quick-include-seed`。打开该选项后，平台先为本轮需要的
+租户做一次最小真实 warm-up，后续场景复用这批已完成记忆，避免每个场景重复等待
+模型抽取；报告会记录 `seed_reused` 和 `seed_evidence_status`。单场景默认最多运行
+30 秒、总墙钟 180 秒、barrier 默认最多 32 个
 Commit；正式场景 Commit 默认单次最多等待 180 秒，并发波次默认 4，可通过
 `--quick-commit-timeout-s` 和 `--quick-barrier-wave-size` 调整。真实模型 warm-up
 另外使用 `--quick-seed-commit-timeout-s`（默认 180 秒），外层窗口至少为该值的 2 倍。

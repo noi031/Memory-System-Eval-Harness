@@ -284,6 +284,64 @@ def _probe_budget_skip(
     return skipped
 
 
+PROBE_CONFIG_KEYS = (
+    "capability_probe",
+    "blackbox_probe",
+    "missing_cases",
+    "concurrent_commit",
+    "fault_isolation",
+    "limit_failure_sweep",
+    "commit_recovery",
+    "fault_plan",
+)
+
+
+def _probe_plan(profile: dict[str, Any]) -> list[dict[str, Any]]:
+    """Describe configured post-suite probes before they are executed.
+
+    The plan is persisted in ``objective-suite.json`` so a partial run still
+    explains which six-metric evidence was requested and which controls were
+    absent.  This is intentionally configuration-driven; the harness never
+    invents a fault or restart control.
+    """
+    plan: list[dict[str, Any]] = []
+    labels = {
+        "capability_probe": ("能力探针", "O6"),
+        "blackbox_probe": ("黑盒契约探针", "O5"),
+        "missing_cases": ("PR397 一致性探针", "O5"),
+        "concurrent_commit": ("并发 Commit 探针", "O3"),
+        "fault_isolation": ("单租户故障隔离探针", "O2"),
+        "limit_failure_sweep": ("限流阶梯探针", "O1/O4/O6"),
+        "commit_recovery": ("Commit kill-9 恢复探针", "O5"),
+        "fault_plan": ("故障套件", "O2/O5"),
+    }
+    for key in PROBE_CONFIG_KEYS:
+        configured = profile.get(key)
+        automatic = key == "blackbox_probe"
+        if automatic:
+            enabled = True
+        elif key == "fault_plan":
+            enabled = bool(configured)
+        else:
+            enabled = isinstance(configured, dict) and configured.get("enabled", True)
+        label, objectives = labels[key]
+        plan.append({
+            "name": key,
+            "label": label,
+            "objectives": objectives,
+            "configured": enabled,
+            "status": "scheduled" if enabled else "not_configured",
+            "reason": (
+                "将由 objective suite 在 formal 场景后自动执行"
+                if automatic
+                else "将由 objective suite 在 formal 场景后执行"
+                if enabled
+                else "profile 未配置真实控制或探针"
+            ),
+        })
+    return plan
+
+
 def read_json(path: Path) -> dict[str, Any]:
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
@@ -1245,6 +1303,37 @@ def render_report(result: dict[str, Any], path: Path) -> None:
     details = []
     for profile in result.get("profiles") or []:
         details.append(f"<h3>{html.escape(str(profile.get('name')))}</h3>")
+        probe_plan = profile.get("probe_plan") or []
+        if isinstance(probe_plan, list) and probe_plan:
+            configured_count = sum(
+                1
+                for item in probe_plan
+                if isinstance(item, dict) and item.get("configured")
+            )
+            details.append(
+                "<details><summary>补测计划："
+                f"{html.escape(str(configured_count))}/"
+                f"{html.escape(str(len(probe_plan)))} 项已配置</summary>"
+                "<table><thead><tr><th>探针</th><th>目标</th><th>状态</th>"
+                "<th>说明</th></tr></thead><tbody>"
+            )
+            for item in probe_plan:
+                if not isinstance(item, dict):
+                    continue
+                details.append(
+                    "<tr>"
+                    f"<td>{html.escape(str(item.get('label') or item.get('name')))}</td>"
+                    f"<td>{html.escape(str(item.get('objectives') or '-'))}</td>"
+                    f"<td>{html.escape(str(item.get('status') or '-'))}</td>"
+                    f"<td>{html.escape(str(item.get('reason') or '-'))}</td>"
+                    "</tr>"
+                )
+            details.append(
+                "</tbody></table>"
+                f"<p class='muted'>预留补测时间："
+                f"{html.escape(str(profile.get('probe_budget_reserved_s', 0)))} 秒</p>"
+                "</details>"
+            )
         coverage = profile.get("coverage") or {}
         missing = coverage.get("missing_scenarios") or []
         details.append(
@@ -1451,6 +1540,15 @@ def main() -> int:
         help="所有 profile 与探针共享的最大 wall-clock 时间；默认 10800 秒",
     )
     parser.add_argument(
+        "--probe-budget-s",
+        type=float,
+        default=900.0,
+        help=(
+            "为 formal 完成后的能力/故障/恢复补测预留的 wall-clock 时间；"
+            "设为 0 表示不预留，默认 900 秒"
+        ),
+    )
+    parser.add_argument(
         "--skip-run",
         action="store_true",
         help="只根据已有 suite.json 生成总报告",
@@ -1491,6 +1589,8 @@ def main() -> int:
         parser.error("--timeout-s must be > 0")
     if args.max_wall_clock_s <= 0:
         parser.error("--max-wall-clock-s must be > 0")
+    if args.probe_budget_s < 0:
+        parser.error("--probe-budget-s must be >= 0")
     suite_deadline = time.monotonic() + min(args.timeout_s, args.max_wall_clock_s)
 
     child_env = dict(os.environ)
@@ -1523,6 +1623,17 @@ def main() -> int:
     ):
         parser.error("--gaps-only 需要 --suite-path 或 profile.suite_path")
 
+    configured_probe_profiles = [
+        profile for profile in profiles
+        if any(item["configured"] for item in _probe_plan(profile))
+    ]
+    # Reserve time only when a profile actually asks for post-suite probes.
+    # A pure formal run should keep the full wall-clock budget available.
+    probe_reserve_s = (
+        min(args.probe_budget_s, args.max_wall_clock_s)
+        if configured_probe_profiles and not args.skip_run
+        else 0.0
+    )
     args.out_dir.mkdir(parents=True, exist_ok=True)
     output_lock = None
     if not args.skip_run:
@@ -1537,6 +1648,7 @@ def main() -> int:
         profile_dir.mkdir(parents=True, exist_ok=True)
         command_result: dict[str, Any] = {}
         suite_path = profile_dir / "suite.json"
+        probe_plan = _probe_plan(profile)
 
         if not args.skip_run:
             prepare = str(profile.get("prepare_command") or "").strip()
@@ -1639,14 +1751,6 @@ def main() -> int:
                         command += ["--quick-seed-tenant-cap", "4"]
                     if args.quick:
                         command += ["--quick-mode"]
-                remaining_for_formal = _bounded_timeout(
-                    args.timeout_s,
-                    suite_deadline,
-                )
-                command += [
-                    "--max-wall-clock-s",
-                    str(max(0.0, remaining_for_formal)),
-                ]
                 include_quick_seed = bool(
                     args.quick_include_seed
                     or profile.get("quick_include_seed")
@@ -1654,28 +1758,43 @@ def main() -> int:
                 if args.quick and not include_quick_seed:
                     _append_quick_seed_options(command, include_seed=False)
                 elif args.quick:
-                    # Capacity/user evidence needs real session identities.
-                    # Seed once in formal_suite and reuse that completed
-                    # warm-up across the whole bounded matrix. Re-seeding
-                    # every capacity tier serializes real-model Commit
-                    # extraction and can make the diagnostic suite exceed
-                    # its wall-clock budget before any useful comparison is
-                    # produced. The runner still creates fresh sessions for
-                    # measured requests, so request evidence remains
-                    # scenario-local.
+                    # Seed once for hot-cache evidence; reuse it across cases.
                     _append_quick_seed_options(command, include_seed=True)
                 if bool(profile.get("allow_partial_tenants")):
                     command += ["--allow-partial-tenants"]
-                command_result["run"] = run_command(
-                    command,
-                    timeout_s=remaining_for_formal,
-                    env=child_env,
+                remaining_before_formal = _bounded_timeout(
+                    args.timeout_s,
+                    suite_deadline,
                 )
-                formal_root = profile_dir / "formal"
-                candidates = []
-                if (formal_root / "suite.json").is_file():
-                    candidates.append(formal_root / "suite.json")
-                candidates.extend(sorted(formal_root.glob("*/suite.json")))
+                remaining_for_formal = max(
+                    0.0,
+                    remaining_before_formal - probe_reserve_s,
+                )
+                if remaining_for_formal <= 0:
+                    command_result["run"] = {
+                        "status": "TIMEOUT",
+                        "reason": (
+                            "测试平台为 post-suite 探针预留了全部剩余预算；"
+                            "formal suite 未启动"
+                        ),
+                    }
+                    formal_root = profile_dir / "formal"
+                    candidates = []
+                else:
+                    command += [
+                        "--max-wall-clock-s",
+                        str(remaining_for_formal),
+                    ]
+                    command_result["run"] = run_command(
+                        command,
+                        timeout_s=remaining_for_formal,
+                        env=child_env,
+                    )
+                    formal_root = profile_dir / "formal"
+                    candidates = []
+                    if (formal_root / "suite.json").is_file():
+                        candidates.append(formal_root / "suite.json")
+                    candidates.extend(sorted(formal_root.glob("*/suite.json")))
                 if candidates:
                     suite_path = candidates[-1]
         else:
@@ -1709,6 +1828,26 @@ def main() -> int:
             quick=args.quick,
             deadline=suite_deadline,
         )
+        probe_command_names = {
+            "fault_plan": "fault_suite",
+        }
+        for item in probe_plan:
+            if not isinstance(item, dict) or not item.get("configured"):
+                continue
+            probe_name = str(item.get("name") or "")
+            command_name = probe_command_names.get(probe_name, probe_name)
+            execution = probe_commands.get(command_name)
+            artifact = probe_artifacts.get(command_name)
+            if isinstance(artifact, dict) and artifact.get("status"):
+                item["status"] = str(artifact["status"])
+            elif isinstance(execution, dict) and execution.get("status"):
+                item["status"] = str(execution["status"])
+            elif probe_name == "blackbox_probe":
+                item["status"] = "not_run"
+                item["reason"] = "本轮没有完成 Commit 证据，未启动自动黑盒契约探针"
+            else:
+                item["status"] = "not_run"
+                item["reason"] = "未生成该探针的执行记录"
         suite = {**suite, **probe_artifacts}
         command_result.update(probe_commands)
 
@@ -1727,6 +1866,8 @@ def main() -> int:
             "completed_runs": completed_runs,
             "submitted_runs": submitted_runs,
             "coverage": coverage,
+            "probe_plan": probe_plan,
+            "probe_budget_reserved_s": probe_reserve_s,
             **probe_artifacts,
             "command": command_result,
             "objectives": objective_statuses(
@@ -1769,6 +1910,8 @@ def main() -> int:
     )
     result = {
         "created_at": now(),
+        "wall_clock_budget_s": args.max_wall_clock_s,
+        "probe_budget_reserved_s": probe_reserve_s,
         "profiles": output_profiles,
         "objectives": OBJECTIVES,
         "instance_profiles": completed_profile_records,

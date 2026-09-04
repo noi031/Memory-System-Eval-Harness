@@ -34,6 +34,19 @@
         "recovery_timeout_s": 180,
         "poll_s": 2
       },
+      "fairness_expectations": {
+        "tenant_ids": ["stress-a", "stress-b", "stress-c", "stress-d"]
+      },
+      "observability": {
+        "lanes": [
+          "recall_engine",
+          "recall_intent_llm",
+          "recall_query_embedding",
+          "recall_rerank",
+          "commit"
+        ],
+        "fanout_engines": ["recall", "commit"]
+      },
       "limit_failure_sweep": {
         "levels": "16,64,128,256",
         "search_count": 256,
