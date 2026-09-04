@@ -27,6 +27,7 @@ from performance.objective_suite import (
     run_command,
     render_report,
 )
+from scripts.build_pr29_six_metric_report import load_formal_artifacts
 from performance.probes.limit_failure_probe import (
     auth_key,
     classify_response,
@@ -40,6 +41,24 @@ from performance.formal_suite import SCENARIOS, _build_seed_warmup_command
 
 
 class ObjectiveSuiteTests(unittest.TestCase):
+    def test_report_loader_keeps_probe_artifacts_next_to_formal_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            formal = root / "4U8G" / "formal"
+            formal.mkdir(parents=True)
+            (root / "4U8G" / "commit-recovery.json").write_text(
+                json.dumps({"status": "PASS"}), encoding="utf-8"
+            )
+            (root / "4U8G" / "capability-probe.json").write_text(
+                json.dumps({"status": "INCONCLUSIVE"}), encoding="utf-8"
+            )
+            artifacts = load_formal_artifacts(formal)
+            self.assertEqual("PASS", artifacts["commit_recovery"]["status"])
+            self.assertEqual(
+                "INCONCLUSIVE",
+                artifacts["capability_probe"]["status"],
+            )
+
     def test_first_completed_commit_evidence_returns_session(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

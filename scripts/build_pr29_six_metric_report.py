@@ -44,6 +44,42 @@ def load(path: Path) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
 
 
+def first_existing(*paths: Path) -> Path | None:
+    """Return the first existing artifact path, keeping old result layouts usable."""
+    for path in paths:
+        if path.is_file():
+            return path
+    return None
+
+
+def load_artifact(*paths: Path) -> tuple[dict[str, Any], Path | None]:
+    path = first_existing(*paths)
+    return (load(path), path) if path else ({}, None)
+
+
+def load_formal_artifacts(formal: Path) -> dict[str, dict[str, Any]]:
+    """Load post-suite probes from both current and legacy result layouts."""
+    probe_dirs = (formal / "probes", formal.parent / "probes", formal.parent)
+    artifacts: dict[str, dict[str, Any]] = {}
+    for key, filename in (
+        ("capability_probe", "capability-probe.json"),
+        ("commit_recovery", "commit-recovery.json"),
+        ("fault_suite", "fault-suite.json"),
+        ("fault_isolation", "fault-isolation.json"),
+        ("blackbox_contract_probe", "blackbox-contract-probe.json"),
+    ):
+        candidates = [probe_dir / filename for probe_dir in probe_dirs]
+        if key == "fault_suite":
+            candidates.extend(
+                probe_dir / "fault-suite" / filename
+                for probe_dir in probe_dirs
+            )
+        artifact, _artifact_path = load_artifact(*candidates)
+        if artifact:
+            artifacts[key] = artifact
+    return artifacts
+
+
 def esc(value: Any) -> str:
     return html.escape("-" if value in (None, "") else str(value))
 
@@ -99,16 +135,9 @@ def main() -> int:
     if direct_formal:
         formal = root
         formal_suite = load(formal / "suite.json")
-        probe_dir = root / "probes"
-        for key, filename in (
-            ("capability_probe", "capability-probe.json"),
-            ("commit_recovery", "commit-recovery.json"),
-            ("fault_suite", "fault-suite.json"),
-            ("fault_isolation", "fault-isolation.json"),
-        ):
-            artifact = load(probe_dir / filename)
-            if artifact:
-                formal_suite[key] = artifact
+        # Do not silently lose recovery/capability evidence just because the
+        # caller points at the formal directory.
+        formal_suite.update(load_formal_artifacts(formal))
         acceptance = evaluate_scheduler_acceptance(
             formal_suite,
             capability=formal_suite.get("capability_probe"),
@@ -156,16 +185,32 @@ def main() -> int:
         metrics = summary.get("metrics") or {}
         search = metrics.get("search") or {}
         commit = metrics.get("commit") or {}
+        search_latency = search.get("latency") or {}
+        commit_latency = commit.get("latency") or {}
+        errors = summary.get("errors") or {}
         scenarios.append(
-            (
-                name,
-                summary.get("status") or "not-run",
-                search.get("submitted", 0),
-                search.get("succeeded", 0),
-                commit.get("submitted", 0),
-                commit.get("completed", 0),
-                search.get("latency", {}).get("p95_s"),
-            )
+            {
+                "name": name,
+                "status": summary.get("status") or "not-run",
+                "search_submitted": search.get("submitted", 0),
+                "search_succeeded": search.get("succeeded", 0),
+                "search_success_rate": search.get("success_rate"),
+                "commit_submitted": commit.get("submitted", 0),
+                "commit_completed": commit.get("completed", 0),
+                "commit_success_rate": commit.get("success_rate"),
+                "search_p95": search_latency.get("p95_s"),
+                "commit_p95": commit_latency.get("p95_s"),
+                "duration_s": summary.get("duration_s"),
+                "error_count": (
+                    summary.get("error_count")
+                    if summary.get("error_count") is not None
+                    else sum(
+                        int(value or 0)
+                        for value in errors.values()
+                        if isinstance(value, (int, float))
+                    )
+                ),
+            }
         )
 
     cards = "".join(
@@ -176,20 +221,48 @@ def main() -> int:
     )
     scenario_rows = "".join(
         "<tr>"
-        f"<td>{esc(name)}</td><td>{status(state)}</td>"
-        f"<td>{esc(search_submitted)}/{esc(search_succeeded)}</td>"
-        f"<td>{esc(commit_submitted)}/{esc(commit_completed)}</td>"
-        f"<td>{esc(p95)} s</td></tr>"
-        for name, state, search_submitted, search_succeeded,
-        commit_submitted, commit_completed, p95 in scenarios
+        f"<td>{esc(item['name'])}</td><td>{status(item['status'])}</td>"
+        f"<td>{esc(item['search_submitted'])}/{esc(item['search_succeeded'])}"
+        f"<br><span class='muted'>{esc(item['search_success_rate'])}</span></td>"
+        f"<td>{esc(item['commit_submitted'])}/{esc(item['commit_completed'])}"
+        f"<br><span class='muted'>{esc(item['commit_success_rate'])}</span></td>"
+        f"<td>{esc(item['search_p95'])} s"
+        f"<br><span class='muted'>Commit {esc(item['commit_p95'])} s</span></td>"
+        f"<td>{esc(item['duration_s'])} s</td>"
+        f"<td>{esc(item['error_count'])}</td></tr>"
+        for item in scenarios
     )
     artifact_paths = (
         (root / "objective-suite.json", "objective-suite.json"),
         (formal / "suite.json", "4U8G/formal/suite.json"),
         (formal / "acceptance.json", "4U8G/formal/acceptance.json"),
-        (root / "4U8G" / "capability-probe.json", "capability-probe.json"),
-        (root / "4U8G" / "blackbox-contract-probe.json", "blackbox-contract-probe.json"),
-        (root / "4U8G" / "commit-recovery.json", "commit-recovery.json"),
+        (
+            first_existing(
+                root / "4U8G" / "capability-probe.json",
+                root / "capability-probe.json",
+                root.parent / "capability-probe.json",
+                formal / "probes" / "capability-probe.json",
+            ) or root / "__missing__",
+            "capability-probe.json",
+        ),
+        (
+            first_existing(
+                root / "4U8G" / "blackbox-contract-probe.json",
+                root / "blackbox-contract-probe.json",
+                root.parent / "blackbox-contract-probe.json",
+                formal / "probes" / "blackbox-contract-probe.json",
+            ) or root / "__missing__",
+            "blackbox-contract-probe.json",
+        ),
+        (
+            first_existing(
+                root / "4U8G" / "commit-recovery.json",
+                root / "commit-recovery.json",
+                root.parent / "commit-recovery.json",
+                formal / "probes" / "commit-recovery.json",
+            ) or root / "__missing__",
+            "commit-recovery.json",
+        ),
         (formal / "probes" / "capability-probe.json", "probes/capability-probe.json"),
         (formal / "probes" / "commit-recovery.json", "probes/commit-recovery.json"),
         (formal / "fairness-bounded/repeat-01/server-observe/search_results.csv",
@@ -235,7 +308,9 @@ def main() -> int:
         for state, count in status_counts.items()
     )
     capacity_points = []
-    for name, state, _ss, _sd, _cs, _cd, _p95 in scenarios:
+    for item in scenarios:
+        name = str(item["name"])
+        state = str(item["status"])
         if name.startswith("capacity-"):
             try:
                 level = int(name.split("-", 1)[1])
@@ -351,9 +426,9 @@ table{{width:100%;border-collapse:collapse}}th,td{{padding:8px;border-bottom:1px
 <tr><td>Embedding</td><td>{esc(embedding)}（真实模型）</td></tr>
 <tr><td>独立凭据</td><td>{esc(auth.get("passed", 0))}/{esc(auth.get("tenant_count", 0))}</td></tr>
 </table></section>
-<section><h2>场景明细</h2><p class="muted">Search 和 Commit 均按“提交数/成功或完成数”展示，P95 只来自真实请求。</p>
-<table><thead><tr><th>场景</th><th>运行状态</th><th>Search</th><th>Commit</th><th>Search P95</th></tr></thead>
-<tbody>{scenario_rows or "<tr><td colspan='5'>没有场景结果</td></tr>"}</tbody></table></section>
+<section><h2>场景明细</h2><p class="muted">Search 和 Commit 均按“提交数/成功或完成数”展示；成功率、P95、耗时和错误数直接来自场景 summary.json。</p>
+<table><thead><tr><th>场景</th><th>运行状态</th><th>Search</th><th>Commit</th><th>延迟 P95</th><th>耗时</th><th>错误数</th></tr></thead>
+<tbody>{scenario_rows or "<tr><td colspan='7'>没有场景结果</td></tr>"}</tbody></table></section>
 <section><h2>六项指标原始观测</h2><p class="muted">这里保留验收器实际使用的 observed 字段，便于复核容量档位、Jain、恢复和指标覆盖。</p>
 <table><thead><tr><th>指标</th><th>状态</th><th>判定说明</th><th>观测数据</th></tr></thead>
 <tbody>{observed_rows}</tbody></table></section>
