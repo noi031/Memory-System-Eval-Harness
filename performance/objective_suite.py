@@ -26,6 +26,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent
+
 try:
     from .scheduler_acceptance import evaluate as evaluate_scheduler_acceptance
 except ImportError:
@@ -60,6 +62,23 @@ def _formal_profile_name(profile_name: str, *, quick: bool) -> str:
     if str(profile_name).upper() == "4U8G":
         return "4u8g" if quick else "4u8g-full"
     return "complete"
+
+
+def _formal_scenario_filter(profile_name: str, scenarios: str, *, quick: bool) -> str:
+    """Translate public objective names to the formal catalog names.
+
+    The full 4U8G catalog namespaces overlapping PR397/PR421 cases. The
+    objective-suite API intentionally exposes the source scenario name, so a
+    targeted run such as ``fairness-steady`` must be translated before it is
+    passed to ``formal_suite``.
+    """
+    if not scenarios or quick or str(profile_name).upper() != "4U8G":
+        return scenarios
+    return ",".join(
+        item if "__" in item else f"pr421__{item}"
+        for item in (part.strip() for part in scenarios.split(","))
+        if item
+    )
 
 
 def now() -> str:
@@ -482,6 +501,7 @@ def _resolve_profile_path(value: str, profiles_path: Path) -> str:
     candidates = [
         profiles_path.parent / path,
         profiles_path.parent.parent / path,
+        _PROJECT_ROOT / path,
     ]
     for candidate in candidates:
         if candidate.exists():
@@ -1576,6 +1596,14 @@ def main() -> int:
             "适合服务器 Docker env 文件，密钥不会写入报告"
         ),
     )
+    parser.add_argument(
+        "--skip-prepare",
+        action="store_true",
+        help=(
+            "跳过 profile.prepare_command；适用于 runner 容器已固定到目标实例，"
+            "避免执行仅宿主机可用的切换命令"
+        ),
+    )
     args = parser.parse_args()
     if args.full and args.quick:
         parser.error("--full 与 --quick 不能同时使用")
@@ -1652,7 +1680,7 @@ def main() -> int:
 
         if not args.skip_run:
             prepare = str(profile.get("prepare_command") or "").strip()
-            if prepare:
+            if prepare and not args.skip_prepare:
                 command_result["prepare"] = run_command(
                     ["bash", "-lc", prepare],
                     timeout_s=_bounded_timeout(
@@ -1671,6 +1699,12 @@ def main() -> int:
                         ),
                     })
                     continue
+            elif prepare and args.skip_prepare:
+                command_result["prepare"] = {
+                    "status": "SKIPPED",
+                    "reason": "命令由 --skip-prepare 跳过；目标实例由部署环境固定",
+                    "command": ["bash", "-lc", prepare],
+                }
             tenant_config = _resolve_profile_path(
                 str(profile.get("tenant_config") or ""), args.profiles
             )
@@ -1684,6 +1718,11 @@ def main() -> int:
                 }
             else:
                 scenarios = args.scenarios or (QUICK_SCENARIOS if args.quick else "")
+                formal_scenarios = _formal_scenario_filter(
+                    name,
+                    scenarios,
+                    quick=args.quick,
+                )
                 command = [
                     sys.executable,
                     "-m",
@@ -1735,9 +1774,9 @@ def main() -> int:
                 # HTTP gateway still requires independent X-API-Key tenant
                 # credentials.  Only an explicit profile/CLI setting may
                 # select --local-auth; never infer it from config.json.
-                if scenarios:
+                if formal_scenarios:
                     command += [
-                        "--scenarios", scenarios,
+                        "--scenarios", formal_scenarios,
                         "--duration-cap-s", str(args.quick_duration_cap_s),
                         "--case-timeout-s", str(args.quick_case_timeout_s),
                         "--barrier-count-cap", str(args.quick_barrier_count_cap),

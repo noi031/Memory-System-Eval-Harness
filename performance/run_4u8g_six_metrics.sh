@@ -13,6 +13,8 @@ set -euo pipefail
 #   STRESS_OUTPUT_DIR   default: results/performance/4u8g-six-metrics-<timestamp>
 #   STRESS_ENV_FILE     KEY=VALUE file for the real-model subprocesses
 #   STRESS_QUICK=1      bounded diagnostic run; not a full acceptance result
+#   STRESS_SKIP_PREPARE=1
+#                       skip host-only profile switching inside a runner container
 #   STRESS_MAX_WALL_CLOCK_S
 #   STRESS_PROBE_BUDGET_S default 900; reserved for post-suite probes
 #
@@ -34,8 +36,60 @@ env_args=()
 if [ -n "${STRESS_ENV_FILE:-}" ]; then
   env_args=(--env-file "$STRESS_ENV_FILE")
 fi
+prepare_args=()
+if [ "${STRESS_SKIP_PREPARE:-0}" = "1" ]; then
+  prepare_args=(--skip-prepare)
+fi
+mkdir -p "$out_dir"
+
+# Persist only non-secret run inputs before starting. This makes a partially
+# completed server run diagnosable without copying an environment file into
+# the result bundle.
+"$python_bin" - "$out_dir" "$profiles" "$config" "$base_url" "$profile_name" "$max_wall_clock" "$probe_budget" <<'PY'
+import hashlib
+import json
+import os
+import sys
+from pathlib import Path
+
+out, profiles, config, base_url, profile, wall, probe = sys.argv[1:]
+config_path = Path(config)
+config_digest = ""
+model = {}
+try:
+    raw = config_path.read_bytes()
+    config_digest = hashlib.sha256(raw).hexdigest()
+    payload = json.loads(raw.decode("utf-8"))
+    if isinstance(payload, dict):
+        model = payload.get("model") or {}
+except (OSError, ValueError, UnicodeDecodeError):
+    pass
+llm = (model.get("llm") or {}) if isinstance(model, dict) else {}
+embedding = (model.get("embedding") or {}) if isinstance(model, dict) else {}
+manifest = {
+    "test_type": "pr29_six_metric_entrypoint",
+    "created_at": __import__("datetime").datetime.now(__import__("datetime").timezone.utc).isoformat(),
+    "profile": profile,
+    "base_url": base_url,
+    "profiles_path": os.path.abspath(profiles),
+    "echomem_config_path": os.path.abspath(config),
+    "echomem_config_sha256": config_digest,
+    "llm_model": llm.get("model", ""),
+    "embedding_model": embedding.get("model", ""),
+    "real_model_required": True,
+    "soak_enabled": False,
+    "max_wall_clock_s": float(wall),
+    "probe_budget_s": float(probe),
+    "status": "started",
+}
+Path(out, "run-manifest.json").write_text(
+    json.dumps(manifest, ensure_ascii=False, indent=2) + "\n",
+    encoding="utf-8",
+)
+PY
 
 if [ "${STRESS_QUICK:-0}" = "1" ]; then
+  set +e
   "$python_bin" -m performance.objective_suite \
     --profiles "$profiles" \
     --profile "$profile_name" \
@@ -46,8 +100,11 @@ if [ "${STRESS_QUICK:-0}" = "1" ]; then
     --timeout-s "$max_wall_clock" \
     --max-wall-clock-s "$max_wall_clock" \
     --probe-budget-s "$probe_budget" \
+    "${prepare_args[@]}" \
     "${env_args[@]}"
+  suite_rc=$?
 else
+  set +e
   "$python_bin" -m performance.objective_suite \
     --profiles "$profiles" \
     --profile "$profile_name" \
@@ -58,7 +115,35 @@ else
     --timeout-s "$max_wall_clock" \
     --max-wall-clock-s "$max_wall_clock" \
     --probe-budget-s "$probe_budget" \
+    "${prepare_args[@]}" \
     "${env_args[@]}"
+  suite_rc=$?
 fi
 
-printf '4U8G six-metric report: %s/objective-suite.html\n' "$out_dir"
+"$python_bin" - "$out_dir/run-manifest.json" "$suite_rc" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path, rc = sys.argv[1:]
+payload = json.loads(Path(path).read_text(encoding="utf-8"))
+payload["status"] = "completed" if rc == "0" else "runner_exit_nonzero"
+payload["runner_exit_code"] = int(rc)
+Path(path).write_text(
+    json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
+    encoding="utf-8",
+)
+PY
+
+# The objective suite intentionally returns non-zero for a real FAIL. Always
+# render the report so FAIL/INCONCLUSIVE runs are useful to the caller.
+set +e
+"$python_bin" scripts/build_pr29_six_metric_report.py "$out_dir" \
+  -o "$out_dir/pr29-six-metric-report.html"
+report_rc=$?
+set -e
+printf '4U8G six-metric report: %s/pr29-six-metric-report.html\n' "$out_dir"
+if [ "$suite_rc" -ne 0 ]; then
+  exit "$suite_rc"
+fi
+exit "$report_rc"

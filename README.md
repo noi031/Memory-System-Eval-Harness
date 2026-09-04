@@ -199,6 +199,29 @@ export STRESS_PYTHON=python3  # runner 容器内使用 Python >= 3.9；也可填
 路径。宿主机只负责启动 EchoMem 和保存结果，避免旧解释器把环境问题误报为
 业务测试失败。
 
+如果 EchoMem 已经由部署编排固定在 4U8G 容器中，而 profile 里的
+`prepare_command` 只是宿主机上的实例切换命令，可使用：
+
+```bash
+export STRESS_SKIP_PREPARE=1
+./performance/run_4u8g_six_metrics.sh
+```
+
+这只跳过“切换实例规格”动作，不会跳过健康检查、真实 HTTP 请求、模型
+preflight、`/metrics` 采集或六项目标判定。也可以直接运行某个场景做回归：
+
+```bash
+python3 -m performance.objective_suite \
+  --profiles performance/instance-profiles.example.json \
+  --profile 4U8G \
+  --scenarios fairness-steady \
+  --skip-prepare \
+  --out-dir results/fairness-regression
+```
+
+完整 4U8G profile 会自动把公开场景名转换成正式套件内部的
+`pr421__<scenario>` 名称；调用者不需要手写命名空间。
+
 脚本会调用 `performance.objective_suite`，只运行 4U8G profile；完整模式默认
 使用 PR397/report(6) 与 PR421 的场景目录，soak 不在默认场景中。每个场景会
 等待服务健康、执行真实 HTTP 请求、采集 `/metrics`、保存逐请求数据，并在结束
@@ -1154,6 +1177,12 @@ Embedding、`ECHOMEM_AUTO_COMMIT_THRESHOLD=20000` 和 4U8G 资源档位。测试
 保留三天，过期结果由服务器定时清理。正式六项结论以
 `objective-suite.html` / `suite.json` 为准，缺少真实故障控制或恢复证据时会标记
 `INCONCLUSIVE`，不会把缺失数据当作通过。
+
+一键入口还会在输出目录先写入 `run-manifest.json`，记录本次实际使用的
+EchoMem `config.json` SHA-256、模型名、目标地址、4U8G profile、是否启用
+soak 以及 runner 退出码（不保存任何 API key）。套件即使返回 FAIL 或
+INCONCLUSIVE，也会继续生成 `pr29-six-metric-report.html`，便于直接查看
+部分结果和缺失证据；不要因为 runner 退出码非 0 就删除这份报告。
 
 容量场景（quick 和 full）都把 Commit 负载固定为 0，避免容量测量被后台写入拖住；
 容量场景的 `K` 负载在 `commit-rpm=0` 时严格只启动 Search worker，不会因为

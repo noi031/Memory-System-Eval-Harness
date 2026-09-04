@@ -17,8 +17,13 @@ import argparse
 import html
 import json
 import os
+import sys
 from pathlib import Path
 from typing import Any
+
+# Allow direct execution from the repository's ``scripts/`` directory.
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from performance.scheduler_acceptance import evaluate as evaluate_scheduler_acceptance
 
 
 OBJECTIVES = (
@@ -79,21 +84,70 @@ def json_text(value: Any) -> str:
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("root", type=Path, help="objective-suite result directory")
+    parser.add_argument(
+        "root",
+        type=Path,
+        help="objective-suite result directory, or a direct formal-suite result directory",
+    )
     parser.add_argument("-o", "--output", type=Path, default=None)
     args = parser.parse_args()
 
     root = args.root.resolve()
     output = (args.output or root / "pr29-six-metric-report.html").resolve()
     suite = load(root / "objective-suite.json")
-    profile = (suite.get("profiles") or [{}])[0]
-    objectives = {
-        str(item.get("id")): item
-        for item in profile.get("objectives") or []
-        if isinstance(item, dict)
-    }
-    formal = root / "4U8G" / "formal"
-    formal_manifest = load(formal / "suite.json")
+    direct_formal = not suite and (root / "suite.json").is_file()
+    if direct_formal:
+        formal = root
+        formal_suite = load(formal / "suite.json")
+        probe_dir = root / "probes"
+        for key, filename in (
+            ("capability_probe", "capability-probe.json"),
+            ("commit_recovery", "commit-recovery.json"),
+            ("fault_suite", "fault-suite.json"),
+            ("fault_isolation", "fault-isolation.json"),
+        ):
+            artifact = load(probe_dir / filename)
+            if artifact:
+                formal_suite[key] = artifact
+        acceptance = evaluate_scheduler_acceptance(
+            formal_suite,
+            capability=formal_suite.get("capability_probe"),
+            recovery=formal_suite.get("commit_recovery"),
+            fault=formal_suite.get("fault_suite"),
+        )
+        objective_name_to_id = {
+            "DAU / 最大热用户容量": "O1",
+            "单租户故障隔离": "O2",
+            "Commit/Search 公平性 Jain": "O3",
+            "Search 优先于 Commit": "O4",
+            "Commit kill-9 恢复与重放": "O5",
+            "分层/分租户调度可观测性": "O6",
+        }
+        objectives = {
+            objective_name_to_id.get(str(item.get("name")), str(item.get("name"))): {
+                **item,
+                "id": objective_name_to_id.get(
+                    str(item.get("name")), str(item.get("name"))
+                ),
+            }
+            for item in acceptance.get("checks") or []
+            if isinstance(item, dict)
+        }
+        suite = formal_suite
+        profile = {
+            "name": formal_suite.get("instance_profile") or "4U8G",
+            "objectives": [],
+        }
+        formal_manifest = formal_suite
+    else:
+        profile = (suite.get("profiles") or [{}])[0]
+        objectives = {
+            str(item.get("id")): item
+            for item in profile.get("objectives") or []
+            if isinstance(item, dict)
+        }
+        formal = root / "4U8G" / "formal"
+        formal_manifest = load(formal / "suite.json")
     auth = formal_manifest.get("auth_preflight") or {}
     scenarios = []
     for name in formal_manifest.get("scenarios") or []:
@@ -136,6 +190,8 @@ def main() -> int:
         (root / "4U8G" / "capability-probe.json", "capability-probe.json"),
         (root / "4U8G" / "blackbox-contract-probe.json", "blackbox-contract-probe.json"),
         (root / "4U8G" / "commit-recovery.json", "commit-recovery.json"),
+        (formal / "probes" / "capability-probe.json", "probes/capability-probe.json"),
+        (formal / "probes" / "commit-recovery.json", "probes/commit-recovery.json"),
         (formal / "fairness-bounded/repeat-01/server-observe/search_results.csv",
          "fairness Search CSV"),
         (formal / "fairness-bounded/repeat-01/server-observe/commit_results.csv",
@@ -149,6 +205,14 @@ def main() -> int:
     configured = formal_manifest.get("scenarios") or []
     coverage = f"{len(scenarios)}/{len(configured)}"
     model = load(root / "echomem-config-real-4u8g.json")
+    if not model and direct_formal:
+        candidates = sorted(formal.glob("*/repeat-01/server-observe/run/*/config.json"))
+        if candidates:
+            model = load(candidates[0])
+    if not model and direct_formal:
+        candidates = sorted(formal.glob("*/repeat-01/server-observe/config.json"))
+        if candidates:
+            model = load(candidates[0])
     llm = ((model.get("model") or {}).get("llm") or {}).get("model", "-")
     embedding = ((model.get("model") or {}).get("embedding") or {}).get("model", "-")
     observed_rows = "".join(

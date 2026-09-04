@@ -2857,6 +2857,18 @@ class LoadGeneratorSceneTests(unittest.TestCase):
         self.assertEqual(1, read_loop.call_count)
         self.assertEqual(1, write_loop.call_count)
 
+    def test_rate_based_mixed_scene_keeps_commit_worker_for_per_tenant_rate(self) -> None:
+        generator = LoadGenerator(rps=2.0, per_tenant_commit_rpm=2.0)
+        scene = SceneRun("K", 1, 1.0)
+        tenant = mock.Mock(idx=0)
+        with (
+            mock.patch.object(generator, "_read_loop", return_value=[]) as read_loop,
+            mock.patch.object(generator, "_write_loop", return_value=[]) as write_loop,
+        ):
+            generator.run_scene(scene, [tenant], messages_per_session=1)
+        self.assertEqual(1, read_loop.call_count)
+        self.assertEqual(1, write_loop.call_count)
+
     def test_capacity_scene_with_zero_commit_rate_is_read_only(self) -> None:
         generator = LoadGenerator(rps=8.0, commit_rpm=0.0)
         scene = SceneRun("K", 1, 0.05)

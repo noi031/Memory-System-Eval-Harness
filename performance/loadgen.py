@@ -879,13 +879,17 @@ class LoadGenerator:
         self.reset_client_diagnostics()
         scene_key = scene.key
         total_workers = len(tenants) * scene.per_tenant_conc
+        has_commit_stream = (
+            self.commit_rate_limiter is not None
+            or self.per_tenant_commit_rate is not None
+        )
         # A rate-based K scene has independent read and commit streams. With
         # one tenant/worker, integer 1:1 splitting otherwise creates only a
         # writer, producing a misleading "completed" run with zero Search.
         if (
             scene.scene_id == "K"
             and self.rate_limiter is not None
-            and self.commit_rate_limiter is not None
+            and has_commit_stream
         ):
             total_workers = max(2, total_workers)
         stop = threading.Event()
@@ -900,7 +904,7 @@ class LoadGenerator:
             read_count, write_count = total_workers, 0
         elif scene.scene_id == "B":
             read_count, write_count = 0, total_workers
-        elif scene.scene_id == "K" and self.commit_rate_limiter is None:
+        elif scene.scene_id == "K" and not has_commit_stream:
             # K is also used by the capacity ladder.  An explicit
             # ``--commit-rpm 0`` means Search-only measurement; treating it
             # as the normal mixed split would still launch writer threads and

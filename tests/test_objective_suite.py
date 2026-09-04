@@ -19,6 +19,7 @@ from performance.objective_suite import (
     _formal_coverage,
     _formal_submitted_operations,
     _formal_profile_name,
+    _formal_scenario_filter,
     _probe_plan,
     load_env_file,
     load_profiles,
@@ -118,12 +119,34 @@ class ObjectiveSuiteTests(unittest.TestCase):
         self.assertIn("STRESS_QUICK", text)
         self.assertIn("STRESS_PYTHON", text)
         self.assertNotIn("--scenarios soak", text)
+        self.assertIn("run-manifest.json", text)
+        self.assertIn("pr29-six-metric-report.html", text)
+        self.assertIn("set +e", text)
+        self.assertIn("STRESS_SKIP_PREPARE", text)
 
     def test_load_profiles(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "profiles.json"
             path.write_text(json.dumps({"profiles": [{"name": "4U8G"}]}), encoding="utf-8")
             self.assertEqual(["4U8G"], [item["name"] for item in load_profiles(path)])
+
+    def test_full_4u8g_targeted_scenario_is_namespaced_for_formal_suite(self) -> None:
+        self.assertEqual(
+            "pr421__fairness-steady,pr421__capacity-4",
+            _formal_scenario_filter(
+                "4U8G",
+                "fairness-steady,capacity-4",
+                quick=False,
+            ),
+        )
+        self.assertEqual(
+            "fairness-steady",
+            _formal_scenario_filter(
+                "4U8G",
+                "fairness-steady",
+                quick=True,
+            ),
+        )
 
     def test_load_profiles_expands_runtime_deployment_values(self) -> None:
         import os
