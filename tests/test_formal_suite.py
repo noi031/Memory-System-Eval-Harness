@@ -594,7 +594,7 @@ class FormalSuiteAdapterTests(unittest.TestCase):
             "error_type", "ts_ms", "session_id", "extra", "retry_count", "retried",
             "retry_total_wait_ms", "final_success", "retry_after_s", "reason_code",
             "message_id", "content_hash", "content_bytes", "hit_count", "real_recall",
-            "quality_ok", "degraded", "query",
+            "quality_ok", "degraded", "query_kind", "query",
         ]
         with (run_dir / "requests.csv").open("w", newline="", encoding="utf-8") as handle:
             writer = csv.DictWriter(handle, fieldnames=headers)

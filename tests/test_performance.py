@@ -83,6 +83,7 @@ from performance.perf_preflight import (
     run_preflight,
 )
 from performance.prepare import (
+    build_search_query_pool,
     TenantContext,
     TenantPreparer,
     _format_prepare_error,
@@ -648,6 +649,34 @@ class MonitorAnalyticsTests(unittest.TestCase):
 
 
 class PrepareTests(unittest.TestCase):
+    def test_build_search_query_pool_profiles(self) -> None:
+        recall, ordinary = ["r1", "r2"], ["n1", "n2"]
+        queries, kinds = build_search_query_pool(
+            recall_queries=recall,
+            no_recall_queries=ordinary,
+            profile="recall-only",
+        )
+        self.assertEqual(queries, recall)
+        self.assertEqual(kinds, ["recall", "recall"])
+        queries, kinds = build_search_query_pool(
+            recall_queries=recall,
+            no_recall_queries=ordinary,
+            profile="no-recall-only",
+        )
+        self.assertEqual(queries, ordinary)
+        self.assertEqual(kinds, ["no_recall", "no_recall"])
+
+    def test_build_search_query_pool_mixes_at_requested_ratio(self) -> None:
+        queries, kinds = build_search_query_pool(
+            recall_queries=["r1"],
+            no_recall_queries=["n1"],
+            profile="mixed",
+            recall_ratio=0.7,
+        )
+        self.assertEqual(len(queries), 10)
+        self.assertEqual(kinds.count("recall"), 7)
+        self.assertEqual(kinds.count("no_recall"), 3)
+
     def test_query_fragments_split_on_chinese_separator(self) -> None:
         fragments = _query_fragments(
             ["本周项目进展顺利，核心模块完成联调。计划下周发布。"]
@@ -1667,6 +1696,30 @@ class SearchQualityAssertionTests(unittest.TestCase):
         self.assertTrue(is_anchor_query("压测写入会话消息 PERFTAIL-0-1"))
         self.assertFalse(is_anchor_query("本周项目进展顺利"))
 
+    def test_query_kind_is_recorded_on_search(self) -> None:
+        client = FakeMemClient()
+        gen = LoadGenerator(timeout_s=2.0)
+        record = gen._read_once(
+            client,
+            "PERFANCHOR-0-1-2",
+            scene_key="A@1",
+            step_conc=1,
+            tenant_idx=0,
+            query_kind="recall",
+        )
+        self.assertEqual("recall", record.query_kind)
+
+    def test_search_quality_summary_groups_query_kinds(self) -> None:
+        records = [
+            self._mk_read("PERFANCHOR-0", 1, True, True),
+            self._mk_read("今天下午帮我整理一下会议纪要", 0, True, query_kind="no_recall"),
+        ]
+        records[0].query_kind = "recall"
+        summary = search_quality_summary(records)
+        self.assertEqual(summary["query_kind_counts"], {"no_recall": 1, "recall": 1})
+        self.assertEqual(summary["query_kind_stats"]["recall"]["count"], 1)
+        self.assertEqual(summary["query_kind_stats"]["no_recall"]["p95_ms"], 5.0)
+
     def test_read_quality_anchor_failure(self) -> None:
         client = FakeMemClient()
         gen = LoadGenerator(timeout_s=2.0)
@@ -1678,6 +1731,22 @@ class SearchQualityAssertionTests(unittest.TestCase):
         self.assertFalse(rec2.quality_ok)
         self.assertEqual(rec2.hit_count, 0)
         self.assertFalse(rec2.degraded)
+
+    def test_read_quality_semantic_recall_failure(self) -> None:
+        """LoCoMo 语义 query 不是锚词，也必须按 recall 口径判定。"""
+        client = FakeMemClient()
+        client.search_short_circuit = True
+        gen = LoadGenerator(timeout_s=2.0)
+        rec = gen._read_once(
+            client,
+            "上周评审的新接口设计有什么结论",
+            scene_key="A@1",
+            step_conc=1,
+            tenant_idx=0,
+            query_kind="recall",
+        )
+        self.assertFalse(rec.quality_ok)
+        self.assertEqual(rec.hit_count, 0)
 
     def test_read_quality_anchor_degraded_empty_is_not_failure(self) -> None:
         # 核心标记 degraded（引擎跳过/饱和）时空结果不是召回缺陷：不计质量失败。
@@ -1711,12 +1780,14 @@ class SearchQualityAssertionTests(unittest.TestCase):
         quality_ok: bool,
         real: bool = False,
         degraded: bool = False,
+        query_kind: str = "",
     ) -> RequestRecord:
         return RequestRecord(
             scene_key="A@1", step_conc=1, tenant_idx=0, op="read",
             stage_ms=5.0, status="ok", error_type="", ts_ms=0.0,
             query=query, hit_count=hit, real_recall=real, quality_ok=quality_ok,
             degraded=degraded,
+            query_kind=query_kind,
         )
 
     def test_quality_summary_counts(self) -> None:
@@ -1735,6 +1806,27 @@ class SearchQualityAssertionTests(unittest.TestCase):
         self.assertEqual(summary["anchor_degraded"], 0)
         # hit 分布只覆盖实际召回（hit_count≥1）的 read：无证据的 0 命中不再计入
         self.assertEqual(summary["hit_count_p95"], 1.95)
+
+    def test_quality_summary_uses_query_kind_for_semantic_recall(self) -> None:
+        records = [
+            self._mk_read(
+                "上周评审的新接口设计有什么结论",
+                0,
+                False,
+                query_kind="recall",
+            ),
+            self._mk_read(
+                "查今天工单",
+                0,
+                True,
+                query_kind="no_recall",
+            ),
+        ]
+        summary = search_quality_summary(records)
+        self.assertEqual(summary["recall_total"], 1)
+        self.assertEqual(summary["recall_failures"], 1)
+        self.assertEqual(summary["no_recall_total"], 1)
+        self.assertEqual(summary["anchor_total"], 0)
 
     def test_quality_burst_window_excluded(self) -> None:
         # D 场景洪峰窗口（burst）内是刻意过载场景，读降级不计入质量失败；

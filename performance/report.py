@@ -45,6 +45,8 @@ CSV_HEADERS = [
     "degraded",
     "query_kind",
     "query",
+    "expected_terms",
+    "recall_matched",
 ]
 
 
@@ -964,11 +966,20 @@ def _extended_evidence_section(summary: dict[str, Any]) -> str:
         gated = quality.get("gated_read_stats") or {}
         rows = [
             ("read 总数（ok）", str(quality.get("total"))),
-            ("锚词查询数", str(quality.get("anchor_total"))),
-            ("锚词未召回（干净质量失败）", str(quality.get("anchor_failures"))),
-            ("锚词降级空结果（引擎跳过/饱和）", str(quality.get("anchor_degraded"))),
+            (
+                "已验证 recall 查询数",
+                str(quality.get("recall_total", quality.get("anchor_total"))),
+            ),
+            (
+                "recall 未召回（干净质量失败）",
+                str(quality.get("recall_failures", quality.get("anchor_failures"))),
+            ),
+            (
+                "recall 降级响应（引擎跳过/饱和）",
+                str(quality.get("recall_degraded", quality.get("anchor_degraded"))),
+            ),
             ("降级响应总数（degraded）", str(quality.get("degraded_total"))),
-            ("普通查询数", str(quality.get("ordinary_total"))),
+            ("no-recall 日常查询数", str(quality.get("no_recall_total", quality.get("ordinary_total")))),
             ("real_recall 无法判定", str(quality.get("undetermined_real_recall"))),
             ("hit_count P50/P95", f"{quality.get('hit_count_p50')} / {quality.get('hit_count_p95')}"),
             ("实际召回 read 的 P95 (ms)", str(gated.get("p95_ms"))),
@@ -978,10 +989,10 @@ def _extended_evidence_section(summary: dict[str, Any]) -> str:
             rows.append(("query kind 覆盖", ", ".join(f"{k}={v.get('count')}" for k, v in kind_stats.items())))
         blocks.append(
             "<h3>search 质量断言（特性 6，支撑事实）</h3>"
-            + _note("锚词查询必须可召回（hit_count≥1），干净空结果计为假通过/失败；若服务端标记 degraded"
-                    "（引擎跳过/饱和），空结果是容量伪影而非召回缺陷，单独统计不计为质量失败；普通查询需有"
-                    "真实召回证据（explain/debug/非空命中），无证据计「无法判定」而非失败；延迟统计仅覆盖"
-                    "实际召回（hit_count≥1）的 read。")
+            + _note("recall 流量只使用“预注入后已验证命中”的 query，必须再次召回（hit_count≥1）；"
+                    "干净空结果计为失败。若服务端标记 degraded（引擎跳过/饱和），空结果是容量伪影而非"
+                    "召回缺陷，单独统计。no-recall 日常查询允许空结果，用于观察正常空结果路径的稳定性和"
+                    "延迟；延迟仍按 query kind 分开统计。")
             + _stat_table(rows, ["指标", "值"])
         )
 

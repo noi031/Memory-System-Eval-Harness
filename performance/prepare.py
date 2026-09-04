@@ -89,6 +89,14 @@ _NO_RECALL_QUERIES = (
     "给我看一下部署进度",
 )
 
+_SYNTHETIC_FACTS = (
+    ("林晓", "北极星知识库迁移", "杭州研发中心", "周三下午"),
+    ("周宁", "海风客户画像项目", "上海交付中心", "周四上午"),
+    ("陈默", "星桥告警治理专项", "深圳运维中心", "周五下午"),
+    ("叶青", "远航检索优化项目", "北京算法实验室", "周二上午"),
+    ("许言", "云杉权限改造计划", "成都平台团队", "周一下午"),
+)
+
 
 def build_search_query_pool(
     *,
@@ -121,38 +129,137 @@ def build_search_query_pool(
     if recall_ratio >= 1:
         combined = recall
         return combined, ["recall"] * len(combined)
+    # Reduce the ratio to a short deterministic cycle.  The source lists may
+    # have different lengths; cycling each source independently keeps the
+    # requested traffic mix stable over a long-running load test.
+    from math import gcd
+
     recall_weight = max(1, int(round(recall_ratio * 100)))
     ordinary_weight = max(1, int(round((1.0 - recall_ratio) * 100)))
+    divisor = gcd(recall_weight, ordinary_weight)
+    recall_weight //= divisor
+    ordinary_weight //= divisor
     cycle = ["recall"] * recall_weight + ["no_recall"] * ordinary_weight
     combined: list[str] = []
     kinds: list[str] = []
     indices = {"recall": 0, "no_recall": 0}
     sources = {"recall": recall, "no_recall": ordinary}
-    while indices["recall"] < len(recall) or indices["no_recall"] < len(ordinary):
-        progressed = False
+    # Keep one cycle per available source item, then stop. The load loop
+    # itself wraps this pool indefinitely, preserving the ratio.
+    cycle_count = max(len(recall), len(ordinary))
+    for _ in range(cycle_count):
         for kind in cycle:
             source = sources[kind]
-            idx = indices[kind]
-            if idx >= len(source):
+            if not source:
                 continue
+            idx = indices[kind] % len(source)
             combined.append(source[idx])
             kinds.append(kind)
-            indices[kind] = idx + 1
-            progressed = True
-        if not progressed:
-            break
+            indices[kind] += 1
     return combined, kinds
+
+
+def verify_recall_query_pool(
+    client: EchoMemClient,
+    candidates: list[str],
+    *,
+    top_k: int,
+    timeout_s: float,
+    limit: int = 20,
+    expected_terms_by_query: dict[str, list[str]] | None = None,
+) -> tuple[list[str], dict[str, Any]]:
+    """Keep only seeded queries that can actually recall a memory item.
+
+    A completed Commit proves that the asynchronous write flow terminated.
+    It does not prove that a later Search can retrieve the injected content.
+    This setup-only probe establishes that second fact before measurement.
+    """
+    unique: list[str] = []
+    seen: set[str] = set()
+    for candidate in candidates:
+        query = str(candidate or "").strip()
+        if query and query not in seen:
+            unique.append(query)
+            seen.add(query)
+    checked = unique[: max(0, limit)]
+    verified: list[str] = []
+    errors = 0
+    degraded = 0
+    relevance_failures = 0
+    started = time.perf_counter()
+    for query in checked:
+        try:
+            items, meta = client.search_with_meta(
+                query,
+                top_k=top_k,
+                timeout_s=timeout_s,
+            )
+            is_degraded = bool(meta.get("degraded_reasons")) or str(
+                meta.get("status") or ""
+            ).lower() == "degraded"
+            if is_degraded:
+                degraded += 1
+            elif items and _items_match_expected_terms(
+                items, (expected_terms_by_query or {}).get(query, [])
+            ):
+                verified.append(query)
+            elif items:
+                relevance_failures += 1
+        except Exception:
+            errors += 1
+    return verified, {
+        "candidates": len(unique),
+        "checked": len(checked),
+        "verified": len(verified),
+        "errors": errors,
+        "degraded": degraded,
+        "relevance_failures": relevance_failures,
+        "elapsed_s": round(time.perf_counter() - started, 3),
+    }
+
+
+def _items_match_expected_terms(items: list[Any], expected_terms: list[str]) -> bool:
+    """Check that a retrieved item contains the fact marker for this query."""
+    if not items:
+        return False
+    if not expected_terms:
+        return True
+    evidence = "\n".join(
+        json.dumps(item.to_dict(), ensure_ascii=False)
+        if hasattr(item, "to_dict")
+        else str(item)
+        for item in items
+    ).lower()
+    return all(str(term).lower() in evidence for term in expected_terms)
 
 
 def _anchor(idx: int, session_idx: int, msg_idx: int) -> str:
     return f"{ANCHOR_PREFIX}-{idx}-{session_idx}-{msg_idx}"
 
 
-def _message_pair(idx: int, session_idx: int, msg_idx: int) -> tuple[str, str]:
+def _synthetic_recall_case(
+    idx: int, session_idx: int, msg_idx: int
+) -> tuple[str, str, str, list[str]]:
+    """A short fact paragraph plus a semantic question and expected marker."""
     anchor = _anchor(idx, session_idx, msg_idx)
-    base = _USER_MSGS[msg_idx % len(_USER_MSGS)]
-    user_msg = f"{base} 编号{anchor}"
-    assistant_msg = f"已记录该事项，编号{anchor}。后续需要时我可以随时回忆这些内容。"
+    person, project, location, schedule = _SYNTHETIC_FACTS[
+        (idx + session_idx + msg_idx) % len(_SYNTHETIC_FACTS)
+    ]
+    user_msg = (
+        f"事实编号 {anchor}：{person} 负责{project}，"
+        f"计划在{schedule}于{location}完成方案评审。"
+    )
+    assistant_msg = (
+        f"已记录：{person} 的{project}安排，关联事实编号 {anchor}。"
+    )
+    question = f"{person} 在哪里负责什么项目？"
+    return user_msg, assistant_msg, question, [anchor]
+
+
+def _message_pair(idx: int, session_idx: int, msg_idx: int) -> tuple[str, str]:
+    user_msg, assistant_msg, _, _ = _synthetic_recall_case(
+        idx, session_idx, msg_idx
+    )
     return user_msg, assistant_msg
 
 
@@ -260,7 +367,9 @@ class TenantContext:
     queries: list[str] = field(default_factory=list)
     query_kinds: list[str] = field(default_factory=list)
     recall_queries: list[str] = field(default_factory=list)
+    recall_expected_terms: dict[str, list[str]] = field(default_factory=dict)
     no_recall_queries: list[str] = field(default_factory=list)
+    recall_probe: dict[str, Any] = field(default_factory=dict)
     active_session_ids: list[str] = field(default_factory=list)
     seed_sessions: int = 0
     seed_messages: int = 0
@@ -275,7 +384,9 @@ class TenantContext:
             "queries": len(self.queries),
             "query_kinds": len(self.query_kinds),
             "recall_queries": len(self.recall_queries),
+            "recall_expected_queries": len(self.recall_expected_terms),
             "no_recall_queries": len(self.no_recall_queries),
+            "recall_probe": dict(self.recall_probe),
             "active_session_ids": len(self.active_session_ids),
             "seed_sessions": self.seed_sessions,
             "seed_messages": self.seed_messages,
@@ -364,6 +475,8 @@ def seed_tenant(
     """
     queries: list[str] = []
     anchor_queries: list[str] = []
+    semantic_recall_queries: list[str] = []
+    recall_expected_terms: dict[str, list[str]] = {}
     active_session_ids: list[str] = []
     seed_messages = 0
     started = time.perf_counter()
@@ -382,6 +495,7 @@ def seed_tenant(
             queries=queries,
             query_kinds=["recall"] * len(queries),
             recall_queries=list(queries),
+            recall_expected_terms=recall_expected_terms,
             no_recall_queries=list(_NO_RECALL_QUERIES),
             active_session_ids=active_session_ids,
             seed_sessions=0,
@@ -391,10 +505,16 @@ def seed_tenant(
     for session_idx in range(sessions):
         messages: list[tuple[str, str]] = []
         for msg_idx in range(messages_per_session):
-            user_msg, assistant_msg = _message_pair(idx, session_idx, msg_idx)
+            user_msg, assistant_msg, question, expected_terms = _synthetic_recall_case(
+                idx, session_idx, msg_idx
+            )
             messages.append(("user", user_msg))
             messages.append(("assistant", assistant_msg))
-            anchor_queries.append(_anchor(idx, session_idx, msg_idx))
+            anchor = _anchor(idx, session_idx, msg_idx)
+            anchor_queries.append(anchor)
+            semantic_recall_queries.append(question)
+            recall_expected_terms[anchor] = [anchor]
+            recall_expected_terms[question] = expected_terms
         texts, session_id = _seed_session_flow(
             client,
             idx,
@@ -406,8 +526,10 @@ def seed_tenant(
         active_session_ids.append(session_id)
         seed_messages += len(texts)
         queries.extend(_query_fragments(texts))
-    # Anchor queries first so targeted lookups are always available.
-    queries = anchor_queries + queries
+    # The formal recall pool contains semantic questions and their marker
+    # probes. Fragments are kept only as auxiliary queries, not accuracy data.
+    queries = semantic_recall_queries + anchor_queries + queries
+    recall_queries = semantic_recall_queries + anchor_queries
     elapsed = time.perf_counter() - started
     logger.info(
         "seeded tenant idx=%d sessions=%d messages=%d elapsed=%.1fs queries=%d",
@@ -421,7 +543,8 @@ def seed_tenant(
         client=client,
         queries=queries,
         query_kinds=["recall"] * len(queries),
-        recall_queries=list(queries),
+        recall_queries=recall_queries,
+        recall_expected_terms=recall_expected_terms,
         no_recall_queries=list(_NO_RECALL_QUERIES),
         active_session_ids=active_session_ids,
         seed_sessions=sessions,
@@ -481,6 +604,7 @@ def seed_tenant_from_conversations(
         queries=queries,
         query_kinds=["recall"] * len(queries),
         recall_queries=list(queries),
+        recall_expected_terms={},
         no_recall_queries=list(_NO_RECALL_QUERIES),
         active_session_ids=active_session_ids,
         seed_sessions=len(batches),

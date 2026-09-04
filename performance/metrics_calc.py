@@ -796,16 +796,25 @@ def evaluate_features(summary: dict[str, Any]) -> dict[str, Any]:
             "not_run", "未运行读场景（A/C/D），无 read 数据"
         )
     else:
-        anchor_fail = int(quality.get("anchor_failures", 0) or 0)
+        recall_total = int(
+            quality.get("recall_total", quality.get("anchor_total", 0)) or 0
+        )
+        recall_fail = int(
+            quality.get("recall_failures", quality.get("anchor_failures", 0)) or 0
+        )
         total = int(quality.get("total", 0) or 0)
-        if anchor_fail > 0:
+        if recall_total == 0:
+            features["search_quality"] = _verdict(
+                "INCONCLUSIVE", "没有已验证 recall query，不能判定记忆召回正确性"
+            )
+        elif recall_fail > 0:
             features["search_quality"] = _verdict(
                 "FAIL",
-                f"{anchor_fail}/{total} 次锚词查询未召回（hit_count<1），疑似短路/假通过",
+                f"{recall_fail}/{recall_total} 次 recall 查询未召回（hit_count<1），疑似短路/假通过",
             )
         else:
             features["search_quality"] = _verdict(
-                "PASS", f"{total} 次 read 质量断言通过（锚词全部召回）"
+                "PASS", f"{recall_total} 次已验证 recall 查询全部召回"
             )
     features["search_quality"]["measurements"] = quality
 
@@ -1354,16 +1363,29 @@ def search_quality_summary(
         for rec in records
         if rec.op == "read" and rec.status == "ok" and not _in_burst(rec.ts_ms)
     ]
+    # query_kind is authoritative. The anchor fallback preserves
+    # compatibility with raw request files produced before query_kind existed.
+    recall = [
+        rec
+        for rec in reads
+        if str(rec.query_kind or "") == "recall"
+        or (not rec.query_kind and is_anchor_query(rec.query))
+    ]
+    no_recall = [
+        rec
+        for rec in reads
+        if str(rec.query_kind or "") == "no_recall"
+        or (not rec.query_kind and not is_anchor_query(rec.query))
+    ]
     anchor = [rec for rec in reads if is_anchor_query(rec.query)]
-    ordinary = [rec for rec in reads if not is_anchor_query(rec.query)]
-    anchor_failures = [rec for rec in anchor if not rec.quality_ok]
+    recall_failures = [rec for rec in recall if not rec.quality_ok]
     # Degraded contract: a degraded response means the engine was skipped /
     # saturated — an empty result is a capacity artifact, not a recall
     # failure. Surface it separately from clean quality failures.
     degraded = [rec for rec in reads if rec.degraded]
-    anchor_degraded = [rec for rec in anchor if rec.degraded]
+    recall_degraded = [rec for rec in recall if rec.degraded]
     undetermined = [
-        rec for rec in ordinary if not rec.real_recall and rec.hit_count == 0
+        rec for rec in no_recall if not rec.real_recall and rec.hit_count == 0
     ]
     passed = [rec for rec in reads if rec.quality_ok]
     # Gated latency / hit distribution cover reads that actually recalled
@@ -1372,8 +1394,16 @@ def search_quality_summary(
     recalled = [rec for rec in passed if rec.hit_count >= 1]
     hit_counts = [rec.hit_count for rec in recalled]
 
+    measured_reads = [
+        rec for rec in records if rec.op == "read" and not _in_burst(rec.ts_ms)
+    ]
+
     def _by_kind(kind: str) -> dict[str, Any]:
-        selected = [rec for rec in reads if str(rec.query_kind or "unknown") == kind]
+        # Keep transport failures in the denominator. Only successful reads
+        # contribute to latency and hit distributions.
+        selected = [
+            rec for rec in measured_reads if str(rec.query_kind or "unknown") == kind
+        ]
         if not selected:
             return {
                 "count": 0,
@@ -1383,34 +1413,44 @@ def search_quality_summary(
                 "hit_p95": None,
                 "p95_ms": None,
             }
-        recalled_selected = [rec for rec in selected if rec.hit_count >= 1 and rec.quality_ok]
+        successful = [rec for rec in selected if rec.status == "ok"]
+        recalled_selected = [
+            rec for rec in successful if rec.hit_count >= 1 and rec.quality_ok
+        ]
         hit_counts_selected = [rec.hit_count for rec in recalled_selected]
         return {
             "count": len(selected),
-            "ok": sum(1 for rec in selected if rec.status == "ok"),
-            "error": sum(1 for rec in selected if rec.status != "ok"),
+            "ok": len(successful),
+            "error": len(selected) - len(successful),
+            "success_rate": round(len(successful) / len(selected), 5),
+            "empty": sum(1 for rec in successful if rec.hit_count == 0),
             "hit_p50": percentile(sorted(hit_counts_selected), 0.5) if hit_counts_selected else None,
             "hit_p95": percentile(sorted(hit_counts_selected), 0.95) if hit_counts_selected else None,
-            "p95_ms": _op_stats([rec.stage_ms for rec in selected]).get("p95_ms"),
+            "p95_ms": _op_stats([rec.stage_ms for rec in successful]).get("p95_ms"),
         }
 
-    query_kind_counts = Counter(str(rec.query_kind or "unknown") for rec in reads)
+    query_kind_counts = Counter(str(rec.query_kind or "unknown") for rec in measured_reads)
     query_kind_stats = {kind: _by_kind(kind) for kind in sorted(query_kind_counts)}
     return {
         "total": len(reads),
-        "anchor_total": len(anchor),
-        "anchor_failures": len(anchor_failures),
-        "anchor_failure_rate": (
-            round(len(anchor_failures) / len(anchor), 5) if anchor else None
+        "recall_total": len(recall),
+        "recall_failures": len(recall_failures),
+        "recall_failure_rate": (
+            round(len(recall_failures) / len(recall), 5) if recall else None
         ),
-        "ordinary_total": len(ordinary),
+        "no_recall_total": len(no_recall),
         "undetermined_real_recall": len(undetermined),
         "degraded_total": len(degraded),
-        "anchor_degraded": len(anchor_degraded),
-        "quality_failures": len(anchor_failures),
+        "recall_degraded": len(recall_degraded),
+        "quality_failures": len(recall_failures),
         "quality_failure_rate": (
-            round(len(anchor_failures) / len(reads), 5) if reads else None
+            round(len(recall_failures) / len(reads), 5) if reads else None
         ),
+        # Legacy fields remain for old reports and historical comparisons.
+        "anchor_total": len(anchor),
+        "anchor_failures": sum(1 for rec in anchor if not rec.quality_ok),
+        "anchor_degraded": sum(1 for rec in anchor if rec.degraded),
+        "ordinary_total": len(no_recall),
         "hit_count_p50": percentile(sorted(hit_counts), 0.5) if hit_counts else None,
         "hit_count_p95": percentile(sorted(hit_counts), 0.95) if hit_counts else None,
         "gated_read_stats": _op_stats([rec.stage_ms for rec in recalled]),

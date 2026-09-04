@@ -84,6 +84,7 @@ from performance.prepare import (
     TenantPreparer,
     load_locomo_seed_batches,
     load_tenant_specs,
+    verify_recall_query_pool,
 )
 from performance.report import (
     build_html,
@@ -178,8 +179,24 @@ def build_parser() -> argparse.ArgumentParser:
         "--search-queries",
         default=os.getenv("ECHOMEM_SEARCH_QUERIES", ""),
         help=(
-            "Search 查询词，逗号分隔；skip-seed/复用已有数据时用于恢复查询池。"
-            "未提供时使用 hello，并在结果中标记为 fallback"
+            "兼容旧参数：逗号分隔的 Search 查询词。建议改用 "
+            "--search-recall-queries 或 --search-no-recall-queries。"
+        ),
+    )
+    g.add_argument(
+        "--search-recall-queries",
+        default=os.getenv("ECHOMEM_SEARCH_RECALL_QUERIES", ""),
+        help=(
+            "额外/复用记忆的 recall 查询词，逗号分隔。会在压测窗口前做真实 "
+            "Search 验证，只有命中的 query 才进入 recall 流量池。"
+        ),
+    )
+    g.add_argument(
+        "--search-no-recall-queries",
+        default=os.getenv("ECHOMEM_SEARCH_NO_RECALL_QUERIES", ""),
+        help=(
+            "日常但预期不命中既有记忆的查询词，逗号分隔；用于 mixed 或 "
+            "no-recall-only 流量。未配置时使用内置日常查询池。"
         ),
     )
     g.add_argument(
@@ -193,6 +210,15 @@ def build_parser() -> argparse.ArgumentParser:
         type=float,
         default=float(os.getenv("ECHOMEM_SEARCH_RECALL_RATIO", "0.7")),
         help="mixed 模式下 recall 查询占比（0~1）",
+    )
+    g.add_argument(
+        "--seed-recall-probe-limit",
+        type=int,
+        default=20,
+        help=(
+            "每租户在压测前最多验证多少条 recall 候选；验证不计入压测窗口，"
+            "默认 20。0 表示不验证，recall 正确性只能标记 INCONCLUSIVE。"
+        ),
     )
     g.add_argument(
         "--seed-concurrency",
@@ -471,6 +497,14 @@ def _resolve_args(args: argparse.Namespace) -> dict[str, Any]:
         raise ValueError("--commit-rpm 与 --per-tenant-commit-rpm 互斥")
     if per_tenant_rps < 0 or per_tenant_commit_rpm < 0:
         raise ValueError("每租户速率不能为负数")
+    search_recall_ratio = float(getattr(args, "search_recall_ratio", 0.7))
+    search_query_profile = str(
+        getattr(args, "search_query_profile", "mixed") or "mixed"
+    )
+    if not 0.0 <= search_recall_ratio <= 1.0:
+        raise ValueError("--search-recall-ratio 必须在 0~1 之间")
+    if int(getattr(args, "seed_recall_probe_limit", 20)) < 0:
+        raise ValueError("--seed-recall-probe-limit 必须 >= 0")
     if getattr(args, "client_connection_error_abort_threshold", 100) < 0:
         raise ValueError("--client-connection-error-abort-threshold 必须 >= 0")
     return {
@@ -495,6 +529,18 @@ def _resolve_args(args: argparse.Namespace) -> dict[str, Any]:
             for item in str(getattr(args, "search_queries", "") or "").split(",")
             if item.strip()
         ],
+        "search_recall_queries": [
+            item.strip()
+            for item in str(getattr(args, "search_recall_queries", "") or "").split(",")
+            if item.strip()
+        ],
+        "search_no_recall_queries": [
+            item.strip()
+            for item in str(getattr(args, "search_no_recall_queries", "") or "").split(",")
+            if item.strip()
+        ],
+        "search_query_profile": search_query_profile,
+        "search_recall_ratio": search_recall_ratio,
     }
 
 
@@ -1167,15 +1213,45 @@ def main() -> None:
                     else None
                 ),
             )
-            fallback_queries = list(resolved.get("search_queries") or []) or ["hello"]
+            legacy_queries = list(resolved.get("search_queries") or [])
+            configured_recall = list(resolved.get("search_recall_queries") or [])
+            configured_no_recall = list(resolved.get("search_no_recall_queries") or [])
+            fallback_queries = legacy_queries or ["hello"]
             for tenant in tenants:
-                recall_queries = list(tenant.recall_queries or tenant.queries or [])
-                no_recall_queries = list(tenant.no_recall_queries or fallback_queries)
+                recall_candidates = list(
+                    configured_recall
+                    or tenant.recall_queries
+                    or tenant.queries
+                    or legacy_queries
+                )
+                no_recall_queries = list(
+                    configured_no_recall
+                    or tenant.no_recall_queries
+                    or fallback_queries
+                )
                 if args.skip_seed or getattr(args, "reuse_existing_data", False):
-                    if not recall_queries:
-                        recall_queries = list(fallback_queries)
+                    if not recall_candidates:
+                        recall_candidates = list(fallback_queries)
                     if not no_recall_queries:
                         no_recall_queries = list(fallback_queries)
+                recall_queries, recall_probe = verify_recall_query_pool(
+                    tenant.client,
+                    recall_candidates,
+                    top_k=args.top_k,
+                    timeout_s=args.timeout_s,
+                    limit=args.seed_recall_probe_limit,
+                    expected_terms_by_query=tenant.recall_expected_terms,
+                )
+                tenant.recall_probe = recall_probe
+                requires_recall = args.search_query_profile == "recall-only" or (
+                    args.search_query_profile == "mixed"
+                    and args.search_recall_ratio > 0
+                )
+                if requires_recall and not recall_queries:
+                    raise RuntimeError(
+                        "没有可验证命中的 recall query；已完成 Commit 但无法证明记忆可召回。"
+                        f" tenant={tenant.idx} probe={recall_probe}"
+                    )
                 queries, query_kinds = build_search_query_pool(
                     recall_queries=recall_queries,
                     no_recall_queries=no_recall_queries,
@@ -1188,10 +1264,12 @@ def main() -> None:
                 tenant.queries = queries
                 tenant.query_kinds = query_kinds
                 logger.info(
-                    "tenant_idx=%d search pool profile=%s recall=%d no_recall=%d total=%d",
+                    "tenant_idx=%d search pool profile=%s recall=%d/%d verified "
+                    "no_recall=%d total=%d",
                     tenant.idx,
                     args.search_query_profile,
                     len(recall_queries),
+                    len(recall_candidates),
                     len(no_recall_queries),
                     len(queries),
                 )
@@ -1361,6 +1439,8 @@ def main() -> None:
                             else "default_fallback"
                         )
                     ),
+                    "query_profile": args.search_query_profile,
+                    "search_recall_ratio": args.search_recall_ratio,
                     "tenant_details": [tenant.to_dict() for tenant in tenants],
                 },
                 "server": server_info,

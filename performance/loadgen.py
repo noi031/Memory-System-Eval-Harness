@@ -40,6 +40,21 @@ def is_anchor_query(query: str) -> bool:
     return ANCHOR_PREFIX in query or WRITE_ANCHOR_PREFIX in query
 
 
+def _items_match_expected_terms(items: list[Any], expected_terms: list[str]) -> bool:
+    """Verify that Search returned evidence for the intended synthetic fact."""
+    if not items:
+        return False
+    if not expected_terms:
+        return True
+    evidence = "\n".join(
+        json.dumps(item.to_dict(), ensure_ascii=False)
+        if hasattr(item, "to_dict")
+        else str(item)
+        for item in items
+    ).lower()
+    return all(str(term).lower() in evidence for term in expected_terms)
+
+
 def _retry_after_seconds(exc: BaseException) -> float | None:
     """Parse the ``Retry-After`` header of a 429 into seconds (or None)."""
     headers = getattr(exc, "headers", None)
@@ -175,6 +190,8 @@ class RequestRecord:
     # failure, and must not be counted as a quality failure.
     degraded: bool = False
     query_kind: str = ""
+    expected_terms: str = ""
+    recall_matched: bool | None = None
 
     def to_csv_row(self) -> dict[str, Any]:
         return {
@@ -206,6 +223,8 @@ class RequestRecord:
             "degraded": self.degraded,
             "query_kind": self.query_kind,
             "query": self.query,
+            "expected_terms": self.expected_terms,
+            "recall_matched": self.recall_matched,
         }
 
 
@@ -659,6 +678,7 @@ class LoadGenerator:
         tenant_idx: int,
         session_id: str = "",
         query_kind: str = "",
+        expected_terms: list[str] | None = None,
     ) -> RequestRecord:
         started = time.perf_counter()
         hit_count = 0
@@ -667,6 +687,10 @@ class LoadGenerator:
         degraded = False
         http_status: int | None = None
         reason_code = ""
+        normalized_expected_terms = [
+            str(term).strip() for term in (expected_terms or []) if str(term).strip()
+        ]
+        recall_matched: bool | None = None
         request_id = f"search-{uuid.uuid4().hex}"
         try:
             items, meta = _call_with_request_id(
@@ -687,16 +711,20 @@ class LoadGenerator:
                 or bool(meta.get("has_debug"))
                 or bool(hit_count)
             )
+            if query_kind == "recall" or is_anchor_query(query):
+                recall_matched = _items_match_expected_terms(
+                    items, normalized_expected_terms
+                )
         except Exception as exc:
             status, error = "error", classify_error(exc)
             if isinstance(exc, urllib.error.HTTPError):
                 http_status = int(exc.code)
                 reason_code = extract_reason_code(exc)
-        if status == "ok" and is_anchor_query(query):
+        if status == "ok" and (query_kind == "recall" or is_anchor_query(query)):
             # A degraded empty result is a capacity artifact (engine skipped /
-            # saturated), not a recall defect: only clean empty results are
-            # counted as quality failures.
-            quality_ok = hit_count >= 1 or degraded
+            # saturated), not a recall defect: only clean empty results from
+            # a pre-verified recall query are counted as quality failures.
+            quality_ok = bool(recall_matched) or degraded
         return RequestRecord(
             scene_key=scene_key,
             step_conc=step_conc,
@@ -716,6 +744,8 @@ class LoadGenerator:
             quality_ok=quality_ok,
             degraded=degraded,
             query_kind=query_kind,
+            expected_terms=",".join(normalized_expected_terms),
+            recall_matched=recall_matched,
         )
 
     # -- worker loops ------------------------------------------------------
@@ -731,8 +761,17 @@ class LoadGenerator:
     ) -> list[RequestRecord]:
         records: list[RequestRecord] = []
         queries = tenant.queries or ["hello"]
-        query_kinds = tenant.query_kinds or ["fallback"] * len(queries)
+        raw_query_kinds = getattr(tenant, "query_kinds", None)
+        query_kinds = (
+            list(raw_query_kinds)
+            if isinstance(raw_query_kinds, (list, tuple))
+            else ["fallback"] * len(queries)
+        )
         active_sessions = tenant.active_session_ids
+        raw_expected_terms = getattr(tenant, "recall_expected_terms", {})
+        expected_terms_by_query = (
+            raw_expected_terms if isinstance(raw_expected_terms, dict) else {}
+        )
         cursor = 0
         if start_event is not None:
             start_event.wait()
@@ -757,6 +796,7 @@ class LoadGenerator:
                     tenant_idx=tenant.idx,
                     session_id=session_id,
                     query_kind=query_kind,
+                    expected_terms=list(expected_terms_by_query.get(query) or []),
                 )
             )
             if record.error_type == "connection" and self.note_client_connection_error():
