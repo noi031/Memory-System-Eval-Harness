@@ -37,6 +37,19 @@ from performance.formal_suite import SCENARIOS, _build_seed_warmup_command
 
 
 class ObjectiveSuiteTests(unittest.TestCase):
+    def test_six_metric_entrypoint_is_self_contained_and_no_soak_by_default(self) -> None:
+        script = (
+            Path(__file__).resolve().parents[1]
+            / "performance"
+            / "run_4u8g_six_metrics.sh"
+        )
+        text = script.read_text(encoding="utf-8")
+        self.assertIn("performance.objective_suite", text)
+        self.assertIn("--full", text)
+        self.assertIn("--profile", text)
+        self.assertIn("STRESS_QUICK", text)
+        self.assertNotIn("--scenarios soak", text)
+
     def test_load_profiles(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "profiles.json"

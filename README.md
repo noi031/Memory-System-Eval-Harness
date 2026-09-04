@@ -144,6 +144,42 @@ scripts/                     # 辅助工具
 针对 agent 插件而非记忆后端；记忆注入通过 `AgentPlugin.inject_memories()` 统一
 完成，评测平台不直接感知记忆后端。
 
+### 4U8G 六项指标压测入口
+
+PR29 的六项指标压测使用真实 EchoMem HTTP，不使用 mock 模型替代容量或延迟结论。
+测试平台默认使用合成可控语料：每个租户先走真实
+`open -> add -> commit -> poll completed`，再用 recall / no-recall 查询压测。
+正式运行默认关闭 `soak`，不会把长稳态测试混进日常验收。
+
+先准备一份实际部署 profile（可从
+`performance/instance-profiles.example.json` 复制），填写真实的
+`base_url`、独立租户凭据文件、实际 EchoMem `config.json`，以及需要时的
+故障控制和容器重启配置。然后执行：
+
+```bash
+export ECHOMEM_CONFIG=/etc/echomem/4u8g/config.json
+export STRESS_PROFILES=/etc/echomem/performance-profiles.json
+export ECHOMEM_BASE_URL=http://127.0.0.1:8010
+export STRESS_PROFILE_NAME=4U8G
+./performance/run_4u8g_six_metrics.sh
+```
+
+结果目录中的 `objective-suite.html` 是总报告；`objective-suite.json` 保存六项
+目标的 PASS / FAIL / INCONCLUSIVE 和证据；profile 下的 `formal/` 保留逐场景
+`summary.json`、`requests.csv`、`metrics_samples.csv` 和 HTML。查看报告时要同时
+检查 `coverage`：场景没有真实请求证据时，即使进程退出码为 0，也不能当作测试完成。
+
+需要快速检查命令和服务连通性时可执行：
+
+```bash
+export STRESS_QUICK=1
+./performance/run_4u8g_six_metrics.sh
+```
+
+`STRESS_QUICK=1` 只产生 bounded 诊断证据，不能替代完整验收；O2 的真实单租户
+故障、O5 的 kill-9 恢复和 O6 的租户/分层指标，在 profile 没有配置真实控制或
+观测能力时必须显示 `INCONCLUSIVE`，不能伪造为 PASS。
+
 ## 核心架构
 
 ### 插件生命周期
