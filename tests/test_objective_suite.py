@@ -260,6 +260,54 @@ class ObjectiveSuiteTests(unittest.TestCase):
             command[command.index("--commit-poll-timeout-s") + 1],
         )
 
+    def test_formal_case_command_propagates_auth_header(self) -> None:
+        import argparse
+        from performance.formal_suite import _build_case_command
+
+        args = argparse.Namespace(
+            base_url="http://127.0.0.1:8010",
+            commit_timeout_s=10,
+            commit_max_attempts=0,
+            commit_retry_backoff_s=0,
+            seed_sessions_per_tenant=None,
+            active_sessions_per_tenant=None,
+            barrier_wave_size=4,
+            barrier_drain_timeout_s=10,
+            local_auth_mode=False,
+            skip_seed=True,
+            reuse_existing_data=False,
+            search_queries="",
+            preflight_config="",
+            no_server_metrics=False,
+            auth_header="X-API-Key",
+            quick_mode=True,
+        )
+        command = _build_case_command(
+            args,
+            {"tenants": 1, "duration_s": 1, "search_rps": 1, "commit_rpm": 0},
+            Path("/tmp/tenants.json"),
+            Path("/tmp/case"),
+            1,
+        )
+        self.assertEqual("X-API-Key", command[command.index("--auth-header") + 1])
+
+    def test_limit_probe_accepts_configured_auth_header(self) -> None:
+        from performance.probes.limit_failure_probe import request
+
+        # The request is intentionally pointed at an unused local port. The
+        # returned transport error still proves argument compatibility without
+        # making a network call to a real service.
+        result = request(
+            "http://127.0.0.1:1",
+            {"tenant_id": "t", "auth_key": "secret"},
+            "/health",
+            {},
+            0.01,
+            "search",
+            "X-API-Key",
+        )
+        self.assertIsNone(result["status_code"])
+
     def test_partial_formal_manifest_is_not_complete_coverage(self) -> None:
         suite = {
             "scenarios": ["pr397__A@1", "pr397__B@1", "pr421__baseline"],

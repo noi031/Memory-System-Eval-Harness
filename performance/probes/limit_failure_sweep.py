@@ -38,6 +38,7 @@ def main() -> int:
     parser.add_argument("--out-dir", type=Path, required=True)
     parser.add_argument("--levels", default="4,16,64,128,256")
     parser.add_argument("--timeout-s", type=float, default=8.0)
+    parser.add_argument("--auth-header", default="X-Auth-Key")
     parser.add_argument("--search-count", type=int, default=0)
     parser.add_argument("--commit-count", type=int, default=0)
     parser.add_argument("--open-count", type=int, default=0)
@@ -51,7 +52,7 @@ def main() -> int:
 
     tenants = load_tenants(args.tenant_config)
     sessions = (
-        create_sessions(args.base_url, tenants, args.timeout_s)
+        create_sessions(args.base_url, tenants, args.timeout_s, args.auth_header)
         if args.create_sessions
         else discover_sessions(args.session_root, tenants)
     )
@@ -90,6 +91,7 @@ def main() -> int:
                 workers=effective_workers,
                 timeout_s=args.timeout_s,
                 path=path,
+                auth_header=args.auth_header,
             )
             for row in level_rows:
                 row["kind"] = f"{kind}-workers-{workers}"
@@ -105,6 +107,7 @@ def main() -> int:
         workers=4,
         timeout_s=args.timeout_s,
         path="/api/retrieval/search",
+        auth_header=args.auth_header,
     )
     for row in recovery:
         row["kind"] = "recovery-search-workers-4"

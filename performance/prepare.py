@@ -631,6 +631,7 @@ class TenantPreparer:
         label_prefix: str = "perf",
         tenant_specs: list[dict[str, Any]] | None = None,
         seed_concurrency: int = 4,
+        auth_header: str = "X-Auth-Key",
     ) -> None:
         if tenants < 1:
             raise ValueError("tenants must be >= 1")
@@ -646,6 +647,7 @@ class TenantPreparer:
         if seed_concurrency < 1:
             raise ValueError("seed_concurrency must be >= 1")
         self.seed_concurrency = seed_concurrency
+        self.auth_header = auth_header
         # --tenant-config 独立凭据：非空时优先于 auth_mode，--tenants 忽略
         self.tenant_specs = tenant_specs
         self._provisioned: list[tuple[int, EchoMemClient]] = []
@@ -682,6 +684,7 @@ class TenantPreparer:
                     agent_id=str(spec.get("agent_id") or "default"),
                     timeout_s=self.timeout_s,
                     max_retries=0,
+                    auth_header=self.auth_header,
                 )
                 return self._seed_one(
                     client,
@@ -707,7 +710,10 @@ class TenantPreparer:
             stamp = int(time.time())
             for idx in range(self.tenants):
                 client = EchoMemClient(
-                    self.base_url, timeout_s=self.timeout_s, max_retries=0
+                    self.base_url,
+                    timeout_s=self.timeout_s,
+                    max_retries=0,
+                    auth_header=self.auth_header,
                 )
                 client.provision_isolated_identity(f"{self.label_prefix}-{stamp}-{idx}")
                 self._provisioned.append((idx, client))
@@ -731,6 +737,7 @@ class TenantPreparer:
                 agent_id=self.agent_id,
                 timeout_s=self.timeout_s,
                 max_retries=0,
+                auth_header=self.auth_header,
             )
             contexts.append(
                 self._seed_one(

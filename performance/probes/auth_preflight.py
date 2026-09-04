@@ -25,7 +25,13 @@ def key_fingerprint(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()[:12] if value else ""
 
 
-def open_session(base_url: str, tenant: Any, *, timeout_s: float) -> dict[str, Any]:
+def open_session(
+    base_url: str,
+    tenant: Any,
+    *,
+    timeout_s: float,
+    auth_header: str = "X-Auth-Key",
+) -> dict[str, Any]:
     body = {
         "agent_id": tenant.agent_id,
         "metadata": {
@@ -35,14 +41,22 @@ def open_session(base_url: str, tenant: Any, *, timeout_s: float) -> dict[str, A
             "tenant_id": tenant.tenant_id,
         },
     }
+    headers = {
+        "Accept": "application/json",
+        "Content-Type": "application/json",
+    }
+    if auth_header.lower() == "authorization":
+        headers["Authorization"] = (
+            tenant.auth_key
+            if tenant.auth_key.lower().startswith("bearer ")
+            else f"Bearer {tenant.auth_key}"
+        )
+    else:
+        headers[auth_header] = tenant.auth_key
     request = urllib.request.Request(
         base_url.rstrip("/") + "/api/sessions/open",
         data=json.dumps(body).encode("utf-8"),
-        headers={
-            "Accept": "application/json",
-            "Content-Type": "application/json",
-            "X-Auth-Key": tenant.auth_key,
-        },
+        headers=headers,
         method="POST",
     )
     started = time.monotonic()
@@ -107,6 +121,7 @@ def run(
     *,
     timeout_s: float = 5.0,
     tenant_count: int = 0,
+    auth_header: str = "X-Auth-Key",
 ) -> dict[str, Any]:
     tenants = load_tenant_specs(tenant_config, tenant_count=tenant_count)
     # Authentication is an independent read-only check per tenant. Running
@@ -116,7 +131,7 @@ def run(
         results = list(
             executor.map(
                 lambda tenant: open_session(
-                    base_url, tenant, timeout_s=timeout_s
+                    base_url, tenant, timeout_s=timeout_s, auth_header=auth_header
                 ),
                 tenants,
             )
@@ -153,12 +168,14 @@ def main() -> int:
     parser.add_argument("--out", required=True)
     parser.add_argument("--timeout-s", type=float, default=5.0)
     parser.add_argument("--tenant-count", type=int, default=0)
+    parser.add_argument("--auth-header", default="X-Auth-Key")
     args = parser.parse_args()
     result = run(
         args.base_url,
         args.tenant_config,
         timeout_s=max(0.1, args.timeout_s),
         tenant_count=max(0, args.tenant_count),
+        auth_header=args.auth_header,
     )
     output = Path(args.out)
     output.parent.mkdir(parents=True, exist_ok=True)

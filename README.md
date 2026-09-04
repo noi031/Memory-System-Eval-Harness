@@ -1107,6 +1107,10 @@ PR397 的写后可见性/持久化对账、Commit 状态机、冷暖 Search，�
 `INCONCLUSIVE`，不会被包装成 PASS。
 没有真实故障控制端点时，故障项必须显示 `INCONCLUSIVE`，不能用测试平台自身缺少
 适配器来判定 EchoMem 未实现。
+正式套件会把 profile 的 `auth_header` 贯穿到租户预检、真实 workload、限流阶梯、
+故障隔离、恢复和指标探针；支持 `X-Auth-Key`、`X-API-Key` 以及带 `Bearer` 前缀
+的 `Authorization`。未配置时默认使用 `X-Auth-Key`，避免主压测和补测探针因鉴权头
+不一致产生假失败。
 报告文件为 `suite.html`，逐请求和资源时序通常位于各场景的 `run/` 目录。
 如果只想重新审计已有结果而不重新发请求，可在 profile 中填写
 `suite_path`，然后执行 `objective_suite.py --skip-run`；该模式只读取

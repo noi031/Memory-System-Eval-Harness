@@ -523,6 +523,8 @@ def _run_limit_failure_sweep(
         levels,
         "--timeout-s",
         str(probe_timeout_s),
+        "--auth-header",
+        str(profile.get("auth_header") or "X-Auth-Key"),
     ]
     session_root = str(config.get("session_root") or "").strip()
     if session_root:
@@ -574,6 +576,7 @@ def _run_configured_probes(
     artifacts: dict[str, Any] = {}
     commands: dict[str, Any] = {}
     base_url = str(profile.get("base_url") or "http://127.0.0.1:8010")
+    auth_header = str(profile.get("auth_header") or "X-Auth-Key")
     probe_budget = _bounded_timeout(timeout_s, deadline)
     available, availability_error = _service_available(
         base_url,
@@ -618,6 +621,7 @@ def _run_configured_probes(
             command += ["--auth-key", auth_key]
         elif auth_key_env:
             command += ["--auth-key-env", auth_key_env]
+        command += ["--auth-header", auth_header]
         for key, flag in (
             ("session_id", "--session-id"),
             ("health_path", "--health-path"),
@@ -632,6 +636,11 @@ def _run_configured_probes(
             ("timeout_s", "--timeout-s"),
         ):
             _add_option(command, flag, capability.get(key))
+        _add_option(
+            command,
+            "--auth-header",
+            str(profile.get("auth_header") or "X-Auth-Key"),
+        )
         # Bind cursor probing to a session created by this run rather than a
         # stale session hard-coded in a shared deployment profile.
         if evidence_row.get("session_id") and not capability.get("session_id"):
@@ -666,6 +675,7 @@ def _run_configured_probes(
             command += ["--auth-key", auth_key]
         elif auth_key_env:
             command += ["--auth-key-env", auth_key_env]
+        command += ["--auth-header", auth_header]
         execution = run_command(
             command,
             timeout_s=_bounded_timeout(min(timeout_s, 180), deadline),
@@ -706,6 +716,7 @@ def _run_configured_probes(
             ("visibility_timeout_s", "--visibility-timeout-s"),
         ):
             _add_option(command, flag, missing.get(key))
+        command += ["--auth-header", auth_header]
         execution = run_command(
             command,
             timeout_s=_bounded_timeout(
@@ -737,6 +748,7 @@ def _run_configured_probes(
             ("auth_header", "--auth-header"),
         ):
             _add_option(command, flag, concurrent.get(key))
+        command += ["--auth-header", auth_header]
         execution = run_command(
             command,
             timeout_s=_bounded_timeout(
@@ -774,6 +786,7 @@ def _run_configured_probes(
             ("auth_header", "--auth-header"),
         ):
             _add_option(command, flag, fault_isolation.get(key))
+        command += ["--auth-header", auth_header]
         execution = run_command(
             command,
             timeout_s=_bounded_timeout(
@@ -839,6 +852,7 @@ def _run_configured_probes(
             ("accepted_wait_s", "--accepted-wait-s"),
         ):
             _add_option(command, flag, recovery.get(key))
+        command += ["--auth-header", auth_header]
         if recovery.get("require_accepted_202"):
             command.append("--require-accepted-202")
         execution = run_command(
@@ -886,6 +900,7 @@ def _run_configured_probes(
             command += ["--auth-key", auth_key]
         if commit_csv:
             command += ["--commit-csv", str(commit_csv)]
+        command += ["--auth-header", auth_header]
         execution = run_command(
             command,
             timeout_s=_bounded_timeout(min(timeout_s, 900), deadline),
@@ -1575,6 +1590,8 @@ def main() -> int:
                     _formal_profile_name(name, quick=args.quick),
                     "--instance-profile",
                     name,
+                    "--auth-header",
+                    str(profile.get("auth_header") or "X-Auth-Key"),
                     "--repeats",
                     "1",
                     "--commit-timeout-s",

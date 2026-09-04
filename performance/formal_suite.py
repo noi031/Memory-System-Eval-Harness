@@ -965,6 +965,8 @@ def _build_case_command(
         str(per_tenant_conc),
         "--out-dir",
         str(output / "run"),
+        "--auth-header",
+        str(getattr(args, "auth_header", "X-Auth-Key")),
         "--seed-sessions-per-tenant",
         str(seed_sessions),
         "--active-sessions-per-tenant",
@@ -2414,7 +2416,7 @@ def main() -> int:
     # legacy knobs keeps an already deployed API from failing before case 1.
     parser.add_argument("--commit-workers", type=int, default=0, help=argparse.SUPPRESS)
     parser.add_argument("--search-workers", type=int, default=0, help=argparse.SUPPRESS)
-    parser.add_argument("--auth-header", default="X-API-Key", help=argparse.SUPPRESS)
+    parser.add_argument("--auth-header", default="X-Auth-Key", help=argparse.SUPPRESS)
     parser.add_argument("--pid", default="", help=argparse.SUPPRESS)
     args = parser.parse_args()
 
@@ -2526,6 +2528,7 @@ def main() -> int:
             tenant_path,
             timeout_s=_budget_timeout(5.0, suite_deadline, minimum_s=0.0),
             tenant_count=required_tenants,
+            auth_header=args.auth_header,
         )
         if (
             auth_preflight_result["status"] != "PASS"

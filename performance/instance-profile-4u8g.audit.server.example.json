@@ -5,6 +5,7 @@
       "base_url": "http://127.0.0.1:8010",
       "tenant_config": "/config/tenants.json",
       "preflight_config": "/config/config.json",
+      "auth_header": "X-Auth-Key",
       "allow_partial_tenants": true,
       "metrics_enabled": true,
       "quick_include_seed": false,

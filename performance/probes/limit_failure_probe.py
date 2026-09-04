@@ -136,13 +136,16 @@ def fetch_metrics(
     base_url: str,
     tenant: dict[str, str],
     timeout_s: float,
+    auth_header: str = "X-Auth-Key",
 ) -> dict[str, Any]:
     """Fetch a real Prometheus snapshot without changing target state."""
     started = time.monotonic()
-    headers = {
-        "Accept": "text/plain, application/openmetrics-text",
-        "X-Auth-Key": auth_key(tenant),
-    }
+    headers = {"Accept": "text/plain, application/openmetrics-text"}
+    key = auth_key(tenant)
+    headers["Authorization" if auth_header.lower() == "authorization" else auth_header] = (
+        key if auth_header.lower() != "authorization" or key.lower().startswith("bearer ")
+        else f"Bearer {key}"
+    )
     req = urllib.request.Request(
         base_url.rstrip("/") + "/metrics",
         headers=headers,
@@ -236,13 +239,15 @@ def request(
     body: dict[str, Any],
     timeout_s: float,
     kind: str,
+    auth_header: str = "X-Auth-Key",
 ) -> dict[str, Any]:
     started = time.monotonic()
-    headers = {
-        "Content-Type": "application/json",
-        "Accept": "application/json",
-        "X-Auth-Key": auth_key(tenant),
-    }
+    headers = {"Content-Type": "application/json", "Accept": "application/json"}
+    key = auth_key(tenant)
+    headers["Authorization" if auth_header.lower() == "authorization" else auth_header] = (
+        key if auth_header.lower() != "authorization" or key.lower().startswith("bearer ")
+        else f"Bearer {key}"
+    )
     data = json.dumps(body).encode("utf-8")
     row: dict[str, Any] = {
         "kind": kind,
@@ -303,14 +308,16 @@ def commit_request(
     tenant: dict[str, str],
     session_id: str,
     timeout_s: float,
+    auth_header: str = "X-Auth-Key",
 ) -> dict[str, Any]:
     """Add a real message before Commit so capacity probes exercise Commit."""
     started = time.monotonic()
-    headers = {
-        "Content-Type": "application/json",
-        "Accept": "application/json",
-        "X-Auth-Key": auth_key(tenant),
-    }
+    headers = {"Content-Type": "application/json", "Accept": "application/json"}
+    key = auth_key(tenant)
+    headers["Authorization" if auth_header.lower() == "authorization" else auth_header] = (
+        key if auth_header.lower() != "authorization" or key.lower().startswith("bearer ")
+        else f"Bearer {key}"
+    )
     message_id = f"limit-probe-{uuid.uuid4().hex}"
     message_body = {
         "message_id": message_id,
@@ -434,15 +441,17 @@ def create_sessions(
     base_url: str,
     tenants: list[dict[str, str]],
     timeout_s: float,
+    auth_header: str = "X-Auth-Key",
 ) -> dict[str, str]:
     """Create sessions on the target being measured, avoiding cross-instance IDs."""
     sessions: dict[str, str] = {}
     for tenant in tenants:
-        headers = {
-            "Content-Type": "application/json",
-            "Accept": "application/json",
-        "X-Auth-Key": auth_key(tenant),
-        }
+        headers = {"Content-Type": "application/json", "Accept": "application/json"}
+        key = auth_key(tenant)
+        headers["Authorization" if auth_header.lower() == "authorization" else auth_header] = (
+            key if auth_header.lower() != "authorization" or key.lower().startswith("bearer ")
+            else f"Bearer {key}"
+        )
         body = {
             "agent_id": "echomem-limit-failure-probe",
             "metadata": {
@@ -478,6 +487,7 @@ def run_wave(
     workers: int,
     timeout_s: float,
     path: str,
+    auth_header: str = "X-Auth-Key",
 ) -> list[dict[str, Any]]:
     jobs: list[tuple[dict[str, str], dict[str, Any]]] = []
     for index in range(count):
@@ -520,9 +530,9 @@ def run_wave(
                     else body.pop("_request_path", path)
                 ),
                 *(
-                    (timeout_s,)
+                    (timeout_s, auth_header)
                     if kind == "commit"
-                    else (body, timeout_s, kind)
+                    else (body, timeout_s, kind, auth_header)
                 ),
             )
             for tenant, body in jobs
@@ -673,10 +683,11 @@ def main() -> int:
     parser.add_argument("--commit-count", type=int, default=0)
     parser.add_argument("--workers", type=int, default=256)
     parser.add_argument("--timeout-s", type=float, default=8.0)
+    parser.add_argument("--auth-header", default="X-Auth-Key")
     args = parser.parse_args()
     tenants = load_tenants(args.tenant_config)
     sessions = (
-        create_sessions(args.base_url, tenants, args.timeout_s)
+        create_sessions(args.base_url, tenants, args.timeout_s, args.auth_header)
         if args.create_sessions
         else discover_sessions(args.session_root, tenants)
     )
@@ -694,12 +705,15 @@ def main() -> int:
         "search_sessions": sessions,
     }
     rows: list[dict[str, Any]] = []
-    metrics_before = fetch_metrics(args.base_url, tenants[0], args.timeout_s)
+    metrics_before = fetch_metrics(
+        args.base_url, tenants[0], args.timeout_s, args.auth_header
+    )
     rows.extend(
         run_wave(
             args.base_url, tenants, sessions, kind="search",
             count=args.search_count, workers=args.workers,
             timeout_s=args.timeout_s, path="/api/retrieval/search",
+            auth_header=args.auth_header,
         )
     )
     if args.commit_count > 0:
@@ -708,6 +722,7 @@ def main() -> int:
                 args.base_url, tenants, sessions, kind="commit",
                 count=args.commit_count, workers=args.workers,
                 timeout_s=args.timeout_s, path="/commit",
+                auth_header=args.auth_header,
             )
         )
     rows.extend(
@@ -715,9 +730,12 @@ def main() -> int:
             args.base_url, tenants, sessions, kind="open",
             count=args.open_count, workers=args.workers,
             timeout_s=args.timeout_s, path="/api/sessions/open",
+            auth_header=args.auth_header,
         )
     )
-    metrics_after = fetch_metrics(args.base_url, tenants[0], args.timeout_s)
+    metrics_after = fetch_metrics(
+        args.base_url, tenants[0], args.timeout_s, args.auth_header
+    )
     manifest["metrics_before"] = {
         key: value for key, value in metrics_before.items() if key != "raw"
     }

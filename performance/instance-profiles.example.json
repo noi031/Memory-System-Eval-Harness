@@ -5,6 +5,7 @@
       "base_url": "http://127.0.0.1:8010",
       "tenant_config": "performance/tenants-32.server.json",
       "preflight_config": "/etc/echomem/4u8g/config.json",
+      "auth_header": "X-Auth-Key",
       "allow_partial_tenants": true,
       "metrics_enabled": true,
       "quick_include_seed": false,

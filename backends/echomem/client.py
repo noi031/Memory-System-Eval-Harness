@@ -36,6 +36,7 @@ class EchoMemClient(BaseHTTPMemoryClient):
         max_retries: int = 3,
         retry_backoff_s: float = 1.0,
         log_access_key: str = "",
+        auth_header: str = "X-Auth-Key",
     ):
         super().__init__(
             base_url,
@@ -49,13 +50,21 @@ class EchoMemClient(BaseHTTPMemoryClient):
         )
         self.auth_key = auth_key
         self.log_access_key = log_access_key
+        self.auth_header = auth_header
 
     # -- low-level HTTP -------------------------------------------------
 
     def _headers(self) -> dict[str, str]:
         h = {"Content-Type": "application/json"}
         if self.auth_key:
-            h["X-Auth-Key"] = self.auth_key
+            if self.auth_header.lower() == "authorization":
+                h["Authorization"] = (
+                    self.auth_key
+                    if self.auth_key.lower().startswith("bearer ")
+                    else f"Bearer {self.auth_key}"
+                )
+            else:
+                h[self.auth_header] = self.auth_key
         return h
 
     # -- commit polling hooks -------------------------------------------

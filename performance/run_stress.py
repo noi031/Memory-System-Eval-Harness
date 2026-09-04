@@ -147,6 +147,11 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     g.add_argument("--auth-key", default="", help="static 模式: 预置鉴权 key")
+    g.add_argument(
+        "--auth-header",
+        default=os.getenv("ECHOMEM_AUTH_HEADER", "X-Auth-Key"),
+        help="真实服务使用的鉴权头；支持 X-Auth-Key、X-API-Key 或 Authorization",
+    )
     g.add_argument("--tenant-id", default="", help="static 模式: 预置租户 id")
     g.add_argument("--user-id", default="", help="static 模式: 预置用户 id")
     g.add_argument("--agent-id", default="default", help="agent id")
@@ -1213,6 +1218,7 @@ def main() -> None:
             label_prefix="perf",
             tenant_specs=resolved.get("tenant_specs"),
             seed_concurrency=args.seed_concurrency,
+            auth_header=args.auth_header,
         )
         try:
             tenants = preparer.prepare(
@@ -1434,6 +1440,7 @@ def main() -> None:
                 "config": {
                     **vars(args),
                     "auth_key": _redact(args.auth_key),
+                    "auth_header": args.auth_header,
                     "effective_auth_mode": preparer.identity_mode(),
                     "tenant_config_count": len(resolved.get("tenant_specs") or []),
                     "scenario_ids": resolved["scenario_ids"],

@@ -307,6 +307,7 @@ def main() -> int:
     )
     parser.add_argument("--tenant-config", required=True, type=Path)
     parser.add_argument("--tenant", default="stress-a")
+    parser.add_argument("--auth-header", default="X-Auth-Key")
     parser.add_argument("--kill-delay-s", type=float, default=0.5)
     parser.add_argument("--messages", type=int, default=12)
     parser.add_argument("--content-chars", type=int, default=2500)
@@ -340,6 +341,7 @@ def main() -> int:
         user_id=tenant["user_id"],
         account_id=tenant["tenant_id"],
         agent_id="pr421-commit-recovery",
+        auth_header=args.auth_header,
     )
     result: dict[str, Any] = {
         "started_at": started_at,
