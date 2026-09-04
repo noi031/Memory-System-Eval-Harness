@@ -151,34 +151,81 @@ PR29 的六项指标压测使用真实 EchoMem HTTP，不使用 mock 模型替�
 `open -> add -> commit -> poll completed`，再用 recall / no-recall 查询压测。
 正式运行默认关闭 `soak`，不会把长稳态测试混进日常验收。
 
-先准备一份实际部署 profile（可从
-`performance/instance-profiles.example.json` 复制），填写真实的
-`base_url`、独立租户凭据文件、实际 EchoMem `config.json`，以及需要时的
-故障控制和容器重启配置。然后执行：
+详细测试方案见
+[`docs/4u8g-six-metric-stress-plan.md`](docs/4u8g-six-metric-stress-plan.md)，里面
+说明了每项指标测试什么、为什么测试、请求如何产生、通过什么数据判定，以及哪些
+情况下只能得到 `INCONCLUSIVE`。六项指标对应：
+
+1. 单实例最大 DAU / 最大热用户量；
+2. 任意单租户故障时，其他租户 Search P95 的劣化百分比；
+3. 不同租户之间分别计算 Commit 吞吐 Jain 和 Search 延迟效用 Jain；
+4. Commit 洪泛期间 Search 的优先级和 P95/P99；
+5. HTTP 202 Commit 在 kill/restart 后的完成、重放、顺序和幂等对账；
+6. `/metrics` 中每个调度层的 `queued/wait/exec/rejected` 四元组。
+
+#### 1. 准备真实服务和配置
+
+EchoMem 服务必须已经启动，并且 `ECHOMEM_CONFIG` 指向服务实际使用的
+`config.json`。压测租户配置至少准备 32 个租户；公平性、故障隔离和容量场景
+需要独立凭据，不能让多个租户共用同一个 API key。可从
+`performance/instance-profiles.example.json` 复制一份部署配置，至少填写：
+
+- `base_url`：EchoMem HTTP 地址；
+- `tenant_config`：独立租户凭据 JSON；
+- `preflight_config`：实际生效的 EchoMem `config.json`；
+- `commit_recovery`：容器/PID 和重启控制；
+- `fault_isolation` / `fault_plan`：真实故障控制（没有就会是 `INCONCLUSIVE`）；
+- `metrics_enabled`：是否能访问 `/metrics`。
+
+#### 2. 运行完整六指标验收
 
 ```bash
+git clone https://github.com/tech-innovation-group/Memory-System-Eval-Harness.git
+cd Memory-System-Eval-Harness
+git fetch origin v3_mcpTool
+git checkout v3_mcpTool
+
 export ECHOMEM_CONFIG=/etc/echomem/4u8g/config.json
 export STRESS_PROFILES=/etc/echomem/performance-profiles.json
 export ECHOMEM_BASE_URL=http://127.0.0.1:8010
 export STRESS_PROFILE_NAME=4U8G
+
 ./performance/run_4u8g_six_metrics.sh
 ```
 
-结果目录中的 `objective-suite.html` 是总报告；`objective-suite.json` 保存六项
-目标的 PASS / FAIL / INCONCLUSIVE 和证据；profile 下的 `formal/` 保留逐场景
-`summary.json`、`requests.csv`、`metrics_samples.csv` 和 HTML。查看报告时要同时
-检查 `coverage`：场景没有真实请求证据时，即使进程退出码为 0，也不能当作测试完成。
+脚本会调用 `performance.objective_suite`，只运行 4U8G profile；完整模式默认
+使用 PR397/report(6) 与 PR421 的场景目录，soak 不在默认场景中。每个场景会
+等待服务健康、执行真实 HTTP 请求、采集 `/metrics`、保存逐请求数据，并在结束
+后生成六项目标验收结果。
 
-需要快速检查命令和服务连通性时可执行：
+#### 3. 先做快速诊断
 
 ```bash
 export STRESS_QUICK=1
 ./performance/run_4u8g_six_metrics.sh
 ```
 
-`STRESS_QUICK=1` 只产生 bounded 诊断证据，不能替代完整验收；O2 的真实单租户
-故障、O5 的 kill-9 恢复和 O6 的租户/分层指标，在 profile 没有配置真实控制或
-观测能力时必须显示 `INCONCLUSIVE`，不能伪造为 PASS。
+快速模式会缩短场景和 Commit barrier，只用于检查服务、凭据、配置和基本请求
+链路，不足以替代完整容量、公平性或崩溃恢复结论。
+
+#### 4. 查看结果
+
+```text
+<输出目录>/objective-suite.html       总体 HTML 报告
+<输出目录>/objective-suite.json       六项目标和覆盖状态
+<输出目录>/4U8G/suite.json            场景总清单
+<输出目录>/4U8G/formal/**/summary.json 每个场景的摘要
+<输出目录>/4U8G/formal/**/requests.csv 逐请求耗时、状态、租户和召回断言
+<输出目录>/4U8G/formal/**/metrics_samples.csv
+                                        服务端 /metrics 原始采样
+```
+
+重点检查 `objective-suite.json` 中的 `coverage` 和六个 `O1` 到 `O6`：
+
+- `PASS`：有足够真实请求和对应证据，并满足阈值；
+- `FAIL`：真实证据表明阈值未满足；
+- `INCONCLUSIVE`：没有真实故障控制、kill/restart、独立凭据或服务端指标等必要证据；
+- 场景进程退出成功但 `evidence_runs` 不足时，仍不能当作测试完成。
 
 ## 核心架构
 
