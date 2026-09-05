@@ -118,6 +118,10 @@ performance/        # 性能压测与正式验收（多租户并发读写、注�
                              #     evaluate(8 门禁) / scheduler(7 检查) / objectives(O1-O7) / report_html
     orchestrator/            #   编排器实现（场景矩阵 + 套件执行 + 探针编排 + objective-suite 报告）
     profiles/                #   画像示例 + instance-profiles / tenants / fault-plan 示例
+  targets/general/
+    main.py                  #   通用场景引擎 CLI（python -m performance --target general：run / validate / probe / list）
+    scenes/                  #   通用场景（不针对具体系统的临时压测放这里，结果落到 results/）
+    probes/                  #   通用探针
 
 正式套件的 barrier 场景会在正式提交屏障前只执行少量 seed warm-up；
 屏障本身会按场景配置单独准备精确数量的未提交 session。不要把
@@ -466,7 +470,7 @@ python scripts/compare_memory_backends.py \
 「注入洪峰」下的劣化（**检出"注入阻塞检索"**）。设计见
 `performance/docs/设计意图.md`。
 
-场景引擎（`performance run`）产出 `summary.json`（请求统计：rps、延迟
+场景引擎（`performance --target general run`）产出 `summary.json`（请求统计：rps、延迟
 p50/p95/p99、错误分类、租户分组；场景可挂 `report` 钩子输出 `custom` 段，
 如 search 质量聚合）与 `records.csv`（逐请求明细）。正式验收不直接消费
 summary，而是由编排器（`echomem-acceptance`）统一灌种、跑 case，把 records
@@ -485,13 +489,14 @@ summary，而是由编排器（`echomem-acceptance`）统一灌种、跑 case，
 
 ```bash
 # 运行一个场景（场景=Python 文件，画像=YAML；输出 performance/targets/echomem/results/<ts>/）
-python -m performance run \
+# 通用引擎入口统一走 --target general；不针对具体系统的场景/探针放 targets/general/ 下
+python -m performance --target general run \
   --scene performance/targets/echomem/scenes/scene_c_mixed.py \
   --profile performance/targets/echomem/profiles/echomem.yaml
 
 # 场景清单与契约校验
-python -m performance list
-python -m performance validate --scene performance/targets/echomem/scenes/scene_a_pure_read.py
+python -m performance --target general list
+python -m performance --target general validate --scene performance/targets/echomem/scenes/scene_a_pure_read.py
 ```
 
 场景说明：`A` 纯读基线（劣化对照）· `B` 纯写注入（四段延迟 + 写后读一致性 +

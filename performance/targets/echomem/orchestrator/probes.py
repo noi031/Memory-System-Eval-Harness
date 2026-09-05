@@ -3,10 +3,10 @@
 ``run_configured_probes`` 逐个执行 profile 里显式配置的探针段（capability /
 blackbox / missing_cases / concurrent_commit / fault_isolation /
 limit_failure_sweep / commit_recovery / fault_plan），每个探针以子进程方式
-运行：写临时 YAML profile → ``python -m performance probe --scene
-<probes>/<scene>.py --profile <tmp.yaml> --out <out.json>`` → 读回产物 →
-删除临时文件。未配置的探针不跑；缺前置条件（如 blackbox 需要已完成 Commit
-与租户配置）只记 INCONCLUSIVE 命令记录，不产出制品。
+运行：写临时 YAML profile → ``python -m performance --target general probe
+--scene <probes>/<scene>.py --profile <tmp.yaml> --out <out.json>`` → 读回
+产物 → 删除临时文件。未配置的探针不跑；缺前置条件（如 blackbox 需要已完成
+Commit 与租户配置）只记 INCONCLUSIVE 命令记录，不产出制品。
 
 返回 (artifacts, commands)：artifacts 的键即 suite 顶层合并键（如
 ``capability_probe``/``commit_recovery``/``fault_suite``），值带 ``path``；
@@ -247,6 +247,8 @@ def _probe_command(scene: str, profile_path: Path, out_path: Path) -> list[str]:
         sys.executable,
         "-m",
         "performance",
+        "--target",
+        "general",
         "probe",
         "--scene",
         str(PROBES_DIR / scene),

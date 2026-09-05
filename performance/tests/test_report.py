@@ -12,7 +12,7 @@ from pathlib import Path
 from performance.engine import Engine, load_scene
 from performance.profile import Profile, load_profile
 from performance.report import summarize
-from performance.run import _build_summary
+from performance.targets.general.main import _build_summary
 
 SCENES_DIR = Path(__file__).resolve().parent.parent / "targets" / "echomem" / "scenes"
 
