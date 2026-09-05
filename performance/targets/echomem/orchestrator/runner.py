@@ -1,9 +1,8 @@
 """单 instance profile 的正式套件执行。
 
-``run_case`` 用 ``performance.engine.Engine`` 进程内执行单个 case
-（load_scene + Engine.run），把 records 汇总成契约摘要并写 case 目录下的
-summary.json / records.csv / commit_results.csv / search_results.csv；
-Engine 异常记 ``ENV_ERROR`` 不中断套件。
+``run_case`` 经通用层 ``performance.suite.run_case`` 执行单个 case：
+echomem 侧只挂 summarize 包装（通用 metrics + details/parameters）与
+commit/search 证据 CSV；Engine 异常记 ``ENV_ERROR`` 不中断套件。
 
 ``run_suite`` 编排一个 instance profile 的完整正式套件：prepare_command →
 preflight → 灌种（TenantPreparer）→ 逐 case 执行 → acceptance 求值 →
@@ -15,15 +14,15 @@ from __future__ import annotations
 import csv
 import json
 import shutil
-import statistics
-import threading
 from pathlib import Path
 from typing import Any
 
-from performance.engine import Engine, load_scene
 from performance.profile import Profile, TenantSpec
-from performance.records import CSV_FIELDS, RequestRecord
-from performance.stats import percentile
+from performance.records import RequestRecord
+from performance.suite import (
+    run_case as run_case_impl,
+    summarize_case_records as summarize_case_metrics,
+)
 from performance.targets.echomem.acceptance.evaluate import (
     evaluate_pr421_acceptance,
 )
@@ -43,107 +42,20 @@ from performance.util import now_iso, run_command
 SCENES_DIR = Path(__file__).resolve().parent.parent / "scenes"
 
 
-def _seconds(stage_ms: float) -> float:
-    return stage_ms / 1000.0
-
-
-def _rate_limited(record: RequestRecord) -> bool:
-    """限流样本：http_4xx 且带 Retry-After 或 reason_code（对齐 features.py）。"""
-    return (
-        record.status == "error"
-        and record.error_type == "http_4xx"
-        and (record.retry_after_s is not None or record.reason_code != "")
-    )
-
-
 def summarize_case_records(records: list[RequestRecord]) -> dict:
-    """records → suite per-run summary（对齐 evaluate/scheduler 期望结构）。
+    """records → suite per-run summary（通用 metrics + echomem 扩展）。
 
-    search = op=="read"，commit = commit_submit/commit_done；per_tenant 按
-    tenant_idx 分组；延迟统一为秒（stage_ms/1000）。
+    通用层 ``suite.summarize_case_records`` 只产出 metrics；这里补
+    details/parameters（identity_mode/quality_seed/延迟阈值），并用
+    ``is_anchor_query`` 计算 quality_asserted。
     """
-    reads = [r for r in records if r.op == "read"]
-    ok_reads = [r for r in reads if r.status == "ok"]
-    read_latencies = [_seconds(r.stage_ms) for r in ok_reads]
-
-    submits = [r for r in records if r.op == "commit_submit"]
-    dones = [r for r in records if r.op == "commit_done"]
-    ok_dones = [r for r in dones if r.status == "ok"]
-
-    completed_by_tenant: dict[str, int] = {}
-    for record in ok_dones:
-        key = str(record.tenant_idx)
-        completed_by_tenant[key] = completed_by_tenant.get(key, 0) + 1
-
-    def _pct(values: list[float], p: float) -> float | None:
-        value = percentile(values, p)
-        return round(value, 3) if value is not None else None
-
-    search = {
-        "submitted": len(reads),
-        "succeeded": len(ok_reads),
-        "errors": len(reads) - len(ok_reads),
-        "success_rate": (len(ok_reads) / len(reads)) if reads else None,
-        "rate_limited_count": sum(1 for r in reads if _rate_limited(r)),
-        "quality_asserted": sum(1 for r in reads if is_anchor_query(r.query)),
-        "quality_failures": sum(1 for r in reads if not r.quality_ok),
-        "latency": {
-            "mean_s": (
-                round(statistics.mean(read_latencies), 3) if read_latencies else None
-            ),
-            "p50_s": _pct(read_latencies, 50),
-            "p95_s": _pct(read_latencies, 95),
-            "p99_s": _pct(read_latencies, 99),
-        },
+    summary = summarize_case_metrics(records, is_anchor=is_anchor_query)
+    summary["details"] = {"identity_mode": "independent_auth_keys", "quality_seed": []}
+    summary["parameters"] = {
+        "commit_delay_threshold_s": 10.0,
+        "search_delay_threshold_s": 2.5,
     }
-    submitted = len(submits)
-    completed = len(ok_dones)
-    commit = {
-        "submitted": submitted,
-        "completed": completed,
-        "failed": sum(1 for r in dones if r.status != "ok")
-        + sum(1 for r in submits if r.status != "ok"),
-        "success_rate": (completed / submitted) if submitted else None,
-        "rate_limited_count": sum(1 for r in submits if _rate_limited(r)),
-    }
-
-    per_tenant: dict[str, dict[str, Any]] = {}
-    for tenant_idx in sorted({str(r.tenant_idx) for r in records}):
-        tenant_reads = [r for r in ok_reads if str(r.tenant_idx) == tenant_idx]
-        tenant_submits = [
-            r for r in submits if r.status == "ok" and str(r.tenant_idx) == tenant_idx
-        ]
-        tenant_dones = [
-            _seconds(r.stage_ms) for r in ok_dones if str(r.tenant_idx) == tenant_idx
-        ]
-        if not tenant_reads and not tenant_submits and not tenant_dones:
-            continue
-        entry: dict[str, Any] = {}
-        if tenant_submits or tenant_dones:
-            entry["commit"] = {"submitted": len(tenant_submits), "completed": len(tenant_dones)}
-            if tenant_dones:
-                entry["commit"]["completion"] = {"p50_s": _pct(tenant_dones, 50)}
-        if tenant_reads:
-            entry["search"] = {
-                "submitted": sum(1 for r in reads if str(r.tenant_idx) == tenant_idx),
-                "succeeded": len(tenant_reads),
-                "latency": {
-                    "p50_s": _pct([_seconds(r.stage_ms) for r in tenant_reads], 50),
-                    "p95_s": _pct([_seconds(r.stage_ms) for r in tenant_reads], 95),
-                },
-            }
-        per_tenant[tenant_idx] = entry
-
-    return {
-        "metrics": {
-            "search": search,
-            "commit": commit,
-            "fairness": {"commit_completed_per_tenant": completed_by_tenant},
-            "per_tenant": per_tenant,
-        },
-        "details": {"identity_mode": "independent_auth_keys", "quality_seed": []},
-        "parameters": {"commit_delay_threshold_s": 10.0, "search_delay_threshold_s": 2.5},
-    }
+    return summary
 
 
 # ---------------------------------------------------------------------- #
@@ -231,21 +143,8 @@ def _write_search_results(case_dir: Path, records: list[RequestRecord]) -> None:
         writer.writerows(rows)
 
 
-def _write_case_outputs(
-    case_dir: Path,
-    records: list[RequestRecord],
-    summary: dict[str, Any],
-) -> None:
-    case_dir.mkdir(parents=True, exist_ok=True)
-    (case_dir / "summary.json").write_text(
-        json.dumps(summary, ensure_ascii=False, indent=2) + "\n",
-        encoding="utf-8",
-    )
-    with (case_dir / "records.csv").open("w", newline="", encoding="utf-8") as handle:
-        writer = csv.DictWriter(handle, fieldnames=CSV_FIELDS)
-        writer.writeheader()
-        for record in records:
-            writer.writerow(record.to_csv_row())
+def _write_case_evidence(case_dir: Path, records: list[RequestRecord]) -> None:
+    """commit/search 证据 CSV（echomem 专属，写在通用 summary/records 之后）。"""
     _write_commit_results(case_dir, records)
     _write_search_results(case_dir, records)
 
@@ -257,49 +156,20 @@ def run_case(
     case_dir: Path,
     timeout_s: float | None = None,
 ) -> dict:
-    """执行单个 case：load_scene + Engine.run，写产物并返回 run dict。
+    """执行单个 case（经通用层 run_case）：load_scene + Engine.run 并写产物。
 
-    Engine 异常记 ``ENV_ERROR``；``timeout_s`` 用守护线程包裹 Engine.run，
-    超时记 ``TIMEOUT`` 并返回已收集的（可能为空）records 摘要。
+    通用层负责执行与 summary.json/records.csv；这里挂上 echomem 的
+    summarize 包装（metrics + details/parameters）与 commit/search 证据 CSV。
     """
-    scene = load_scene(SCENES_DIR / f"{case['scene']}.py")
-    runner_timeout = False
-    status = "completed"
-    records: list[RequestRecord] = []
-    try:
-        if timeout_s and timeout_s > 0:
-            holder: dict[str, Any] = {}
-
-            def _execute() -> None:
-                holder["result"] = Engine(profile, scene).run()
-
-            thread = threading.Thread(target=_execute, daemon=True)
-            thread.start()
-            thread.join(timeout_s)
-            if thread.is_alive():
-                runner_timeout = True
-                status = "TIMEOUT"
-            else:
-                records = holder["result"].records
-        else:
-            records = Engine(profile, scene).run().records
-    except Exception:
-        status = "ENV_ERROR"
-    summary = summarize_case_records(records)
-    _write_case_outputs(case_dir, records, summary)
-    return {
-        "scenario": case["label"],
-        "scenario_label": case["label"],
-        "scene": case["scene"],
-        "repetition": 1,
-        "policy": "server-observe",
-        "status": status,
-        "duration_s": float(profile.load.duration_s),
-        "case_timeout_s": float(timeout_s or 0),
-        "runner_timeout": runner_timeout,
-        "output_dir": str(case_dir.resolve()),
-        "summary": summary,
-    }
+    return run_case_impl(
+        case,
+        profile,
+        scene_path=SCENES_DIR / f"{case['scene']}.py",
+        case_dir=case_dir,
+        timeout_s=timeout_s,
+        summarize=summarize_case_records,
+        write_evidence=_write_case_evidence,
+    )
 
 
 # ---------------------------------------------------------------------- #

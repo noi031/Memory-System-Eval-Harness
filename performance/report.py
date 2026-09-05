@@ -115,7 +115,7 @@ def summarize(result: RunResult, profile: Profile) -> dict[str, Any]:
     return as_json_safe(summary)
 
 
-def write_outputs(out_dir: Path, result: RunResult, summary: dict[str, Any]) -> None:
+def write_records(out_dir: Path, records: list[RequestRecord], summary: dict[str, Any]) -> None:
     """Write summary.json and records.csv into ``out_dir``."""
 
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -124,8 +124,14 @@ def write_outputs(out_dir: Path, result: RunResult, summary: dict[str, Any]) -> 
     with (out_dir / "records.csv").open("w", encoding="utf-8", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=CSV_FIELDS)
         writer.writeheader()
-        for record in result.records:
+        for record in records:
             writer.writerow(record.to_csv_row())
+
+
+def write_outputs(out_dir: Path, result: RunResult, summary: dict[str, Any]) -> None:
+    """Write summary.json and records.csv into ``out_dir``."""
+
+    write_records(out_dir, result.records, summary)
 
 
 def print_summary(summary: dict[str, Any], stream: TextIO = sys.stdout) -> None:
