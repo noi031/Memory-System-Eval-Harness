@@ -5,6 +5,7 @@
       "base_url": "http://127.0.0.1:8010",
       "tenant_config": "tenants.example.json",
       "preflight_config": "/etc/echomem/4u8g/config.json",
+      "auth_header": "X-Auth-Key",
       "allow_partial_tenants": true,
       "metrics_enabled": true,
       "quick_include_seed": false,
@@ -12,14 +13,27 @@
         "health_path": "/health",
         "metrics_path": "/metrics",
         "cursor_path": "",
+        "cursor_uri_template": "echo://sessions/{session}/current/commit_cursor.json",
         "operation_path": "",
         "conflict_path": "",
         "ttl_path": "",
         "engine_path": "",
         "fault_path": ""
       },
+      "missing_cases": {
+        "enabled": true,
+        "max_tenants": 1,
+        "commit_timeout_s": 15,
+        "search_timeout_s": 10,
+        "visibility_timeout_s": 20
+      },
+      "concurrent_commit": {
+        "enabled": true,
+        "concurrency": 4,
+        "timeout_s": 120
+      },
       "commit_recovery": {
-        "container": "echomem-4u8g",
+        "container": "${ECHOMEM_CONTAINER:-echomem-4u8g}",
         "tenant": "stress-a",
         "kill_delay_s": 0.5,
         "messages": 12,
@@ -28,14 +42,27 @@
         "poll_s": 2
       },
       "fault_isolation": {
-        "enabled": false,
+        "enabled": true,
         "target_tenant": "stress-a",
         "bystander_tenants": "stress-b,stress-c,stress-d",
-        "endpoint": "http://127.0.0.1:8010/fault/control",
+        "endpoint": "${ECHOMEM_FAULT_CONTROL_URL}",
         "samples": 8,
         "workers": 8,
         "timeout_s": 20,
         "control_timeout_s": 30
+      },
+      "fairness_expectations": {
+        "tenant_ids": ["stress-a", "stress-b", "stress-c", "stress-d"]
+      },
+      "observability": {
+        "lanes": [
+          "recall_engine",
+          "recall_intent_llm",
+          "recall_query_embedding",
+          "recall_rerank",
+          "commit"
+        ],
+        "fanout_engines": ["recall", "commit"]
       },
       "fault_plan": "fault-plan.example.json",
       "limit_failure_sweep": {
