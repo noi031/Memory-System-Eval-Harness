@@ -92,7 +92,7 @@ send_message()             ----->  EchoAgent 后端  ----->  LLM
 
 ```bash
 # 动态评测 -- EchoMem 后端（默认）
-python -m dynamic.run_eval \
+python run_eval.py --dataset dynamic \
   --agent-plugin echoagent_live \
   --llm-base-url https://dashscope.aliyuncs.com/compatible-mode/v1 \
   --llm-api-key YOUR_API_KEY \
@@ -106,7 +106,7 @@ python -m dynamic.run_eval \
   --num-memories 5 --num-queries 10
 
 # 动态评测 -- OpenViking 后端
-python -m dynamic.run_eval \
+python run_eval.py --dataset dynamic \
   --agent-plugin echoagent_live \
   --memory-backend openviking \
   --llm-base-url https://dashscope.aliyuncs.com/compatible-mode/v1 \
@@ -121,7 +121,7 @@ python -m dynamic.run_eval \
   --num-memories 5 --num-queries 10
 
 # LoCoMo benchmark 评测
-python benchmarks/locomo/run_eval.py \
+python run_eval.py --dataset locomo \
   --agent-plugin echoagent_live \
   --echoagent-url https://echo-agent.online \
   --username test_user \

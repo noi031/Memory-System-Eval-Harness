@@ -25,7 +25,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, TextIO
 
+# 支持从任意位置运行（`cd performance && python probe.py` 或项目根 `python -m performance.probe`）
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent
+if str(_PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(_PROJECT_ROOT))
+
 from performance.ctx import Ctx, PROBE_STATUSES, ProbeCheck
+from performance.dispatch import dispatch
 from performance.profile import Profile
 from performance.records import RequestRecord
 
@@ -214,3 +220,21 @@ def write_probe_output(out_path: Path, summary: dict[str, Any]) -> None:
         json.dumps(summary, ensure_ascii=False, indent=2) + "\n",
         encoding="utf-8",
     )
+
+
+def main(argv: list[str] | None = None) -> int:
+    """CLI: forward ``--target <system>`` to the target's orchestration entry.
+
+    Probe execution itself is driven by the target's ``main.py`` (e.g.
+    ``python probe.py --target echomem --profiles ...``).
+    """
+    argv = list(sys.argv[1:] if argv is None else argv)
+    target_result = dispatch(argv)
+    if target_result is not None:
+        return target_result
+    print("error: probe.py requires --target <system>", file=sys.stderr)
+    return 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

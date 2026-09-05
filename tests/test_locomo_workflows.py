@@ -36,7 +36,7 @@ from benchmarks.locomo.resume import (
     write_judge_resume_manifest,
     write_qa_resume_manifest,
 )
-from benchmarks.locomo.run_eval import load_qa_prompt_append
+from run_eval import load_qa_prompt_append
 from shared.eval_base import EvalConfig
 from shared.qa import QAResult
 from plugins.base import AgentResponse

@@ -250,6 +250,8 @@ class LongMemEvalWorkflowTests(unittest.TestCase):
             commands = build_shard_commands(
                 [
                     "--dataset",
+                    "longmemeval",
+                    "--dataset-path",
                     "dataset.json",
                     "--out-dir",
                     "old",

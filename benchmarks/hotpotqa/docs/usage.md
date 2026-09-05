@@ -16,28 +16,28 @@
 ## 使用方法
 
 ```bash
-# 不指定 --dataset 则自动查找/下载
-python benchmarks/hotpotqa/run_eval.py \
+# 不指定 --dataset-path 则自动查找/下载
+python run_eval.py --dataset hotpotqa \
   --import-mode per_question \
   --llm-api-key YOUR_API_KEY
 
 # 指定数据集路径
-python benchmarks/hotpotqa/run_eval.py \
-  --dataset /path/to/hotpotqa.json \
+python run_eval.py --dataset hotpotqa \
+  --dataset-path /path/to/hotpotqa.json \
   --import-mode per_question \
   --llm-api-key YOUR_API_KEY
 
 # global 模式 (共享 session)
-python benchmarks/hotpotqa/run_eval.py \
-  --dataset /path/to/hotpotqa.json \
+python run_eval.py --dataset hotpotqa \
+  --dataset-path /path/to/hotpotqa.json \
   --import-mode global \
   --concurrency 8 \
   --llm-api-key YOUR_API_KEY
 
 # documents 模式 (文档资源语料, 快速 RAG 评测; 需后端启用资源索引:
 # EchoMem resource_engine 或 OpenViking 19080)
-python benchmarks/hotpotqa/run_eval.py \
-  --dataset /path/to/hotpotqa.json \
+python run_eval.py --dataset hotpotqa \
+  --dataset-path /path/to/hotpotqa.json \
   --import-mode documents \
   --agent-plugin vikingbot \
   --memory-backend echomem \
@@ -70,7 +70,7 @@ python benchmarks/hotpotqa/run_eval.py \
 ### 数据集参数
 | 参数 | 默认值 | 说明 |
 |---|---|---|
-| `--dataset` | (自动) | HotpotQA JSON 数据集路径。不指定时自动在 `benchmarks/hotpotqa/data/` 查找 `hotpot_dev_distractor_v1.json`, 找不到则从远程下载 |
+| `--dataset-path` | (自动) | HotpotQA JSON 数据集路径。不指定时自动在 `benchmarks/hotpotqa/data/` 查找 `hotpot_dev_distractor_v1.json`, 找不到则从远程下载 |
 | `--sample` | `all` | 筛选 sample |
 | `--questions` | `0` | 限制 QA 数量 (0=全部) |
 | `--question-ids` | (空) | 逗号分隔的 question/native/sample ID，在 `--questions` 前应用 |
@@ -129,7 +129,7 @@ metadata；若存在显式 `hotpotqa_title` / `hotpotqa_sent_id`，评测优先�
 python benchmarks/hotpotqa/diagnosis.py \
   --qa-results path/to/qa_results.csv \
   --eval-results path/to/eval_results.csv \
-  --dataset path/to/hotpotqa.json \
+  --dataset-path path/to/hotpotqa.json \
   --questions 100 \
   --out-dir path/to/run_dir
 ```
@@ -139,7 +139,7 @@ python benchmarks/hotpotqa/diagnosis.py \
 ```bash
 python benchmarks/hotpotqa/recovery.py \
   --qa /path/to/run/qa_results.csv \
-  --dataset /path/to/hotpotqa.json \
+  --dataset-path /path/to/hotpotqa.json \
   --mode failed-or-missing \
   --out-dir /path/to/recovery
 ```

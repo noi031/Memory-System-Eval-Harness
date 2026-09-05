@@ -1,9 +1,11 @@
-"""objective-suite CLI：多 instance profile 的正式验收编排入口。
+"""objective-suite CLI：多 instance profile 的正式验收编排入口（EchoMem target）。
 
 读取 instance-profiles JSON，逐 profile 执行正式套件（``run_suite``，进程内
 Engine + 灌种 + acceptance 求值）与探针编排（``run_configured_probes``），
 汇总七项目标 O1-O7，写 objective-suite.json 并渲染 objective-suite.html。
 ``--skip-run`` 只读已有 suite.json 生成报告，不重新发送压测请求。
+
+调用方式：``python run.py --target echomem``（由 performance 顶层分发）。
 """
 
 from __future__ import annotations
@@ -153,7 +155,7 @@ def acquire_output_lock(out_dir: Path):
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog="echomem-orchestrator",
+        prog="echomem-acceptance",
         description="Run EchoMem objective acceptance suite",
     )
     parser.add_argument("--profiles", required=True, type=Path)

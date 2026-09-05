@@ -7,7 +7,7 @@ import sys
 
 import pytest
 
-from performance.targets.echomem.orchestrator.main import (
+from performance.targets.echomem.main import (
     acquire_output_lock,
     load_env_file,
     load_profiles,

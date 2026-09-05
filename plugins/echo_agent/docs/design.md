@@ -74,14 +74,14 @@ typing 状态（`_pending_turn_id`、`_typing_committed`、`_typing_memory_items
 
 ```bash
 # 动态评测（默认插件）
-python dynamic/run_eval.py \
+python run_eval.py --dataset dynamic \
   --echoagent-url http://127.0.0.1:31020 \
   --username test_user --password YOUR_PASSWORD \
   --evaluator-api-key YOUR_KEY
 
 # benchmark（需 --concurrency 1，因有 typing 状态）
 # echo_agent 不提供 --llm-* 参数，judge LLM 需通过 --judge-* 指定
-python benchmarks/locomo/run_eval.py \
+python run_eval.py --dataset locomo \
   --agent-plugin echo_agent \
   --echoagent-url http://127.0.0.1:31020 \
   --username test_user --password YOUR_PASSWORD \

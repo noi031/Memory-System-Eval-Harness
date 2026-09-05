@@ -81,8 +81,10 @@ def build_retry_command(
 ) -> list[str]:
     return [
         sys.executable,
-        str(project_root / "benchmarks" / "locomo" / "run_eval.py"),
+        str(project_root / "run_eval.py"),
         "--dataset",
+        "locomo",
+        "--dataset-path",
         str(dataset),
         "--sample",
         sample,

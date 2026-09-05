@@ -62,7 +62,7 @@ from benchmarks.locomo.provenance import (
 from benchmarks.locomo.qa import QAOptions, build_qa_tasks
 from benchmarks.locomo.reporting import build_summary
 from benchmarks.locomo.retry import build_retry_command, latest_qa_csv
-from benchmarks.locomo.run_eval import _build_agent_options, build_parser
+from run_eval import _build_agent_options, build_locomo_parser as build_parser
 from benchmarks.locomo.selection import parse_question_ids, select_questions
 from benchmarks.locomo.stats import summarize_judge_rows
 from benchmarks.locomo.blackbox import metric_stats, percentile
@@ -777,10 +777,12 @@ class BuildRetryCommandTests(unittest.TestCase):
         )
         self.assertEqual(cmd[0], cmd[0])  # python executable
         self.assertEqual(
-            str(Path("/project") / "benchmarks" / "locomo" / "run_eval.py"),
+            str(Path("/project") / "run_eval.py"),
             cmd[1],
         )
         self.assertIn("--dataset", cmd)
+        self.assertIn("locomo", cmd)
+        self.assertIn("--dataset-path", cmd)
         self.assertIn(str(Path("/data/locomo.json")), cmd)
         self.assertIn("--sample", cmd)
         self.assertIn("conv-30", cmd)
@@ -1408,7 +1410,7 @@ class RunEvalParserTests(unittest.TestCase):
         ])
 
     def test_dataset_params(self):
-        self.assertEqual("", self.args.dataset)
+        self.assertEqual("", self.args.dataset_path)
         self.assertEqual("all", self.args.sample)
         self.assertEqual(0, self.args.questions)
         self.assertEqual("", self.args.question_ids)

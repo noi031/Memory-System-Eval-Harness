@@ -141,4 +141,4 @@ class MyAgentPlugin(AgentPlugin):
 
 `registry.py` 自动扫描 `plugins.<name>.plugin` 模块中 `AgentPlugin` 的子类, 无需手动注册。
 
-5. 运行: `python dynamic/run_eval.py --agent-plugin <name> ...`
+5. 运行: `python run_eval.py --dataset dynamic --agent-plugin <name> ...`

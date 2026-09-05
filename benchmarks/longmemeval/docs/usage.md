@@ -13,46 +13,46 @@
 ## 使用方法
 
 ```bash
-# 不指定 --dataset 则自动查找/下载
-python benchmarks/longmemeval/run_eval.py \
+# 不指定 --dataset-path 则自动查找/下载
+python run_eval.py --dataset longmemeval \
   --llm-api-key YOUR_API_KEY
 
 # 指定数据集路径
-python benchmarks/longmemeval/run_eval.py \
-  --dataset /path/to/longmemeval.json \
+python run_eval.py --dataset longmemeval \
+  --dataset-path /path/to/longmemeval.json \
   --llm-api-key YOUR_API_KEY
 
 # 限制数量
-python benchmarks/longmemeval/run_eval.py \
-  --dataset /path/to/longmemeval.json \
+python run_eval.py --dataset longmemeval \
+  --dataset-path /path/to/longmemeval.json \
   --questions 20 \
   --concurrency 8 \
   --llm-api-key YOUR_API_KEY
 
 # 使用独立 judge 模型
-python benchmarks/longmemeval/run_eval.py \
-  --dataset /path/to/longmemeval.json \
+python run_eval.py --dataset longmemeval \
+  --dataset-path /path/to/longmemeval.json \
   --judge-model gpt-4o \
   --judge-api-key YOUR_JUDGE_KEY \
   --judge-base-url https://api.openai.com/v1 \
   --llm-api-key YOUR_API_KEY
 
 # 指定题目 ID
-python benchmarks/longmemeval/run_eval.py \
-  --dataset /path/to/longmemeval.json \
+python run_eval.py --dataset longmemeval \
+  --dataset-path /path/to/longmemeval.json \
   --question-ids q1,q2,q3 \
   --llm-api-key YOUR_API_KEY
 
 # 分成 8 个隔离 shard，最多并行 4 个进程，完成后自动合并
-python benchmarks/longmemeval/run_eval.py \
-  --dataset /path/to/longmemeval.json \
+python run_eval.py --dataset longmemeval \
+  --dataset-path /path/to/longmemeval.json \
   --parallel-shards 8 \
   --parallel-workers 4 \
   --llm-api-key YOUR_API_KEY
 
 # 只生成分片命令和 manifest，不启动评测
-python benchmarks/longmemeval/run_eval.py \
-  --dataset /path/to/longmemeval.json \
+python run_eval.py --dataset longmemeval \
+  --dataset-path /path/to/longmemeval.json \
   --parallel-shards 8 \
   --parallel-dry-run \
   --llm-api-key YOUR_API_KEY
@@ -68,7 +68,7 @@ python benchmarks/longmemeval/run_eval.py \
 ### 数据集参数
 | 参数 | 默认值 | 说明 |
 |---|---|---|
-| `--dataset` | (自动) | LongMemEval JSON 数据集路径。不指定时自动在 `benchmarks/longmemeval/data/` 查找 `longmemeval_s_cleaned.json`, 找不到则从 HuggingFace 下载 |
+| `--dataset-path` | (自动) | LongMemEval JSON 数据集路径。不指定时自动在 `benchmarks/longmemeval/data/` 查找 `longmemeval_s_cleaned.json`, 找不到则从 HuggingFace 下载 |
 | `--sample` | `all` | 筛选 sample |
 | `--questions` | `0` | 限制 QA 数量 (0=全部) |
 | `--question-ids` | (空) | 逗号分隔的 question/native/sample ID |
@@ -131,6 +131,6 @@ CSV 合并能力，供分片合并及后续恢复命令复用。
 ```bash
 python benchmarks/longmemeval/recovery.py \
   --qa /path/to/run/qa_results.csv \
-  --dataset /path/to/longmemeval.json \
+  --dataset-path /path/to/longmemeval.json \
   --out-dir /path/to/recovery
 ```

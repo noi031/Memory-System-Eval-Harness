@@ -1,4 +1,4 @@
-"""EchoAgent backend HTTP client (moved from dynamic/run_eval.py).
+"""EchoAgent backend HTTP client.
 
 All calls have graceful failure: prefetch endpoints return None on 404,
 seq conflicts retry up to 3 times.

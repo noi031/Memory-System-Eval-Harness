@@ -67,8 +67,10 @@ def main() -> None:
         "recovery_question_ids": selected_ids,
         "recovery_count": len(selected_ids),
         "retry_command": [
-            str(_PROJECT_ROOT / "benchmarks" / "hotpotqa" / "run_eval.py"),
+            str(_PROJECT_ROOT / "run_eval.py"),
             "--dataset",
+            "hotpotqa",
+            "--dataset-path",
             str(dataset_path),
             "--question-ids",
             ",".join(selected_ids),

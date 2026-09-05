@@ -49,13 +49,13 @@ VikingBot 在 `setup()` 中创建自己的 `LLMClient` 和 `MemoryClient`：
 
 ```bash
 # LoCoMo benchmark（默认使用 vikingbot）
-python benchmarks/locomo/run_eval.py --llm-api-key YOUR_KEY
+python run_eval.py --dataset locomo --llm-api-key YOUR_KEY
 
 # 搭配 echomem 记忆后端
-python benchmarks/locomo/run_eval.py --memory-backend echomem --echomem-url http://127.0.0.1:8010
+python run_eval.py --dataset locomo --memory-backend echomem --echomem-url http://127.0.0.1:8010
 
 # 搭配 openviking 记忆后端
-python benchmarks/locomo/run_eval.py --memory-backend openviking
+python run_eval.py --dataset locomo --memory-backend openviking
 ```
 
 ## 线程安全

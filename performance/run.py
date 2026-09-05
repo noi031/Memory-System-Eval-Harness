@@ -21,6 +21,12 @@ import sys
 import time
 from pathlib import Path
 
+# 支持从任意位置运行（`cd performance && python run.py` 或项目根 `python -m performance.run`）
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent
+if str(_PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(_PROJECT_ROOT))
+
+from performance.dispatch import dispatch
 from performance.engine import Engine, SceneError, load_scene
 from performance.probe import (
     ProbeRunner,
@@ -88,6 +94,10 @@ def main(argv: list[str] | None = None) -> int:
                 stream.reconfigure(encoding="utf-8")
             except (ValueError, OSError):
                 pass
+    argv = list(sys.argv[1:] if argv is None else argv)
+    target_result = dispatch(argv)
+    if target_result is not None:
+        return target_result
     parser = build_parser()
     args = parser.parse_args(argv)
     try:
@@ -265,3 +275,7 @@ def _make_out_dir(explicit: str | None, scene_path: str) -> Path:
     if explicit:
         return Path(explicit)
     return _default_out_root(scene_path) / time.strftime("%Y%m%d_%H%M%S")
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

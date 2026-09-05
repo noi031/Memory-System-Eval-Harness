@@ -64,7 +64,7 @@ from benchmarks.longmemeval.recovery import (
     merge_shard_artifacts,
 )
 from benchmarks.longmemeval.reporting import build_summary
-from benchmarks.longmemeval.run_eval import build_parser as build_eval_parser
+from run_eval import build_longmemeval_parser as build_eval_parser
 from benchmarks.longmemeval.selection import (
     parse_question_ids,
     select_jobs_and_plans,
@@ -1655,26 +1655,33 @@ class ParallelTests(unittest.TestCase):
         self.assertEqual(["--keep"], result)
 
     def test_clean_forwarded_args_preserves_other_args(self):
-        argv = ["--dataset", "data.json", "--sample", "all", "--llm-model", "gpt"]
+        argv = ["--dataset", "longmemeval", "--dataset-path", "data.json",
+                "--sample", "all", "--llm-model", "gpt"]
         result = _clean_forwarded_args(argv)
         self.assertEqual(argv, result)
 
     def test_clean_forwarded_args_mixed(self):
         argv = [
-            "--dataset", "data.json",
+            "--dataset", "longmemeval",
+            "--dataset-path", "data.json",
             "--out-dir", "old",
             "--parallel-dry-run",
             "--questions", "5",
             "--sample", "all",
         ]
         result = _clean_forwarded_args(argv)
-        self.assertEqual(["--dataset", "data.json", "--sample", "all"], result)
+        self.assertEqual(
+            ["--dataset", "longmemeval", "--dataset-path", "data.json",
+             "--sample", "all"],
+            result,
+        )
 
     def test_build_shard_commands_structure(self):
         with tempfile.TemporaryDirectory() as d:
             shards = [["q1", "q3"], ["q2"]]
             commands = build_shard_commands(
-                ["--dataset", "data.json"], shards, Path(d)
+                ["--dataset", "longmemeval", "--dataset-path", "data.json"],
+                shards, Path(d),
             )
             self.assertEqual(2, len(commands))
             cmd1 = commands[0]
@@ -1687,13 +1694,16 @@ class ParallelTests(unittest.TestCase):
             self.assertIn("--out-dir", cmd1["command"])
             # The cleaned base args should be present
             self.assertIn("--dataset", cmd1["command"])
+            self.assertIn("longmemeval", cmd1["command"])
+            self.assertIn("--dataset-path", cmd1["command"])
             self.assertIn("data.json", cmd1["command"])
 
     def test_build_shard_commands_strips_old_options(self):
         with tempfile.TemporaryDirectory() as d:
             shards = [["q1"]]
             commands = build_shard_commands(
-                ["--dataset", "data.json", "--out-dir", "old", "--questions", "3"],
+                ["--dataset", "longmemeval", "--dataset-path", "data.json",
+                 "--out-dir", "old", "--questions", "3"],
                 shards, Path(d),
             )
             cmd = commands[0]["command"]
@@ -1704,7 +1714,7 @@ class ParallelTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             output_dir = Path(d) / "parallel"
             summary = run_parallel(
-                argv=["--dataset", "data.json"],
+                argv=["--dataset", "longmemeval", "--dataset-path", "data.json"],
                 question_ids=["q1", "q2"],
                 output_dir=output_dir,
                 shard_count=2,
@@ -1731,7 +1741,7 @@ class ParallelTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             output_dir = Path(d) / "parallel"
             summary = run_parallel(
-                argv=["--dataset", "data.json"],
+                argv=["--dataset", "longmemeval", "--dataset-path", "data.json"],
                 question_ids=["q1", "q2"],
                 output_dir=output_dir,
                 shard_count=2,
@@ -1758,7 +1768,7 @@ class ParallelTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             output_dir = Path(d) / "parallel_fail"
             summary = run_parallel(
-                argv=["--dataset", "data.json"],
+                argv=["--dataset", "longmemeval", "--dataset-path", "data.json"],
                 question_ids=["q1", "q2"],
                 output_dir=output_dir,
                 shard_count=2,
@@ -1779,11 +1789,11 @@ class RunEvalTests(unittest.TestCase):
         with patch.object(sys, "argv", ["test"]):
             parser = build_eval_parser()
             args = parser.parse_args([
-                "--dataset", "data.json",
+                "--dataset-path", "data.json",
                 "--llm-base-url", "http://api",
                 "--llm-api-key", "key",
             ])
-            self.assertEqual("data.json", args.dataset)
+            self.assertEqual("data.json", args.dataset_path)
             self.assertEqual("all", args.sample)
             self.assertEqual(0, args.questions)
             self.assertEqual("", args.question_ids)

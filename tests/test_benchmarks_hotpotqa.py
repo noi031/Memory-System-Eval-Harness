@@ -2573,7 +2573,7 @@ class TestHotpotQAResumeTraces(unittest.TestCase):
 
 class TestRunEvalBuildParser(unittest.TestCase):
     def test_defaults(self):
-        from benchmarks.hotpotqa.run_eval import build_parser
+        from run_eval import build_hotpotqa_parser as build_parser
         # --agent-plugin bare_llm keeps the parser simple for testing
         argv = ["run_eval.py", "--agent-plugin", "bare_llm",
                 "--llm-api-key", "k", "--llm-base-url", "http://x",
@@ -2589,7 +2589,7 @@ class TestRunEvalBuildParser(unittest.TestCase):
         self.assertEqual("results", args.out_dir)
 
     def test_import_mode_choices(self):
-        from benchmarks.hotpotqa.run_eval import build_parser
+        from run_eval import build_hotpotqa_parser as build_parser
         for mode in ("per_question", "global"):
             with self.subTest(mode=mode):
                 argv = ["run_eval.py", "--agent-plugin", "bare_llm",
@@ -2600,7 +2600,7 @@ class TestRunEvalBuildParser(unittest.TestCase):
                 self.assertEqual(mode, args.import_mode)
 
     def test_question_ids_arg(self):
-        from benchmarks.hotpotqa.run_eval import build_parser
+        from run_eval import build_hotpotqa_parser as build_parser
         argv = ["run_eval.py", "--agent-plugin", "bare_llm",
                 "--llm-api-key", "k", "--llm-base-url", "http://x",
                 "--llm-model", "m", "--question-ids", "a,b,c"]
@@ -2609,7 +2609,7 @@ class TestRunEvalBuildParser(unittest.TestCase):
         self.assertEqual("a,b,c", args.question_ids)
 
     def test_reuse_memory_from_arg(self):
-        from benchmarks.hotpotqa.run_eval import build_parser
+        from run_eval import build_hotpotqa_parser as build_parser
         argv = ["run_eval.py", "--agent-plugin", "bare_llm",
                 "--llm-api-key", "k", "--llm-base-url", "http://x",
                 "--llm-model", "m",

@@ -5,7 +5,8 @@ import unittest
 from pathlib import Path
 
 from shared.eval_base import build_config_from_args, resolve_llm_credentials, validate_eval_config
-from dynamic.run_eval import _build_v2_quality_report, build_parser, validate_dynamic_args
+from run_eval import build_dynamic_parser as build_parser, validate_dynamic_args
+from dynamic.artifacts import build_v2_quality_report as _build_v2_quality_report
 
 
 class DynamicConfigTests(unittest.TestCase):
@@ -32,7 +33,7 @@ class DynamicConfigTests(unittest.TestCase):
             dataset.write_text("[]\n", encoding="utf-8")
             evaluator.write_text("dimensions: []\n", encoding="utf-8")
             args = build_parser().parse_args([
-                "--dataset", str(dataset),
+                "--dataset-path", str(dataset),
                 "--evaluator-config", str(evaluator),
                 "--llm-base-url", "https://example.test/v1",
                 "--llm-api-key", "secret",
@@ -69,7 +70,7 @@ class DynamicConfigTests(unittest.TestCase):
             dataset = Path(directory) / "dataset.json"
             dataset.write_text("[]\n", encoding="utf-8")
             args = build_parser().parse_args([
-                "--dataset", str(dataset),
+                "--dataset-path", str(dataset),
                 "--evaluator-config", str(evaluator),
                 "--llm-base-url", "https://example.test/v1",
                 "--llm-api-key", "secret",
@@ -88,7 +89,7 @@ class DynamicConfigTests(unittest.TestCase):
             dataset = Path(directory) / "dataset.json"
             dataset.write_text("[]\n", encoding="utf-8")
             args = build_parser().parse_args([
-                "--dataset", str(dataset),
+                "--dataset-path", str(dataset),
                 "--evaluator-config", str(evaluator),
             ])
             errors = validate_dynamic_args(args)

@@ -39,8 +39,8 @@
 
 直接 Python 调用，CLI 参数即配置，AI 友好。
 
-- **直接启动**：`python benchmarks/<name>/run_eval.py` 或
-  `python dynamic/run_eval.py`，一条命令完成全流程，无需额外包装层。
+- **直接启动**：`python run_eval.py --dataset <name>`，一条命令完成全流程，
+  无需额外包装层。
 - **CLI 参数驱动**：所有连接地址、模型配置、记忆后端、插件选择通过 CLI 参数
  传入，可写在 `.bat` / `.sh` 脚本中固化。环境变量作为默认值，CLI 参数覆盖。
 - **预检**：评测启动时自动验证数据集、记忆后端连通性和模型配置，通过后才进入
@@ -69,54 +69,54 @@ Embedding 使用 `text-embedding-v3`。
 ## 目录结构
 
 ```
-plugins/                     # Agent 插件 (AgentPlugin 协议)
-  base.py                    #   AgentPlugin ABC + AgentResponse / TypingResult
-  registry.py                #   按名动态加载，无需手动注册
-  bare_llm/                  #   纯 LLM 基线 (无记忆检索)
-  echo_agent/                #   EchoAgent + EchoMem 完整管线 (动态评测默认)
-  vikingbot/                 #   VikingBot 工具调用 agent (LoCoMo 默认)
-  echomem_mcp/               #   LLM 通过 EchoMem MCP 工具检索记忆
-  openviking_mcp/            #   LLM 通过 MemoryClient 工具检索记忆
-backends/                    # 记忆后端客户端
-  memory_types.py            #   MemoryClient 协议 + BaseHTTPMemoryClient + NullMemoryClient
-  memory_args.py             #   add_memory_backend_args() -- 后端连接 CLI 参数
-  echomem/                   #   EchoMemClient (端口 8010)
-  openviking/                #   OpenVikingClient (端口 19080)
-benchmarks/                  # 静态数据集评测
-  locomo/                    #   LoCoMo: LLM Judge (CORRECT/WRONG)
-    run_eval.py              #     入口脚本
-    dataset.py               #     数据集加载与解析
-    import_memory.py         #     记忆导入
-    qa.py                    #     QA 任务构建与执行
-    judge.py                 #     LLM Judge
-    reporting.py             #     结果汇总
-    data/                    #     内置 locomo10.json
-    results/                 #     运行结果
-  hotpotqa/                  #   HotpotQA: F1/EM 官方指标
-  longmemeval/               #   LongMemEval: LLM yes/no accuracy
-  doc/                       #   benchmark 通用文档
-dynamic/                     # 动态评测 (generate / replay)
-  run_eval.py                #   入口脚本
-  workflows.py               #   generate / replay 工作流
-  simulator.py               #   场景与查询生成
-  metrics.py                 #   动态指标和多维质量评估
-  artifacts.py               #   JSON/CSV/报告输出
-  model_client.py            #   动态 LLM 客户端
-  prompt_config.py           #   prompt 配置加载
-  configs/                   #   evaluator / user_simulator YAML 配置
-  results/                   #   运行结果
-performance/         # 性能压测与正式验收（多租户并发读写、注入/检索延迟、CPU/RSS、O1-O7）
+run_eval.py                 # 统一评测入口（python run_eval.py --dataset <name>）
+plugins/                    # Agent 插件 (AgentPlugin 协议)
+  base.py                   #   AgentPlugin ABC + AgentResponse / TypingResult
+  registry.py               #   按名动态加载，无需手动注册
+  bare_llm/                 #   纯 LLM 基线 (无记忆检索)
+  echo_agent/               #   EchoAgent + EchoMem 完整管线 (动态评测默认)
+  vikingbot/                #   VikingBot 工具调用 agent (LoCoMo 默认)
+  echomem_mcp/              #   LLM 通过 EchoMem MCP 工具检索记忆
+  openviking_mcp/           #   LLM 通过 MemoryClient 工具检索记忆
+backends/                   # 记忆后端客户端
+  memory_types.py           #   MemoryClient 协议 + BaseHTTPMemoryClient + NullMemoryClient
+  memory_args.py            #   add_memory_backend_args() -- 后端连接 CLI 参数
+  echomem/                  #   EchoMemClient (端口 8010)
+  openviking/               #   OpenVikingClient (端口 19080)
+benchmarks/                 # 静态数据集评测
+  locomo/                   #   LoCoMo: LLM Judge (CORRECT/WRONG)
+    dataset.py              #     数据集加载与解析
+    import_memory.py        #     记忆导入
+    qa.py                   #     QA 任务构建与执行
+    judge.py                #     LLM Judge
+    reporting.py            #     结果汇总
+    data/                   #     内置 locomo10.json
+    results/                #     运行结果
+  hotpotqa/                 #   HotpotQA: F1/EM 官方指标
+  longmemeval/              #   LongMemEval: LLM yes/no accuracy
+  doc/                      #   benchmark 通用文档
+dynamic/                    # 动态评测 (generate / replay)
+  workflows.py              #   generate / replay 工作流
+  simulator.py              #   场景与查询生成
+  metrics.py                #   动态指标和多维质量评估
+  artifacts.py              #   JSON/CSV/报告输出
+  model_client.py           #   动态 LLM 客户端
+  prompt_config.py          #   prompt 配置加载
+  configs/                  #   evaluator / user_simulator YAML 配置
+  results/                  #   运行结果
+performance/        # 性能压测与正式验收（多租户并发读写、注入/检索延迟、CPU/RSS、O1-O7）
   engine.py                  #   通用场景引擎（场景=Python 文件，画像=YAML）
   probe.py                   #   探针执行器（PASS/FAIL/INCONCLUSIVE/NOT_IMPLEMENTED 四态）
   profile.py                 #   画像加载（YAML，${ENV:-default} 展开）
   report.py                  #   运行聚合与 summary.json / records.csv
   ctx.py                     #   场景 ctx API（请求/轮询/阶段注入/记录/断言）
   targets/echomem/
+    main.py                  #   正式验收编排器 CLI（python -m performance.run --target echomem）
     scenes/                  #   场景文件（A 纯读 / B 纯写 / C 混合 / D 洪峰 / barrier / burst-waves / capacity）
     probes/                  #   故障/恢复/限流/对账探针（真实 HTTP）
     acceptance/              #   求值器：preflight / seed / metrics / features /
                              #     evaluate(8 门禁) / scheduler(7 检查) / objectives(O1-O7) / report_html
-    orchestrator/            #   正式验收编排器（场景矩阵 + 套件执行 + 探针编排 + objective-suite 报告 + CLI）
+    orchestrator/            #   编排器实现（场景矩阵 + 套件执行 + 探针编排 + objective-suite 报告）
     profiles/                #   画像示例 + instance-profiles / tenants / fault-plan 示例
 
 正式套件的 barrier 场景会在正式提交屏障前只执行少量 seed warm-up；
@@ -224,7 +224,7 @@ CLI 参数可直接传入，也可通过环境变量设默认值：
 
 ### Benchmark 评测
 
-直接调用 `benchmarks/<name>/run_eval.py`，通过 `--agent-plugin` 选择被测 agent，
+直接调用根级 `run_eval.py --dataset <name>`，通过 `--agent-plugin` 选择被测 agent，
 通过 `--memory-backend` 选择记忆后端。
 
 #### LoCoMo + echomem_mcp（EchoMem 后端）
@@ -233,7 +233,7 @@ CLI 参数可直接传入，也可通过环境变量设默认值：
 
 无工具调用时，测试平台仍通过 EchoMem MCP 执行每题的初始 `memory_query`：
 
-<pre style="color: red;"><code class="language-bash">./.venv/bin/python benchmarks/locomo/run_eval.py \
+<pre style="color: red;"><code class="language-bash">./.venv/bin/python run_eval.py --dataset locomo \
   --agent-plugin echomem_mcp \
   --echomem-url http://127.0.0.1:8010 \
   --mcp-url http://127.0.0.1:8001 \
@@ -256,7 +256,7 @@ CLI 参数可直接传入，也可通过环境变量设默认值：
 
 允许模型通过 MCP 调用工具，但禁止读取 `messages.jsonl`：
 
-<pre style="color: red;"><code class="language-bash">./.venv/bin/python benchmarks/locomo/run_eval.py \
+<pre style="color: red;"><code class="language-bash">./.venv/bin/python run_eval.py --dataset locomo \
   --agent-plugin echomem_mcp \
   --echomem-url http://127.0.0.1:8010 \
   --mcp-url http://127.0.0.1:8001 \
@@ -279,7 +279,7 @@ CLI 参数可直接传入，也可通过环境变量设默认值：
 
 允许模型通过 MCP 调用工具，并允许读取 `messages.jsonl`：
 
-<pre style="color: red;"><code class="language-bash">./.venv/bin/python benchmarks/locomo/run_eval.py \
+<pre style="color: red;"><code class="language-bash">./.venv/bin/python run_eval.py --dataset locomo \
   --agent-plugin echomem_mcp \
   --echomem-url http://127.0.0.1:8010 \
   --mcp-url http://127.0.0.1:8001 \
@@ -305,7 +305,7 @@ CLI 参数可直接传入，也可通过环境变量设默认值：
 #### LoCoMo + vikingbot（OpenViking 后端）
 
 ```bash
-python benchmarks/locomo/run_eval.py \
+python run_eval.py --dataset locomo \
   --agent-plugin vikingbot \
   --memory-backend openviking \
   --echomem-url http://127.0.0.1:19080 \
@@ -323,7 +323,7 @@ python benchmarks/locomo/run_eval.py \
 #### 断点续跑
 
 ```bash
-./.venv/bin/python benchmarks/locomo/run_eval.py \
+./.venv/bin/python run_eval.py --dataset locomo \
   --agent-plugin echomem_mcp \
   --echomem-url http://127.0.0.1:8010 \
   --mcp-url http://127.0.0.1:8001 \
@@ -342,7 +342,7 @@ python benchmarks/locomo/run_eval.py \
 
 ```bash
 # HotpotQA
-python benchmarks/hotpotqa/run_eval.py \
+python run_eval.py --dataset hotpotqa \
   --agent-plugin bare_llm \
   --llm-base-url https://dashscope.aliyuncs.com/compatible-mode/v1 \
   --llm-model deepseek-v4-flash-0731 \
@@ -350,7 +350,7 @@ python benchmarks/hotpotqa/run_eval.py \
   --questions 10
 
 # LongMemEval
-python benchmarks/longmemeval/run_eval.py \
+python run_eval.py --dataset longmemeval \
   --agent-plugin bare_llm \
   --llm-base-url https://dashscope.aliyuncs.com/compatible-mode/v1 \
   --llm-model deepseek-v4-flash-0731 \
@@ -370,7 +370,7 @@ python benchmarks/longmemeval/run_eval.py \
 
 ### 动态评测
 
-直接调用 `dynamic/run_eval.py`。需先启动 EchoAgent Backend（端口 31020）和
+直接调用 `run_eval.py --dataset dynamic`。需先启动 EchoAgent Backend（端口 31020）和
 EchoMem（端口 8010）。
 
 #### Generate 模式
@@ -378,7 +378,7 @@ EchoMem（端口 8010）。
 LLM 生成场景和提问，端到端走 EchoAgent 完整管线：
 
 ```bash
-python dynamic/run_eval.py \
+python run_eval.py --dataset dynamic \
   --echoagent-url http://127.0.0.1:31020 \
   --memory-engine-endpoint http://127.0.0.1:31030 \
   --echomem-url http://127.0.0.1:8010 \
@@ -401,13 +401,13 @@ python dynamic/run_eval.py \
 回放已有数据集对话，测试跨 session 召回：
 
 ```bash
-python dynamic/run_eval.py \
+python run_eval.py --dataset dynamic \
   --echoagent-url http://127.0.0.1:31020 \
   --memory-engine-endpoint http://127.0.0.1:31030 \
   --echomem-url http://127.0.0.1:8010 \
   --username test_user \
   --password YOUR_PASSWORD \
-  --dataset dynamic/results/20260728_175544/dataset.json \
+  --dataset-path dynamic/results/20260728_175544/dataset.json \
   --new-session-ratio 0.3 \
   --typing-speed-ms 2 \
   --scenario-model deepseek-v4-flash-0731 \
@@ -430,21 +430,21 @@ python dynamic/run_eval.py \
 
 ```bash
 # 1) generate 一次：LLM 模拟用户生成背景记忆 + 查询
-python dynamic/run_eval.py --agent-plugin vikingbot --memory-backend echomem \
+python run_eval.py --dataset dynamic --agent-plugin vikingbot --memory-backend echomem \
   --echomem-url http://127.0.0.1:8010 --num-memories 20 --num-queries 50 \
   --scenario-base-url ... --scenario-model ... --scenario-api-key ... \
   --llm-base-url ... --llm-model ... --llm-api-key ... \
   --out-dir dynamic/results/formal_gen
 
 # 2) replay 同一份 dataset.json 到 EchoMem
-python dynamic/run_eval.py --agent-plugin vikingbot --memory-backend echomem \
-  --echomem-url http://127.0.0.1:8010 --dataset <dataset.json> \
+python run_eval.py --dataset dynamic --agent-plugin vikingbot --memory-backend echomem \
+  --echomem-url http://127.0.0.1:8010 --dataset-path <dataset.json> \
   --llm-base-url ... --llm-model ... --llm-api-key ... --out-dir dynamic/results/formal_em
 
 # 3) replay 同一份 dataset.json 到 OpenViking
-python dynamic/run_eval.py --agent-plugin vikingbot --memory-backend openviking \
+python run_eval.py --dataset dynamic --agent-plugin vikingbot --memory-backend openviking \
   --echomem-url http://127.0.0.1:19080 --workspace D:/.openviking/data \
-  --dataset <dataset.json> --llm-base-url ... --llm-model ... --llm-api-key ... \
+  --dataset-path <dataset.json> --llm-base-url ... --llm-model ... --llm-api-key ... \
   --out-dir dynamic/results/formal_ov
 
 # 4) 生成对比报告（token / 注入耗时 / 检索延迟 / 召回精度 / 答案质量）
@@ -469,7 +469,7 @@ python scripts/compare_memory_backends.py \
 场景引擎（`performance run`）产出 `summary.json`（请求统计：rps、延迟
 p50/p95/p99、错误分类、租户分组；场景可挂 `report` 钩子输出 `custom` 段，
 如 search 质量聚合）与 `records.csv`（逐请求明细）。正式验收不直接消费
-summary，而是由编排器（`echomem-orchestrator`）统一灌种、跑 case，把 records
+summary，而是由编排器（`echomem-acceptance`）统一灌种、跑 case，把 records
 汇总成验收门禁与七项目标：
 
 - **验收门禁**（`acceptance/evaluate.py`，8 gate）：search 成功率 / report6
@@ -500,10 +500,10 @@ commit 成功保证）· `C` 读写混合（多档 read:write）· `D` 注入洪
 `burst-waves` / `capacity` 三个正式场景，由编排器的场景矩阵按 case 参数驱动。
 引擎、场景契约与画像格式详见 `performance/docs/设计意图.md`。
 
-正式验收不直接调用场景引擎，而是通过编排器（`echomem-orchestrator`）统一
+正式验收不直接调用场景引擎，而是通过编排器（`echomem-acceptance`）统一
 执行：按机器规格 profile 组织场景矩阵、灌种、跑探针并汇总 O1-O7。
 
-### 正式验收编排器（echomem-orchestrator）
+### 正式验收编排器（echomem-acceptance）
 
 正式验收按机器规格逐个执行容量、稳定性、公平性、Search 优先级、Commit 恢复
 和 `/metrics` 可观测性检查，对每轮套件汇总七项目标 `O1-O7`（DAU/热租户容量、
@@ -517,7 +517,7 @@ commit 成功保证）· `C` 读写混合（多档 read:write）· `D` 注入洪
 
 ```bash
 # quick bounded smoke（默认 7 例 QUICK_SCENARIOS，每场景 ≤30s、barrier ≤32）
-python -m performance.targets.echomem.orchestrator \
+python -m performance.run --target echomem \
   --profiles performance/targets/echomem/profiles/instance-profiles.example.json \
   --profile 4U8G \
   --out-dir performance/targets/echomem/results/objective-suite-$(date +%Y%m%d_%H%M%S) \
@@ -594,7 +594,7 @@ capacity-4 / capacity-8）。正式模式（去掉 `--quick`）按 `complete` �
 
 ```bash
 # 正式验收（去掉 --quick；complete 26 例）
-python -m performance.targets.echomem.orchestrator \
+python -m performance.run --target echomem \
   --profiles performance/targets/echomem/profiles/instance-profiles.example.json \
   --profile 4U8G \
   --out-dir performance/targets/echomem/results/objective-suite-$(date +%Y%m%d_%H%M%S)
@@ -611,7 +611,7 @@ python -m performance.targets.echomem.orchestrator \
 ```bash
 cd /opt/Memory-System-Eval-Harness
 export STRESS_OUTPUT_DIR=/opt/Memory-System-Eval-Harness/performance/targets/echomem/results/objective-suite-$(date +%Y%m%d_%H%M%S)
-nohup python -m performance.targets.echomem.orchestrator \
+nohup python -m performance.run --target echomem \
   --profiles /opt/echomem-stress/instance-profiles.json \
   --profile 4U8G \
   --out-dir "$STRESS_OUTPUT_DIR" \
@@ -750,7 +750,7 @@ cp performance/targets/echomem/profiles/instance-profiles.example.json \
 
 export STRESS_OUTPUT_DIR=/opt/Memory-System-Eval-Harness/performance/targets/echomem/results/smoke-$(date +%Y%m%d_%H%M%S)
 
-python3 -m performance.targets.echomem.orchestrator \
+python3 -m performance.run --target echomem \
   --profiles /opt/echomem-stress/instance-profiles.json \
   --profile 4U8G \
   --scenarios baseline \
@@ -771,7 +771,7 @@ python3 -m performance.targets.echomem.orchestrator \
 cd /opt/Memory-System-Eval-Harness
 export STRESS_OUTPUT_DIR=/opt/Memory-System-Eval-Harness/performance/targets/echomem/results/4u8g-$(date +%Y%m%d_%H%M%S)
 
-nohup python3 -m performance.targets.echomem.orchestrator \
+nohup python3 -m performance.run --target echomem \
   --profiles /opt/echomem-stress/instance-profiles.json \
   --profile 4U8G \
   --env-file /opt/echomem-stress/formal-run-4u8g.env \
@@ -813,7 +813,7 @@ find "$STRESS_OUTPUT_DIR" -name summary.json -type f | sort
 
 按实例规格逐个执行容量、稳定性、公平性、Search 优先级、Commit 恢复和
 `/metrics` 可观测性检查、汇总 O1-O7 的入口就是上面的编排器
-（`python -m performance.targets.echomem.orchestrator`），完整用法见
+（`python -m performance.run --target echomem`），完整用法见
 「性能压测」章节。服务器上先把
 `performance/targets/echomem/profiles/instance-profiles.example.json` 复制为
 实际 profile 配置，填写真实 `tenant_config`、`preflight_config` 和可选
@@ -853,7 +853,7 @@ PR397 的写后可见性/持久化对账、Commit 状态机、冷暖 Search 与�
 没有真实故障控制端点时，故障项必须显示 `INCONCLUSIVE`，不能用测试平台自身
 缺少适配器来判定 EchoMem 未实现。如果只想重新审计已有结果而不重新发请求，
 可在 profile 中填写 `suite_path`，然后执行
-`python -m performance.targets.echomem.orchestrator --skip-run`；该模式只读取
+`python -m performance.run --target echomem --skip-run`；该模式只读取
 已有 `suite.json` 和探针制品。
 
 quick 的容量场景 Commit 负载置 0（`quick_commit_rpm=0`，只启动 Search
@@ -932,7 +932,7 @@ class MyAgentPlugin(AgentPlugin):
    `backends/memory_args.py` 中的 `add_memory_backend_args()`。
 
 `registry.py` 自动扫描 `plugins.<name>.plugin` 模块中 `AgentPlugin` 的子类，
-无需手动注册。运行：`python benchmarks/locomo/run_eval.py --agent-plugin <name> ...`
+无需手动注册。运行：`python run_eval.py --dataset locomo --agent-plugin <name> ...`
 
 ### 新增记忆后端
 
@@ -961,8 +961,9 @@ class MyBackendClient(BaseHTTPMemoryClient):
    - `qa.py` - QA 任务构建与执行
    - `judge.py` 或 `evaluate.py` - 评测逻辑
    - `reporting.py` - 结果汇总
-   - `run_eval.py` - 入口脚本
-3. 复用 `shared/` 基础设施：`EvalConfig` / `EvalRun` /
+3. 在根级 `run_eval.py` 中注册：新增 `build_<name>_parser` / `run_<name>`，
+   并挂到 `_DATASET_PARSERS` / `_RUNNERS`
+4. 复用 `shared/` 基础设施：`EvalConfig` / `EvalRun` /
    `add_agent_plugin_args` / `add_eval_args` / `add_judge_args` / `LLMClient`
 
 ## 评测流程概览

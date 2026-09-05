@@ -55,7 +55,7 @@ def build_shard_commands(
     output_dir: Path,
 ) -> list[dict[str, Any]]:
     base_args = _clean_forwarded_args(argv)
-    runner = Path(__file__).with_name("run_eval.py")
+    runner = Path(__file__).resolve().parents[2] / "run_eval.py"
     commands: list[dict[str, Any]] = []
     for index, question_ids in enumerate(shards, 1):
         shard_root = output_dir / "shards" / f"shard_{index:03d}"

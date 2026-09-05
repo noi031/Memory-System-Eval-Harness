@@ -23,10 +23,10 @@
 
 ```bash
 # benchmark（纯 LLM 基线，无记忆）
-python benchmarks/locomo/run_eval.py --agent-plugin bare_llm --llm-api-key YOUR_KEY
+python run_eval.py --dataset locomo --agent-plugin bare_llm --llm-api-key YOUR_KEY
 
 # 动态评测
-python dynamic/run_eval.py --agent-plugin bare_llm --llm-api-key YOUR_KEY
+python run_eval.py --dataset dynamic --agent-plugin bare_llm --llm-api-key YOUR_KEY
 ```
 
 > 要评测记忆检索能力，请改用 `echomem_mcp` 或 `openviking_mcp` 插件。
