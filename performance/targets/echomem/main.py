@@ -31,6 +31,7 @@ from performance.targets.echomem.orchestrator.suites import (
     QUICK_SCENARIOS,
     QuickSpec,
 )
+from performance.profile import expand_env_in
 from performance.util import (
     acquire_output_lock,
     load_env_file,
@@ -132,10 +133,11 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def _resolve_profile(profile: dict[str, Any], profiles_path: Path) -> dict[str, Any]:
-    """把 profile 引用的文件路径解析为绝对路径（相对清单目录）。"""
+    """把 profile 引用的文件路径解析为绝对路径（相对清单目录），并展开
+    ``${ENV:-default}`` 占位符（instance profile 是 JSON，不经 load_profile）。"""
     profiles_dir = profiles_path.parent
     return {
-        **profile,
+        **expand_env_in(profile),
         "tenant_config": resolve_relative_to(
             str(profile.get("tenant_config") or ""), profiles_dir
         ),

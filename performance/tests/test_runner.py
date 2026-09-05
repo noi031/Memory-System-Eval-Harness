@@ -143,6 +143,55 @@ def test_run_case(server, tmp_path):
     assert summary["metrics"]["commit"]["submitted"] >= 0
 
 
+def test_run_case_attaches_metric_coverage(server, tmp_path):
+    _, state, base_url = server
+    state.metrics_text = (
+        'echomem_lane_queued{lane="recall_engine"} 1\n'
+        'echomem_lane_wait_seconds_bucket{lane="recall_engine",le="0.5"} 2\n'
+        'echomem_lane_exec_seconds_bucket{lane="recall_engine",le="0.5"} 2\n'
+        'echomem_lane_rejected_total{lane="recall_engine"} 0\n'
+        'echomem_engine_fanout_exec_seconds{engine="recall"} 0.2\n'
+        'echomem_engine_fanout_skipped_total{engine="recall"} 0\n'
+    )
+    case = _baseline_case()
+    profile = build_case_profile(
+        case,
+        base_url=base_url,
+        tenant_count=1,
+        auth_headers={},
+        quick=QuickSpec(duration_cap_s=1.5),
+    )
+    case_dir = tmp_path / "case"
+    run = run_case(case, profile, case_dir=case_dir, timeout_s=30.0)
+    assert run["status"] == "completed"
+    assert (case_dir / "metrics_samples.csv").is_file()
+    coverage = run["summary"]["details"]["pr421_metric_coverage"]
+    assert coverage["present"]["echomem_lane_queued"] is True
+    assert coverage["missing"] == []
+    assert coverage["lane_quartets"]["recall_engine"] == {
+        "queued": True, "wait": True, "exec": True, "rejected": True
+    }
+    assert coverage["fanout_engines"]["recall"] == {"exec": True, "skipped": True}
+
+
+def test_run_case_metrics_disabled(server, tmp_path):
+    _, state, base_url = server
+    state.metrics_text = 'echomem_lane_queued{lane="recall_engine"} 1\n'
+    case = _baseline_case()
+    profile = build_case_profile(
+        case,
+        base_url=base_url,
+        tenant_count=1,
+        auth_headers={},
+        quick=QuickSpec(duration_cap_s=1.5),
+    )
+    case_dir = tmp_path / "case"
+    run = run_case(case, profile, case_dir=case_dir, timeout_s=30.0, collect_metrics=False)
+    assert run["status"] == "completed"
+    assert not (case_dir / "metrics_samples.csv").exists()
+    assert "pr421_metric_coverage" not in run["summary"].get("details", {})
+
+
 # -- run_suite -----------------------------------------------------------
 
 

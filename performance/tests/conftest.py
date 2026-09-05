@@ -36,6 +36,7 @@ class MockState:
         self.fail_open = fail_open
         self.fail_add = fail_add
         self.fail_commit = fail_commit
+        self.metrics_text: str | None = None
         self.sessions = itertools.count(1)
         self.messages = itertools.count(1)
         self.archives = itertools.count(1)
@@ -71,6 +72,16 @@ def _make_handler(state: MockState):
             path = urllib.parse.urlparse(self.path).path
             if path == "/health":
                 return self._send(200, {"ok": True})
+            if path == "/metrics":
+                if state.metrics_text is not None:
+                    body = state.metrics_text.encode("utf-8")
+                    self.send_response(200)
+                    self.send_header("Content-Type", "text/plain")
+                    self.send_header("Content-Length", str(len(body)))
+                    self.end_headers()
+                    self.wfile.write(body)
+                    return
+                return self._send(404, {"error": "not found"})
             match = re.fullmatch(r"/api/sessions/([^/]+)/commits/([^/]+)", path)
             if match:
                 key = (match.group(1), match.group(2))

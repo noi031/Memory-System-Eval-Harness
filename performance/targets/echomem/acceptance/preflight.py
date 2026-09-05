@@ -84,9 +84,42 @@ def parse_engine_configs(path: str | Path) -> list[dict[str, Any]]:
         ]
     else:
         raise ValueError("engine config 必须是 JSON 对象或对象数组")  # noqa: TRY004
+    # Native configs may contain providers for optional branches that are not
+    # active in the selected runtime. Preflighting an inactive provider can
+    # stop an otherwise valid run (for example an intent LLM while the
+    # configured intent backend is "rule").
+    intent_backends: list[str] = []
+
+    def collect_intent_backends(value: Any, path_parts: tuple[str, ...] = ()) -> None:
+        if isinstance(value, dict):
+            if (
+                len(path_parts) >= 2
+                and path_parts[-2:] == ("search", "intent")
+                and value.get("backend")
+            ):
+                intent_backends.append(str(value["backend"]).lower())
+            for key, child in value.items():
+                collect_intent_backends(child, (*path_parts, str(key)))
+        elif isinstance(value, list):
+            for index, child in enumerate(value):
+                collect_intent_backends(child, (*path_parts, str(index)))
+
+    collect_intent_backends(raw)
+    intent_backend = next(
+        (backend for backend in intent_backends if backend),
+        "",
+    )
+
+    def is_active(candidate_id: str) -> bool:
+        if candidate_id.lower().startswith("recall.model.intent_llm"):
+            return intent_backend in {"", "llm", "model", "openai_compatible"}
+        return True
+
     engines: list[dict[str, Any]] = []
     seen: set[tuple[str, str, str, str]] = set()
     for candidate_id, entry in candidates:
+        if not is_active(candidate_id):
+            continue
         if not isinstance(entry, dict):
             raise ValueError("engine config 条目必须是 JSON 对象")  # noqa: TRY004
         # Native EchoMem configs also contain fake VLM and model-only
@@ -219,12 +252,17 @@ def run_preflight(
     config_path: str | Path,
     *,
     timeout_s: float = 20.0,
+    retry_attempts: int = 3,
+    retry_backoff_s: float = 1.0,
 ) -> dict[str, Any]:
     """Run the full preflight gate; returns a structured, secret-free result.
 
     ``ok`` is True only when every engine passes environment and real-request
     checks. On failure the caller must stop the run and classify the result
-    as an environment/dependency error.
+    as an environment/dependency error. Transient transport failures (name
+    resolution, timeouts, connection refused) are retried up to
+    ``retry_attempts`` times with linear backoff; deterministic HTTP errors
+    are never retried.
     """
     try:
         engines = parse_engine_configs(config_path)
@@ -237,10 +275,18 @@ def run_preflight(
             "digest": "",
         }
     env_errors = check_env(engines)
-    probes = [probe_endpoint(engine, timeout_s=timeout_s) for engine in engines]
-    failures = [
-        entry for entry in probes if entry["status"] != "ok"
-    ]
+    attempts = max(1, int(retry_attempts))
+    probes: list[dict[str, Any]] = []
+    attempts_used = 0
+    for attempt in range(1, attempts + 1):
+        attempts_used = attempt
+        probes = [probe_endpoint(engine, timeout_s=timeout_s) for engine in engines]
+        failures = [entry for entry in probes if entry["status"] != "ok"]
+        if not failures or not _retryable_probe_failure(failures[0]):
+            break
+        if attempt < attempts:
+            time.sleep(max(0.0, float(retry_backoff_s)) * attempt)
+    failures = [entry for entry in probes if entry["status"] != "ok"]
     if env_errors:
         return {
             "ok": False,
@@ -248,6 +294,7 @@ def run_preflight(
             "engines_checked": len(engines),
             "engines": probes,
             "digest": config_digest(engines),
+            "probe_attempts": attempts_used,
         }
     if failures:
         return {
@@ -256,6 +303,7 @@ def run_preflight(
             "engines_checked": len(engines),
             "engines": probes,
             "digest": config_digest(engines),
+            "probe_attempts": attempts_used,
         }
     return {
         "ok": True,
@@ -263,4 +311,24 @@ def run_preflight(
         "engines_checked": len(engines),
         "engines": probes,
         "digest": config_digest(engines),
+        "probe_attempts": attempts_used,
     }
+
+
+def _retryable_probe_failure(entry: dict[str, Any]) -> bool:
+    """Retry only transient transport failures, never deterministic HTTP errors."""
+    if entry.get("code") is not None:
+        return False
+    error = str(entry.get("error") or "").lower()
+    return any(
+        marker in error
+        for marker in (
+            "nodename nor servname",
+            "name or service not known",
+            "temporary failure in name resolution",
+            "timed out",
+            "connection refused",
+            "network is unreachable",
+            "urlopen error",
+        )
+    )

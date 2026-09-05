@@ -6,7 +6,9 @@ probe scenes live under ``performance/targets/echomem/probes``.
 
 from __future__ import annotations
 
+import http.server
 import json
+import threading
 from pathlib import Path
 
 from performance.targets.echomem.orchestrator.probes import (
@@ -14,6 +16,7 @@ from performance.targets.echomem.orchestrator.probes import (
     _resolve_tenant_id,
     run_configured_probes,
 )
+from performance.targets.echomem.probes.fault_isolation import control
 
 
 def _tenant_config(path: Path) -> dict:
@@ -103,6 +106,43 @@ def test_capability_probe_runs_against_mock(server, tmp_path):
     # blackbox 缺 commit 证据 + sweep 未配置 → 两条 INCONCLUSIVE 标记
     markers = [c for c in commands if c.get("status") == "INCONCLUSIVE" and "command" not in c]
     assert len(markers) == 2
+
+
+def test_capability_probe_cursor_uri_template(server, tmp_path):
+    """cursor_uri_template 经 /fs/read 探测持久 cursor（mock 404 → NOT_IMPLEMENTED）。"""
+    _, _, base_url = server
+    tenants_path = _tenants(tmp_path)
+    suite_dir = tmp_path / "suite"
+    suite_dir.mkdir()
+    profile = {
+        "name": "p",
+        "base_url": base_url,
+        "tenant_config": str(tenants_path),
+        "capability_probe": {
+            "health_path": "/health",
+            "metrics_path": "/metrics",
+            "session_id": "s1",
+            "cursor_uri_template": "echo://sessions/{session}/current/commit_cursor.json",
+        },
+    }
+    artifacts, _ = run_configured_probes(
+        profile,
+        base_url=base_url,
+        suite_dir=suite_dir,
+        auth_headers={},
+        tenant_config=_tenant_config(tenants_path),
+        quick=False,
+    )
+    payload = artifacts["capability_probe"]
+    cursor_checks = [
+        check for check in payload["checks"] if check["name"] == "cursor/message-set"
+    ]
+    assert cursor_checks, "cursor/message-set check should exist"
+    check = cursor_checks[0]
+    assert check["status"] == "NOT_IMPLEMENTED"  # mock 无 /fs/read → 404
+    assert check["reason"] == "endpoint returned HTTP 404"
+    assert "echo://sessions/s1/current/commit_cursor.json" in check["detail"]
+    assert '"document_keys"' in check["detail"]
 
 
 def test_unconfigured_probes_not_run(server, tmp_path):
@@ -212,3 +252,58 @@ def test_fault_plan_base_url_replacement(server, tmp_path):
         suite_dir / "fault-suite" / "fault-suite.json"
     )
     assert _probe_scenes(commands) == ["fault_suite.py"]
+
+
+# -- fault_isolation 故障控制 --------------------------------------------
+
+
+def test_fault_isolation_control_command_injects_target_tenant(tmp_path):
+    out = tmp_path / "ctrl.txt"
+    result = control(
+        {"endpoint": "", "command": f"echo {{action}} {{target_tenant}} {{tenant}} > {out}"},
+        action="enable",
+        target_tenant="t1",
+        timeout_s=10,
+    )
+    assert result["status"] == "PASS"
+    assert result["backend"] == "command"
+    assert out.read_text(encoding="utf-8").strip() == "enable t1 t1"
+
+
+def test_fault_isolation_control_http_injects_target_tenant(tmp_path):
+    captured: dict = {}
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def log_message(self, *args):
+            pass
+
+        def do_POST(self):
+            length = int(self.headers.get("Content-Length") or 0)
+            captured["body"] = json.loads(self.rfile.read(length).decode("utf-8"))
+            body = b"{}"
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+    httpd = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+    thread.start()
+    try:
+        endpoint = f"http://127.0.0.1:{httpd.server_port}/fault"
+        result = control(
+            {"endpoint": endpoint, "command": ""},
+            action="disable",
+            target_tenant="t1",
+            timeout_s=10,
+        )
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+    assert result["status"] == "PASS"
+    assert result["status_code"] == 200
+    assert captured["body"] == {
+        "action": "disable",
+        "target_tenant": "t1",
+        "tenant": "t1",
+    }

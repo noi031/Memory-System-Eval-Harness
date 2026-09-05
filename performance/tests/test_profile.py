@@ -10,6 +10,7 @@ from performance.profile import (
     Profile,
     ProfileError,
     TargetSpec,
+    expand_env_in,
     load_profile,
     with_name,
 )
@@ -185,3 +186,25 @@ def test_load_invalid_yaml(tmp_path):
     path.write_text("name: [unclosed", encoding="utf-8")
     with pytest.raises(Exception):
         load_profile(str(path))
+
+
+# -- expand_env_in（instance profile JSON 的递归展开） ----------------------
+
+
+def test_expand_env_in_recursive(monkeypatch):
+    monkeypatch.setenv("ECHOMEM_CONTAINER", "echomem-8u16g")
+    monkeypatch.delenv("ECHOMEM_FAULT_CONTROL_URL", raising=False)
+    data = {
+        "name": "4U8G",
+        "commit_recovery": {"container": "${ECHOMEM_CONTAINER:-echomem-4u8g}"},
+        "fault_isolation": {"endpoint": "${ECHOMEM_FAULT_CONTROL_URL}"},
+        "levels": ["${ECHOMEM_CONTAINER:-x}", "plain"],
+        "kept": {"n": 3, "flag": True},
+    }
+    expanded = expand_env_in(data)
+    assert expanded["commit_recovery"]["container"] == "echomem-8u16g"
+    assert expanded["fault_isolation"]["endpoint"] == ""
+    assert expanded["levels"] == ["echomem-8u16g", "plain"]
+    assert expanded["kept"] == {"n": 3, "flag": True}
+    # 原 dict 不被就地修改
+    assert data["commit_recovery"]["container"] == "${ECHOMEM_CONTAINER:-echomem-4u8g}"

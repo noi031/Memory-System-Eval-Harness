@@ -9,6 +9,8 @@
 
 from __future__ import annotations
 
+import csv
+import json
 import logging
 import threading
 import time
@@ -16,6 +18,7 @@ import urllib.error
 import urllib.request
 from collections import defaultdict
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 logger = logging.getLogger("performance.monitor")
@@ -318,3 +321,23 @@ class MetricsMonitor:
         if delta is None or wall <= 0:
             return None
         return round(delta / wall, 4)
+
+
+def write_metrics_csv(out_dir: Path, monitor: MetricsMonitor) -> Path:
+    """Flatten every sampled frame into a long-format CSV (ts, metric, labels, value)."""
+    path = out_dir / "metrics_samples.csv"
+    with path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.writer(handle)
+        writer.writerow(["ts", "metric", "labels", "value"])
+        for frame in monitor.frames:
+            for name, samples in frame.samples.items():
+                for labels, value in samples:
+                    writer.writerow(
+                        [
+                            round(frame.ts, 3),
+                            name,
+                            json.dumps(labels, ensure_ascii=False, sort_keys=True),
+                            value,
+                        ]
+                    )
+    return path

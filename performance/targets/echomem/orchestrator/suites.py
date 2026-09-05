@@ -1,4 +1,4 @@
-"""正式场景矩阵（case 定义）与 case → Profile 解析。
+"""正式场景矩阵（case 定义）与 echomem 侧 case → Profile 包装。
 
 case 是正式验收矩阵的最小单元：label 唯一、携带场景文件名（scenes/ 下，
 不含 .py）、负载参数（tenants/duration_s/search_rps/commit_rpm/sessions/
@@ -7,28 +7,24 @@ messages）与 barrier/burst 字段。``complete_cases`` 是报告(6) 12 例 +
 （22 例，capacity-2/4/8 强置 quick_commit_rpm=0，另含 fairness-bounded）；
 两者都是显式常量列表，不做动态叉乘生成。
 
-``build_case_profile`` 把 case 翻译为 ``performance.profile.Profile``：
-arrival 按任务映射 fixed_rps（search_rps→read、commit_rpm/60→write），
-params 携带 barrier/burst 参数。``apply_quick`` 做 quick 收敛（duration /
-barrier count 双 cap、quick_commit_rpm 覆盖、sessions 压到 1）。
+quick 收敛（``QuickSpec``/``apply_quick``）与 case → Profile 的通用骨架
+（``build_case_profile``）在通用套件层 ``performance.suite``；本模块按
+echomem 约定填充场景目录、默认 query 列表与 barrier/burst 参数回调，
+并保留场景矩阵常量与 case 选择。
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from performance.engine import load_scene
-from performance.profile import (
-    ArrivalSpec,
-    LoadSpec,
-    Profile,
-    TargetSpec,
-    TenantSpec,
+from performance.profile import Profile
+from performance.suite import (
+    QuickSpec,
+    apply_quick,
+    build_case_profile as _build_case_profile_general,
 )
 from performance.targets.echomem.protocol import DEFAULT_QUERIES
-from performance.util import scale_counts_to_cap
 
 SCENES_DIR = Path(__file__).resolve().parent.parent / "scenes"
 
@@ -37,15 +33,6 @@ QUICK_SCENARIOS = (
     "baseline,fairness-bounded,search-priority-blackbox,"
     "saturation,capacity-2,capacity-4,capacity-8"
 )
-
-
-@dataclass
-class QuickSpec:
-    """quick 收敛参数：时长上限、barrier 计数上限与是否保留灌种。"""
-
-    duration_cap_s: float = 15.0
-    barrier_count_cap: int = 32
-    include_seed: bool = False
 
 
 def _case(**fields: Any) -> dict[str, Any]:
@@ -475,27 +462,30 @@ def select_cases(profile_name: str, scenarios: list[str] | None) -> list[dict]:
     return [by_label[item] for item in scenarios]
 
 
-def apply_quick(case: dict, quick: QuickSpec) -> dict:
-    """返回 quick 收敛后的 case 副本（原 case 不被修改）。"""
-    result = dict(case)
-    result["duration_s"] = min(float(case["duration_s"]), quick.duration_cap_s)
-    if case.get("commit_barrier"):
-        cap = quick.barrier_count_cap
-        scenario_cap = int(case.get("quick_barrier_count_cap") or 0)
-        if scenario_cap > 0:
-            cap = min(cap, scenario_cap)
-        result["commit_barrier_count"] = min(
-            int(case.get("commit_barrier_count", 32)), cap
-        )
-        counts = case.get("commit_tenant_counts")
-        if counts and result["commit_barrier_count"] < sum(int(v) for v in counts):
-            result["commit_tenant_counts"] = scale_counts_to_cap(
-                [int(v) for v in counts], result["commit_barrier_count"]
-            )
-    if case.get("quick_commit_rpm") is not None:
-        result["commit_rpm"] = case["quick_commit_rpm"]
-    result["sessions_per_tenant"] = 1
-    return result
+def build_case_profile(
+    case: dict,
+    *,
+    base_url: str,
+    tenant_count: int,
+    auth_headers: dict,
+    quick: QuickSpec | None = None,
+) -> Profile:
+    """case → Profile：场景目录/默认 query 按 echomem 约定填充。
+
+    quick 非 None 时先 ``apply_quick`` 收敛；barrier/burst 参数经
+    ``_apply_barrier_params`` 注入 params。通用骨架见
+    ``performance.suite.build_case_profile``。
+    """
+    return _build_case_profile_general(
+        case,
+        scene_path=SCENES_DIR / f"{case['scene']}.py",
+        base_url=base_url,
+        tenant_count=tenant_count,
+        auth_headers=auth_headers,
+        queries=list(DEFAULT_QUERIES),
+        quick=quick,
+        extra_params=_apply_barrier_params,
+    )
 
 
 def _apply_barrier_params(params: dict[str, Any], case: dict) -> None:
@@ -536,67 +526,3 @@ def _apply_barrier_params(params: dict[str, Any], case: dict) -> None:
             and case.get("commit_tenant_distribution") == "uniform"
         ):
             params["floor_to_tenants"] = True
-
-
-def build_case_profile(
-    case: dict,
-    *,
-    base_url: str,
-    tenant_count: int,
-    auth_headers: dict,
-    quick: QuickSpec | None = None,
-) -> Profile:
-    """case → Profile：arrival 按任务固定 rps，params 带 barrier/burst 参数。
-
-    quick 非 None 时先 ``apply_quick`` 收敛。worker 数取 case 显式
-    ``search_workers``/``commit_workers``，否则按 rps 取整（至少 1）。
-    """
-    if quick is not None:
-        case = apply_quick(case, quick)
-    scene = load_scene(SCENES_DIR / f"{case['scene']}.py")
-    search_rps = float(case.get("search_rps") or 0.0)
-    commit_rps = float(case.get("commit_rpm") or 0.0) / 60.0
-
-    read_workers = case.get("search_workers") or 0
-    if read_workers <= 0 and search_rps > 0:
-        read_workers = max(1, round(search_rps))
-    write_workers = case.get("commit_workers") or 0
-    if write_workers <= 0 and commit_rps > 0:
-        write_workers = max(1, round(commit_rps))
-
-    arrival: dict[str, ArrivalSpec] = {}
-    mix: dict[str, int] = {}
-    if "read" in scene.tasks:
-        mix["read"] = max(1, read_workers)
-        if search_rps > 0:
-            arrival["read"] = ArrivalSpec(model="fixed_rps", rps=search_rps)
-    if "write" in scene.tasks:
-        mix["write"] = max(1, write_workers) if write_workers > 0 else 0
-        if commit_rps > 0:
-            arrival["write"] = ArrivalSpec(model="fixed_rps", rps=commit_rps)
-
-    params: dict[str, Any] = {
-        "top_k": int(case.get("top_k", 5)),
-        "messages_per_session": int(case.get("messages_per_session", 3)),
-        "sessions_per_tenant": int(case.get("sessions_per_tenant", 1)),
-        "queries": list(DEFAULT_QUERIES),
-        "commit_poll_timeout_s": float(case.get("commit_poll_timeout_s", 600)),
-    }
-    _apply_barrier_params(params, case)
-
-    return Profile(
-        name=case["label"],
-        target=TargetSpec(
-            base_url=base_url.rstrip("/"),
-            headers=dict(auth_headers),
-            read_timeout_s=30.0,
-        ),
-        load=LoadSpec(
-            workers=max(1, read_workers + write_workers),
-            duration_s=float(case["duration_s"]),
-            mix=mix or None,
-            arrival=arrival,
-        ),
-        tenants=[TenantSpec(name=f"tenant-{index}") for index in range(tenant_count)],
-        params=params,
-    )

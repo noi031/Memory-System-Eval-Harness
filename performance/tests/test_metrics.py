@@ -9,13 +9,21 @@ from __future__ import annotations
 
 import pytest
 
-from performance.monitor import MetricsFrame, MetricsMonitor, parse_prometheus_text
+from performance.monitor import (
+    MetricsFrame,
+    MetricsMonitor,
+    parse_prometheus_text,
+    write_metrics_csv,
+)
 from performance.targets.echomem.acceptance.metrics import (
     COMMIT_QUEUE_DEPTH,
     CPU_SECONDS,
+    FANOUT_METRIC_FAMILIES,
     HTTP_INFLIGHT,
+    LANE_METRIC_FAMILIES,
     PROCESS_THREADS,
     RESIDENT_MEMORY,
+    metric_coverage,
     scene_resource_summary,
 )
 
@@ -214,3 +222,67 @@ def test_scene_resource_summary_snapshot() -> None:
     assert summary["threads_max"] == 15.0
     assert summary["http_inflight_max"] == 5.0
     assert summary["commit_queue_depth_max"] == 4.0
+
+
+# -- metric_coverage（PR421 B7 覆盖） --------------------------------------
+
+
+def test_metric_coverage_full() -> None:
+    families = {**LANE_METRIC_FAMILIES, **FANOUT_METRIC_FAMILIES}
+    samples: dict[str, list[tuple[dict[str, str], float]]] = {}
+    for family, short in LANE_METRIC_FAMILIES.items():
+        samples[f"{family}_bucket"] = [({"lane": "recall_engine", "le": "0.5"}, 2.0)]
+    for family, short in FANOUT_METRIC_FAMILIES.items():
+        samples[family] = [({"engine": "recall"}, 1.0)]
+    monitor = _monitor_with_frames([MetricsFrame(ts=1.0, samples=samples)])
+    coverage = metric_coverage(monitor, 0.0, 2.0)
+    assert coverage["present"] == {family: True for family in families}
+    assert coverage["missing"] == []
+    assert coverage["lane_quartets"] == {
+        "recall_engine": {"queued": True, "wait": True, "exec": True, "rejected": True}
+    }
+    assert coverage["fanout_engines"] == {"recall": {"exec": True, "skipped": True}}
+    assert coverage["bounded_label_violations"] == []
+
+
+def test_metric_coverage_missing_and_violations() -> None:
+    monitor = _monitor_with_frames([
+        MetricsFrame(
+            ts=1.0,
+            samples={
+                "echomem_lane_queued": [({"lane": "commit", "tenant_id": "t1"}, 1.0)],
+                "echomem_lane_wait_seconds": [({"lane": "commit"}, 0.1)],
+                "echomem_engine_fanout_exec_seconds": [({"engine": "commit"}, 0.2)],
+            },
+        )
+    ])
+    coverage = metric_coverage(monitor, 0.0, 2.0)
+    assert coverage["missing"] == sorted(
+        set({**LANE_METRIC_FAMILIES, **FANOUT_METRIC_FAMILIES})
+        - {"echomem_lane_queued", "echomem_lane_wait_seconds",
+           "echomem_engine_fanout_exec_seconds"}
+    )
+    assert coverage["lane_quartets"]["commit"] == {
+        "queued": True, "wait": True, "exec": False, "rejected": False
+    }
+    assert coverage["bounded_label_violations"] == [
+        {"metric": "echomem_lane_queued", "label": "tenant_id", "value": "t1"}
+    ]
+
+
+def test_write_metrics_csv(tmp_path) -> None:
+    monitor = _monitor_with_frames([
+        MetricsFrame(
+            ts=1.0,
+            samples={
+                "echomem_lane_queued": [({"lane": "commit"}, 1.0)],
+                "plain_gauge": [({}, 3.5)],
+            },
+        )
+    ])
+    path = write_metrics_csv(tmp_path, monitor)
+    assert path.name == "metrics_samples.csv"
+    lines = path.read_text(encoding="utf-8").splitlines()
+    assert lines[0] == "ts,metric,labels,value"
+    assert lines[1] == '1.0,echomem_lane_queued,"{""lane"": ""commit""}",1.0'
+    assert lines[2] == "1.0,plain_gauge,{},3.5"

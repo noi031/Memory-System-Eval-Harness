@@ -47,6 +47,7 @@ def control(
     config: dict[str, Any],
     *,
     action: str,
+    target_tenant: str = "",
     timeout_s: float,
 ) -> dict[str, Any]:
     endpoint = str(config.get("endpoint") or "").strip()
@@ -56,7 +57,13 @@ def control(
         if endpoint:
             request = urllib.request.Request(
                 endpoint,
-                data=json.dumps({"action": action}).encode("utf-8"),
+                data=json.dumps(
+                    {
+                        "action": action,
+                        "target_tenant": target_tenant,
+                        "tenant": target_tenant,
+                    }
+                ).encode("utf-8"),
                 headers={"Content-Type": "application/json"},
                 method="POST",
             )
@@ -70,7 +77,11 @@ def control(
                     "elapsed_s": time.monotonic() - started,
                 }
         if command:
-            rendered = command.format(action=action)
+            rendered = command.format(
+                action=action,
+                target_tenant=target_tenant,
+                tenant=target_tenant,
+            )
             completed = subprocess.run(
                 rendered,
                 shell=True,
@@ -232,18 +243,27 @@ def run(ctx: Ctx) -> None:
         clients, sessions, count=samples, workers=workers,
         timeout_s=timeout_s, phase="before",
     )
-    enable = control({"endpoint": endpoint, "command": command},
-                     action="enable", timeout_s=control_timeout_s)
-    during = (
-        sample_search(
-            clients, sessions, count=samples, workers=workers,
-            timeout_s=timeout_s, phase="during",
-        )
-        if enable.get("status") == PASS
-        else {}
+    enable = control(
+        {"endpoint": endpoint, "command": command},
+        action="enable", target_tenant=target_tenant, timeout_s=control_timeout_s,
     )
-    disable = control({"endpoint": endpoint, "command": command},
-                      action="disable", timeout_s=control_timeout_s)
+    during: dict[str, Any] = {}
+    disable: dict[str, Any] = {
+        "status": INCONCLUSIVE,
+        "reason": "故障尚未启用，未执行恢复动作",
+    }
+    try:
+        if enable.get("status") == PASS:
+            during = sample_search(
+                clients, sessions, count=samples, workers=workers,
+                timeout_s=timeout_s, phase="during",
+            )
+    finally:
+        # 无论采样是否抛异常，故障结束后都必须恢复真实依赖。
+        disable = control(
+            {"endpoint": endpoint, "command": command},
+            action="disable", target_tenant=target_tenant, timeout_s=control_timeout_s,
+        )
 
     degradations: dict[str, float] = {}
     for tenant_id in bystanders:
@@ -287,6 +307,7 @@ def run(ctx: Ctx) -> None:
         detail=_detail({
             "target_tenant": target_tenant,
             "bystanders": bystanders,
+            "fault_recovered": disable.get("status") == PASS,
             "bystander_p95_degradation": bystander_p95_degradation,
             "degradation_by_tenant": degradations,
             "p95_before_by_tenant": {

@@ -67,8 +67,11 @@ def run(ctx: Ctx) -> None:
     )
     rows: list[dict[str, Any]] = []
     for level in levels:
-        # Keep each level bounded while making the arrival burst visible.
-        effective_workers = workers if workers > 0 else level
+        # 配置的 workers 是上限而非替代值：否则固定值（如 256）会让每档
+        # level 都以同一并发运行，扫描就测不出容量边界。
+        effective_workers = (
+            max(1, min(level, workers)) if workers > 0 else level
+        )
         default_count = min(512, max(32, effective_workers * 2))
         counts = {
             "search": search_count if search_count > 0 else default_count,

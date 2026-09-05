@@ -7,7 +7,7 @@ import sys
 
 import pytest
 
-from performance.targets.echomem.main import load_profiles, main
+from performance.targets.echomem.main import _resolve_profile, load_profiles, main
 from performance.util import acquire_output_lock, load_env_file, run_command
 
 # -- load_profiles -------------------------------------------------------
@@ -32,6 +32,20 @@ def test_load_profiles_empty_raises(tmp_path):
     path.write_text(json.dumps({"profiles": []}), encoding="utf-8")
     with pytest.raises(ValueError):
         load_profiles(path)
+
+
+def test_resolve_profile_expands_env(monkeypatch, tmp_path):
+    monkeypatch.setenv("ECHOMEM_CONTAINER", "echomem-8u16g")
+    profiles_path = tmp_path / "instance-profiles.json"
+    profile = {
+        "name": "4U8G",
+        "commit_recovery": {"container": "${ECHOMEM_CONTAINER:-echomem-4u8g}"},
+        "tenant_config": "tenants.example.json",
+    }
+    resolved = _resolve_profile(profile, profiles_path)
+    assert resolved["commit_recovery"]["container"] == "echomem-8u16g"
+    # 相对路径仍按清单目录解析为绝对路径
+    assert resolved["tenant_config"] == str((tmp_path / "tenants.example.json").resolve())
 
 
 # -- load_env_file -------------------------------------------------------

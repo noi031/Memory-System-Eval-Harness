@@ -248,3 +248,14 @@ def _expand(value: str) -> str:
         return default if default is not None else ""
 
     return _ENV_PATTERN.sub(replace, value)
+
+
+def expand_env_in(data: Any) -> Any:
+    """Recursively expand ``${ENV:-default}`` placeholders in string values."""
+    if isinstance(data, str):
+        return _expand(data)
+    if isinstance(data, dict):
+        return {key: expand_env_in(value) for key, value in data.items()}
+    if isinstance(data, list):
+        return [expand_env_in(item) for item in data]
+    return data

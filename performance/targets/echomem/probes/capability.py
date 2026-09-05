@@ -5,10 +5,12 @@
 
 配置经 ``ctx.params`` 读取（键名与原 CLI 参数同名）：``auth_key`` /
 ``auth_key_env`` / ``auth_header`` / ``health_path`` / ``metrics_path`` /
-``session_id`` / ``cursor_path`` / ``message_list_key`` /
-``operation_path`` / ``operation_keys`` / ``conflict_path`` /
-``conflict_keys`` / ``ttl_path`` / ``ttl_keys`` / ``engine_path`` /
-``engine_keys`` / ``fault_path`` / ``fault_keys`` / ``timeout_s``。
+``session_id`` / ``cursor_path`` / ``cursor_uri_template`` /
+``message_list_key`` / ``operation_path`` / ``operation_keys`` /
+``conflict_path`` / ``conflict_keys`` / ``ttl_path`` / ``ttl_keys`` /
+``engine_path`` / ``engine_keys`` / ``fault_path`` / ``fault_keys`` /
+``timeout_s``。``cursor_uri_template`` 优先于 ``cursor_path``：前者经
+EchoMem ``/fs/read`` 读取 ``echo://`` 持久 cursor 文档。
 """
 
 from __future__ import annotations
@@ -19,6 +21,7 @@ import time
 import urllib.error
 import urllib.request
 from typing import Any
+from urllib.parse import quote
 
 from performance.ctx import Ctx
 
@@ -86,6 +89,41 @@ def request(
         }
 
 
+def request_cursor_uri(
+    base_url: str,
+    uri: str,
+    *,
+    auth_key: str = "",
+    auth_header: str = "X-Auth-Key",
+    timeout_s: float = 10.0,
+) -> dict[str, Any]:
+    """经 EchoMem ``/fs/read`` 读取 ``echo://`` 文档，解析内嵌 JSON 到 document。
+
+    ``payload.result.text`` 是文档原文；能解析为 JSON 时 ``document`` 取其值，
+    否则保留原文片段。``cursor_uri`` 记录实际读取的 URI。
+    """
+    result = request(
+        base_url,
+        f"/fs/read?uri={quote(uri, safe=':/')}",
+        auth_key=auth_key,
+        auth_header=auth_header,
+        timeout_s=timeout_s,
+        preserve_raw=True,
+    )
+    payload = result.get("payload")
+    document: Any = {}
+    if isinstance(payload, dict):
+        fs_result = payload.get("result")
+        if isinstance(fs_result, dict) and isinstance(fs_result.get("text"), str):
+            try:
+                document = json.loads(fs_result["text"])
+            except json.JSONDecodeError:
+                document = {"raw": fs_result["text"][-4000:]}
+    result["cursor_uri"] = uri
+    result["document"] = document
+    return result
+
+
 def classify_probe(
     name: str,
     result: dict[str, Any],
@@ -129,6 +167,13 @@ def classify_probe(
 
 
 def _detail(item: dict[str, Any]) -> str:
+    evidence = {
+        key: item[key]
+        for key in ("cursor_uri", "document_keys")
+        if key in item
+    }
+    if evidence:
+        return json.dumps(evidence, ensure_ascii=False)[:500]
     payload = item.get("payload")
     if isinstance(payload, dict) and payload:
         return json.dumps(payload, ensure_ascii=False)[:500]
@@ -151,8 +196,54 @@ def run(ctx: Ctx) -> None:
         request(base_url, params.get("health_path", "/health"), auth_key=auth_key,
                 auth_header=auth_header, timeout_s=timeout_s),
     ))
+
+    # cursor/message-set：cursor_uri_template 经 /fs/read 读 echo:// 持久
+    # cursor（优先）；cursor_path 直取 HTTP 端点；两者都未配置时 INCONCLUSIVE。
+    cursor_uri_template = str(params.get("cursor_uri_template") or "")
+    if cursor_uri_template:
+        if not params.get("session_id"):
+            checks.append({
+                "name": "cursor/message-set",
+                "status": INCONCLUSIVE,
+                "http_status": None,
+                "reason": "cursor URI requires session_id; capability was not externally tested",
+                "payload": {},
+            })
+        else:
+            cursor_uri = cursor_uri_template.format(session=str(params.get("session_id")))
+            result = request_cursor_uri(
+                base_url, cursor_uri, auth_key=auth_key,
+                auth_header=auth_header, timeout_s=timeout_s,
+            )
+            check = classify_probe("cursor/message-set", result)
+            check["cursor_uri"] = cursor_uri
+            check["document_keys"] = (
+                sorted(result["document"])
+                if isinstance(result.get("document"), dict)
+                else []
+            )
+            checks.append(check)
+    else:
+        cursor_path = params.get("cursor_path")
+        if cursor_path:
+            checks.append(classify_probe(
+                "cursor/message-set",
+                request(
+                    base_url, cursor_path, auth_key=auth_key,
+                    auth_header=auth_header, timeout_s=timeout_s,
+                ),
+                expect_list_key=str(params.get("message_list_key") or "message_ids"),
+            ))
+        else:
+            checks.append({
+                "name": "cursor/message-set",
+                "status": INCONCLUSIVE,
+                "http_status": None,
+                "reason": "no probe endpoint configured; capability was not externally tested",
+                "payload": {},
+            })
+
     optional = [
-        ("cursor/message-set", params.get("cursor_path"), (), str(params.get("message_list_key") or "message_ids")),
         ("operation/idempotency", params.get("operation_path"), tuple(params.get("operation_keys") or ["operation_id"]), ""),
         ("version/conflict", params.get("conflict_path"), tuple(params.get("conflict_keys") or ["version", "conflict_count"]), ""),
         ("cache/TTL", params.get("ttl_path"), tuple(params.get("ttl_keys") or ["ttl_seconds"]), ""),

@@ -156,6 +156,39 @@ def test_parse_skips_empty_api_base_and_model(tmp_path):
     assert [e["id"] for e in engines] == ["on"]
 
 
+def test_parse_intent_llm_skipped_when_intent_backend_not_llm(tmp_path):
+    # An intent LLM provider is inactive when search.intent.backend is a
+    # non-LLM backend (e.g. "rule"); preflighting it would stop a valid run.
+    path = tmp_path / "native.json"
+    path.write_text(json.dumps({
+        "recall": {
+            "search": {"intent": {"backend": "rule"}},
+            "model": {
+                "intent_llm": {"api_key_env": "K", "api_base": "https://intent", "model": "i1"},
+                "llm": {"api_key_env": "K", "api_base": "https://llm", "model": "m1"},
+            },
+        },
+    }), encoding="utf-8")
+    engines = parse_engine_configs(path)
+    ids = [e["id"] for e in engines]
+    assert "recall.model.intent_llm" not in ids
+    assert ids == ["recall.model.llm"]
+
+
+def test_parse_intent_llm_kept_when_intent_backend_llm(tmp_path):
+    path = tmp_path / "native.json"
+    path.write_text(json.dumps({
+        "recall": {
+            "search": {"intent": {"backend": "llm"}},
+            "model": {
+                "intent_llm": {"api_key_env": "K", "api_base": "https://intent", "model": "i1"},
+            },
+        },
+    }), encoding="utf-8")
+    engines = parse_engine_configs(path)
+    assert [e["id"] for e in engines] == ["recall.model.intent_llm"]
+
+
 def test_parse_flat_keeps_enabled_false_entry(tmp_path):
     # ``enabled:false`` filtering applies to the native nested layout (see
     # test_parse_nested_native_config); the flat engines format does not
@@ -389,6 +422,49 @@ def test_run_preflight_probe_failure(probe_server, tmp_path, monkeypatch):
     assert result["ok"] is False
     assert "可能不被该 endpoint 支持" in result["error"]
     assert result["engines_checked"] == 1
+    # deterministic HTTP errors are never retried
+    assert result["probe_attempts"] == 1
+    assert len(state.requests) == 1
+
+
+def test_run_preflight_transient_failure_retried_then_ok(tmp_path, monkeypatch):
+    from performance.targets.echomem.acceptance import preflight as preflight_mod
+
+    attempts: list[int] = []
+
+    def flaky_probe(engine: dict, *, timeout_s: float = 20.0) -> dict:
+        attempts.append(1)
+        if len(attempts) < 3:
+            return {
+                "id": engine["id"],
+                "kind": engine["kind"],
+                "api_base": engine["api_base"],
+                "model": engine["model"],
+                "model_supported": False,
+                "status": "error",
+                "code": None,
+                "elapsed_s": 0.0,
+                "error": "urlopen error [Errno -2] Name or service not known",
+            }
+        return {
+            "id": engine["id"],
+            "kind": engine["kind"],
+            "api_base": engine["api_base"],
+            "model": engine["model"],
+            "model_supported": True,
+            "status": "ok",
+            "code": 200,
+            "elapsed_s": 0.0,
+            "error": "",
+        }
+
+    monkeypatch.setattr(preflight_mod, "probe_endpoint", flaky_probe)
+    monkeypatch.setenv("PROBE_KEY", "secret-key")
+    config = _write_config(tmp_path, [_engine("llm", "https://x")])
+    result = run_preflight(config, timeout_s=5.0, retry_backoff_s=0.0)
+    assert result["ok"] is True
+    assert result["probe_attempts"] == 3
+    assert len(attempts) == 3
 
 
 def test_run_preflight_config_read_failure(tmp_path):

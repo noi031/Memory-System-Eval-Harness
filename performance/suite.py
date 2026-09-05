@@ -1,26 +1,36 @@
-"""通用套件能力：case records 汇总与单 case 执行。
+"""通用套件能力：case 收敛、case → Profile 解析、单 case 与整套执行。
 
-``summarize_case_records`` 把一批 RequestRecord 汇总为 case 契约摘要
-（``{"metrics": {...}}``，search/commit/fairness/per_tenant），op 映射与
-锚点判定可参数化；``run_case`` 用 ``engine.Engine`` 进程内执行单个 case
-（load_scene + Engine.run），把汇总结果经 ``report.write_records`` 写成
-case 目录下的 summary.json / records.csv，Engine 异常记 ``ENV_ERROR`` 不
-中断套件。target 可通过 ``summarize`` / ``write_evidence`` 挂自己的汇总
-扩展（如 details/parameters）与证据 CSV。
+``apply_quick`` 做 quick 收敛（duration / barrier count 双 cap、
+quick_commit_rpm 覆盖、sessions 压到 1）；``build_case_profile`` 把 case
+翻译为 ``profile.Profile``（arrival 按任务映射 fixed_rps，params 带基础键
+与 target 专属参数回调）；``summarize_case_records`` 把一批 RequestRecord
+汇总为 case 契约摘要（``{"metrics": {...}}``，search/commit/fairness/
+per_tenant），op 映射与锚点判定可参数化；``run_case`` 用 ``engine.Engine``
+进程内执行单个 case（load_scene + Engine.run），把汇总结果经
+``report.write_records`` 写成 case 目录下的 summary.json / records.csv，
+Engine 异常记 ``ENV_ERROR`` 不中断套件；``run_suite`` 编排整套正式套件
+（prepare → preflight → 灌种 → 逐 case → acceptance → suite.json），
+case 选择/Profile 构造/单 case 执行/preflight/seed/acceptance 均可由
+target 挂钩。target 可通过 ``summarize`` / ``write_evidence`` 挂自己的
+汇总扩展（如 details/parameters）与证据 CSV。
 """
 
 from __future__ import annotations
 
+import json
+import shutil
 import statistics
 import threading
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
 from performance.engine import Engine, load_scene
-from performance.profile import Profile
+from performance.profile import ArrivalSpec, LoadSpec, Profile, TargetSpec, TenantSpec
 from performance.records import RequestRecord
 from performance.report import write_records
 from performance.stats import percentile
+from performance.util import now_iso, run_command, scale_counts_to_cap
 
 
 def _seconds(stage_ms: float) -> float:
@@ -33,6 +43,109 @@ def _rate_limited(record: RequestRecord) -> bool:
         record.status == "error"
         and record.error_type == "http_4xx"
         and (record.retry_after_s is not None or record.reason_code != "")
+    )
+
+
+@dataclass
+class QuickSpec:
+    """quick 收敛参数：时长上限、barrier 计数上限与是否保留灌种。"""
+
+    duration_cap_s: float = 15.0
+    barrier_count_cap: int = 32
+    include_seed: bool = False
+
+
+def apply_quick(case: dict, quick: QuickSpec) -> dict:
+    """返回 quick 收敛后的 case 副本（原 case 不被修改）。"""
+    result = dict(case)
+    result["duration_s"] = min(float(case["duration_s"]), quick.duration_cap_s)
+    if case.get("commit_barrier"):
+        cap = quick.barrier_count_cap
+        scenario_cap = int(case.get("quick_barrier_count_cap") or 0)
+        if scenario_cap > 0:
+            cap = min(cap, scenario_cap)
+        result["commit_barrier_count"] = min(
+            int(case.get("commit_barrier_count", 32)), cap
+        )
+        counts = case.get("commit_tenant_counts")
+        if counts and result["commit_barrier_count"] < sum(int(v) for v in counts):
+            result["commit_tenant_counts"] = scale_counts_to_cap(
+                [int(v) for v in counts], result["commit_barrier_count"]
+            )
+    if case.get("quick_commit_rpm") is not None:
+        result["commit_rpm"] = case["quick_commit_rpm"]
+    result["sessions_per_tenant"] = 1
+    return result
+
+
+def build_case_profile(
+    case: dict,
+    *,
+    scene_path: Path,
+    base_url: str,
+    tenant_count: int,
+    auth_headers: dict,
+    queries: list[str],
+    quick: QuickSpec | None = None,
+    extra_params: Callable[[dict[str, Any], dict], None] | None = None,
+) -> Profile:
+    """case → Profile：arrival 按任务固定 rps，params 带场景专属参数。
+
+    quick 非 None 时先 ``apply_quick`` 收敛。worker 数取 case 显式
+    ``search_workers``/``commit_workers``，否则按 rps 取整（至少 1）。
+    ``scene_path`` 指向场景文件，``queries`` 是检索探测用 query 列表；
+    ``extra_params`` 在基础 params 之后回调，用于注入场景专属参数
+    （如 barrier/burst）。
+    """
+    if quick is not None:
+        case = apply_quick(case, quick)
+    scene = load_scene(scene_path)
+    search_rps = float(case.get("search_rps") or 0.0)
+    commit_rps = float(case.get("commit_rpm") or 0.0) / 60.0
+
+    read_workers = case.get("search_workers") or 0
+    if read_workers <= 0 and search_rps > 0:
+        read_workers = max(1, round(search_rps))
+    write_workers = case.get("commit_workers") or 0
+    if write_workers <= 0 and commit_rps > 0:
+        write_workers = max(1, round(commit_rps))
+
+    arrival: dict[str, ArrivalSpec] = {}
+    mix: dict[str, int] = {}
+    if "read" in scene.tasks:
+        mix["read"] = max(1, read_workers)
+        if search_rps > 0:
+            arrival["read"] = ArrivalSpec(model="fixed_rps", rps=search_rps)
+    if "write" in scene.tasks:
+        mix["write"] = max(1, write_workers) if write_workers > 0 else 0
+        if commit_rps > 0:
+            arrival["write"] = ArrivalSpec(model="fixed_rps", rps=commit_rps)
+
+    params: dict[str, Any] = {
+        "top_k": int(case.get("top_k", 5)),
+        "messages_per_session": int(case.get("messages_per_session", 3)),
+        "sessions_per_tenant": int(case.get("sessions_per_tenant", 1)),
+        "queries": list(queries),
+        "commit_poll_timeout_s": float(case.get("commit_poll_timeout_s", 600)),
+    }
+    if extra_params is not None:
+        extra_params(params, case)
+
+    return Profile(
+        name=case["label"],
+        target=TargetSpec(
+            base_url=base_url.rstrip("/"),
+            headers=dict(auth_headers),
+            read_timeout_s=30.0,
+        ),
+        load=LoadSpec(
+            workers=max(1, read_workers + write_workers),
+            duration_s=float(case["duration_s"]),
+            mix=mix or None,
+            arrival=arrival,
+        ),
+        tenants=[TenantSpec(name=f"tenant-{index}") for index in range(tenant_count)],
+        params=params,
     )
 
 
@@ -196,3 +309,170 @@ def run_case(
         "output_dir": str(case_dir.resolve()),
         "summary": summary,
     }
+
+
+@dataclass
+class SeedContext:
+    """灌种结果里单个租户的上下文：身份、凭据与检索 query 列表。"""
+
+    tenant_id: str
+    auth_key: str
+    queries: list[str]
+
+
+def _run_prepare_command(command: str) -> dict:
+    """prepare_command 经 bash -lc 执行；Windows 无 bash 时降级为 NOT_RUN。"""
+    if shutil.which("bash") is None:
+        return {
+            "status": "NOT_RUN",
+            "command": command,
+            "reason": "bash not available (Windows); command not executed",
+        }
+    result = run_command(["bash", "-lc", command], timeout_s=1800.0)
+    return {
+        "status": "ok" if result["status"] == "PASS" else "INCONCLUSIVE",
+        "command": command,
+        "returncode": result["returncode"],
+        "stdout_tail": result["stdout"][-2000:],
+        "stderr_tail": result["stderr"][-4000:],
+    }
+
+
+def _finalize_suite(manifest: dict, suite_dir: Path) -> dict:
+    """写 suite.json / acceptance.json 并返回 manifest（acceptance 缺省 NOT_RUN）。"""
+    if "acceptance" not in manifest:
+        manifest["acceptance"] = {"status": "NOT_RUN", "reason": "no evaluator"}
+    (suite_dir / "suite.json").write_text(
+        json.dumps(manifest, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    (suite_dir / "acceptance.json").write_text(
+        json.dumps(manifest["acceptance"], ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    return manifest
+
+
+def run_suite(
+    profile: dict,
+    *,
+    suite_dir: Path,
+    profile_name: str,
+    base_url: str = "",
+    timeout_s: float = 120.0,
+    scenarios: list[str] | None = None,
+    quick: QuickSpec | None = None,
+    select_cases: Callable[[str, list[str] | None], list[dict]],
+    build_profile: Callable[[dict, str, int, QuickSpec | None], Profile],
+    run_case: Callable[[dict, Profile, Path, float | None], dict],
+    preflight: Callable[[str], dict] | None = None,
+    seed: Callable[[str, str, int, int, int], tuple[list[SeedContext], dict]]
+    | None = None,
+    evaluate: Callable[[dict], dict] | None = None,
+) -> dict:
+    """执行单个 instance profile 的正式套件，返回 manifest。
+
+    profile = instance-profiles JSON 里的单个 profile dict（name/base_url/
+    tenant_config/preflight_config/allow_partial_tenants/quick_include_seed/
+    prepare_command 等）。``select_cases``/``build_profile``/``run_case``
+    必填，分别提供 case 选择、case → Profile（含 quick 收敛）与单 case
+    执行；``preflight`` 收 preflight 配置路径（为空返回 NOT_RUN 条目，非空
+    且 ``ok`` 非真时提前返回）；``seed`` 收 (base_url, tenant_config,
+    max_tenants, sessions, messages) 返回 (contexts, seed 摘要)；``evaluate``
+    收 manifest 返回 acceptance 摘要。各阶段失败按 prepare/preflight/seed
+    段记录并提前返回（仍写 suite.json / acceptance.json）。
+    """
+    suite_dir = Path(suite_dir)
+    suite_dir.mkdir(parents=True, exist_ok=True)
+    base_url = (base_url or str(profile.get("base_url") or "")).rstrip("/")
+    manifest: dict[str, Any] = {
+        "created_at": now_iso(),
+        "base_url": base_url,
+        "profile": profile_name,
+        "instance_profile": str(profile.get("name") or ""),
+        "tenant_config": str(profile.get("tenant_config") or ""),
+        "preflight_config": str(profile.get("preflight_config") or ""),
+        "allow_partial_tenants": bool(profile.get("allow_partial_tenants")),
+        "metrics_enabled": bool(profile.get("metrics_enabled", True)),
+        "resource_profile": profile.get("resource_profile") or {},
+        "output_root": str(suite_dir.resolve()),
+        "scenarios": [],
+        "repeats": 1,
+        "policies": ["server-observe"],
+        "duration_cap_s": quick.duration_cap_s if quick else 0.0,
+        "server_observation_mode": True,
+        "client_admission_enabled": False,
+        "probe_artifacts": {},
+        "runs": [],
+    }
+    cases = select_cases(profile_name, scenarios)
+    manifest["scenarios"] = [case["label"] for case in cases]
+
+    def finish() -> dict:
+        """写盘收尾：acceptance 缺失时先经 evaluate 钩子求值。"""
+        if evaluate is not None and "acceptance" not in manifest:
+            manifest["acceptance"] = evaluate(manifest)
+        return _finalize_suite(manifest, suite_dir)
+
+    prepare_command = profile.get("prepare_command")
+    if prepare_command:
+        prepare = _run_prepare_command(str(prepare_command))
+        manifest["prepare"] = prepare
+        if prepare["status"] != "ok":
+            return finish()
+
+    preflight_config = str(profile.get("preflight_config") or "")
+    if preflight is not None:
+        manifest["preflight"] = preflight(preflight_config)
+        if preflight_config and not manifest["preflight"].get("ok"):
+            return finish()
+    else:
+        manifest["preflight"] = {"status": "NOT_RUN", "config": preflight_config}
+
+    contexts = None
+    seed_sessions = max(int(case.get("sessions_per_tenant", 1)) for case in cases)
+    include_seed = bool(profile.get("quick_include_seed"))
+    if quick is not None and not include_seed and not quick.include_seed:
+        seed_sessions = min(seed_sessions, 1)
+    seed_messages = max(int(case.get("messages_per_session", 3)) for case in cases)
+    tenant_config = profile.get("tenant_config")
+    if tenant_config and seed is not None:
+        try:
+            contexts, seed_summary = seed(
+                base_url,
+                str(tenant_config),
+                max(int(case["tenants"]) for case in cases),
+                seed_sessions,
+                seed_messages,
+            )
+            manifest["seed"] = seed_summary
+        except Exception as exc:
+            manifest["seed"] = {"status": "ENV_ERROR", "error": str(exc)}
+            return finish()
+    else:
+        manifest["seed"] = {"status": "skipped", "reason": "no tenant_config"}
+
+    for case in cases:
+        tenant_count = case["tenants"]
+        case_profile = build_profile(case, base_url, tenant_count, quick)
+        if contexts:
+            usable = contexts[:tenant_count] if tenant_count > 0 else contexts
+            case_profile.tenants = [
+                TenantSpec(
+                    name=ctx.tenant_id or f"tenant-{index}",
+                    headers={"X-Auth-Key": ctx.auth_key} if ctx.auth_key else {},
+                )
+                for index, ctx in enumerate(usable)
+            ]
+            case_profile.params["queries"] = [
+                query for ctx in usable for query in ctx.queries
+            ]
+        run = run_case(
+            case, case_profile,
+            case_dir=suite_dir / case["label"], timeout_s=timeout_s,
+        )
+        manifest["runs"].append(run)
+
+    if evaluate is not None:
+        manifest["acceptance"] = evaluate(manifest)
+    return _finalize_suite(manifest, suite_dir)

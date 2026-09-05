@@ -1,13 +1,14 @@
-"""探测 EchoMem 容器在 Commit 操作中途被 kill 后的恢复能力（真实 HTTP）。
+"""探测 EchoMem 容器/进程在 Commit 操作中途被 kill 后的恢复能力（真实 HTTP）。
 
 使用真实 HTTP 服务与真实配置模型。有意保持保守：丢失 Commit 响应、或缺少
 message-set/cursor 端点，记录为 INCONCLUSIVE 而非推断为成功。
 
 配置经 ``ctx.params`` 读取（键名与原 CLI 参数同名）：``health_url`` /
-``container`` / ``tenant_config`` / ``tenant`` / ``kill_delay_s`` /
-``messages`` / ``content_chars`` / ``health_timeout_s`` /
-``recovery_timeout_s`` / ``poll_s`` / ``require_accepted_202`` /
-``accepted_wait_s`` / ``idempotency_key``。``base_url`` 取 ``ctx.base_url``。
+``container`` / ``pid`` / ``restart_command`` / ``tenant_config`` /
+``tenant`` / ``kill_delay_s`` / ``messages`` / ``content_chars`` /
+``health_timeout_s`` / ``recovery_timeout_s`` / ``poll_s`` /
+``require_accepted_202`` / ``accepted_wait_s`` / ``idempotency_key``。
+``base_url`` 取 ``ctx.base_url``。
 """
 
 from __future__ import annotations
@@ -15,6 +16,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import signal
 import socket
 import subprocess
 import threading
@@ -28,8 +30,12 @@ from typing import Any
 from urllib.parse import quote
 
 from performance.ctx import Ctx
-from performance.targets.echomem.probes._client import EchoMemHTTP, extract_message
-from performance.targets.echomem.probes.cursor_reconcile import values_from_payload
+from performance.targets.echomem.probes._client import (
+    EchoMemHTTP,
+    extract_message,
+    ordered_message_ids_from_payload,
+    values_from_payload,
+)
 
 PASS = "PASS"
 FAIL = "FAIL"
@@ -143,7 +149,68 @@ def _docker_engine_post(path: str) -> tuple[int, str]:
         return 0, f"{type(exc).__name__}: {exc}"
 
 
-def kill_and_start(container: str, restart_wait_s: float) -> dict[str, Any]:
+def kill_and_start(
+    container: str,
+    restart_wait_s: float,
+    *,
+    pid: int = 0,
+    restart_command: str = "",
+) -> dict[str, Any]:
+    if pid:
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except ProcessLookupError:
+            return {
+                "kill_returncode": 1,
+                "kill_stderr": f"process {pid} does not exist",
+                "control_backend": "pid",
+                "pid": pid,
+            }
+        except OSError as exc:
+            return {
+                "kill_returncode": 1,
+                "kill_stderr": f"{type(exc).__name__}: {exc}",
+                "control_backend": "pid",
+                "pid": pid,
+            }
+        result: dict[str, Any] = {
+            "kill_returncode": 0,
+            "kill_stderr": "",
+            "killed_at": now(),
+            "control_backend": "pid",
+            "pid": pid,
+        }
+        if not restart_command:
+            result.update({
+                "start_returncode": 1,
+                "start_stderr": "restart_command is required when using pid",
+                "restart_at": now(),
+            })
+            return result
+        try:
+            started = subprocess.Popen(
+                restart_command,
+                shell=True,
+                start_new_session=True,
+            )
+        except OSError as exc:
+            result.update({
+                "start_returncode": 1,
+                "start_stderr": f"{type(exc).__name__}: {exc}",
+                "restart_at": now(),
+            })
+            return result
+        result.update({
+            "start_returncode": 0,
+            "start_stderr": "",
+            "restart_at": now(),
+            "restart_pid": started.pid,
+            "restart_command_supplied": True,
+        })
+        if restart_wait_s > 0:
+            time.sleep(restart_wait_s)
+        return result
+
     docker_cli = shutil.which("docker")
     killed = None
     if docker_cli:
@@ -230,6 +297,8 @@ def run(ctx: Ctx) -> None:
     base_url = ctx.base_url
     health_url = str(params.get("health_url") or "") or base_url.rstrip("/") + "/health"
     container = str(params.get("container") or "")
+    pid = int(params.get("pid") or 0)
+    restart_command = str(params.get("restart_command") or "")
     tenant_config = str(params.get("tenant_config") or "")
     tenant = str(params.get("tenant") or "stress-a")
     kill_delay_s = float(params.get("kill_delay_s", 0.5))
@@ -267,11 +336,11 @@ def run(ctx: Ctx) -> None:
         detail=_detail({"health_url": health_url, "status_code": before.get("status_code")}),
     )
 
-    if not container:
+    if not container and not pid:
         ctx.check(
             "commit-recovery",
             status=INCONCLUSIVE,
-            reason="no container configured; recovery was not externally exercised",
+            reason="no container or pid configured; recovery was not externally exercised",
             elapsed_s=time.monotonic() - started,
         )
         return
@@ -365,7 +434,9 @@ def run(ctx: Ctx) -> None:
     commit_submitted_at = now()
     commit_request_elapsed_before_kill_s = time.monotonic() - commit_started
     accepted_202 = commit_box.get("status_code") == 202
-    control = kill_and_start(container, 0)
+    control = kill_and_start(
+        container, 0, pid=pid, restart_command=restart_command
+    )
     control_ok = recovery_control_ok(control)
     commit_thread.join(timeout=1.0)
 
@@ -486,15 +557,20 @@ def run(ctx: Ctx) -> None:
         or replay_result.get("id")
     )
     replayed = bool(replay_result.get("replayed")) if isinstance(replay_result, dict) else False
+    same_archive = str(replay_archive_id or "") == str(archive_id)
     idempotency_status = (
         PASS
-        if replayed and str(replay_archive_id or "") == str(archive_id)
+        if replayed and same_archive
+        else INCONCLUSIVE
+        if same_archive
         else FAIL
     )
     idempotency_reason = (
         "same idempotency key returned the same archive with replayed=true"
         if idempotency_status == PASS
-        else "same-key Commit replay did not return the original archive with replayed=true"
+        else "same-key Commit returned the original archive, but the optional replayed flag was false"
+        if idempotency_status == INCONCLUSIVE
+        else "same-key Commit replay did not return the original archive"
     )
 
     terminal = []
@@ -562,6 +638,41 @@ def run(ctx: Ctx) -> None:
         else FAIL
     )
 
+    def is_subsequence(expected: list[str], observed: list[str]) -> bool:
+        if not expected:
+            return False
+        iterator = iter(observed)
+        return all(any(candidate == item for candidate in iterator) for item in expected)
+
+    source_ordered_ids = {
+        source: ordered_message_ids_from_payload(source_payload)
+        for source, source_payload in source_payloads.items()
+    }
+    order_checks = {
+        source: {
+            "expected": list(message_ids),
+            "observed": ordered,
+            "matches_in_order": is_subsequence(message_ids, ordered),
+        }
+        for source, ordered in source_ordered_ids.items()
+        if source in {"archive", "commit_cursor", "commit_memories"}
+        and ordered
+    }
+    order_status = (
+        PASS
+        if any(item["matches_in_order"] for item in order_checks.values())
+        else FAIL
+        if order_checks
+        else INCONCLUSIVE
+    )
+    order_reason = (
+        "至少一个 Commit 作用域的持久化来源按客户端提交顺序暴露全部消息"
+        if order_status == PASS
+        else "持久化来源中的消息顺序与客户端提交顺序不一致"
+        if order_status == FAIL
+        else "没有可解析的 Commit 作用域消息顺序"
+    )
+
     cursor_status = (
         PASS
         if expected_message_ids and expected_message_ids <= set(source_ids["commit_cursor"])
@@ -582,6 +693,7 @@ def run(ctx: Ctx) -> None:
         if (
             final_state == "completed"
             and reconciliation_status == PASS
+            and order_status == PASS
             and idempotency_status == PASS
             and history.status_code
             and history.status_code < 400
@@ -671,5 +783,16 @@ def run(ctx: Ctx) -> None:
             "expected_server_message_ids": sorted(expected_message_ids),
             "observed_by_cursor": sorted(source_ids["commit_cursor"]),
             "cursor_status_code": cursor_response.status_code,
+        }),
+    )
+    ctx.check(
+        "order-reconciliation",
+        status=order_status,
+        reason=order_reason,
+        elapsed_s=elapsed,
+        detail=_detail({
+            "expected_in_submit_order": list(message_ids),
+            "ordered_by_source": source_ordered_ids,
+            "checks": order_checks,
         }),
     )

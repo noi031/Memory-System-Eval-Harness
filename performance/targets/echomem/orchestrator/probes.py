@@ -3,10 +3,10 @@
 ``run_configured_probes`` 逐个执行 profile 里显式配置的探针段（capability /
 blackbox / missing_cases / concurrent_commit / fault_isolation /
 limit_failure_sweep / commit_recovery / fault_plan），每个探针以子进程方式
-运行：写临时 YAML profile → ``python -m performance --target general probe
---scene <probes>/<scene>.py --profile <tmp.yaml> --out <out.json>`` → 读回
-产物 → 删除临时文件。未配置的探针不跑；缺前置条件（如 blackbox 需要已完成
-Commit 与租户配置）只记 INCONCLUSIVE 命令记录，不产出制品。
+运行（临时 YAML profile 写入、CLI 命令构造、产物读回与状态保留见通用层
+``performance.probe.run_configured_probe``）。未配置的探针不跑；缺前置条件
+（如 blackbox 需要已完成 Commit 与租户配置）只记 INCONCLUSIVE 命令记录，
+不产出制品。
 
 返回 (artifacts, commands)：artifacts 的键即 suite 顶层合并键（如
 ``capability_probe``/``commit_recovery``/``fault_suite``），值带 ``path``；
@@ -18,31 +18,15 @@ from __future__ import annotations
 import csv
 import json
 import os
-import sys
-import tempfile
 from pathlib import Path
 from typing import Any
 
-import yaml
-
-from performance.util import expand_template, read_json, run_command
+from performance.probe import preserve_probe_status, run_configured_probe
+from performance.util import expand_template, read_json
 
 PROBES_DIR = Path(__file__).resolve().parent.parent / "probes"
 
 _AUTH_HEADER_NAMES = {"x-auth-key", "authorization"}
-
-
-def _preserve_probe_status(
-    execution: dict[str, Any],
-    payload: dict[str, Any],
-) -> dict[str, Any]:
-    """探针级 INCONCLUSIVE/NOT_IMPLEMENTED 不被子进程失败掩盖。"""
-    if (
-        execution.get("status") == "FAIL"
-        and payload.get("status") in {"INCONCLUSIVE", "NOT_IMPLEMENTED"}
-    ):
-        execution["status"] = payload["status"]
-    return execution
 
 
 def _first_completed_commit_csv(formal_root: Path) -> tuple[Path, str] | None:
@@ -144,48 +128,6 @@ def _materialize_fault_plan(
     return output_path
 
 
-def _write_probe_profile(base_url: str, params: dict[str, Any]) -> Path:
-    """把探针 profile 物化为临时 YAML 供探针 CLI 使用。
-
-    ``base_url`` 落在 ``target.base_url``；探针参数保留原始类型。调用方负责
-    在运行结束后删除返回的临时文件。
-    """
-    fd, path = tempfile.mkstemp(prefix="objective-probe-", suffix=".yaml", text=True)
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            yaml.safe_dump(
-                {
-                    "name": "objective-probe",
-                    "target": {"base_url": base_url},
-                    "params": params,
-                },
-                handle,
-                allow_unicode=True,
-                sort_keys=False,
-            )
-    except Exception:
-        os.unlink(path)
-        raise
-    return Path(path)
-
-
-def _probe_command(scene: str, profile_path: Path, out_path: Path) -> list[str]:
-    return [
-        sys.executable,
-        "-m",
-        "performance",
-        "--target",
-        "general",
-        "probe",
-        "--scene",
-        str(PROBES_DIR / scene),
-        "--profile",
-        str(profile_path),
-        "--out",
-        str(out_path),
-    ]
-
-
 def _run_limit_failure_sweep(
     profile: dict[str, Any],
     *,
@@ -247,10 +189,14 @@ def _run_limit_failure_sweep(
         }.get(key)
         if value not in (None, ""):
             params[key] = value
-    profile_path = _write_probe_profile(base_url, params)
-    command = _probe_command("limit_failure_sweep.py", profile_path, output / "probe-report.json")
-    execution = run_command(command, timeout_s=min(timeout_s, 180 if quick else 1800))
-    profile_path.unlink(missing_ok=True)
+    _, execution = run_configured_probe(
+        params,
+        probes_dir=PROBES_DIR,
+        scene="limit_failure_sweep.py",
+        output=output / "probe-report.json",
+        base_url=base_url,
+        timeout_s=min(timeout_s, 180 if quick else 1800),
+    )
     commands: list[dict[str, Any]] = [execution]
     summary_path = output / "summary.json"
     payload = read_json(summary_path)
@@ -311,6 +257,7 @@ def run_configured_probes(
             "health_path",
             "metrics_path",
             "cursor_path",
+            "cursor_uri_template",
             "operation_path",
             "conflict_path",
             "ttl_path",
@@ -321,16 +268,16 @@ def run_configured_probes(
             value = capability.get(key)
             if value not in (None, ""):
                 params[key] = value
-        profile_path = _write_probe_profile(base_url, params)
-        execution = run_command(
-            _probe_command("capability.py", profile_path, output),
+        payload, execution = run_configured_probe(
+            params,
+            probes_dir=PROBES_DIR,
+            scene="capability.py",
+            output=output,
+            base_url=base_url,
             timeout_s=min(timeout_s, 180),
             redact_values=redact,
         )
-        profile_path.unlink(missing_ok=True)
         commands.append(execution)
-        payload = read_json(output)
-        _preserve_probe_status(execution, payload)
         if payload:
             artifacts["capability_probe"] = {**payload, "path": str(output)}
 
@@ -341,15 +288,16 @@ def run_configured_probes(
             params["auth_key"] = auth_key
         elif auth_key_env:
             params["auth_key_env"] = auth_key_env
-        profile_path = _write_probe_profile(base_url, params)
-        execution = run_command(
-            _probe_command("blackbox_contract.py", profile_path, output),
+        payload, execution = run_configured_probe(
+            params,
+            probes_dir=PROBES_DIR,
+            scene="blackbox_contract.py",
+            output=output,
+            base_url=base_url,
             timeout_s=min(timeout_s, 180),
             redact_values=redact,
         )
-        profile_path.unlink(missing_ok=True)
         commands.append(execution)
-        payload = read_json(output)
         if payload:
             artifacts["blackbox_contract_probe"] = {**payload, "path": str(output)}
     else:
@@ -375,16 +323,16 @@ def run_configured_probes(
             value = missing.get(key)
             if value not in (None, ""):
                 params[key] = value
-        profile_path = _write_probe_profile(base_url, params)
-        execution = run_command(
-            _probe_command("missing_cases.py", profile_path, output),
+        payload, execution = run_configured_probe(
+            params,
+            probes_dir=PROBES_DIR,
+            scene="missing_cases.py",
+            output=output,
+            base_url=base_url,
             timeout_s=min(timeout_s, 300 if quick else 900),
             redact_values=redact,
         )
-        profile_path.unlink(missing_ok=True)
         commands.append(execution)
-        payload = read_json(output)
-        _preserve_probe_status(execution, payload)
         if payload:
             artifacts["missing_cases"] = {**payload, "path": str(output)}
 
@@ -396,16 +344,16 @@ def run_configured_probes(
             value = concurrent.get(key)
             if value not in (None, ""):
                 params[key] = value
-        profile_path = _write_probe_profile(base_url, params)
-        execution = run_command(
-            _probe_command("concurrent_commit.py", profile_path, output),
+        payload, execution = run_configured_probe(
+            params,
+            probes_dir=PROBES_DIR,
+            scene="concurrent_commit.py",
+            output=output,
+            base_url=base_url,
             timeout_s=min(timeout_s, 300 if quick else 900),
             redact_values=redact,
         )
-        profile_path.unlink(missing_ok=True)
         commands.append(execution)
-        payload = read_json(output)
-        _preserve_probe_status(execution, payload)
         if payload:
             artifacts["concurrent_commit"] = {**payload, "path": str(output)}
 
@@ -427,16 +375,16 @@ def run_configured_probes(
             value = fault_isolation.get(key)
             if value not in (None, ""):
                 params[key] = value
-        profile_path = _write_probe_profile(base_url, params)
-        execution = run_command(
-            _probe_command("fault_isolation.py", profile_path, output),
+        payload, execution = run_configured_probe(
+            params,
+            probes_dir=PROBES_DIR,
+            scene="fault_isolation.py",
+            output=output,
+            base_url=base_url,
             timeout_s=min(timeout_s, 600 if quick else 1800),
             redact_values=redact,
         )
-        profile_path.unlink(missing_ok=True)
         commands.append(execution)
-        payload = read_json(output)
-        _preserve_probe_status(execution, payload)
         if payload:
             artifacts["fault_isolation"] = {**payload, "path": str(output)}
 
@@ -468,22 +416,24 @@ def run_configured_probes(
             "recovery_timeout_s",
             "poll_s",
             "accepted_wait_s",
+            "pid",
+            "restart_command",
         ):
             value = recovery.get(key)
             if value not in (None, ""):
                 params[key] = value
         if recovery.get("require_accepted_202"):
             params["require_accepted_202"] = True
-        profile_path = _write_probe_profile(base_url, params)
-        execution = run_command(
-            _probe_command("commit_recovery.py", profile_path, output),
+        payload, execution = run_configured_probe(
+            params,
+            probes_dir=PROBES_DIR,
+            scene="commit_recovery.py",
+            output=output,
+            base_url=base_url,
             timeout_s=min(timeout_s, 900),
             redact_values=redact,
         )
-        profile_path.unlink(missing_ok=True)
         commands.append(execution)
-        payload = read_json(output)
-        _preserve_probe_status(execution, payload)
         if payload:
             artifacts["commit_recovery"] = {**payload, "path": str(output)}
 
@@ -503,16 +453,18 @@ def run_configured_probes(
             params["auth_key"] = auth_key
         if commit_csv:
             params["commit_csv"] = str(commit_csv)
-        profile_path = _write_probe_profile(base_url, params)
-        execution = run_command(
-            _probe_command("fault_suite.py", profile_path, output_dir / "probe-report.json"),
+        _, execution = run_configured_probe(
+            params,
+            probes_dir=PROBES_DIR,
+            scene="fault_suite.py",
+            output=output_dir / "probe-report.json",
+            base_url=base_url,
             timeout_s=min(timeout_s, 900),
             redact_values=redact,
         )
-        profile_path.unlink(missing_ok=True)
         commands.append(execution)
         payload = read_json(output_dir / "fault-suite.json")
-        _preserve_probe_status(execution, payload)
+        preserve_probe_status(execution, payload)
         if payload:
             artifacts["fault_suite"] = {
                 **payload,

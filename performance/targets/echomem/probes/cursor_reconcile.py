@@ -3,9 +3,9 @@
 对已受理（completed）的 Commit 记录做对账：读 cursor（``cursor_url_template``
 直取，或经 EchoMem ``/fs/read`` 读持久 cursor），并在 ``base_url`` 下复查
 history / archives / archive / commit_status / commit_memories 五个只读源，
-用 :func:`values_from_payload` 抽取 message / archive / operation 身份与 CSV
-期望比对。每个 session 一条断言；无 completed Commit 证据或未配置任何对账
-端点时 INCONCLUSIVE，cursor 端点 HTTP 404 视为 NOT_IMPLEMENTED。
+用 :func:`_client.values_from_payload` 抽取 message / archive / operation
+身份与 CSV 期望比对。每个 session 一条断言；无 completed Commit 证据或未
+配置任何对账端点时 INCONCLUSIVE，cursor 端点 HTTP 404 视为 NOT_IMPLEMENTED。
 
 配置经 ``ctx.params`` 读取（键名与原 CLI 参数同名）：``commit_csv``（必填）/
 ``cursor_url_template`` / ``cursor_uri_template`` / ``auth_key`` /
@@ -25,6 +25,7 @@ from typing import Any
 from urllib.parse import quote
 
 from performance.ctx import Ctx
+from performance.targets.echomem.probes._client import values_from_payload
 
 NOT_IMPLEMENTED = "NOT_IMPLEMENTED"
 PASS = "PASS"
@@ -74,65 +75,6 @@ def fetch_existing_cursor(
             return code, {}, raw
         return code, decoded if isinstance(decoded, dict) else {}, raw
     return code, payload, raw
-
-
-def values_from_payload(payload: dict[str, Any]) -> tuple[set[str], set[str], set[str]]:
-    """Extract message, archive and operation identities without assuming one schema."""
-    message_ids: set[str] = set()
-    archive_ids: set[str] = set()
-    operation_ids: set[str] = set()
-
-    def visit(value: Any, list_context: str = "") -> None:
-        if isinstance(value, list):
-            for item in value:
-                if isinstance(item, dict) and list_context in {
-                    "messages",
-                    "items",
-                    "message_ids",
-                    "committed_message_ids",
-                    "source_turn_ids",
-                }:
-                    message = item.get("message_id") or item.get("messageId") or item.get("id")
-                    if message:
-                        message_ids.add(str(message))
-                    archive = item.get("archive_id") or item.get("archiveId")
-                    operation = item.get("operation_id") or item.get("operationId")
-                    if archive:
-                        archive_ids.add(str(archive))
-                    if operation:
-                        operation_ids.add(str(operation))
-                elif not isinstance(item, (dict, list)) and list_context in {
-                    "message_ids",
-                    "messages",
-                    "items",
-                    "committed_message_ids",
-                    "source_turn_ids",
-                }:
-                    if item not in (None, ""):
-                        message_ids.add(str(item))
-                visit(item, list_context)
-            return
-        if not isinstance(value, dict):
-            return
-        for key, item in value.items():
-            normalized = str(key)
-            if normalized in {"archive_id", "archiveId"} and item not in (None, ""):
-                archive_ids.add(str(item))
-            elif normalized in {"operation_id", "operationId"} and item not in (None, ""):
-                operation_ids.add(str(item))
-            if normalized in {
-                "message_ids",
-                "messages",
-                "items",
-                "committed_message_ids",
-                "source_turn_ids",
-            }:
-                visit(item, normalized)
-            else:
-                visit(item, "")
-
-    visit(payload)
-    return message_ids, archive_ids, operation_ids
 
 
 def run(ctx: Ctx) -> None:

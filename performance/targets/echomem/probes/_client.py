@@ -568,3 +568,108 @@ def extract_message(payload: dict[str, Any]) -> dict[str, Any]:
                 "metadata": candidate.get("metadata") or {},
             }
     return {}
+
+
+def values_from_payload(payload: dict[str, Any]) -> tuple[set[str], set[str], set[str]]:
+    """从响应负载中抽取 message / archive / operation 身份，不假设单一 schema。"""
+    message_ids: set[str] = set()
+    archive_ids: set[str] = set()
+    operation_ids: set[str] = set()
+
+    def visit(value: Any, list_context: str = "") -> None:
+        if isinstance(value, list):
+            for item in value:
+                if isinstance(item, dict) and list_context in {
+                    "messages",
+                    "items",
+                    "message_ids",
+                    "committed_message_ids",
+                    "source_turn_ids",
+                }:
+                    message = item.get("message_id") or item.get("messageId") or item.get("id")
+                    if message:
+                        message_ids.add(str(message))
+                    archive = item.get("archive_id") or item.get("archiveId")
+                    operation = item.get("operation_id") or item.get("operationId")
+                    if archive:
+                        archive_ids.add(str(archive))
+                    if operation:
+                        operation_ids.add(str(operation))
+                elif not isinstance(item, (dict, list)) and list_context in {
+                    "message_ids",
+                    "messages",
+                    "items",
+                    "committed_message_ids",
+                    "source_turn_ids",
+                }:
+                    if item not in (None, ""):
+                        message_ids.add(str(item))
+                visit(item, list_context)
+            return
+        if not isinstance(value, dict):
+            return
+        for key, item in value.items():
+            normalized = str(key)
+            if normalized in {"archive_id", "archiveId"} and item not in (None, ""):
+                archive_ids.add(str(item))
+            elif normalized in {"operation_id", "operationId"} and item not in (None, ""):
+                operation_ids.add(str(item))
+            if normalized in {
+                "message_ids",
+                "messages",
+                "items",
+                "committed_message_ids",
+                "source_turn_ids",
+            }:
+                visit(item, normalized)
+            else:
+                visit(item, "")
+
+    visit(payload)
+    return message_ids, archive_ids, operation_ids
+
+
+def ordered_message_ids_from_payload(payload: dict[str, Any]) -> list[str]:
+    """按持久化来源暴露的顺序提取 message id（去重保留顺序）。
+
+    集合版 :func:`values_from_payload` 是 schema 宽容的，但集合无法证明恢复
+    契约的「不乱序」部分；本助手同样宽容，同时保留列表顺序并去掉重复 id。
+    """
+    ordered: list[str] = []
+    seen: set[str] = set()
+    list_keys = {
+        "messages",
+        "items",
+        "message_ids",
+        "committed_message_ids",
+        "source_turn_ids",
+    }
+
+    def append(value: Any) -> None:
+        if value in (None, ""):
+            return
+        message_id = str(value)
+        if message_id not in seen:
+            seen.add(message_id)
+            ordered.append(message_id)
+
+    def visit(value: Any, list_context: str = "") -> None:
+        if isinstance(value, list):
+            for item in value:
+                if isinstance(item, dict) and list_context in list_keys:
+                    append(
+                        item.get("message_id")
+                        or item.get("messageId")
+                        or item.get("id")
+                    )
+                elif not isinstance(item, (dict, list)) and list_context in list_keys:
+                    append(item)
+                visit(item, list_context)
+            return
+        if not isinstance(value, dict):
+            return
+        for key, item in value.items():
+            visit(item, str(key) if str(key) in list_keys else "")
+
+    visit(payload)
+    return ordered

@@ -26,6 +26,11 @@ from pathlib import Path
 from typing import Any
 
 from performance.ctx import Ctx
+from performance.targets.echomem.acceptance.metrics import (
+    FANOUT_METRIC_FAMILIES,
+    LANE_METRIC_FAMILIES,
+    match_metric_family,
+)
 
 PASS = "PASS"
 FAIL = "FAIL"
@@ -182,14 +187,6 @@ def fetch_metrics(
 
 def metrics_coverage(raw: str) -> dict[str, Any]:
     """Summarize actual metric samples, excluding HELP/TYPE declarations."""
-    families = {
-        "echomem_lane_queued": ("queued", "lane"),
-        "echomem_lane_wait_seconds": ("wait", "lane"),
-        "echomem_lane_exec_seconds": ("exec", "lane"),
-        "echomem_lane_rejected_total": ("rejected", "lane"),
-        "echomem_engine_fanout_exec_seconds": ("exec", "engine"),
-        "echomem_engine_fanout_skipped_total": ("skipped", "engine"),
-    }
     present: set[str] = set()
     lane_quartets: dict[str, dict[str, bool]] = {}
     fanout_engines: dict[str, dict[str, bool]] = {}
@@ -200,18 +197,11 @@ def metrics_coverage(raw: str) -> dict[str, Any]:
         base_name = metric_name
         for suffix in ("_bucket", "_count", "_sum"):
             base_name = base_name.removesuffix(suffix)
-        match = next(
-            (
-                (family, short, label_key)
-                for family, (short, label_key) in families.items()
-                if base_name == family
-            ),
-            None,
-        )
-        if match is None:
+        family = match_metric_family(base_name)
+        if family is None:
             continue
-        family, short, label_key = match
         present.add(family)
+        label_key = "lane" if family in LANE_METRIC_FAMILIES else "engine"
         marker = f'{label_key}="'
         label_value = (
             label_text.split(marker, 1)[1].split('"', 1)[0]
@@ -224,11 +214,12 @@ def metrics_coverage(raw: str) -> dict[str, Any]:
             lane_quartets.setdefault(
                 label_value,
                 {"queued": False, "wait": False, "exec": False, "rejected": False},
-            )[short] = True
+            )[LANE_METRIC_FAMILIES[family]] = True
         else:
             fanout_engines.setdefault(
                 label_value, {"exec": False, "skipped": False}
-            )[short] = True
+            )[FANOUT_METRIC_FAMILIES[family]] = True
+    families = {**LANE_METRIC_FAMILIES, **FANOUT_METRIC_FAMILIES}
     return {
         "present": {family: family in present for family in families},
         "missing": sorted(set(families) - present),
