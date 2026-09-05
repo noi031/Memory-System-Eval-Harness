@@ -16,9 +16,7 @@ import csv
 import json
 import shutil
 import statistics
-import subprocess
 import threading
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -40,12 +38,9 @@ from performance.targets.echomem.orchestrator.suites import (
     select_cases,
 )
 from performance.targets.echomem.protocol import is_anchor_query
+from performance.util import now_iso, run_command
 
 SCENES_DIR = Path(__file__).resolve().parent.parent / "scenes"
-
-
-def _now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
 
 
 def _seconds(stage_ms: float) -> float:
@@ -319,15 +314,13 @@ def _run_prepare_command(command: str) -> dict:
             "command": command,
             "reason": "bash not available (Windows); command not executed",
         }
-    completed = subprocess.run(
-        ["bash", "-lc", command], capture_output=True, text=True, check=False
-    )
+    result = run_command(["bash", "-lc", command], timeout_s=1800.0)
     return {
-        "status": "ok" if completed.returncode == 0 else "INCONCLUSIVE",
+        "status": "ok" if result["status"] == "PASS" else "INCONCLUSIVE",
         "command": command,
-        "returncode": completed.returncode,
-        "stdout_tail": completed.stdout[-2000:],
-        "stderr_tail": completed.stderr[-4000:],
+        "returncode": result["returncode"],
+        "stdout_tail": result["stdout"][-2000:],
+        "stderr_tail": result["stderr"][-4000:],
     }
 
 
@@ -367,7 +360,7 @@ def run_suite(
     suite_dir.mkdir(parents=True, exist_ok=True)
     base_url = (base_url or str(profile.get("base_url") or "")).rstrip("/")
     manifest: dict[str, Any] = {
-        "created_at": _now_iso(),
+        "created_at": now_iso(),
         "base_url": base_url,
         "profile": profile_name,
         "instance_profile": str(profile.get("name") or ""),

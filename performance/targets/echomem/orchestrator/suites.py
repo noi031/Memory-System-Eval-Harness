@@ -28,6 +28,7 @@ from performance.profile import (
     TenantSpec,
 )
 from performance.targets.echomem.protocol import DEFAULT_QUERIES
+from performance.util import scale_counts_to_cap
 
 SCENES_DIR = Path(__file__).resolve().parent.parent / "scenes"
 
@@ -474,36 +475,6 @@ def select_cases(profile_name: str, scenarios: list[str] | None) -> list[dict]:
     return [by_label[item] for item in scenarios]
 
 
-def _scale_explicit_tenant_counts(counts: list[int], total_cap: int) -> list[int]:
-    """把 explicit 分布按比例缩到 ``total_cap`` 且不超上限。"""
-    if total_cap <= 0 or sum(counts) <= total_cap:
-        return counts
-    if not counts:
-        return []
-    if total_cap < len(counts):
-        return [1 if index < total_cap else 0 for index in range(len(counts))]
-    total = sum(counts)
-    scaled = [max(1, (count * total_cap) // total) for count in counts]
-    while sum(scaled) > total_cap:
-        index = max(
-            (idx for idx, value in enumerate(scaled) if value > 1),
-            key=lambda idx: (scaled[idx], -idx),
-            default=None,
-        )
-        if index is None:
-            break
-        scaled[index] -= 1
-    fractions = [
-        (count * total_cap / total) - ((count * total_cap) // total)
-        for count in counts
-    ]
-    while sum(scaled) < total_cap:
-        index = max(range(len(counts)), key=lambda idx: (fractions[idx], -idx))
-        scaled[index] += 1
-        fractions[index] = -1.0
-    return scaled
-
-
 def apply_quick(case: dict, quick: QuickSpec) -> dict:
     """返回 quick 收敛后的 case 副本（原 case 不被修改）。"""
     result = dict(case)
@@ -518,7 +489,7 @@ def apply_quick(case: dict, quick: QuickSpec) -> dict:
         )
         counts = case.get("commit_tenant_counts")
         if counts and result["commit_barrier_count"] < sum(int(v) for v in counts):
-            result["commit_tenant_counts"] = _scale_explicit_tenant_counts(
+            result["commit_tenant_counts"] = scale_counts_to_cap(
                 [int(v) for v in counts], result["commit_barrier_count"]
             )
     if case.get("quick_commit_rpm") is not None:

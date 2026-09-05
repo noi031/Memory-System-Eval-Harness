@@ -8,13 +8,14 @@ visible in the output.
 
 from __future__ import annotations
 
-import csv
 import html
 import json
 import statistics
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+from performance.util import read_csv
 
 OK_STATES = {"completed", "complete", "transcommit", "succeeded", "success"}
 
@@ -66,13 +67,6 @@ def stats(values: list[float]) -> dict[str, Any]:
         "max": max(values) if values else None,
         "total": sum(values) if values else 0.0,
     }
-
-
-def read_csv(path: Path) -> list[dict[str, str]]:
-    if not path.is_file():
-        return []
-    with path.open(newline="", encoding="utf-8") as handle:
-        return list(csv.DictReader(handle))
 
 
 def float_value(row: dict[str, str], *names: str) -> float | None:

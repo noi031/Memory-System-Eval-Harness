@@ -18,78 +18,18 @@ from __future__ import annotations
 import csv
 import json
 import os
-import subprocess
 import sys
 import tempfile
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 import yaml
 
+from performance.util import expand_template, read_json, run_command
+
 PROBES_DIR = Path(__file__).resolve().parent.parent / "probes"
 
 _AUTH_HEADER_NAMES = {"x-auth-key", "authorization"}
-
-
-def read_json(path: Path) -> dict[str, Any]:
-    """读取 JSON；缺失或解析失败返回空 dict。"""
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-        return payload if isinstance(payload, dict) else {}
-    except (OSError, json.JSONDecodeError):
-        return {}
-
-
-def run_command(
-    command: list[str],
-    *,
-    timeout_s: float,
-    redact_values: set[str] | None = None,
-    env: dict[str, str] | None = None,
-) -> dict[str, Any]:
-    """执行子进程并返回 {status, returncode, command, stdout, stderr, elapsed_s}。
-
-    status 为 PASS/FAIL/TIMEOUT；``redact_values`` 中的敏感值（如 auth_key）
-    从 command/stdout/stderr 替换为 ``***configured***``。
-    """
-    started = datetime.now(timezone.utc)
-    redact_values = redact_values or set()
-
-    def safe_command() -> list[str]:
-        return [
-            "***configured***" if item in redact_values else item
-            for item in command
-        ]
-
-    try:
-        completed = subprocess.run(
-            command,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            capture_output=True,
-            timeout=timeout_s,
-            check=False,
-            env=env,
-        )
-        return {
-            "status": "PASS" if completed.returncode == 0 else "FAIL",
-            "returncode": completed.returncode,
-            "command": safe_command(),
-            "stdout": completed.stdout[-12000:],
-            "stderr": completed.stderr[-12000:],
-            "elapsed_s": (datetime.now(timezone.utc) - started).total_seconds(),
-        }
-    except subprocess.TimeoutExpired as exc:
-        return {
-            "status": "TIMEOUT",
-            "returncode": 124,
-            "command": safe_command(),
-            "stdout": str(exc.stdout or "")[-12000:],
-            "stderr": str(exc.stderr or "")[-12000:],
-            "elapsed_s": (datetime.now(timezone.utc) - started).total_seconds(),
-        }
 
 
 def _preserve_probe_status(
@@ -183,14 +123,6 @@ def _resolve_tenant_id(tenant_config: dict[str, Any], requested: str) -> str:
     return requested
 
 
-def _resolve_profile_path(value: str, profiles_path: Path) -> str:
-    """把相对路径解析到 profile 清单同目录。"""
-    if not value:
-        return ""
-    path = Path(value).expanduser()
-    return str(path if path.is_absolute() else (profiles_path.parent / path).resolve())
-
-
 def _materialize_fault_plan(
     plan_path: Path,
     *,
@@ -199,19 +131,14 @@ def _materialize_fault_plan(
 ) -> Path:
     """把 run-local fault plan 里的服务地址解析为实际 base_url。"""
     payload = read_json(plan_path)
-
-    def replace(value: Any) -> Any:
-        if isinstance(value, str):
-            return value.replace("${BASE_URL}", base_url.rstrip("/"))
-        if isinstance(value, list):
-            return [replace(item) for item in value]
-        if isinstance(value, dict):
-            return {str(key): replace(item) for key, item in value.items()}
-        return value
-
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(
-        json.dumps(replace(payload), ensure_ascii=False, indent=2) + "\n",
+        json.dumps(
+            expand_template(payload, {"BASE_URL": base_url.rstrip("/")}),
+            ensure_ascii=False,
+            indent=2,
+        )
+        + "\n",
         encoding="utf-8",
     )
     return output_path

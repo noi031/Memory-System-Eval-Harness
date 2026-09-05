@@ -7,13 +7,8 @@ import sys
 
 import pytest
 
-from performance.targets.echomem.main import (
-    acquire_output_lock,
-    load_env_file,
-    load_profiles,
-    main,
-    run_command,
-)
+from performance.targets.echomem.main import load_profiles, main
+from performance.util import acquire_output_lock, load_env_file, run_command
 
 # -- load_profiles -------------------------------------------------------
 

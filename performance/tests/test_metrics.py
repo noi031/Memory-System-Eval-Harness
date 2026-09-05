@@ -1,4 +1,5 @@
-"""服务端观测纯函数测试：``acceptance/metrics.py``（Prometheus /metrics 采样与分析）。
+"""服务端观测纯函数测试：``performance.monitor``（Prometheus /metrics 采样与分析）
++ ``acceptance/metrics.py``（EchoMem 指标常量与资源摘要）。
 
 全部为纯函数/内存内测试，直接构造 ``MetricsFrame`` 注入
 ``MetricsMonitor.frames``，不启动后台线程、不依赖 conftest 的 mock 服务器。
@@ -8,15 +9,13 @@ from __future__ import annotations
 
 import pytest
 
+from performance.monitor import MetricsFrame, MetricsMonitor, parse_prometheus_text
 from performance.targets.echomem.acceptance.metrics import (
     COMMIT_QUEUE_DEPTH,
     CPU_SECONDS,
     HTTP_INFLIGHT,
     PROCESS_THREADS,
     RESIDENT_MEMORY,
-    MetricsFrame,
-    MetricsMonitor,
-    parse_prometheus_text,
     scene_resource_summary,
 )
 
@@ -94,14 +93,14 @@ def test_counter_delta_and_cpu_utilization_and_gauge_max() -> None:
     )
     # 帧 t=1 的 cpu = user(8) + system(2) = 10，t=2 的 cpu = 12 + 3 = 15
     assert monitor.counter_delta(CPU_SECONDS, 0.0, 3.0) == 5.0
-    assert monitor.cpu_utilization(0.0, 3.0) == pytest.approx(5.0 / 3.0, abs=1e-4)
+    assert monitor.cpu_utilization(CPU_SECONDS, 0.0, 3.0) == pytest.approx(5.0 / 3.0, abs=1e-4)
     assert monitor.gauge_max(RESIDENT_MEMORY, 0.0, 3.0) == 130.0
 
 
 def test_counter_delta_missing_window() -> None:
     monitor = _monitor_with_frames([_cpu_frame(5.0, 8.0, 2.0, 100.0)])
     assert monitor.counter_delta(CPU_SECONDS, 0.0, 3.0) is None
-    assert monitor.cpu_utilization(0.0, 3.0) is None
+    assert monitor.cpu_utilization(CPU_SECONDS, 0.0, 3.0) is None
 
 
 def test_gauge_series() -> None:
@@ -118,7 +117,7 @@ def test_cpu_utilization_series() -> None:
         MetricsFrame(ts=1.0, samples={CPU_SECONDS: [({}, 1.0)]}),
         MetricsFrame(ts=2.0, samples={CPU_SECONDS: [({}, 1.0)]}),
     ]
-    series = monitor.cpu_utilization_series(0.0, 2.0)
+    series = monitor.cpu_utilization_series(CPU_SECONDS, 0.0, 2.0)
     assert series == [(1.0, 100.0), (2.0, 0.0)]
 
 

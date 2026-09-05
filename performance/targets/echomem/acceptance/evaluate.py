@@ -8,9 +8,10 @@ require an unavailable EchoMem control plane are reported explicitly.
 
 from __future__ import annotations
 
-import csv
 from pathlib import Path
 from typing import Any
+
+from performance.util import read_csv
 
 PASS = "PASS"
 FAIL = "FAIL"
@@ -95,13 +96,6 @@ def _number(value: Any) -> float | None:
     except (TypeError, ValueError):
         return None
     return number if number == number else None
-
-
-def _read_csv(path: Path) -> list[dict[str, str]]:
-    if not path.is_file():
-        return []
-    with path.open(newline="", encoding="utf-8") as handle:
-        return list(csv.DictReader(handle))
 
 
 def _is_admission_rejection(row: dict[str, Any]) -> bool:
@@ -561,7 +555,7 @@ def _rejection_gate(manifest: dict[str, Any]) -> dict[str, Any]:
     evidence_sources: list[str] = []
     for run in runs:
         output_dir = Path(run.get("output_dir") or "")
-        rows = _read_csv(output_dir / "search_results.csv")
+        rows = read_csv(output_dir / "search_results.csv")
         evidence_sources.append(str(output_dir / "search_results.csv"))
         for row in rows:
             code = _number(row.get("status_code"))
@@ -588,7 +582,7 @@ def _rejection_gate(manifest: dict[str, Any]) -> dict[str, Any]:
     sweep = manifest.get("limit_failure_sweep")
     if isinstance(sweep, dict):
         sweep_path = Path(str(sweep.get("requests_path") or ""))
-        rows = _read_csv(sweep_path)
+        rows = read_csv(sweep_path)
         if rows:
             evidence_sources.append(str(sweep_path))
         for row in rows:

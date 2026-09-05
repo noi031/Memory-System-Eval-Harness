@@ -22,7 +22,6 @@ from performance.targets.echomem.acceptance.report_html import (
     percent,
     percentile,
     policy_label,
-    read_csv,
     render,
     scenario_label,
     seconds,
@@ -31,6 +30,7 @@ from performance.targets.echomem.acceptance.report_html import (
     tenant_groups,
     timestamp_delta,
 )
+from performance.util import read_csv
 
 # -- math helpers ----------------------------------------------------------
 

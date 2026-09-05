@@ -110,6 +110,8 @@ performance/        # 性能压测与正式验收（多租户并发读写、注�
   profile.py                 #   画像加载（YAML，${ENV:-default} 展开）
   report.py                  #   运行聚合与 summary.json / records.csv
   ctx.py                     #   场景 ctx API（请求/轮询/阶段注入/记录/断言）
+  util.py                    #   通用基础设施（JSON/环境文件/输出锁/路径/模板/子进程/CSV/分布缩放）
+  monitor.py                 #   服务端 Prometheus /metrics 采样与推导（系统无关）
   targets/echomem/
     main.py                  #   正式验收编排器 CLI（python -m performance.run --target echomem）
     scenes/                  #   场景文件（A 纯读 / B 纯写 / C 混合 / D 洪峰 / barrier / burst-waves / capacity）

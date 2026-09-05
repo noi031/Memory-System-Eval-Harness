@@ -11,10 +11,8 @@ Engine + 灌种 + acceptance 求值）与探针编排（``run_configured_probes`
 from __future__ import annotations
 
 import argparse
-import errno
 import json
 import os
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -24,12 +22,7 @@ from performance.targets.echomem.acceptance.objectives import (
     PASS,
     objective_statuses,
 )
-from performance.targets.echomem.orchestrator.probes import (
-    _resolve_profile_path,
-    read_json,
-    run_command,
-    run_configured_probes,
-)
+from performance.targets.echomem.orchestrator.probes import run_configured_probes
 from performance.targets.echomem.orchestrator.report import (
     write_objective_suite_html,
 )
@@ -38,20 +31,19 @@ from performance.targets.echomem.orchestrator.suites import (
     QUICK_SCENARIOS,
     QuickSpec,
 )
+from performance.util import (
+    acquire_output_lock,
+    load_env_file,
+    now_iso,
+    read_json,
+    resolve_relative_to,
+)
 
 __all__ = [
-    "acquire_output_lock",
     "build_parser",
-    "load_env_file",
     "load_profiles",
     "main",
-    "now",
-    "run_command",
 ]
-
-
-def now() -> str:
-    return datetime.now(timezone.utc).isoformat()
 
 
 def load_profiles(path: Path) -> list[dict[str, Any]]:
@@ -61,35 +53,6 @@ def load_profiles(path: Path) -> list[dict[str, Any]]:
     if not isinstance(profiles, list) or not profiles:
         raise ValueError("profiles config must contain a non-empty profiles list")
     return [item for item in profiles if isinstance(item, dict) and item.get("name")]
-
-
-def load_env_file(path: Path) -> dict[str, str]:
-    """读取 KEY=VALUE / export KEY=VALUE 环境文件，跳过注释。
-
-    探针以子进程方式运行，服务器部署通常把模型凭据放在 Docker env 文件里；
-    接受该文件保证探针与 EchoMem 看到一致的环境。值绝不写入报告。
-    """
-    values: dict[str, str] = {}
-    for raw_line in Path(path).read_text(encoding="utf-8").splitlines():
-        line = raw_line.strip()
-        if not line or line.startswith("#"):
-            continue
-        if line.startswith("export "):
-            line = line[7:].lstrip()
-        if "=" not in line:
-            continue
-        key, value = line.split("=", 1)
-        key = key.strip()
-        if not key or any(
-            char not in "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_"
-            for char in key
-        ):
-            continue
-        value = value.strip()
-        if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
-            value = value[1:-1]
-        values[key] = value
-    return values
 
 
 def _formal_run_counts(suite: dict[str, Any]) -> tuple[int, int]:
@@ -119,38 +82,6 @@ def _formal_run_counts(suite: dict[str, Any]) -> tuple[int, int]:
         if str(item.get("status") or "").lower() == "completed":
             completed += 1
     return completed, submitted
-
-
-def acquire_output_lock(out_dir: Path):
-    """防止两个编排任务写同一证据树；Windows 独占区域锁，句柄关闭即释放。
-
-    Windows 用 ``msvcrt.locking(LK_NBLCK)``，POSIX 回退 ``fcntl.flock``；
-    已锁定时抛 ``RuntimeError("already locked")``。
-    """
-    lock_path = out_dir / ".objective-suite.lock"
-    handle = lock_path.open("a+", encoding="utf-8")
-    try:
-        if os.name == "nt":
-            import msvcrt
-
-            handle.write(f"pid={os.getpid()}\n")
-            handle.flush()
-            handle.seek(0)
-            msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
-        else:
-            import fcntl
-
-            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-            handle.write(f"pid={os.getpid()}\n")
-            handle.flush()
-    except OSError as exc:
-        handle.close()
-        if exc.errno in {errno.EACCES, errno.EAGAIN, errno.EDEADLK}:
-            raise RuntimeError(
-                f"objective output directory is already locked: {out_dir}"
-            ) from exc
-        raise
-    return handle
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -202,16 +133,17 @@ def build_parser() -> argparse.ArgumentParser:
 
 def _resolve_profile(profile: dict[str, Any], profiles_path: Path) -> dict[str, Any]:
     """把 profile 引用的文件路径解析为绝对路径（相对清单目录）。"""
+    profiles_dir = profiles_path.parent
     return {
         **profile,
-        "tenant_config": _resolve_profile_path(
-            str(profile.get("tenant_config") or ""), profiles_path
+        "tenant_config": resolve_relative_to(
+            str(profile.get("tenant_config") or ""), profiles_dir
         ),
-        "preflight_config": _resolve_profile_path(
-            str(profile.get("preflight_config") or ""), profiles_path
+        "preflight_config": resolve_relative_to(
+            str(profile.get("preflight_config") or ""), profiles_dir
         ),
-        "fault_plan": _resolve_profile_path(
-            str(profile.get("fault_plan") or ""), profiles_path
+        "fault_plan": resolve_relative_to(
+            str(profile.get("fault_plan") or ""), profiles_dir
         ),
     }
 
@@ -374,7 +306,7 @@ def main(argv: list[str] | None = None) -> int:
                 )
                 objective["evidence"] = completed_profile_records
     result = {
-        "created_at": now(),
+        "created_at": now_iso(),
         "profiles": output_profiles,
         "objectives": OBJECTIVES,
         "instance_profiles": completed_profile_records,
