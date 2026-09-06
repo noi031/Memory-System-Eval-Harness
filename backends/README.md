@@ -4,7 +4,7 @@
 
 ## 设计意图
 
-一个记忆后端可以被多个 plugin 调用。当前 `echomem_mcp` 插件只实现 echomem 后端，`openviking_mcp` 只实现 openviking 后端，但 `echo_agent` 和 `vikingbot` 通过 `--memory-backend` 参数同时支持两者。把客户端从 plugin 目录提取到共享的 `backends/` 目录，避免了多个 plugin 各自持有一份相同代码的问题。
+一个记忆后端可以被多个 plugin 调用。当前 `echomem_mcp` 插件只实现 echomem 后端，但 `echo_agent` 和 `vikingbot` 通过 `--memory-backend` 参数同时支持两者。把客户端从 plugin 目录提取到共享的 `backends/` 目录，避免了多个 plugin 各自持有一份相同代码的问题。
 
 所有客户端实现 `MemoryClient` 协议（定义在 `backends/memory_types.py`），并继承 `BaseHTTPMemoryClient` 获得共享的 HTTP 传输层（重试、超时、commit 轮询模板方法）。不支持记忆注入的插件（如 `bare_llm`）使用 `NullMemoryClient`。
 

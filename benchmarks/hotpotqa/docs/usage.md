@@ -52,11 +52,11 @@ python run_eval.py --dataset hotpotqa \
 > （`viking://user/resources/`）。`--questions N` 会把语料限定为这 N 题的文档，
 > 语料规模随采样伸缩，适合快速跑通。
 >
-> **documents 模式 + 工具调用**：`vikingbot` 的 `--tools`（默认开）与 `echomem_mcp` 的
-> `--tool-calling`（默认开）让 agent 在语料上跑多轮工具检索（`memory_search`/
+> **documents 模式 + 工具调用**：`vikingbot` 与 `echomem_mcp` 的 `--tool-calling`
+> （默认关）让 agent 在语料上跑多轮工具检索（`memory_search`/
 > `memory_read_many`，检索指向 `viking://user/resources/` 或 EchoMem `/api/resources`
-> 语料空间），完整工具调用链进入 `agent_traces/` 与 `tool_audits`；关闭（`--no-tools`
-> / `--no-tool-calling`）回退为单次 RAG（top-N 检索 + 一次 LLM 调用，镜像 OpenViking
+> 语料空间），完整工具调用链进入 `agent_traces/` 与 `tool_audits`；关闭（不传
+> `--tool-calling`）回退为单次 RAG（top-N 检索 + 一次 LLM 调用，镜像 OpenViking
 > KBQA benchmark 口径）。
 
 
@@ -144,5 +144,5 @@ python benchmarks/hotpotqa/recovery.py \
   --out-dir /path/to/recovery
 ```
 
-工具会生成带 `--resume-qa` 的重跑命令。已有 retry CSV 时可
+工具会生成带 `--resume` 的重跑命令。已有 retry CSV 时可
 增加 `--retry-qa /path/to/retry/qa_results.csv`，仅用健康结果替换失败行。

@@ -306,6 +306,25 @@ class EchoMemClientTests(unittest.TestCase):
                 poll_interval_s=0.01,
             )
 
+    def test_wait_for_resource_index_zero_timeout_waits_indefinitely(self) -> None:
+        # timeout_s=0 means no deadline: keep polling until every path is done.
+        statuses = iter([
+            {"status": "running"},
+            {"status": "running"},
+            {"status": "completed", "detail": {"chunk_count": 3}},
+        ])
+
+        def fake_get(path, query=None, **_kwargs):
+            return next(statuses)
+
+        self.client._get = fake_get  # type: ignore[method-assign]
+        result = self.client.wait_for_resource_index(
+            ["user/hotpotqa/doc-x"],
+            timeout_s=0,
+            poll_interval_s=0.01,
+        )
+        self.assertEqual({"indexed": 1, "failed": {}}, result)
+
 
 if __name__ == "__main__":
     unittest.main()

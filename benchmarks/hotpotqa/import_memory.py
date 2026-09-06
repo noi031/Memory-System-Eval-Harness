@@ -104,6 +104,8 @@ def import_hotpotqa_documents(
     memory_client,
     result_dir: Path,
     log,
+    *,
+    index_timeout_s: float = 3600.0,
 ) -> tuple[list[dict[str, Any]], dict[str, str], dict[str, str]]:
     """Import the selected questions' context documents as EchoMem resources.
 
@@ -154,6 +156,7 @@ def import_hotpotqa_documents(
 
             wait = memory_client.wait_for_resource_index(
                 full_paths,
+                timeout_s=index_timeout_s,
                 progress=_track_index,
             )
             for path, detail in wait.get("failed", {}).items():
@@ -196,6 +199,7 @@ def import_hotpotqa_memory(
     import_mode: str,
     prior_import_rows: list[dict] | None = None,
     reuse_memory: bool = False,
+    index_timeout_s: float = 3600.0,
 ) -> ImportReport:
     rows: list[dict[str, Any]] = []
     question_to_session: dict[str, str] = {}
@@ -238,6 +242,7 @@ def import_hotpotqa_memory(
         else:
             rows, question_to_session, document_path_titles = import_hotpotqa_documents(
                 jobs, plans, memory_client, result_dir, log,
+                index_timeout_s=index_timeout_s,
             )
         _write_results(output_path, rows)
     elif import_mode == "global":

@@ -120,12 +120,14 @@ class _RecordingResourceClient:
     def __init__(self):
         self.resources = []
         self.waits = 0
+        self.wait_kwargs = []
 
     def add_resource(self, path, content, **kwargs):
         self.resources.append({"path": path, "content": content, **kwargs})
 
     def wait_for_resource_index(self, paths, **kwargs):
         self.waits += 1
+        self.wait_kwargs.append(kwargs)
         return {"indexed": len(paths), "failed": {}}
 
 
@@ -1340,6 +1342,26 @@ class TestImportDocumentsMode(unittest.TestCase):
         self.assertEqual({"q1": "", "q2": ""}, report.question_to_session)
         # path -> title map covers both unique documents.
         self.assertEqual(2, len(report.document_path_titles))
+
+    def test_documents_index_timeout_passthrough(self):
+        jobs = [SimpleNamespace(question_id="q1")]
+        plans = [{"memory_documents": [{"title": "D1", "text": "body"}]}]
+        client = _RecordingResourceClient()
+        with tempfile.TemporaryDirectory() as d:
+            import_hotpotqa_memory(
+                jobs, plans, client, EvalConfig(),
+                Path(d), _Log(), import_mode="documents",
+                index_timeout_s=123.0,
+            )
+        self.assertEqual(123.0, client.wait_kwargs[0]["timeout_s"])
+
+        client2 = _RecordingResourceClient()
+        with tempfile.TemporaryDirectory() as d:
+            import_hotpotqa_memory(
+                jobs, plans, client2, EvalConfig(),
+                Path(d), _Log(), import_mode="documents",
+            )
+        self.assertEqual(3600.0, client2.wait_kwargs[0]["timeout_s"])
 
     def test_documents_records_metadata(self):
         jobs = [SimpleNamespace(question_id="q1")]

@@ -80,7 +80,7 @@ def _ask_agent(
         return _failed_round(round_data, prefetch_committed, exc)
 
     # If typing simulation didn't produce memory_items, fall back to
-    # response.memory_items (e.g. vikingbot, echomem_mcp, openviking_mcp)
+    # response.memory_items (e.g. vikingbot, echomem_mcp)
     if not memory_items:
         memory_items = response.memory_items or []
 

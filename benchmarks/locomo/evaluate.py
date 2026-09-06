@@ -120,7 +120,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--judge-concurrency", type=int, default=4)
     parser.add_argument("--judge-checkpoint-interval", type=int, default=10)
     parser.add_argument(
-        "--resume-judge",
+        "--resume",
         default="",
         help="Prior Judge run directory or CSV to reuse matching verdicts",
     )
@@ -165,10 +165,10 @@ def main() -> None:
     write_judge_resume_manifest(output_dir, resume_manifest)
     resume_state = (
         load_judge_resume_state(
-            args.resume_judge,
+            args.resume,
             expected_manifest=resume_manifest,
         )
-        if args.resume_judge
+        if args.resume
         else None
     )
     report = judge_locomo_results(

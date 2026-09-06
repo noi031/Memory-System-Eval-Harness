@@ -765,7 +765,7 @@ class ClassifyFailureTests(unittest.TestCase):
 class BuildRetryCommandTests(unittest.TestCase):
     """Tests for build_retry_command structure."""
 
-    def test_generates_command_with_resume_qa(self):
+    def test_generates_command_with_resume(self):
         cmd = build_retry_command(
             project_root=Path("/project"),
             dataset=Path("/data/locomo.json"),
@@ -788,7 +788,7 @@ class BuildRetryCommandTests(unittest.TestCase):
         self.assertIn("conv-30", cmd)
         self.assertIn("--question-ids", cmd)
         self.assertIn("q1,q2", cmd)
-        self.assertIn("--resume-qa", cmd)
+        self.assertIn("--resume", cmd)
         self.assertIn(str(Path("/prior/run")), cmd)
         self.assertIn("--out-dir", cmd)
         self.assertIn(str(Path("/output/retry_001")), cmd)
@@ -1423,7 +1423,6 @@ class RunEvalParserTests(unittest.TestCase):
         self.assertEqual("", self.args.judge_base_url)
         self.assertEqual(4, self.args.judge_concurrency)
         self.assertEqual(10, self.args.judge_checkpoint_interval)
-        self.assertEqual("", self.args.resume_judge)
 
     def test_eval_infra_params(self):
         self.assertEqual(4, self.args.concurrency)
@@ -1434,7 +1433,8 @@ class RunEvalParserTests(unittest.TestCase):
         self.assertIsNone(self.args.qa_profile)
         self.assertEqual("", self.args.qa_prompt_file)
         self.assertEqual(10, self.args.checkpoint_interval)
-        self.assertEqual("", self.args.resume_qa)
+        self.assertEqual("", self.args.resume)
+        self.assertEqual("", self.args.reuse_memory_from)
 
     def test_session_mode_choices(self):
         for mode in ("auto", "locomo", "single"):
@@ -1516,7 +1516,6 @@ class ResumeManifestTests(unittest.TestCase):
             agent_plugin="echomem_mcp",
             qa_profile=None,
             tool_calling=True,
-            search_in_tools=False,
             mcp_url="http://127.0.0.1:8001",
             mcp_auth_key="test-mcp-secret-123456",
             mcp_max_iterations=50,
@@ -1541,6 +1540,7 @@ class ResumeManifestTests(unittest.TestCase):
         self.assertEqual("mcp", options["initial_retrieval_protocol"])
         self.assertNotIn("manual_search", options)
         self.assertNotIn("mcp_initial_search", options)
+        self.assertNotIn("search_in_tools", options)
         self.assertEqual("disabled", options["mcp_read_mode"])
         self.assertEqual(4000, options["user_memory_budget_chars"])
         self.assertEqual(2000, options["agent_memory_budget_chars"])

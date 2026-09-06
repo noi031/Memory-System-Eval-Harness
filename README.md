@@ -32,7 +32,7 @@
 - **诊断与定位**：LoCoMo 产出 `diagnosis.json`、`retrieval_traces.jsonl` 和
   `retrieval_coverage`，标注失败题、可重试题和检索覆盖缺口。`blackbox.py` 和
   `compare.py` 支持黑盒指标导出和两次运行对比。
-- **断点续跑**：QA 和 Judge 均支持 `--resume-qa` / `--resume-judge`，健康行不
+- **断点续跑**：QA 和 Judge 均支持 `--resume` 续跑，健康行不
   重复调用模型；`--checkpoint-interval` 定期落盘部分结果。
 
 ### 3. 简单易用 / AI 入口
@@ -58,9 +58,9 @@ Embedding 使用 `text-embedding-v3`。
 - **真实记忆注入**：评测通过 `inject_memories()` 将数据集对话写入真实 EchoMem
   或 OpenViking 后端（`open_session -> add_message -> commit -> poll`），不使用
   mock 或旁路。
-- **身份隔离**：每次评测新开独立 tenant / user / agent 身份，`--resume-qa` 时
-  复用原有身份。身份信息（account / user_id / auth_key）记录在 resume manifest
-  中，auth key 仅掩码保存。
+- **身份隔离**：每次评测新开独立 tenant / user / agent 身份，`--resume` /
+  `--reuse-memory-from` 时复用原有身份。身份信息（account / user_id / auth_key）
+  记录在 resume manifest 中，auth key 仅掩码保存。
 - **数据完整性校验**：LoCoMo 在 QA 前校验数据集 SHA-256 和实际 session
   manifest，session 数量不匹配时拒绝运行，防止复用 tenant 被污染。
 - **生产管线**：动态评测的 QA 阶段走 EchoAgent 完整 HTTP 管线，含 prefill /
@@ -77,7 +77,6 @@ plugins/                    # Agent 插件 (AgentPlugin 协议)
   echo_agent/               #   EchoAgent + EchoMem 完整管线 (动态评测默认)
   vikingbot/                #   VikingBot 工具调用 agent (LoCoMo 默认)
   echomem_mcp/              #   LLM 通过 EchoMem MCP 工具检索记忆
-  openviking_mcp/           #   LLM 通过 MemoryClient 工具检索记忆
 backends/                   # 记忆后端客户端
   memory_types.py           #   MemoryClient 协议 + BaseHTTPMemoryClient + NullMemoryClient
   memory_args.py            #   add_memory_backend_args() -- 后端连接 CLI 参数
@@ -174,7 +173,7 @@ setup(config)
 - **导入**：将数据集 conversation 按 session 分批写入记忆后端，commit + poll
   直到抽取完成。LoCoMo 校验数据集 SHA-256 和 session manifest。
 - **QA**：并发（`--concurrency`）逐题检索记忆 -> 构建 prompt -> LLM 回答。
-  检索阶段不写入记忆。支持 `--resume-qa` 断点续跑。
+  检索阶段不写入记忆。支持 `--resume` 断点续跑。
 - **评测**：LoCoMo / LongMemEval 使用 LLM Judge；HotpotQA 使用官方 F1/EM。
   产出 `summary.json`、`qa_results.csv`、`judge_results.csv`、`agent_traces/`。
 
@@ -229,242 +228,161 @@ CLI 参数可直接传入，也可通过环境变量设默认值：
 
 ## 运行评测
 
-### Benchmark 评测
-
-直接调用根级 `run_eval.py --dataset <name>`，通过 `--agent-plugin` 选择被测 agent，
-通过 `--memory-backend` 选择记忆后端。
-
-#### LoCoMo + echomem_mcp（EchoMem 后端）
-
-<div style="color: red;">
-
-无工具调用时，测试平台仍通过 EchoMem MCP 执行每题的初始 `memory_query`：
-
-<pre style="color: red;"><code class="language-bash">./.venv/bin/python run_eval.py --dataset locomo \
-  --agent-plugin echomem_mcp \
-  --echomem-url http://127.0.0.1:8010 \
-  --mcp-url http://127.0.0.1:8001 \
-  --sample conv-30 \
-  --no-tool-calling \
-  --mcp-read-mode disabled \
-  --concurrency 4 \
-  --judge-concurrency 4 \
-  --top-k 25 \
-  --memory-budget-chars 8000 \
-  --user-memory-budget-chars 4000 \
-  --agent-memory-budget-chars 2000 \
-  --llm-base-url "$LLM_BASE_URL" \
-  --llm-model "$LLM_MODEL" \
-  --llm-api-key "$LLM_API_KEY" \
-  --llm-temperature 0.7 \
-  --question-timeout-s 600 \
-  --llm-timeout-s 600 \
-  --llm-retries 3</code></pre>
-
-允许模型通过 MCP 调用工具，但禁止读取 `messages.jsonl`：
-
-<pre style="color: red;"><code class="language-bash">./.venv/bin/python run_eval.py --dataset locomo \
-  --agent-plugin echomem_mcp \
-  --echomem-url http://127.0.0.1:8010 \
-  --mcp-url http://127.0.0.1:8001 \
-  --sample conv-30 \
-  --tool-calling \
-  --mcp-read-mode disabled \
-  --concurrency 4 \
-  --judge-concurrency 4 \
-  --top-k 25 \
-  --memory-budget-chars 8000 \
-  --user-memory-budget-chars 4000 \
-  --agent-memory-budget-chars 2000 \
-  --llm-base-url "$LLM_BASE_URL" \
-  --llm-model "$LLM_MODEL" \
-  --llm-api-key "$LLM_API_KEY" \
-  --llm-temperature 0.7 \
-  --question-timeout-s 600 \
-  --llm-timeout-s 600 \
-  --llm-retries 3</code></pre>
-
-允许模型通过 MCP 调用工具，并允许读取 `messages.jsonl`：
-
-<pre style="color: red;"><code class="language-bash">./.venv/bin/python run_eval.py --dataset locomo \
-  --agent-plugin echomem_mcp \
-  --echomem-url http://127.0.0.1:8010 \
-  --mcp-url http://127.0.0.1:8001 \
-  --sample conv-30 \
-  --tool-calling \
-  --mcp-read-mode allow \
-  --concurrency 4 \
-  --judge-concurrency 4 \
-  --top-k 25 \
-  --memory-budget-chars 8000 \
-  --user-memory-budget-chars 4000 \
-  --agent-memory-budget-chars 2000 \
-  --llm-base-url "$LLM_BASE_URL" \
-  --llm-model "$LLM_MODEL" \
-  --llm-api-key "$LLM_API_KEY" \
-  --llm-temperature 0.7 \
-  --question-timeout-s 600 \
-  --llm-timeout-s 600 \
-  --llm-retries 3</code></pre>
-
-</div>
-
-#### LoCoMo + vikingbot（OpenViking 后端）
+统一入口 `python run_eval.py --dataset <name>`，一条命令完成「导入记忆 → 逐题 QA →
+Judge 评分 → 结果报告」全流程，CLI 参数即配置。命令骨架：
 
 ```bash
-python run_eval.py --dataset locomo \
-  --agent-plugin vikingbot \
-  --memory-backend openviking \
-  --echomem-url http://127.0.0.1:19080 \
-  --workspace D:/.openviking/data \
-  --sample conv-30 \
-  --questions 0 \
+python run_eval.py --dataset <locomo|hotpotqa|longmemeval|dynamic> \
+  --agent-plugin <vikingbot|echomem_mcp|bare_llm|echo_agent> \
   --llm-base-url https://dashscope.aliyuncs.com/compatible-mode/v1 \
   --llm-model deepseek-v4-flash-0731 \
   --llm-api-key YOUR_KEY \
-  --commit-timeout-s 0 \
-  --question-timeout-s 0 \
-  --llm-timeout-s 600
+  [其余参数见下表]
 ```
 
-#### 断点续跑
-
-```bash
-./.venv/bin/python run_eval.py --dataset locomo \
-  --agent-plugin echomem_mcp \
-  --echomem-url http://127.0.0.1:8010 \
-  --mcp-url http://127.0.0.1:8001 \
-  --sample conv-30 \
-  --no-tool-calling \
-  --resume-qa benchmarks/locomo/results/20260803_143943_618591 \
-  --llm-base-url "$LLM_BASE_URL" \
-  --llm-model "$LLM_MODEL" \
-  --llm-api-key "$LLM_API_KEY" \
-  --question-timeout-s 600 \
-  --llm-timeout-s 600 \
-  --llm-retries 3
-```
-
-#### 其他 benchmark
-
-```bash
-# HotpotQA
-python run_eval.py --dataset hotpotqa \
-  --agent-plugin bare_llm \
-  --llm-base-url https://dashscope.aliyuncs.com/compatible-mode/v1 \
-  --llm-model deepseek-v4-flash-0731 \
-  --llm-api-key YOUR_KEY \
-  --questions 10
-
-# LongMemEval
-python run_eval.py --dataset longmemeval \
-  --agent-plugin bare_llm \
-  --llm-base-url https://dashscope.aliyuncs.com/compatible-mode/v1 \
-  --llm-model deepseek-v4-flash-0731 \
-  --llm-api-key YOUR_KEY \
-  --questions 10
-```
+### Benchmark 概览
 
 | Benchmark | 默认插件 | 评测方式 | 数据集 |
 |---|---|---|---|
 | `locomo` | `vikingbot` | LLM Judge (CORRECT/WRONG) | 内置 `locomo10.json` |
-| `hotpotqa` | `bare_llm` | F1/EM 官方指标 | 需设置 `HOTPOTQA_DATASET` |
-| `longmemeval` | `bare_llm` | LLM yes/no accuracy | 需设置 `LONGMEMEVAL_DATASET` |
+| `hotpotqa` | `vikingbot` | F1/EM 官方指标 | 需设置 `HOTPOTQA_DATASET` |
+| `longmemeval` | `vikingbot` | LLM yes/no accuracy | 需设置 `LONGMEMEVAL_DATASET` |
 
-结果写入 `benchmarks/<name>/results/<timestamp>/`，主要文件：`qa_results.csv`、
-`judge_results.csv`、`summary.json`、`config.json`、`agent_traces/`、
-`backend_logs.json`。
+### 通用参数（所有数据集）
 
-### 动态评测
+| 参数 | 取值范围 / 默认 | 含义 |
+|---|---|---|
+| `--agent-plugin` | 插件名；默认 `vikingbot`（`dynamic` 默认 `echo_agent`） | 被测 agent 插件 |
+| `--llm-base-url` / `--llm-model` / `--llm-api-key` | 地址默认 `https://dashscope.aliyuncs.com/compatible-mode/v1`；模型默认 `deepseek-v4-flash-0731`；Key 必填 | 回答 LLM 地址、模型、Key |
+| `--llm-temperature` / `--llm-max-tokens` | `0.7` / `2048` | 采样温度 / 最大输出 token 数 |
+| `--llm-timeout-s` / `--llm-retries` | `120` / `3` | 单次 LLM 请求超时（秒）/ 重试次数 |
+| `--top-k` | `10`（`echomem_mcp` 为 `25`） | 检索记忆条目数 |
+| `--memory-budget-chars` | `8000` | 注入 prompt 的记忆最大字符数 |
+| `--question-timeout-s` | `120`（`0`=不额外限制） | 每题检索 + 回答超时（秒） |
+| `--concurrency` | `4`（`dynamic` 不适用） | QA 并发数 |
+| `--out-dir` | `results` | 结果根目录 |
+| `--allow-diagnostics` | 关 | 诊断运行：跳过不完整导入 / provenance 不匹配 |
+| `--judge-model` / `--judge-api-key` / `--judge-base-url` | 默认同 `--llm-*` | Judge LLM（仅 `locomo` / `longmemeval`） |
+| `--memory-backend` | `echomem` / `openviking`，默认 `echomem` | 记忆后端（`vikingbot` / `echo_agent` 支持） |
+| `--echomem-url` | 默认 `http://127.0.0.1:8010` | 记忆后端地址 |
+| `--echomem-auth-key` / `--echomem-log-access-key` | 空 | 后端鉴权 Key / 特权日志查询 Key |
+| `--account` / `--user-id` / `--agent-id` | `default` | 记忆后端身份 |
+| `--workspace` | 空 | 后端工作区路径 |
+| `--commit-timeout-s` / `--commit-poll-interval-s` | `0`（无限等待）/ `2` | commit 轮询超时（秒）/ 轮询间隔（秒） |
+| `--timeout-s` / `--max-retries` | `60` / `3` | 后端 HTTP 请求超时（秒）/ 重试次数 |
 
-直接调用 `run_eval.py --dataset dynamic`。需先启动 EchoAgent Backend（端口 31020）和
-EchoMem（端口 8010）。
+### LoCoMo 参数
 
-#### Generate 模式
+| 参数 | 取值范围 / 默认 | 含义 |
+|---|---|---|
+| `--dataset-path` | 空（自动查找/下载） | 数据集 JSON 路径 |
+| `--sample` | `all` 或 sample_id | 筛选 sample |
+| `--questions` | `0`=全部 | 限制 QA 题数 |
+| `--question-ids` | 逗号分隔 | 指定题目（优先于 `--questions`） |
+| `--session-mode` | `auto` / `locomo` / `single`，默认 `auto` | 会话组织方式 |
+| `--max-sessions` | `0`=全部 | 每个 sample 最多导入的原始 session 数 |
+| `--qa-profile` | `vikingboat0411` / `vikingboat0411-natural-no-tools`，默认按 `--tool-calling` 推断 | QA 执行 profile |
+| `--qa-prompt-file` | 空 | 追加到 system prompt 的文本文件 |
+| `--checkpoint-interval` | `10`（`0`=关） | 每 N 题落盘 QA CSV |
+| `--resume` | 空 | 续跑（run 目录或 qa_results CSV） |
+| `--reuse-memory-from` | 空 | 复用身份 + 已导入记忆，QA/Judge 全量重跑 |
+| `--judge-concurrency` | `4` | Judge 并发数 |
+| `--judge-checkpoint-interval` | `10` | 每 N 题落盘 Judge CSV |
 
-LLM 生成场景和提问，端到端走 EchoAgent 完整管线：
+### HotpotQA 参数
 
-```bash
-python run_eval.py --dataset dynamic \
-  --echoagent-url http://127.0.0.1:31020 \
-  --memory-engine-endpoint http://127.0.0.1:31030 \
-  --echomem-url http://127.0.0.1:8010 \
-  --username test_user \
-  --password YOUR_PASSWORD \
-  --num-memories 5 \
-  --num-queries 5 \
-  --new-session-ratio 0.3 \
-  --typing-speed-ms 2 \
-  --scenario-model deepseek-v4-flash-0731 \
-  --scenario-base-url https://dashscope.aliyuncs.com/compatible-mode/v1 \
-  --scenario-api-key YOUR_KEY \
-  --llm-base-url https://dashscope.aliyuncs.com/compatible-mode/v1 \
-  --llm-model deepseek-v4-flash-0731 \
-  --llm-api-key YOUR_KEY
-```
+| 参数 | 取值范围 / 默认 | 含义 |
+|---|---|---|
+| `--dataset-path` | 空（自动查找/下载） | 数据集 JSON 路径 |
+| `--sample` | `all` 或 index/id | 筛选 sample |
+| `--questions` | `0`=全部 | 限制 QA 题数 |
+| `--question-ids` | 逗号分隔 | 指定题目 |
+| `--import-mode` | `per_question` / `global` / `documents`，默认 `per_question` | 导入模式：每题各自导入 / 合并共享 session / 文档语料 RAG |
+| `--checkpoint-interval` | `10`（`0`=关） | 每 N 题落盘 QA CSV |
+| `--resume` | 空 | 续跑（run 目录或 qa_results CSV） |
+| `--reuse-memory-from` | 空 | 复用身份 + 已导入记忆，QA 全量重跑 |
 
-#### Replay 模式
+### LongMemEval 参数
 
-回放已有数据集对话，测试跨 session 召回：
+| 参数 | 取值范围 / 默认 | 含义 |
+|---|---|---|
+| `--dataset-path` | 空（自动查找/下载） | 数据集 JSON 路径 |
+| `--sample` | `all` 或 index/id | 筛选 sample |
+| `--questions` | `0`=全部 | 限制 QA 题数 |
+| `--question-ids` | 逗号分隔 | 指定题目 |
+| `--random-count` / `--random-seed` | `0` / `30` | 随机抽题数（0=不随机）/ 随机种子 |
+| `--parallel-shards` / `--parallel-workers` | `1` / `2` | 分片进程数 / 并发分片进程数 |
+| `--parallel-dry-run` | 关 | 只写分片清单，不启动评测进程 |
+| `--checkpoint-interval` | `10`（`0`=关） | 每 N 题落盘 QA CSV |
+| `--resume` | 空 | 续跑（run 目录或 qa_results CSV） |
+| `--reuse-memory-from` | 空 | 复用身份 + 已导入记忆，QA/Judge 全量重跑 |
 
-```bash
-python run_eval.py --dataset dynamic \
-  --echoagent-url http://127.0.0.1:31020 \
-  --memory-engine-endpoint http://127.0.0.1:31030 \
-  --echomem-url http://127.0.0.1:8010 \
-  --username test_user \
-  --password YOUR_PASSWORD \
-  --dataset-path dynamic/results/20260728_175544/dataset.json \
-  --new-session-ratio 0.3 \
-  --typing-speed-ms 2 \
-  --scenario-model deepseek-v4-flash-0731 \
-  --scenario-base-url https://dashscope.aliyuncs.com/compatible-mode/v1 \
-  --scenario-api-key YOUR_KEY \
-  --llm-base-url https://dashscope.aliyuncs.com/compatible-mode/v1 \
-  --llm-model deepseek-v4-flash-0731 \
-  --llm-api-key YOUR_KEY
-```
+### 动态评测（dynamic）
 
-结果写入 `dynamic/results/<timestamp>/`，主要文件：`dataset.json`、
+`--dataset-path` 不指定则进入 `generate` 模式（LLM 生成背景记忆和提问，端到端走
+EchoAgent 完整管线，含 prefill / TTFT）；指定则进入 `replay` 模式（回放数据集
+对话，测试跨 session 召回）。需先启动 EchoAgent Backend（端口 31020）和 EchoMem
+（端口 8010）。
+
+| 参数 | 取值范围 / 默认 | 含义 |
+|---|---|---|
+| `--dataset-path` | 空=generate，指定=replay | 模式切换 |
+| `--sample` / `--questions` | `all` / `0` | 筛选 sample / 限制题数 |
+| `--evaluator-config` | `configs/evaluator_template.yaml` | 评测器 YAML（10 个评分维度） |
+| `--num-memories` / `--num-queries` | `5` / `10` | 生成的背景记忆数 / 提问数（generate） |
+| `--new-session-ratio` | `0.3`（0~1） | 新 session 占比 |
+| `--typing-speed-ms` | `200`（`<50`=快速模式：单 tick + finalize，无逐字延迟） | 打字模拟速度（毫秒/字符） |
+| `--typing-jitter-ms` | `20` | 打字间隔抖动（毫秒） |
+| `--user-simulator-config` | `configs/user_simulator_default.yaml` | 用户模拟器 YAML |
+| `--scenario-model` / `--scenario-base-url` / `--scenario-api-key` | 默认 `deepseek-v4-flash-0731` / 空 / 空（env `ECHOAGENT_TEST_SCENARIO_*`） | 场景生成 LLM（generate） |
+| `--echoagent-url` | `http://127.0.0.1:31020` | EchoAgent 后端地址 |
+| `--username` / `--password` | `test_user` / 空 | EchoAgent 登录凭证 |
+| `--memory-engine-endpoint` | `http://127.0.0.1:31030` | EchoAgent 记忆引擎插件地址 |
+| `--out-dir` | `results` | 结果目录 |
+
+### Agent 插件参数
+
+`--tool-calling`（默认**关**）控制是否把记忆工具暴露给回答模型：关闭时模型不做
+工具调用，只完成初始记忆检索后的单轮回答；开启时才允许通过 MCP / 工具调用迭代
+检索。旧版 `--tool-calling` / `--no-tool-calling` 成对出现且默认开启（由 argparse
+`BooleanOptionalAction` 生成），现已统一为单个 `--tool-calling`，默认关闭。
+
+| 插件 | 参数 | 取值范围 / 默认 | 含义 |
+|---|---|---|---|
+| 全部 | `--tool-calling` | 关 | 是否启用 LLM 工具调用 |
+| `echomem_mcp` | `--mcp-url` | `http://127.0.0.1:8001` | EchoMem MCP 地址 |
+| | `--mcp-auth-key` | 空（回退 `--echomem-auth-key`） | MCP 鉴权 Key |
+| | `--mcp-max-iterations` | `50` | 每题最大工具调用轮数 |
+| | `--mcp-read-mode` | `disabled` / `allow`，默认 `allow` | 是否保留读取 `messages.jsonl` 的 read 工具 |
+| | `--user-memory-budget-chars` / `--agent-memory-budget-chars` | `4000` / `2000` | 注入的用户 / agent 记忆最大字符数 |
+| | `--answer-style` | `factoid` / `natural`，默认按 benchmark 推断 | 回答风格 |
+| `vikingbot` | `--vikingbot-workspace` | 插件内置 bootstrap 目录 | SOUL.md / TOOLS.md 工作区 |
+| | `--tool-search-limit` / `--tool-search-pool-multiplier` | profile 默认 | 工具搜索数量上限 / 搜索池倍数 |
+| | `--user-memory-budget-chars` / `--agent-memory-budget-chars` | profile 默认 | 注入的用户 / agent 记忆最大字符数 |
+| | `--max-iterations` | profile 默认 | 最大迭代轮数 |
+| | `--initial-min-score` / `--tool-min-score` | profile 默认 | 初始检索 / 工具调用最低分 |
+| | `--tool-set` | `search_read` / `vikingbot_native_safe` / `vikingbot_echo_native`，默认按 profile | 工具集 |
+
+### 断点续跑与记忆复用
+
+- `--resume <run目录 或 qa_results.csv>`：复用原身份，跳过已完成的导入批次、复用
+  健康 QA 答案（`locomo` 还复用 Judge 结论），只跑缺失/不健康部分；指标按合并后的
+  整轮计算。
+- `--reuse-memory-from <run目录>`：复用原身份和已完成的记忆导入，但 QA（含 Judge）
+  全量重跑，适合更换插件 / 参数后对同一批记忆重新评测。
+
+### 结果文件
+
+结果写入 `benchmarks/<name>/results/<timestamp>/`（动态为 `dynamic/results/<timestamp>/`）。
+静态 benchmark 主要产出 `qa_results.csv`、`judge_results.csv`、`summary.json`、
+`config.json`、`agent_traces/`、`backend_logs.json`；动态评测产出 `dataset.json`、
 `dynamic_results.csv`、`summary.json`、`quality_report.json`。
 
-#### 双后端对比（EchoMem vs OpenViking）
+### 双后端对比（EchoMem vs OpenViking）
 
-同 agent 隔离口径下对比两个记忆后端：先 `generate` 一次产出场景
-`dataset.json`，再用 `replay` 把**同一份**数据集对两个后端各回放一遍
-（vikingbot 插件通过 `--memory-backend` 切换后端），最后生成自包含 HTML
-图表报告：
-
-```bash
-# 1) generate 一次：LLM 模拟用户生成背景记忆 + 查询
-python run_eval.py --dataset dynamic --agent-plugin vikingbot --memory-backend echomem \
-  --echomem-url http://127.0.0.1:8010 --num-memories 20 --num-queries 50 \
-  --scenario-base-url ... --scenario-model ... --scenario-api-key ... \
-  --llm-base-url ... --llm-model ... --llm-api-key ... \
-  --out-dir dynamic/results/formal_gen
-
-# 2) replay 同一份 dataset.json 到 EchoMem
-python run_eval.py --dataset dynamic --agent-plugin vikingbot --memory-backend echomem \
-  --echomem-url http://127.0.0.1:8010 --dataset-path <dataset.json> \
-  --llm-base-url ... --llm-model ... --llm-api-key ... --out-dir dynamic/results/formal_em
-
-# 3) replay 同一份 dataset.json 到 OpenViking
-python run_eval.py --dataset dynamic --agent-plugin vikingbot --memory-backend openviking \
-  --echomem-url http://127.0.0.1:19080 --workspace D:/.openviking/data \
-  --dataset-path <dataset.json> --llm-base-url ... --llm-model ... --llm-api-key ... \
-  --out-dir dynamic/results/formal_ov
-
-# 4) 生成对比报告（token / 注入耗时 / 检索延迟 / 召回精度 / 答案质量）
-python scripts/compare_memory_backends.py \
-  --echomem-run dynamic/results/formal_em/<run> \
-  --openviking-run dynamic/results/formal_ov/<run> \
-  --dataset <dataset.json> --output reports/echomem_vs_openviking/index.html
-```
-
-`replay` 会自动识别 `generate` 产出的动态 v2 `dataset.json`
-（含 `background_memories` + `dataset_queries`），保留每轮 `ground_facts`
-的记忆 id，供召回精度计算；注入耗时记录在结果的 `config.inject_elapsed_s`。
-一键流程见 `START_BAT/compare_echomem_vs_openviking.bat`。
+同 agent 隔离口径下对比两个记忆后端：先 `generate` 一次产出场景 `dataset.json`，
+再用 `replay` 把同一份数据集对 `echomem` / `openviking` 各回放一遍，最后生成
+自包含 HTML 图表报告。一键流程见 `START_BAT/compare_echomem_vs_openviking.bat`。
 
 ## 性能压测
 

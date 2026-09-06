@@ -172,7 +172,7 @@ def _make_plugin(**overrides) -> VikingBotPlugin:
     plugin.memory_client = MagicMock()
     plugin._llm = MagicMock()
     plugin._qa_profile = VIKINGBOAT_0411_PROFILE
-    plugin._tools_enabled = True
+    plugin._tool_calling = True
     plugin._top_k = 25
     plugin._tool_search_limit = None
     plugin._user_memory_budget_chars = None
@@ -271,13 +271,17 @@ class VikingBotAddArgumentsTests(unittest.TestCase):
             with self.subTest(attr=attr):
                 self.assertIsNone(getattr(ns, attr))
 
-    def test_tools_defaults_true(self):
+    def test_tool_calling_defaults_false(self):
         ns = self._parse()
-        self.assertTrue(ns.tools)
+        self.assertFalse(ns.tool_calling)
 
-    def test_no_tools_flag(self):
-        ns = self._parse("--no-tools")
-        self.assertFalse(ns.tools)
+    def test_tool_calling_flag(self):
+        ns = self._parse("--tool-calling")
+        self.assertTrue(ns.tool_calling)
+
+    def test_no_tools_flag_removed(self):
+        with self.assertRaises(SystemExit):
+            self._parse("--no-tools")
 
     def test_tool_set_choices(self):
         for choice in ("search_read", "vikingbot_native_safe", "vikingbot_echo_native"):
@@ -439,7 +443,7 @@ class VikingBotSetupTests(unittest.TestCase):
             patch("plugins.vikingbot.plugin.LLMClient"),
         ):
             plugin = VikingBotPlugin()
-            plugin.setup({"llm_base_url": "u", "llm_api_key": "k", "tools": True})
+            plugin.setup({"llm_base_url": "u", "llm_api_key": "k", "tool_calling": True})
             self.assertEqual(VIKINGBOAT_0411_PROFILE, plugin._qa_profile)
 
     def test_profile_auto_select_tools_false(self):
@@ -449,7 +453,7 @@ class VikingBotSetupTests(unittest.TestCase):
             patch("plugins.vikingbot.plugin.LLMClient"),
         ):
             plugin = VikingBotPlugin()
-            plugin.setup({"llm_base_url": "u", "llm_api_key": "k", "tools": False})
+            plugin.setup({"llm_base_url": "u", "llm_api_key": "k", "tool_calling": False})
             self.assertEqual(VIKINGBOAT_0411_NATURAL_NO_TOOLS_PROFILE, plugin._qa_profile)
 
     def test_resolve_cli_overrides_profile_default(self):
@@ -742,7 +746,7 @@ class VikingBotSendMessageTests(unittest.TestCase):
 
         plugin = _make_plugin(
             _documents_mode=True,
-            _tools_enabled=False,
+            _tool_calling=False,
             path_title_map={"hotpotqa/D1-abc12345": "D1"},
             _docs_memory_budget_chars=8000,
             _top_k=10,
@@ -787,7 +791,7 @@ class VikingBotSendMessageTests(unittest.TestCase):
         mock_answer.return_value = _make_qa_result()
         plugin = _make_plugin(
             _documents_mode=True,
-            _tools_enabled=True,
+            _tool_calling=True,
             path_title_map={"hotpotqa/D1": "D1"},
             _docs_memory_budget_chars=8000,
             _top_k=10,
@@ -820,7 +824,7 @@ class VikingBotSendMessageTests(unittest.TestCase):
         mock_answer.return_value = _make_qa_result()
         plugin = _make_plugin(
             _documents_mode=True,
-            _tools_enabled=True,
+            _tool_calling=True,
             path_title_map={"hotpotqa/D1": "D1"},
             _docs_memory_budget_chars=8000,
             _top_k=10,

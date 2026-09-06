@@ -50,7 +50,7 @@ send_message()             ----->  EchoAgent 后端  ----->  LLM
 
 ## send_message 返回值契约
 
-`send_message` 返回的 `AgentResponse.extra` 必须包含 `qa_profile` 字段。benchmark QA runner（`shared/benchmark_qa.py`）从 `resp.extra["qa_profile"]` 读取 QA profile，写入 QA 结果 CSV。`--resume-qa` 恢复时，`resume.py` 校验 CSV 中的 `qa_profile` 与 manifest 一致；缺失会导致 profile mismatch 错误。
+`send_message` 返回的 `AgentResponse.extra` 必须包含 `qa_profile` 字段。benchmark QA runner（`shared/benchmark_qa.py`）从 `resp.extra["qa_profile"]` 读取 QA profile，写入 QA 结果 CSV。`--resume` 恢复时，`resume.py` 校验 CSV 中的 `qa_profile` 与 manifest 一致；缺失会导致 profile mismatch 错误。
 
 `echoagent_live` 的 `qa_profile` 继承自 `AgentPlugin.qa_profile` 属性，默认返回 `descriptor.id`（即 `"echoagent_live"`）。`send_message` 在所有返回路径（成功、错误、异常）中都设置 `extra={"qa_profile": self.qa_profile}`。
 

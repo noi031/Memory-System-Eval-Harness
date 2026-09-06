@@ -49,11 +49,6 @@ plugins/
     mcp_client.py      # MCP 客户端 (JSON-RPC + SSE)
     runtime.py         # MCP 工具定义 + 系统提示词
     docs/design.md     # 设计意图
-  openviking_mcp/      # LLM 通过 MemoryClient 工具检索记忆 (OpenViking 等)
-    __init__.py
-    plugin.py          # OpenVikingMCPPlugin
-    runtime.py         # 工具定义 + 执行 + 系统提示词
-    docs/design.md     # 设计意图
   bare_llm/            # 纯 LLM 基线 (system prompt + 用户查询)
     __init__.py
     plugin.py          # BareLLMPlugin
@@ -68,10 +63,9 @@ plugins/
 | `echo_agent` | EchoAgent + EchoMem 完整管线 | 不支持 benchmark QA | echomem / openviking | 支持 (prefetch tick/finalize) | 支持 | 否 (有 typing 实例状态) | EchoAgent 后端 + 记忆后端 |
 | `echoagent_live` | EchoAgent 外网部署评测 (无打字模拟) | 不支持 benchmark QA | echomem / openviking | 不支持 | 支持 | 是 | EchoAgent 后端 + 记忆后端 |
 | `echomem_mcp` | LLM 通过 MCP 工具检索记忆 | 工具调用循环 (MCP 协议) | echomem | 不支持 | 支持 | 是 | LLM API + EchoMem MCP 服务 (8001) |
-| `openviking_mcp` | LLM 通过 MemoryClient 工具检索记忆 | 工具调用循环 (MemoryClient 协议) | openviking | 不支持 | 支持 | 是 | LLM API + 记忆后端 |
 | `bare_llm` | 纯 LLM 基线 (system prompt + 用户查询) | 纯 LLM 调用 (无记忆检索) | 不支持 | 不支持 | 支持 | 是 | 仅 LLM API |
 
-> **线程安全**: benchmark 评测使用 `ThreadPoolExecutor` 并发 QA。`vikingbot`、`echomem_mcp`、`openviking_mcp`、`bare_llm` 和 `echoagent_live` 的调用是无状态的, 支持并发。`echo_agent` 有 typing 实例状态, benchmark 使用时需 `--concurrency 1`。
+> **线程安全**: benchmark 评测使用 `ThreadPoolExecutor` 并发 QA。`vikingbot`、`echomem_mcp`、`bare_llm` 和 `echoagent_live` 的调用是无状态的, 支持并发。`echo_agent` 有 typing 实例状态, benchmark 使用时需 `--concurrency 1`。
 
 ## 接口
 
@@ -106,7 +100,7 @@ class AgentPlugin(ABC):
 
 记忆注入是 `AgentPlugin` 接口的一部分。`inject_memories` 方法接收全部记忆, 通过 `backend` 参数选择后端 (echomem / openviking), 在内部调用 `self.memory_client` 的 `open_session` / `add_message` / `commit_session` / `poll_commit` 完成注入。
 
-支持多后端的插件 (echo_agent, vikingbot) 通过 `--memory-backend` 参数选择后端。单后端插件 (echomem_mcp, openviking_mcp) 忽略 `backend` 参数, 始终使用自己的后端。
+支持多后端的插件 (echo_agent, vikingbot) 通过 `--memory-backend` 参数选择后端。单后端插件 (echomem_mcp) 忽略 `backend` 参数, 始终使用自己的后端。
 
 记忆客户端类:
 - `backends/echomem/client.py` -> `EchoMemClient`

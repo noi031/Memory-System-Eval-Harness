@@ -68,16 +68,13 @@ def _make_plugin(**overrides: Any) -> EchoMemMCPPlugin:
     """Construct an EchoMemMCPPlugin with mocked LLM/memory clients.
 
     Internal config fields are set directly so send_message tests have full
-    control without going through setup().  ``manual_search`` is an internal
-    test/config switch only; it is not exposed as an end-user CLI flag.
+    control without going through setup().
     """
     p = EchoMemMCPPlugin()
     p._mcp_url = overrides.get("mcp_url", "http://127.0.0.1:8001")
     p._auth_key = overrides.get("auth_key", "mcp-key")
     p._max_iterations = overrides.get("max_iterations", 10)
-    p._tool_calling = overrides.get("tool_calling", True)
-    p._search_in_tools = overrides.get("search_in_tools", True)
-    p._manual_search = overrides.get("manual_search", False)
+    p._tool_calling = overrides.get("tool_calling", False)
     p._mcp_read_mode = overrides.get("mcp_read_mode", "allow")
     p._top_k = overrides.get("top_k", 25)
     p._memory_budget_chars = overrides.get("memory_budget_chars", 0)
@@ -464,14 +461,12 @@ class RuntimeToolsTests(unittest.TestCase):
         }
         self.assertEqual({"memory_query", "list", "glob"}, names)
 
-    def test_allow_and_require_modes_include_read_tool(self) -> None:
-        for mode in ("allow", "require"):
-            with self.subTest(mode=mode):
-                names = {
-                    tool["function"]["name"]
-                    for tool in configured_tools(mode)
-                }
-                self.assertIn("read", names)
+    def test_allow_mode_includes_read_tool(self) -> None:
+        names = {
+            tool["function"]["name"]
+            for tool in configured_tools("allow")
+        }
+        self.assertIn("read", names)
 
     def test_list_requires_uri(self) -> None:
         tool = next(t for t in MCP_TOOLS if t["function"]["name"] == "list")
@@ -539,8 +534,8 @@ class PluginAddArgumentsTests(unittest.TestCase):
         self.assertEqual("http://127.0.0.1:8001", args.mcp_url)
         self.assertEqual("", args.mcp_auth_key)
         self.assertEqual(50, args.mcp_max_iterations)
-        self.assertTrue(args.tool_calling)
-        self.assertTrue(args.search_in_tools)
+        self.assertFalse(args.tool_calling)
+        self.assertFalse(hasattr(args, "search_in_tools"))
         self.assertFalse(hasattr(args, "manual_search"))
         self.assertFalse(hasattr(args, "mcp_initial_search"))
         self.assertEqual(4000, args.user_memory_budget_chars)
@@ -554,14 +549,18 @@ class PluginAddArgumentsTests(unittest.TestCase):
         self.assertEqual(1234, args.user_memory_budget_chars)
         self.assertEqual(567, args.agent_memory_budget_chars)
 
-    def test_no_tool_calling_flag(self) -> None:
-        self.assertFalse(self._parse("--no-tool-calling").tool_calling)
-
-    def test_tool_calling_flag_explicit(self) -> None:
+    def test_tool_calling_flag(self) -> None:
         self.assertTrue(self._parse("--tool-calling").tool_calling)
 
-    def test_no_search_in_tools_flag(self) -> None:
-        self.assertFalse(self._parse("--no-search-in-tools").search_in_tools)
+    def test_no_tool_calling_flag_removed(self) -> None:
+        with self.assertRaises(SystemExit):
+            self._parse("--no-tool-calling")
+
+    def test_no_search_in_tools_flag_removed(self) -> None:
+        with self.assertRaises(SystemExit):
+            self._parse("--no-search-in-tools")
+        with self.assertRaises(SystemExit):
+            self._parse("--search-in-tools")
 
     def test_manual_search_flag_removed(self) -> None:
         with self.assertRaises(SystemExit):
@@ -605,7 +604,7 @@ class PluginSetupTests(unittest.TestCase):
             "user_id": "u", "agent_id": "ag", "workspace": "w", "timeout_s": 50,
             "max_retries": 4,
             "mcp_url": "http://mcp", "mcp_auth_key": "mk", "mcp_max_iterations": 5,
-            "tool_calling": False, "search_in_tools": False, "manual_search": False,
+            "tool_calling": False,
             "top_k": 15, "memory_budget_chars": 1000, "question_timeout_s": 60,
             "user_memory_budget_chars": 4000, "agent_memory_budget_chars": 2000,
             "commit_timeout_s": 10, "commit_poll_interval_s": 1,
@@ -617,8 +616,6 @@ class PluginSetupTests(unittest.TestCase):
         self.assertEqual("mk", p._auth_key)
         self.assertEqual(5, p._max_iterations)
         self.assertFalse(p._tool_calling)
-        self.assertFalse(p._search_in_tools)
-        self.assertFalse(p._manual_search)
         self.assertEqual(15, p._top_k)
         self.assertEqual(1000, p._memory_budget_chars)
         self.assertEqual(4000, p._user_memory_budget_chars)
@@ -655,9 +652,7 @@ class PluginSetupTests(unittest.TestCase):
         self.assertEqual("http://127.0.0.1:8001", p._mcp_url)
         self.assertEqual("", p._auth_key)
         self.assertEqual(50, p._max_iterations)
-        self.assertTrue(p._tool_calling)
-        self.assertTrue(p._search_in_tools)
-        self.assertTrue(p._manual_search)
+        self.assertFalse(p._tool_calling)
         self.assertEqual(25, p._top_k)
         self.assertEqual(8000, p._memory_budget_chars)
         self.assertEqual(4000, p._user_memory_budget_chars)
@@ -834,10 +829,10 @@ class PluginCreateSessionTests(unittest.TestCase):
 # --------------------------------------------------------------------------- #
 
 class PluginSendMessageTests(unittest.TestCase):
-    # -- Phase A: manual pre-fetch -------------------------------------------
+    # -- Phase A: pre-fetch search -------------------------------------------
 
-    def test_manual_search_prefetch_populates_memory_items(self) -> None:
-        p = _make_plugin(tool_calling=False, manual_search=True)
+    def test_prefetch_populates_memory_items(self) -> None:
+        p = _make_plugin(tool_calling=False)
         p.memory_client.search.return_value = [
             SearchResult(uri="echo://a", score=0.9, content="memory A"),
             SearchResult(uri="echo://b", score=0.5, content="memory B"),
@@ -859,8 +854,8 @@ class PluginSendMessageTests(unittest.TestCase):
         self.assertGreater(resp.extra["retrieval_latency_s"], 0.0)
         self.assertFalse(resp.extra["initial_search_via_mcp"])
 
-    def test_manual_search_injects_memory_into_messages(self) -> None:
-        p = _make_plugin(tool_calling=False, manual_search=True)
+    def test_prefetch_injects_memory_into_messages(self) -> None:
+        p = _make_plugin(tool_calling=False)
         p.memory_client.search.return_value = [
             SearchResult(uri="echo://a", score=0.9, content="memory A"),
             SearchResult(uri="echo://agent/a", score=0.8, content="agent memory"),
@@ -911,8 +906,8 @@ class PluginSendMessageTests(unittest.TestCase):
         self.assertNotIn("x" * 200, text)
         self.assertIn("later", text)
 
-    def test_manual_search_empty_results_no_injection(self) -> None:
-        p = _make_plugin(tool_calling=False, manual_search=True)
+    def test_prefetch_empty_results_no_injection(self) -> None:
+        p = _make_plugin(tool_calling=False)
         p.memory_client.search.return_value = []
         p._llm.chat.return_value = LLMResponse("answer", 5, 3, 0.1)
         resp = p.send_message("s1", "q")
@@ -920,8 +915,8 @@ class PluginSendMessageTests(unittest.TestCase):
         messages = p._llm.chat.call_args.args[0]
         self.assertEqual(2, len(messages))  # system + user only
 
-    def test_manual_search_exception_is_reported(self) -> None:
-        p = _make_plugin(tool_calling=False, manual_search=True)
+    def test_prefetch_exception_is_reported(self) -> None:
+        p = _make_plugin(tool_calling=False)
         p.memory_client.search.side_effect = RuntimeError("search down")
         p._llm.chat.return_value = LLMResponse("answer", 5, 3, 0.1)
         resp = p.send_message("s1", "q")
@@ -933,17 +928,11 @@ class PluginSendMessageTests(unittest.TestCase):
             resp.extra["retrieval_error"],
         )
 
-    def test_manual_search_disabled_skips_search(self) -> None:
-        p = _make_plugin(tool_calling=False, manual_search=False)
-        p._llm.chat.return_value = LLMResponse("answer", 5, 3, 0.1)
-        p.send_message("s1", "q")
-        p.memory_client.search.assert_not_called()
-
     # -- Phase B: tool list building -----------------------------------------
 
     @patch(_MCP_CLIENT)
-    def test_all_four_tools_passed_when_search_in_tools(self, mock_cls: MagicMock) -> None:
-        p = _make_plugin(tool_calling=True, search_in_tools=True, manual_search=False)
+    def test_tool_calling_exposes_all_four_tools(self, mock_cls: MagicMock) -> None:
+        p = _make_plugin(tool_calling=True)
         mock_cls.return_value = MagicMock()
         p._llm.chat_with_tools.return_value = LLMToolResponse(
             "ans", [], 5, 3,
@@ -952,19 +941,8 @@ class PluginSendMessageTests(unittest.TestCase):
         tools = p._llm.chat_with_tools.call_args.args[1]
         self.assertEqual(4, len(tools))
 
-    @patch(_MCP_CLIENT)
-    def test_search_in_tools_false_excludes_memory_query(self, mock_cls: MagicMock) -> None:
-        p = _make_plugin(tool_calling=True, search_in_tools=False, manual_search=False)
-        mock_cls.return_value = MagicMock()
-        p._llm.chat_with_tools.return_value = LLMToolResponse("ans", [], 5, 3)
-        p.send_message("s1", "q")
-        tools = p._llm.chat_with_tools.call_args.args[1]
-        names = [t["function"]["name"] for t in tools]
-        self.assertNotIn("memory_query", names)
-        self.assertEqual({"read", "list", "glob"}, set(names))
-
     def test_tool_calling_false_yields_empty_tools_and_single_call(self) -> None:
-        p = _make_plugin(tool_calling=False, manual_search=False)
+        p = _make_plugin(tool_calling=False)
         p._llm.chat.return_value = LLMResponse("answer", 5, 3, 0.1)
         p.send_message("s1", "q")
         p._llm.chat_with_tools.assert_not_called()
@@ -979,11 +957,11 @@ class PluginSendMessageTests(unittest.TestCase):
     ) -> None:
         p = _make_plugin(
             tool_calling=True,
-            manual_search=False,
             mcp_read_mode="disabled",
         )
         mock_mcp = MagicMock()
         mock_cls.return_value = mock_mcp
+        mock_mcp.call_tool.return_value = json.dumps({"items": []})
         p._llm.chat_with_tools.side_effect = [
             LLMToolResponse(
                 "",
@@ -1004,7 +982,7 @@ class PluginSendMessageTests(unittest.TestCase):
             "read",
             {tool["function"]["name"] for tool in first_tools},
         )
-        mock_mcp.call_tool.assert_not_called()
+        mock_mcp.call_tool.assert_called_once()
         audit = response.extra["trace"]["tool_audit"]
         self.assertEqual("tool_not_exposed", audit["tool_calls"][0]["error"])
 
@@ -1012,22 +990,24 @@ class PluginSendMessageTests(unittest.TestCase):
 
     @patch(_MCP_CLIENT)
     def test_immediate_answer_no_tool_calls(self, mock_cls: MagicMock) -> None:
-        p = _make_plugin(tool_calling=True, manual_search=False)
+        p = _make_plugin(tool_calling=True)
         mock_mcp = MagicMock()
         mock_cls.return_value = mock_mcp
         p._llm.chat_with_tools.return_value = LLMToolResponse(
             "direct answer", [], 5, 3,
         )
+        mock_mcp.call_tool.return_value = json.dumps({"items": []})
         resp = p.send_message("s1", "q")
         self.assertEqual("direct answer", resp.text)
         self.assertEqual(1, resp.extra["iterations"])
         self.assertEqual(0, resp.extra["tool_call_count"])
-        mock_mcp.call_tool.assert_not_called()
+        # The LLM called no tools; the only MCP call is the Phase A pre-fetch.
+        mock_mcp.call_tool.assert_called_once()
         mock_mcp.close.assert_called_once()
 
     @patch(_MCP_CLIENT)
     def test_tool_call_loop_then_final_answer(self, mock_cls: MagicMock) -> None:
-        p = _make_plugin(tool_calling=True, manual_search=False)
+        p = _make_plugin(tool_calling=True)
         mock_mcp = MagicMock()
         mock_cls.return_value = mock_mcp
         mock_mcp.call_tool.return_value = "search results"
@@ -1052,7 +1032,7 @@ class PluginSendMessageTests(unittest.TestCase):
 
     @patch(_MCP_CLIENT)
     def test_memory_query_result_truncated_to_2000(self, mock_cls: MagicMock) -> None:
-        p = _make_plugin(tool_calling=True, manual_search=False)
+        p = _make_plugin(tool_calling=True)
         mock_mcp = MagicMock()
         mock_cls.return_value = mock_mcp
         mock_mcp.call_tool.return_value = "x" * 3000
@@ -1065,7 +1045,7 @@ class PluginSendMessageTests(unittest.TestCase):
 
     @patch(_MCP_CLIENT)
     def test_non_memory_query_tool_not_added_to_memory_items(self, mock_cls: MagicMock) -> None:
-        p = _make_plugin(tool_calling=True, manual_search=False)
+        p = _make_plugin(tool_calling=True)
         mock_mcp = MagicMock()
         mock_cls.return_value = mock_mcp
         mock_mcp.call_tool.return_value = "content"
@@ -1079,10 +1059,10 @@ class PluginSendMessageTests(unittest.TestCase):
 
     @patch(_MCP_CLIENT)
     def test_invalid_tool_arguments_handled_as_empty(self, mock_cls: MagicMock) -> None:
-        p = _make_plugin(tool_calling=True, manual_search=False)
+        p = _make_plugin(tool_calling=True)
         mock_mcp = MagicMock()
         mock_cls.return_value = mock_mcp
-        mock_mcp.call_tool.return_value = "result"
+        mock_mcp.call_tool.side_effect = [json.dumps({"items": []}), "result"]
         bad_call = {
             "id": "c1", "type": "function",
             "function": {"name": "read", "arguments": "not json"},
@@ -1092,12 +1072,12 @@ class PluginSendMessageTests(unittest.TestCase):
             LLMToolResponse("ans", [], 10, 3),
         ]
         p.send_message("s1", "q")
-        mock_mcp.call_tool.assert_called_once()
+        mock_mcp.call_tool.assert_called()
         self.assertEqual({}, mock_mcp.call_tool.call_args.args[1])
 
     @patch(_MCP_CLIENT)
     def test_tool_call_error_does_not_increment_count(self, mock_cls: MagicMock) -> None:
-        p = _make_plugin(tool_calling=True, manual_search=False)
+        p = _make_plugin(tool_calling=True)
         mock_mcp = MagicMock()
         mock_cls.return_value = mock_mcp
         mock_mcp.call_tool.side_effect = RuntimeError("tool boom")
@@ -1111,7 +1091,7 @@ class PluginSendMessageTests(unittest.TestCase):
 
     @patch(_MCP_CLIENT)
     def test_max_iterations_forces_no_tool_answer(self, mock_cls: MagicMock) -> None:
-        p = _make_plugin(tool_calling=True, manual_search=False, max_iterations=2)
+        p = _make_plugin(tool_calling=True, max_iterations=2)
         mock_mcp = MagicMock()
         mock_cls.return_value = mock_mcp
         mock_mcp.call_tool.return_value = "content"
@@ -1129,7 +1109,7 @@ class PluginSendMessageTests(unittest.TestCase):
 
     @patch(_MCP_CLIENT)
     def test_llm_error_in_tool_loop_breaks_with_error(self, mock_cls: MagicMock) -> None:
-        p = _make_plugin(tool_calling=True, manual_search=False)
+        p = _make_plugin(tool_calling=True)
         mock_cls.return_value = MagicMock()
         p._llm.chat_with_tools.return_value = LLMToolResponse(
             error="LLM 500", prompt_tokens=5, completion_tokens=0,
@@ -1141,7 +1121,7 @@ class PluginSendMessageTests(unittest.TestCase):
 
     @patch(_MCP_CLIENT)
     def test_mcp_init_failure_falls_back_to_single_llm_call(self, mock_cls: MagicMock) -> None:
-        p = _make_plugin(tool_calling=True, manual_search=False)
+        p = _make_plugin(tool_calling=True)
         mock_mcp = MagicMock()
         mock_mcp.initialize.side_effect = RuntimeError("init failed")
         mock_cls.return_value = mock_mcp
@@ -1157,7 +1137,7 @@ class PluginSendMessageTests(unittest.TestCase):
 
     @patch(_MCP_CLIENT)
     def test_mcp_init_success_uses_chat_with_tools_not_chat(self, mock_cls: MagicMock) -> None:
-        p = _make_plugin(tool_calling=True, manual_search=False)
+        p = _make_plugin(tool_calling=True)
         mock_cls.return_value = MagicMock()
         p._llm.chat_with_tools.return_value = LLMToolResponse("ans", [], 5, 3)
         p.send_message("s1", "q")
@@ -1167,7 +1147,7 @@ class PluginSendMessageTests(unittest.TestCase):
     # -- message building ----------------------------------------------------
 
     def test_no_tool_calling_uses_no_tools_prompt(self) -> None:
-        p = _make_plugin(tool_calling=False, manual_search=False)
+        p = _make_plugin(tool_calling=False)
         p._llm.chat.return_value = LLMResponse("ans", 5, 3, 0.1)
         p.send_message("s1", "q")
         messages = p._llm.chat.call_args.args[0]
@@ -1176,7 +1156,7 @@ class PluginSendMessageTests(unittest.TestCase):
     @patch(_MCP_CLIENT)
     def test_natural_answer_style_uses_natural_prompts(self, mock_cls: MagicMock) -> None:
         # tool_calling=False path
-        p = _make_plugin(answer_style="natural", tool_calling=False, manual_search=False)
+        p = _make_plugin(answer_style="natural", tool_calling=False)
         p._llm.chat.return_value = LLMResponse("ans", 5, 3, 0.1)
         p.send_message("s1", "q")
         messages = p._llm.chat.call_args.args[0]
@@ -1184,7 +1164,7 @@ class PluginSendMessageTests(unittest.TestCase):
 
         # tool_calling=True path
         mock_cls.return_value = MagicMock()
-        p2 = _make_plugin(answer_style="natural", tool_calling=True, manual_search=False)
+        p2 = _make_plugin(answer_style="natural", tool_calling=True)
         p2._llm.chat_with_tools.return_value = LLMToolResponse("ans", [], 5, 3)
         p2.send_message("s1", "q")
         messages = p2._llm.chat_with_tools.call_args.args[0]
@@ -1193,28 +1173,28 @@ class PluginSendMessageTests(unittest.TestCase):
     @patch(_MCP_CLIENT)
     def test_factoid_answer_style_keeps_short_answer_prompts(self, mock_cls: MagicMock) -> None:
         mock_cls.return_value = MagicMock()
-        p = _make_plugin(answer_style="factoid", tool_calling=True, manual_search=False)
+        p = _make_plugin(answer_style="factoid", tool_calling=True)
         p._llm.chat_with_tools.return_value = LLMToolResponse("ans", [], 5, 3)
         p.send_message("s1", "q")
         messages = p._llm.chat_with_tools.call_args.args[0]
         self.assertEqual(_SYSTEM_PROMPT, messages[0]["content"])
 
     def test_question_time_injected_into_user_message(self) -> None:
-        p = _make_plugin(tool_calling=False, manual_search=False)
+        p = _make_plugin(tool_calling=False)
         p._llm.chat.return_value = LLMResponse("ans", 5, 3, 0.1)
         p.send_message("s1", "q", extra={"question_time": "2026-01-01"})
         user_content = p._llm.chat.call_args.args[0][1]["content"]
         self.assertIn("Current date: 2026-01-01", user_content)
 
     def test_no_question_time_omits_time_context(self) -> None:
-        p = _make_plugin(tool_calling=False, manual_search=False)
+        p = _make_plugin(tool_calling=False)
         p._llm.chat.return_value = LLMResponse("ans", 5, 3, 0.1)
         p.send_message("s1", "q", extra={"question_time": ""})
         user_content = p._llm.chat.call_args.args[0][1]["content"]
         self.assertNotIn("Current date", user_content)
 
     def test_question_time_from_whitespace_only_omitted(self) -> None:
-        p = _make_plugin(tool_calling=False, manual_search=False)
+        p = _make_plugin(tool_calling=False)
         p._llm.chat.return_value = LLMResponse("ans", 5, 3, 0.1)
         p.send_message("s1", "q", extra={"question_time": "   "})
         user_content = p._llm.chat.call_args.args[0][1]["content"]
@@ -1223,26 +1203,26 @@ class PluginSendMessageTests(unittest.TestCase):
     # -- edge cases ----------------------------------------------------------
 
     def test_extra_none_is_tolerated(self) -> None:
-        p = _make_plugin(tool_calling=False, manual_search=False)
+        p = _make_plugin(tool_calling=False)
         p._llm.chat.return_value = LLMResponse("ans", 5, 3, 0.1)
         resp = p.send_message("s1", "q", extra=None)
         self.assertEqual("ans", resp.text)
 
     def test_empty_message_is_accepted(self) -> None:
-        p = _make_plugin(tool_calling=False, manual_search=False)
+        p = _make_plugin(tool_calling=False)
         p._llm.chat.return_value = LLMResponse("ans", 5, 3, 0.1)
         resp = p.send_message("s1", "")
         self.assertEqual("ans", resp.text)
 
     def test_zero_timeout_disables_deadline(self) -> None:
-        p = _make_plugin(tool_calling=False, manual_search=False, question_timeout_s=0.0)
+        p = _make_plugin(tool_calling=False, question_timeout_s=0.0)
         p._llm.chat.return_value = LLMResponse("ans", 5, 3, 0.1)
         p.send_message("s1", "q")
         # With no deadline, remaining() returns None -> timeout_s=None.
         self.assertIsNone(p._llm.chat.call_args.kwargs["timeout_s"])
 
     def test_response_extra_fields_present(self) -> None:
-        p = _make_plugin(tool_calling=False, manual_search=False)
+        p = _make_plugin(tool_calling=False)
         p._llm.chat.return_value = LLMResponse("ans", 5, 3, 0.1)
         resp = p.send_message("s1", "q")
         self.assertIn("tool_call_count", resp.extra)
@@ -1255,8 +1235,8 @@ class PluginSendMessageTests(unittest.TestCase):
         self.assertEqual(0, resp.extra["iterations"])
 
     @patch(_MCP_CLIENT)
-    def test_combined_manual_search_and_tool_calling(self, mock_cls: MagicMock) -> None:
-        p = _make_plugin(tool_calling=True, manual_search=True)
+    def test_combined_prefetch_and_tool_calling(self, mock_cls: MagicMock) -> None:
+        p = _make_plugin(tool_calling=True)
         mock_mcp = MagicMock()
         mock_cls.return_value = mock_mcp
         mock_mcp.call_tool.side_effect = [

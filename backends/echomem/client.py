@@ -388,11 +388,15 @@ class EchoMemClient(BaseHTTPMemoryClient):
         """
         done_statuses = {"completed", "degraded", "empty"}
         failed_statuses = {"failed", "error"}
-        deadline = time.monotonic() + timeout_s
+        deadline = (
+            time.monotonic() + timeout_s
+            if timeout_s and timeout_s > 0
+            else None
+        )
         pending = list(paths)
         failures: dict[str, str] = {}
         while pending:
-            if time.monotonic() >= deadline:
+            if deadline is not None and time.monotonic() >= deadline:
                 raise TimeoutError(
                     f"resource indexing not finished after {timeout_s:g}s "
                     f"({len(pending)} pending: {pending[:5]})"

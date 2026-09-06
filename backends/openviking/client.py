@@ -1,9 +1,4 @@
-"""OpenViking HTTP backend client with commit polling and retrieval.
-
-Moved from plugins/openviking_mcp/memory_client.py. The client logic is unchanged;
-only the import path for BaseHTTPMemoryClient and SearchResult has changed
-to point at backends.memory_types.
-"""
+"""OpenViking HTTP backend client with commit polling and retrieval."""
 
 from __future__ import annotations
 
@@ -502,9 +497,13 @@ class OpenVikingClient(BaseHTTPMemoryClient):
             p for p in paths if self._resource_tasks.get(p)
         ]
         failures: dict[str, str] = {}
-        deadline = time.monotonic() + timeout_s
+        deadline = (
+            time.monotonic() + timeout_s
+            if timeout_s and timeout_s > 0
+            else None
+        )
         while pending:
-            if time.monotonic() >= deadline:
+            if deadline is not None and time.monotonic() >= deadline:
                 raise TimeoutError(
                     f"resource indexing not finished after {timeout_s:g}s "
                     f"({len(pending)} pending: {pending[:5]})"

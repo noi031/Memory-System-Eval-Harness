@@ -161,7 +161,7 @@ _NO_TOOLS_SYSTEM_PROMPT_NATURAL = (
 def configured_tools(read_mode: str = "allow") -> list[dict[str, Any]]:
     """Return the MCP tool contract for the requested transcript policy."""
     mode = str(read_mode or "allow").strip().lower()
-    if mode not in {"disabled", "allow", "require"}:
+    if mode not in {"disabled", "allow"}:
         raise ValueError(f"unsupported MCP read mode: {read_mode}")
     if mode == "disabled":
         return [

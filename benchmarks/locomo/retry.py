@@ -90,7 +90,7 @@ def build_retry_command(
         sample,
         "--question-ids",
         ",".join(question_ids),
-        "--resume-qa",
+        "--resume",
         str(resume_source),
         "--out-dir",
         str(round_dir),

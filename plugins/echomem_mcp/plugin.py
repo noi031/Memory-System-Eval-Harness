@@ -5,14 +5,13 @@ OpenAI function-calling definitions.  It decides when to search memory and
 which URIs to read, mimicking how a real agent would interact with a
 memory system through the MCP protocol.
 
-Two configurable parameters control behavior:
-- --tool-calling / --no-tool-calling: enable LLM tool calling via MCP
-- --search-in-tools / --no-search-in-tools: include memory_query in tool defs
+One configurable parameter controls behavior:
+- --tool-calling: enable LLM tool calling via MCP (default: disabled)
 
 Initial memory pre-fetch is performed through EchoMem MCP ``memory_query``
-when tool calling is enabled.  In ``--no-tool-calling`` mode the pre-fetch
-goes through EchoMem's HTTP retrieval API instead, so the MCP server is not
-required at all in that mode.
+when tool calling is enabled.  Without it the pre-fetch goes through
+EchoMem's HTTP retrieval API instead, so the MCP server is not required at
+all in that mode.
 
 When the benchmark runs with ``--import-mode documents``, QA switches to
 the document mode: the shared document corpus is retrieved via
@@ -116,12 +115,11 @@ def format_split_memory_section(
 class EchoMemMCPPlugin(AgentPlugin):
     """Agent that uses EchoMem MCP tools for memory retrieval.
 
-    Behavior is controlled by two flags (both default to True):
-    - tool_calling: whether to present tools to the LLM
-    - search_in_tools: whether memory_query is in the tool list
+    Behavior is controlled by one flag (default False):
+    - tool_calling: whether to present MCP tools to the LLM
 
     The platform-side pre-fetch before each LLM turn always uses MCP
-    memory_query.
+    memory_query when tool calling is enabled.
     """
 
     descriptor = AgentDescriptor(
@@ -160,24 +158,17 @@ class EchoMemMCPPlugin(AgentPlugin):
         )
         g.add_argument(
             "--tool-calling",
-            action=argparse.BooleanOptionalAction,
-            default=True,
-            help="Enable LLM tool calling via MCP (default: enabled)",
-        )
-        g.add_argument(
-            "--search-in-tools",
-            action=argparse.BooleanOptionalAction,
-            default=True,
-            help="Include memory_query in tool definitions (default: enabled)",
+            action="store_true",
+            default=False,
+            help="Enable LLM tool calling via MCP (default: disabled)",
         )
         g.add_argument(
             "--mcp-read-mode",
-            choices=["disabled", "allow", "require"],
+            choices=["disabled", "allow"],
             default="allow",
             help=(
                 "Transcript read policy: disabled removes read from MCP tools; "
-                "allow and require preserve the read tool; require is retained "
-                "as a compatibility alias without extra prompt rules"
+                "allow preserves the read tool"
             ),
         )
         g.add_argument(
@@ -208,7 +199,7 @@ class EchoMemMCPPlugin(AgentPlugin):
         self._mcp_url = config.get("mcp_url", "http://127.0.0.1:8001")
         self._auth_key = config.get("mcp_auth_key", "") or config.get("echomem_auth_key", "")
         self._max_iterations = config.get("mcp_max_iterations", 50)
-        self._tool_calling = config.get("tool_calling", True)
+        self._tool_calling = config.get("tool_calling", False)
         # Answer-style awareness: factoid benchmarks (e.g. HotpotQA) keep the
         # short-answer system prompt; conversational memory benchmarks
         # (e.g. LoCoMo) use the natural-answer prompt. An explicit
@@ -220,11 +211,6 @@ class EchoMemMCPPlugin(AgentPlugin):
                 "natural" if benchmark in _NATURAL_ANSWER_BENCHMARKS else "factoid"
             )
         self._answer_style = answer_style
-        self._search_in_tools = config.get("search_in_tools", True)
-        # Kept as an internal/backward-compatible config switch for unit tests
-        # and older config files. It is intentionally not exposed as a CLI
-        # option; QA retrieval should use MCP by default.
-        self._manual_search = config.get("manual_search", True)
         self._initial_search_via_mcp = True
         self._mcp_read_mode = config.get("mcp_read_mode", "allow")
         self._top_k = config.get("top_k", 25)
@@ -750,9 +736,7 @@ class EchoMemMCPPlugin(AgentPlugin):
         # MCP is only touched when tool calling is enabled. In no-tool-calling
         # mode the platform pre-fetch uses EchoMem's HTTP retrieval API
         # instead, so the MCP server is not required at all.
-        use_mcp_prefetch = (
-            self._tool_calling and self._manual_search and initial_search_enabled
-        )
+        use_mcp_prefetch = self._tool_calling and initial_search_enabled
         if use_mcp_prefetch:
             try:
                 mcp = McpClient(
@@ -768,54 +752,45 @@ class EchoMemMCPPlugin(AgentPlugin):
 
         # Phase A: Platform pre-fetch search (MCP memory_query when tool calling
         # is enabled, EchoMem HTTP retrieval otherwise).
-        if self._manual_search:
-            try:
-                t0 = time.monotonic()
-                if use_mcp_prefetch and mcp is not None:
-                    raw = mcp.call_tool(
-                        "memory_query",
-                        {"query": message, "limit": self._top_k},
-                        timeout_s=remaining(),
-                    )
-                    payload = json.loads(raw) if raw else {}
-                    raw_items = payload.get("items", []) if isinstance(payload, dict) else []
-                    results = [
-                        SearchResult.from_dict(item)
-                        for item in raw_items
-                        if isinstance(item, dict)
-                    ]
-                else:
-                    # No-tool-calling mode: EchoMem HTTP retrieval (no MCP).
-                    results = self.memory_client.search(
-                        message,
-                        top_k=self._top_k,
-                        timeout_s=remaining(),
-                    )
-                retrieval_latency_s = time.monotonic() - t0
-                memory_text = format_split_memory_section(
-                    results,
-                    user_memory_budget_chars=self._user_memory_budget_chars,
-                    agent_memory_budget_chars=self._agent_memory_budget_chars,
+        try:
+            t0 = time.monotonic()
+            if use_mcp_prefetch and mcp is not None:
+                raw = mcp.call_tool(
+                    "memory_query",
+                    {"query": message, "limit": self._top_k},
+                    timeout_s=remaining(),
                 )
-                if not memory_text:
-                    memory_text = format_memory_section(results, self._memory_budget_chars)
-                if memory_text:
-                    messages.insert(1, {"role": "user", "content": memory_text})
-                retrieval_items = [r.to_dict() for r in results]
-            except Exception as e:
-                retrieval_error = f"{type(e).__name__}: {e}"
-                logger.warning("Manual search failed: %s", retrieval_error)
+                payload = json.loads(raw) if raw else {}
+                raw_items = payload.get("items", []) if isinstance(payload, dict) else []
+                results = [
+                    SearchResult.from_dict(item)
+                    for item in raw_items
+                    if isinstance(item, dict)
+                ]
+            else:
+                # No-tool-calling mode: EchoMem HTTP retrieval (no MCP).
+                results = self.memory_client.search(
+                    message,
+                    top_k=self._top_k,
+                    timeout_s=remaining(),
+                )
+            retrieval_latency_s = time.monotonic() - t0
+            memory_text = format_split_memory_section(
+                results,
+                user_memory_budget_chars=self._user_memory_budget_chars,
+                agent_memory_budget_chars=self._agent_memory_budget_chars,
+            )
+            if not memory_text:
+                memory_text = format_memory_section(results, self._memory_budget_chars)
+            if memory_text:
+                messages.insert(1, {"role": "user", "content": memory_text})
+            retrieval_items = [r.to_dict() for r in results]
+        except Exception as e:
+            retrieval_error = f"{type(e).__name__}: {e}"
+            logger.warning("Pre-fetch search failed: %s", retrieval_error)
 
         # Phase B: Build tool list
-        if self._tool_calling:
-            tools = configured_tools(self._mcp_read_mode)
-            if not self._search_in_tools:
-                tools = [
-                    t for t in tools
-                    if t["function"]["name"] != "memory_query"
-                ]
-        else:
-            tools = []
+        tools = configured_tools(self._mcp_read_mode) if self._tool_calling else []
         allowed_tool_names = {
             str(tool["function"]["name"])
             for tool in tools

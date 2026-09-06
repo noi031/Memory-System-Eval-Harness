@@ -103,11 +103,11 @@ def _start_run(dataset: str, args: argparse.Namespace) -> tuple[EvalRun, logging
 def _resume_qa_for(dataset: str, args: argparse.Namespace) -> str:
     """插件读 ``config["resume_qa"]`` 跳过身份隔离，各段语义不同。"""
     if dataset == "locomo":
-        return str(args.resume or args.resume_qa or args.reuse_memory_from)
+        return str(args.resume or args.reuse_memory_from)
     if dataset == "hotpotqa":
         return str(args.resume or args.reuse_memory_from)
     if dataset == "longmemeval":
-        return str(args.resume)
+        return str(args.resume or args.reuse_memory_from)
     return ""
 
 
@@ -192,11 +192,8 @@ def _build_agent_options(args, config) -> dict[str, Any]:
     options: dict[str, Any] = {
         "agent_plugin": getattr(args, "agent_plugin", ""),
         "qa_profile": getattr(args, "qa_profile", None) or "",
-        "tool_calling": bool(
-            getattr(args, "tools", getattr(args, "tool_calling", True))
-        ),
+        "tool_calling": bool(getattr(args, "tool_calling", False)),
         "initial_retrieval_protocol": "mcp",
-        "search_in_tools": bool(getattr(args, "search_in_tools", False)),
         "top_k": config.top_k,
         "memory_budget_chars": config.memory_budget_chars,
         "question_timeout_s": config.question_timeout_s,
@@ -302,21 +299,11 @@ def build_locomo_parser(
         ),
     )
     qa.add_argument(
-        "--resume-qa",
-        default="",
-        help=(
-            "Resume QA from a prior LoCoMo run directory or qa_results CSV; "
-            "reuses the prior identity and skips already-injected sessions "
-            "(superseded by --resume)"
-        ),
-    )
-    qa.add_argument(
         "--reuse-memory-from",
         default="",
         help=(
             "Reuse the identity and completed memory imports from a prior run, "
-            "but execute a fresh QA/Judge pass with the current MCP mode "
-            "(superseded by --resume)"
+            "but execute a fresh QA/Judge pass with the current MCP mode"
         ),
     )
     # judge 参数 (三个基础参数由共享 helper 声明, locomo 额外参数在此声明)
@@ -333,14 +320,6 @@ def build_locomo_parser(
         type=int,
         default=10,
         help="Persist partial Judge CSV after every N completed questions (0=off)",
-    )
-    g.add_argument(
-        "--resume-judge",
-        default="",
-        help=(
-            "Resume matching Judge rows from a prior LoCoMo run directory "
-            "or judge_results CSV (superseded by --resume)"
-        ),
     )
     return parser
 
@@ -476,13 +455,13 @@ def run_locomo(
 
     echomem = agent_plugin.memory_client
     raw_echomem = echomem
-    memory_reuse_source = args.resume or args.resume_qa or args.reuse_memory_from
+    memory_reuse_source = args.resume or args.reuse_memory_from
     if memory_reuse_source:
         apply_resume_memory_identity(echomem, memory_reuse_source, log)
     evaluation_identity = {
         "mode": (
             "resumed"
-            if (args.resume or args.resume_qa)
+            if args.resume
             else "reused"
             if args.reuse_memory_from
             else "fresh"
@@ -518,9 +497,7 @@ def run_locomo(
         checkpoint_interval=args.checkpoint_interval,
         top_k=config.top_k,
         memory_budget_chars=config.memory_budget_chars,
-        tools_enabled=bool(
-            getattr(args, "tools", getattr(args, "tool_calling", True))
-        ),
+        tools_enabled=bool(getattr(args, "tool_calling", False)),
         system_prompt_append=system_prompt_append,
         system_prompt_append_sha256=system_prompt_append_sha256,
         system_prompt_append_source=system_prompt_append_source,
@@ -642,8 +619,8 @@ def run_locomo(
         agent_id=echomem.agent_id,
     )
     qa_resume_state = None
-    if args.resume or args.resume_qa:
-        qa_resume_source = args.resume or args.resume_qa
+    if args.resume:
+        qa_resume_source = args.resume
         prior_qa_csv = find_qa_resume_csv(qa_resume_source)
         if prior_qa_csv is None:
             log.info(
@@ -709,8 +686,8 @@ def run_locomo(
         judge_resume_manifest,
     )
     judge_resume_state = None
-    if args.resume or args.resume_judge:
-        judge_resume_source = args.resume or args.resume_judge
+    if args.resume:
+        judge_resume_source = args.resume
         prior_judge_csv = find_judge_resume_csv(judge_resume_source)
         if prior_judge_csv is None:
             log.info(
@@ -802,37 +779,12 @@ def run_locomo(
             len(judge_resume_state.rows) if judge_resume_state else 0
         ),
     }
-    summary["qa_resume"] = {
-        "enabled": bool(qa_resume_state),
-        "source": (
-            str(qa_resume_state.source_csv) if qa_resume_state else ""
-        ),
-        "reused": (
-            len(qa_resume_state.results) if qa_resume_state else 0
-        ),
-        "discarded": (
-            qa_resume_state.discarded_question_ids
-            if qa_resume_state
-            else []
-        ),
-    }
     summary["memory_reuse"] = {
         "enabled": bool(args.reuse_memory_from),
         "source": str(args.reuse_memory_from or ""),
     }
     summary["judge_parallelism"] = args.judge_concurrency
     summary["judge_checkpoint_interval"] = args.judge_checkpoint_interval
-    summary["judge_resume"] = {
-        "enabled": bool(judge_resume_state),
-        "source": (
-            str(judge_resume_state.source_csv)
-            if judge_resume_state
-            else ""
-        ),
-        "candidate_rows": (
-            len(judge_resume_state.rows) if judge_resume_state else 0
-        ),
-    }
     summary["memory_provenance"] = {
         **memory_provenance,
         "artifact_path": str(provenance_path),
@@ -925,8 +877,14 @@ def build_hotpotqa_parser(
         default="",
         help=(
             "Reuse the identity and completed memory imports from a prior "
-            "run, but execute a fresh QA pass (superseded by --resume)"
+            "run, but execute a fresh QA pass"
         ),
+    )
+    parser.add_argument(
+        "--index-timeout-s",
+        type=float,
+        default=3600.0,
+        help="documents 模式等待资源索引完成的超时秒数",
     )
     add_agent_plugin_args(parser, default_plugin="vikingbot")
     add_eval_args(parser)
@@ -1054,6 +1012,7 @@ def run_hotpotqa(
         import_mode=args.import_mode,
         prior_import_rows=prior_import_rows,
         reuse_memory=bool(args.reuse_memory_from),
+        index_timeout_s=args.index_timeout_s,
     )
     log.info(
         "导入完成: %d/%d 成功",
@@ -1308,6 +1267,14 @@ def build_longmemeval_parser(
             "the merged whole run."
         ),
     )
+    parser.add_argument(
+        "--reuse-memory-from",
+        default="",
+        help=(
+            "Reuse the identity and completed haystack imports from a prior "
+            "run, but execute a fresh QA/Judge pass"
+        ),
+    )
     add_agent_plugin_args(parser, default_plugin="vikingbot")
     add_eval_args(parser)
     add_judge_args(parser)
@@ -1352,8 +1319,11 @@ def run_longmemeval(
         raise ValueError("random count must be >= 0")
     if args.parallel_shards < 1 or args.parallel_workers < 1:
         raise ValueError("parallel shards and workers must be >= 1")
-    if args.resume and args.parallel_shards > 1:
-        raise ValueError("--resume is not supported together with --parallel-shards")
+    if (args.resume or args.reuse_memory_from) and args.parallel_shards > 1:
+        raise ValueError(
+            "--resume/--reuse-memory-from is not supported together with "
+            "--parallel-shards"
+        )
 
     dataset_path = resolve_dataset_path("longmemeval", args.dataset_path)
     config.dataset_path = dataset_path
@@ -1420,10 +1390,17 @@ def run_longmemeval(
         raise ValueError(message)
 
     echomem = agent_plugin.memory_client
-    if args.resume:
-        apply_resume_memory_identity(echomem, args.resume, log)
+    reuse_source = args.resume or args.reuse_memory_from
+    if reuse_source:
+        apply_resume_memory_identity(echomem, reuse_source, log)
     evaluation_identity = {
-        "mode": "resumed" if args.resume else "fresh",
+        "mode": (
+            "resumed"
+            if args.resume
+            else "reused"
+            if args.reuse_memory_from
+            else "fresh"
+        ),
         "tenant_id": echomem.account,
         "user_id": echomem.user_id,
     }
@@ -1450,7 +1427,7 @@ def run_longmemeval(
     log.info("=" * 60)
     log.info("阶段 1: 逐题导入 haystack sessions (共 %d 题)", len(plans))
     prior_import_rows = (
-        load_prior_import_rows(args.resume) if args.resume else None
+        load_prior_import_rows(reuse_source) if reuse_source else None
     )
     if prior_import_rows is not None:
         log.info("阶段 1: 逐题导入 haystack sessions (resume, 跳过已完成)")
@@ -1605,6 +1582,10 @@ def run_longmemeval(
             if str(row.get("status") or "").strip().lower() == "reused"
         ),
         "reused_judge_rows": len(prior_eval_rows or []),
+    }
+    summary["memory_reuse"] = {
+        "enabled": bool(args.reuse_memory_from),
+        "source": str(args.reuse_memory_from or ""),
     }
     run.save_summary(summary)
 

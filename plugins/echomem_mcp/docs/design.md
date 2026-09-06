@@ -16,12 +16,11 @@
 
 ## 工具调用控制
 
-`send_message` 通过两个 CLI 参数控制模型侧工具调用行为：
+`send_message` 通过 CLI 参数控制模型侧工具调用行为：
 
-- `--tool-calling` / `--no-tool-calling`：是否开启模型工具调用循环。开启时解析 LLM 返回的工具并执行，把结果返回给 LLM 不断迭代；关闭时只做单次 LLM 调用。
-- `--search-in-tools` / `--no-search-in-tools`：是否将 `memory_query` 包含在模型可调用工具定义中。
+- `--tool-calling`（默认关闭）：是否开启模型工具调用循环。开启时解析 LLM 返回的工具并执行，把结果返回给 LLM 不断迭代；关闭时只做单次 LLM 调用。
 
-无论是否开启模型工具调用，平台侧初始检索都固定通过 MCP `memory_query` 完成，不再提供 `--manual-search` / `--mcp-initial-search`，也不会调用 EchoMem HTTP search API。
+初始检索不依赖工具调用开关：开启工具调用时经 MCP `memory_query` 完成，关闭时经 EchoMem HTTP `search` 完成。
 
 ## 记忆注入
 

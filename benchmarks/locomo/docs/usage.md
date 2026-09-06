@@ -39,8 +39,8 @@ For `model.embedding`, use the same endpoint and key environment with
 `"model": "text-embedding-v3"` and `"dimensions": 1024`. Do not use
 `fake-llm` or `fake-embedding` for an official run.
 
-不带 MCP 工具调用。平台仍通过 MCP `memory_query` 做初始召回，但回答阶段不向
-模型暴露工具，只进行一次模型调用：
+不带工具调用（默认，无需传参）。初始召回经 EchoMem HTTP 检索完成（不经 MCP），
+回答阶段不向模型暴露工具，只进行一次模型调用：
 
 ```bash
 ./.venv/bin/python run_eval.py --dataset locomo \
@@ -52,8 +52,7 @@ For `model.embedding`, use the same endpoint and key environment with
   --sample conv-30 \
   --llm-base-url "$LLM_BASE_URL" \
   --llm-model "$LLM_MODEL" \
-  --llm-api-key "$LLM_API_KEY" \
-  --no-tool-calling
+  --llm-api-key "$LLM_API_KEY"
 ```
 
 带 MCP 工具调用但不读 `messages.jsonl`：
@@ -93,22 +92,23 @@ For `model.embedding`, use the same endpoint and key environment with
   --mcp-read-mode allow
 ```
 
-平台侧初始召回始终使用 MCP `memory_query`。`allow` 保留 `read` 工具，但不强制
+平台侧初始召回：工具调用模式下经 MCP `memory_query`，关闭时经 EchoMem HTTP 检索。
+`allow` 保留 `read` 工具，但不强制
 模型调用；模型是否读取 `current/messages.jsonl` 由模型根据工具描述和上下文自行
 决定。`summary.json` 的 `messages_jsonl_read_rate` 用于观察实际读取情况，不能
 把调用率直接等同于准确率。
 
 ```bash
 # 默认注入记忆并使用 VikingBoat 0.4.11 工具口径
-python run_eval.py --dataset locomo --sample conv-30 --tools
+python run_eval.py --dataset locomo --sample conv-30 --tool-calling
 
-# 自然无工具对照
-python run_eval.py --dataset locomo --sample conv-30 --no-tools
+# 自然无工具对照（默认即关闭工具调用，flag 可省略）
+python run_eval.py --dataset locomo --sample conv-30
 
 # 追加仅保存在本地的实验 prompt
 python run_eval.py --dataset locomo \
   --sample conv-30 \
-  --tools \
+  --tool-calling \
   --qa-prompt-file /path/to/local-prompt.txt
 
 # 从中断运行继续（统一 --resume）：复用身份，跳过已完成 import batch，
@@ -116,12 +116,6 @@ python run_eval.py --dataset locomo \
 python run_eval.py --dataset locomo \
   --sample conv-30 \
   --resume /path/to/interrupted-run
-
-# 等价的旧参数形式（已被 --resume 取代，仅保留兼容）
-python run_eval.py --dataset locomo \
-  --sample conv-30 \
-  --resume-qa /path/to/interrupted-run \
-  --resume-judge /path/to/interrupted-run
 
 # 使用 VikingBot v0.4.11 prompt、工具语义和循环口径
 # 后端和模型可见工具均使用只读 EchoMemory memory_* 接口
@@ -132,14 +126,12 @@ python run_eval.py --dataset locomo \
 # 同一 VikingBoat 0.4.11 prompt 和初始记忆注入，但不暴露工具
 python run_eval.py --dataset locomo \
   --sample conv-30 \
-  --qa-profile vikingboat0411 \
-  --no-tools
+  --qa-profile vikingboat0411
 
 # 自然无工具对照：只保留完整初始记忆正文，不保留工具指令或 URI-only 条目
 python run_eval.py --dataset locomo \
   --sample conv-30 \
-  --qa-profile vikingboat0411-natural-no-tools \
-  --no-tools
+  --qa-profile vikingboat0411-natural-no-tools
 
 # 基本用法 (不指定 --dataset-path 则自动查找/下载)
 python run_eval.py --dataset locomo \
@@ -239,32 +231,8 @@ python run_eval.py --dataset locomo \
 | `--mcp-url` | `http://127.0.0.1:8001` | EchoMem MCP server URL |
 | `--mcp-auth-key` | (空) | MCP server X-Auth-Key（留空时回退到 `--echomem-auth-key`） |
 | `--mcp-max-iterations` | `50` | 每个问题的最大工具调用迭代次数 |
-| `--tool-calling` / `--no-tool-calling` | `True` | 是否启用 LLM 工具调用 |
-| `--search-in-tools` / `--no-search-in-tools` | `True` | 是否将 `memory_query` 加入工具定义 |
-| `--manual-search` / `--no-manual-search` | `True` | 是否在每轮 LLM 前预取记忆 |
-| `--mcp-read-mode` | `allow` | 对话读取策略：`disabled`/`allow`/`require` |
-
-#### openviking_mcp 插件
-固定使用 OpenViking 后端，不暴露 `--memory-backend`。使用时需指定
-`--echomem-url http://127.0.0.1:19080`。声明 QA 检索参数。
-
-| 参数 | 默认值 | 说明 |
-|---|---|---|
-| `--echomem-url` | `http://127.0.0.1:8010` | OpenViking HTTP 地址 (实际使用时需改为 19080 端口) |
-| `--echomem-auth-key` | (空) | 后端 API Key |
-| `--account` | `default` | 后端 account |
-| `--user-id` | `default` | 后端 user_id |
-| `--agent-id` | `default` | 后端 agent_id |
-| `--workspace` | (空) | 后端 workspace 路径 |
-| `--commit-timeout-s` | `0` | Commit 轮询超时 (秒)，0 表示无限等待 |
-| `--commit-poll-interval-s` | `2.0` | Commit 轮询间隔 (秒) |
-| `--timeout-s` | `60.0` | 后端 HTTP 请求超时 (秒) |
-| `--max-retries` | `3` | 后端 HTTP 请求最大重试次数 |
-| `--ov-max-iterations` | `10` | 每个问题的最大工具调用迭代次数 |
-| `--ov-search-limit` | `8` | 每次 `memory_search` 返回的最大结果数 |
-| `--tool-calling` / `--no-tool-calling` | `True` | 是否启用 LLM 工具调用 |
-| `--search-in-tools` / `--no-search-in-tools` | `True` | 是否将 `memory_search` 加入工具定义 |
-| `--manual-search` / `--no-manual-search` | `True` | 是否在每轮 LLM 前预取记忆 |
+| `--tool-calling` | `False` | 是否启用 LLM 工具调用 |
+| `--mcp-read-mode` | `allow` | 对话读取策略：`disabled`/`allow` |
 
 #### echo_agent 插件
 支持 `--memory-backend` 选择 echomem 或 openviking。`--echomem-auth-key` 留空
@@ -328,7 +296,7 @@ python run_eval.py --dataset locomo \
 | `--llm-retries` | `3` | LLM 请求重试次数 |
 
 ### QA 检索参数 (通过插件声明)
-> 由 `bare_llm`、`echomem_mcp`、`openviking_mcp`、`vikingbot` 声明；
+> 由 `bare_llm`、`echomem_mcp`、`vikingbot` 声明；
 > `echo_agent` 和 `echoagent_live` 不声明（QA 走 EchoAgent 管线）。
 
 | 参数 | 默认值 | 说明 |
@@ -345,7 +313,7 @@ python run_eval.py --dataset locomo \
 | `--tool-min-score` | profile 决定 | VikingBoat 0.4.11 profiles=`0.35` |
 | `--tool-search-pool-multiplier` | profile 决定 | 两个保留 profile 均为 `1` |
 | `--tool-set` | profile 决定 | VikingBoat 0.4.11 profiles=`vikingbot_echo_native` |
-| `--tools` / `--no-tools` | `--tools` | 是否向回答模型暴露 profile 的记忆工具；关闭后保留相同 prompt 和初始检索注入，只执行一次模型调用 |
+| `--tool-calling` | `False` | 是否向回答模型暴露 profile 的记忆工具；关闭后保留相同 prompt 和初始检索注入，只执行一次模型调用 |
 | `--user-memory-budget-chars` | `4000` | user memory prompt 预算 |
 | `--agent-memory-budget-chars` | `2000` | agent memory prompt 预算 |
 | `--max-iterations` | `50` | 单题最大模型/tool-loop 迭代数 |
@@ -355,12 +323,11 @@ python run_eval.py --dataset locomo \
 | 参数 | 默认值 | 说明 |
 |---|---|---|
 | `--agent-plugin` | `vikingbot` | QA 阶段使用的 agent 插件名，见 `plugins/` 目录。切换后可用参数会变化 |
-| `--qa-profile` | 自动 | `--tools` 默认选择 `vikingboat0411`；`--no-tools` 默认选择 `vikingboat0411-natural-no-tools`。显式指定时可覆盖 |
+| `--qa-profile` | 自动 | 开启 `--tool-calling` 默认选择 `vikingboat0411`；关闭默认选择 `vikingboat0411-natural-no-tools`。显式指定时可覆盖 |
 | `--qa-prompt-file` | (空) | 将本地 UTF-8 文件追加到所选 profile 的 system prompt；`summary.json` 和 resume manifest 仅记录文件名和 SHA-256 |
 | `--checkpoint-interval` | `10` | 每完成 N 题写一次 `qa_results.checkpoint.csv`；0 表示关闭 |
 | `--resume` | (空) | **统一续跑**：从先前运行目录或 CSV 恢复——复用身份，跳过已完成 import batch（只补中断/缺失的），恢复健康 QA 答案，复用一致 Judge 判定；只跑缺失/失败部分。summary/blackbox 指标对合并后的整轮累计（token/延迟/精度不会只算本轮） |
-| `--resume-qa` | (空) | 旧参数，语义同 `--resume`（被取代，仅保留兼容） |
-| `--reuse-memory-from` | (空) | 旧参数：只复用身份+已注入记忆、QA/Judge 全量重跑（指标只算本轮；被 `--resume` 取代，仅保留兼容） |
+| `--reuse-memory-from` | (空) | 复用身份+已注入记忆、QA/Judge 全量重跑（指标只算本轮） |
 | `--concurrency` | `4` | QA 并发数 |
 | `--out-dir` | `results` | 结果目录 |
 | `--allow-diagnostics` | false | 导入未完成或 provenance 不一致仍继续；仅限诊断 |
@@ -373,7 +340,6 @@ python run_eval.py --dataset locomo \
 | `--judge-base-url` | (同 `--llm-base-url`) | Judge base URL |
 | `--judge-concurrency` | `4` | Judge 并发数；结果仍按原始题目顺序写入 |
 | `--judge-checkpoint-interval` | `10` | 每完成 N 题写一次 `judge_results.checkpoint.csv`；0 表示关闭 |
-| `--resume-judge` | (空) | 旧参数，已并入 `--resume`（仅保留兼容） |
 
 ## 输出文件
 

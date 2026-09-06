@@ -1821,6 +1821,17 @@ class RunEvalTests(unittest.TestCase):
                 self.assertEqual("tok", args.judge_api_key)
                 self.assertEqual("http://judge", args.judge_base_url)
 
+    def test_reuse_memory_from_arg(self):
+        with patch.object(sys, "argv", ["test"]):
+            parser = build_eval_parser()
+            args = parser.parse_args([
+                "--dataset-path", "data.json",
+                "--llm-base-url", "http://api",
+                "--llm-api-key", "key",
+                "--reuse-memory-from", "results/prior_run",
+            ])
+            self.assertEqual("results/prior_run", args.reuse_memory_from)
+
 
 if __name__ == "__main__":
     unittest.main()

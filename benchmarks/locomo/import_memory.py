@@ -99,7 +99,7 @@ def import_locomo_memory(
     sample_to_session_ids: dict[str, list[str]] = {}
     output_path = result_dir / "import_results.csv"
 
-    # Build a map of previously completed batches for resume-qa
+    # Build a map of previously completed batches for resume
     completed_map: dict[tuple[str, str], str] = {}
     if options.resume_qa and options.prior_import_rows:
         for prior in options.prior_import_rows:

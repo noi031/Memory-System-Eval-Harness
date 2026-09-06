@@ -43,7 +43,7 @@ VikingBot 在 `setup()` 中创建自己的 `LLMClient` 和 `MemoryClient`：
 | `--tool-min-score` | profile | 工具检索最低分数阈值 |
 | `--tool-search-pool-multiplier` | profile | 工具检索池倍数 |
 | `--tool-set` | profile | 工具集: `search_read` / `vikingbot_native_safe` / `vikingbot_echo_native` |
-| `--tools` / `--no-tools` | `True` | 是否暴露记忆工具给 LLM；`--no-tools` 退化为单轮对话 |
+| `--tool-calling` | `False` | 是否暴露记忆工具给 LLM；关闭时退化为单轮对话 |
 
 ## 使用方式
 

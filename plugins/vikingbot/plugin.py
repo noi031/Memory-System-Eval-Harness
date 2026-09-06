@@ -98,13 +98,14 @@ class VikingBotPlugin(AgentPlugin):
             default=None,
         )
         g.add_argument(
-            "--tools",
-            action=argparse.BooleanOptionalAction,
-            default=True,
+            "--tool-calling",
+            action="store_true",
+            default=False,
             help=(
-                "Expose the profile's memory tools to the answer model; "
-                "--no-tools keeps the same profile prompt and initial memory "
-                "injection but performs a single model turn"
+                "Expose the profile's memory tools to the answer model "
+                "(default: disabled); when disabled, keeps the same profile "
+                "prompt and initial memory injection but performs a single "
+                "model turn"
             ),
         )
 
@@ -161,7 +162,7 @@ class VikingBotPlugin(AgentPlugin):
 
         # Resolve profile defaults: CLI args override profile settings.
         qa_profile = config.get("qa_profile")
-        tools_enabled = config.get("tools", True)
+        tools_enabled = config.get("tool_calling", False)
         if not qa_profile:
             qa_profile = (
                 VIKINGBOAT_0411_PROFILE
@@ -188,7 +189,7 @@ class VikingBotPlugin(AgentPlugin):
             return None
 
         self._qa_profile = qa_profile
-        self._tools_enabled = config.get("tools", True)
+        self._tool_calling = config.get("tool_calling", False)
         self._top_k = _resolve("top_k", int) or 10
         self._tool_search_limit = _resolve("tool_search_limit", int)
         self._user_memory_budget_chars = _resolve("user_memory_budget_chars", int)
@@ -394,7 +395,7 @@ class VikingBotPlugin(AgentPlugin):
             "tool_query_dedup_scope": self._tool_query_dedup_scope,
             "retrieval_uri_dedup": self._retrieval_uri_dedup,
             "search_tool_target_uri_schema": self._search_tool_target_uri_schema,
-            "tools_enabled": self._tools_enabled,
+            "tools_enabled": self._tool_calling,
             "system_prompt_append": extra.get("system_prompt_append", ""),
             "system_prompt_append_sha256": extra.get("system_prompt_append_sha256", ""),
             "system_prompt_append_source": extra.get("system_prompt_append_source", ""),
@@ -466,7 +467,7 @@ class VikingBotPlugin(AgentPlugin):
         """
         extra = extra or {}
         if self._documents_mode:
-            if self._tools_enabled:
+            if self._tool_calling:
                 return self._answer_documents_with_tools(message, extra)
             return self._send_documents(message, extra)
 
