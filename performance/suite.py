@@ -18,6 +18,7 @@ target 挂钩。target 可通过 ``summarize`` / ``write_evidence`` 挂自己的
 from __future__ import annotations
 
 import json
+import logging
 import shutil
 import statistics
 import threading
@@ -33,6 +34,13 @@ from performance.records import RequestRecord
 from performance.report import write_records
 from performance.stats import percentile
 from performance.util import now_iso, run_command, scale_counts_to_cap
+
+log = logging.getLogger(__name__)
+
+# case 超时后调用 Engine.stop() 后等待 worker 退出的有界时长（秒）。
+# 正常场景 stop 后 gate/worker 立即让路；仍阻塞在请求里的 worker 只能等
+# 请求返回，超此上限则放弃等待（daemon 线程随进程退出）。
+_STOP_CONFIRM_S = 30.0
 
 
 def _seconds(stage_ms: float) -> float:
@@ -273,7 +281,9 @@ def run_case(
     """执行单个 case：load_scene + Engine.run，写产物并返回 run dict。
 
     Engine 异常记 ``ENV_ERROR``；``timeout_s`` 用守护线程包裹 Engine.run，
-    超时记 ``TIMEOUT`` 并返回已收集的（可能为空）records 摘要。
+    超时记 ``TIMEOUT``、调用 ``Engine.stop()`` 并有界确认 worker 退出，再
+    返回已收集的（可能为空）records 摘要。summary.json 持久化真实的
+    ``status`` / ``runner_timeout``，供 resume 只复用明确完成的 case。
     ``summarize`` 缺省为通用 ``summarize_case_records``；
     ``write_evidence`` 在 summary.json/records.csv 之后写 target 专属
     证据文件。
@@ -285,9 +295,10 @@ def run_case(
     try:
         if timeout_s and timeout_s > 0:
             holder: dict[str, Any] = {}
+            engine = Engine(profile, scene)
 
             def _execute() -> None:
-                holder["result"] = Engine(profile, scene).run()
+                holder["result"] = engine.run()
 
             thread = threading.Thread(target=_execute, daemon=True)
             thread.start()
@@ -295,6 +306,13 @@ def run_case(
             if thread.is_alive():
                 runner_timeout = True
                 status = "TIMEOUT"
+                engine.stop()
+                thread.join(_STOP_CONFIRM_S)
+                if thread.is_alive():
+                    log.warning(
+                        "case %s 超时后 worker 仍存活（可能阻塞在请求中），放弃等待",
+                        case["label"],
+                    )
             else:
                 records = holder["result"].records
         else:
@@ -303,6 +321,8 @@ def run_case(
         status = "ENV_ERROR"
     summarize_fn = summarize or summarize_case_records
     summary = summarize_fn(records)
+    summary["status"] = status
+    summary["runner_timeout"] = runner_timeout
     write_records(case_dir, records, summary)
     if write_evidence is not None:
         write_evidence(case_dir, records)
@@ -372,12 +392,15 @@ def _finalize_suite(manifest: dict, suite_dir: Path) -> dict:
 def _load_completed_run(
     case: dict, case_dir: Path, timeout_s: float | None
 ) -> dict | None:
-    """从已有 case 目录重建 run dict；summary.json 缺失/损坏时返回 None。
+    """从已有 case 目录重建 run dict；非明确完成时返回 None。
 
     resume 模式用它跳过已完成的 case：run 的状态信息只在 suite.json 里，
     case 目录唯一可靠信号是 run_case 收尾写下的 summary.json（含 metrics
-    契约摘要）。重建字段与 ``run_case`` 的返回结构一致，使历史 run 能
-    直接合并进 manifest，保证 O1-O7 求值证据完整。
+    契约摘要与持久化的 ``status`` / ``runner_timeout``）。仅当状态为
+    ``completed`` 且未超时（``runner_timeout`` 非真）时才重建 run 并入
+    manifest；TIMEOUT / ENV_ERROR 的产物一律视为未完成，resume 重跑该
+    case。重建字段与 ``run_case`` 的返回结构一致，保证 O1-O7 求值证据
+    完整。
     """
     summary_path = case_dir / "summary.json"
     if not summary_path.is_file():
@@ -387,6 +410,8 @@ def _load_completed_run(
     except (OSError, ValueError):
         return None
     if not isinstance(summary, dict):
+        return None
+    if summary.get("status") != "completed" or summary.get("runner_timeout"):
         return None
     return {
         "scenario": case["label"],
@@ -433,9 +458,10 @@ def run_suite(
     收 manifest 返回 acceptance 摘要。各阶段失败按 prepare/preflight/seed
     段记录并提前返回（仍写 suite.json / acceptance.json）。
 
-    ``resume`` 为 True 时跳过已完成的 case（case 目录含可解析的
-    summary.json），把其历史 run 重建后合并进 manifest，从第一个未完成
-    的 case 继续执行；suite.json 因此同时包含历史与本次的 runs。
+    ``resume`` 为 True 时跳过已完成的 case（case 目录的 summary.json
+    标记 ``status=completed`` 且 ``runner_timeout=false``），把其历史 run
+    重建后合并进 manifest，从第一个未完成的 case 继续执行；suite.json
+    因此同时包含历史与本次的 runs。超时/异常的 case 产物不会被跳过。
     """
     suite_dir = Path(suite_dir)
     suite_dir.mkdir(parents=True, exist_ok=True)

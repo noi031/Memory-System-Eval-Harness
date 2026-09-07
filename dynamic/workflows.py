@@ -236,15 +236,18 @@ def run_replay_mode(
     llm: LLMClient,
 ) -> None:
     log = run.logger
-    log.info("模式: replay (回放数据集: %s)", args.dataset)
-    v2_dataset = _load_v2_dataset(args.dataset)
+    # 根级 run_eval.py 用 args.dataset 保存固定选择器（dynamic），真实数据集路径在
+    # args.dataset_path；直接以旧契约调用时 dataset 即路径，这里两者取一。
+    dataset_path = getattr(args, "dataset_path", "") or args.dataset
+    log.info("模式: replay (回放数据集: %s)", dataset_path)
+    v2_dataset = _load_v2_dataset(dataset_path)
     if v2_dataset is not None:
         log.info("检测到动态 v2 数据集，走 v2 回放路径")
         _run_replay_v2_mode(args, run, agent_plugin, llm, v2_dataset)
         return
     evaluator_config = load_evaluator_config(args.evaluator_config)
     jobs, plans = load_dataset(
-        args.dataset,
+        dataset_path,
         sample_filter=args.sample,
     )
     if args.questions > 0:
@@ -317,7 +320,7 @@ def run_replay_mode(
         llm,
         {
             "mode": "replay",
-            "dataset": args.dataset,
+            "dataset": dataset_path,
             "sample": args.sample,
             "questions": args.questions,
             "agent_plugin": args.agent_plugin,
@@ -344,6 +347,7 @@ def _run_replay_v2_mode(
     injected texts (``all_facts`` maps id -> text for the quality judge).
     """
     log = run.logger
+    dataset_path = getattr(args, "dataset_path", "") or args.dataset
     evaluator_config = load_evaluator_config(args.evaluator_config)
     memories = [
         {
@@ -412,7 +416,7 @@ def _run_replay_v2_mode(
         llm,
         {
             "mode": "replay",
-            "dataset": args.dataset,
+            "dataset": dataset_path,
             "sample": args.sample,
             "questions": args.questions,
             "agent_plugin": args.agent_plugin,

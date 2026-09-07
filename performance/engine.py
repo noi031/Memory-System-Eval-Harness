@@ -310,19 +310,27 @@ class Engine:
                 next_phase += 1
 
     def _run_phase(self, phase: Phase) -> None:
+        # 每个 phase job 用独立 Ctx：Ctx._last_record 是单指针，并发 job 共享
+        # 同一 Ctx 会让 record() 后的 note() 把响应 ID 补写到别的请求记录。
         if phase.tenant_counts:
             jobs: list[Ctx] = []
             for tenant_idx, phase_count in phase.tenant_counts.items():
-                ctx = self._make_ctx(
-                    worker_id=BURST_WORKER_ID, tenant_idx=tenant_idx, extra=phase.name
-                )
-                jobs.extend([ctx] * phase_count)
+                for _ in range(phase_count):
+                    jobs.append(
+                        self._make_ctx(
+                            worker_id=BURST_WORKER_ID,
+                            tenant_idx=tenant_idx,
+                            extra=phase.name,
+                        )
+                    )
         else:
             tenant_idx = phase.tenant_idx if phase.tenant_idx is not None else 0
-            ctx = self._make_ctx(
-                worker_id=BURST_WORKER_ID, tenant_idx=tenant_idx, extra=phase.name
-            )
-            jobs = [ctx] * phase.count
+            jobs = [
+                self._make_ctx(
+                    worker_id=BURST_WORKER_ID, tenant_idx=tenant_idx, extra=phase.name
+                )
+                for _ in range(phase.count)
+            ]
 
         def job(ctx: Ctx) -> None:
             try:

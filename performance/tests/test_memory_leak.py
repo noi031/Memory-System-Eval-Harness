@@ -94,3 +94,42 @@ def test_diagnose_runs_aggregation():
 def test_diagnose_runs_no_data_inconclusive():
     out = ML.diagnose_runs([{"output_dir": "/nonexistent"}])
     assert out["verdict"] == "INCONCLUSIVE"
+
+
+def test_diagnose_runs_missing_rss_with_pass_inconclusive():
+    """一个 case 缺 RSS（诊断返回 None）时不得被丢弃：PASS+缺失 → 整体 INCONCLUSIVE。"""
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        good = root / "good"
+        good.mkdir()
+        _write_csv(
+            good / "metrics_samples.csv",
+            [(i * 60.0, "x_resident_memory_bytes", {}, (100 + i) * MB) for i in range(30)],
+        )
+        missing = root / "missing"
+        missing.mkdir()  # 无 metrics_samples.csv → 无 RSS 数据
+        out = ML.diagnose_runs([{"output_dir": str(good)}, {"output_dir": str(missing)}])
+        assert out["verdict"] == "INCONCLUSIVE"
+        assert len(out["per_case"]) == 2
+        missing_entry = next(
+            item for item in out["per_case"] if item["case"] == "missing"
+        )
+        assert missing_entry["verdict"] == "INCONCLUSIVE"
+        assert "无 RSS 采样" in missing_entry["reason"]
+
+
+def test_diagnose_runs_missing_rss_with_fail_fail():
+    """FAIL 优先于缺 RSS：一个 FAIL + 一个缺数据 → 整体 FAIL，且缺数据项仍保留。"""
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        bad = root / "bad"
+        bad.mkdir()
+        _write_csv(
+            bad / "metrics_samples.csv",
+            [(i * 60.0, "x_resident_memory_bytes", {}, (100 + i * 15) * MB) for i in range(30)],
+        )
+        missing = root / "missing"
+        missing.mkdir()
+        out = ML.diagnose_runs([{"output_dir": str(bad)}, {"output_dir": str(missing)}])
+        assert out["verdict"] == "FAIL"
+        assert len(out["per_case"]) == 2

@@ -44,6 +44,46 @@ class DynamicConfigTests(unittest.TestCase):
             validate_eval_config(config)
             self.assertEqual([], validate_dynamic_args(args))
 
+    def test_replay_uses_dataset_path_not_selector(self) -> None:
+        """回归：根入口 --dataset dynamic --dataset-path <file> 必须把真实路径传给加载器。
+
+        分发表把固定选择器 'dynamic' 放在 args.dataset，真实文件在 args.dataset_path；
+        run_replay_mode 的两个加载分支都必须读取 dataset_path，而不是 args.dataset。
+        """
+        import logging
+        import types
+        from unittest import mock
+
+        import dynamic.workflows as wf
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            dataset = root / "dataset.json"
+            dataset.write_text("{}", encoding="utf-8")
+            args = build_parser().parse_args([
+                "--dataset-path", str(dataset),
+                "--evaluator-config", str(root / "evaluator.yaml"),
+                "--llm-base-url", "https://example.test/v1",
+                "--llm-api-key", "secret",
+            ])
+            args.dataset = "dynamic"  # 分发表设置的固定选择器
+
+            captured: dict[str, str] = {}
+            run_stub = types.SimpleNamespace(logger=logging.getLogger("test-dynamic"))
+            with mock.patch.object(
+                wf, "_load_v2_dataset",
+                side_effect=lambda path: captured.setdefault("path", str(path))
+                or {"background_memories": [], "dataset_queries": []},
+            ), mock.patch.object(wf, "_run_replay_v2_mode", return_value=None):
+                wf.run_replay_mode(
+                    args,
+                    run=run_stub,
+                    agent_plugin=None,
+                    llm=None,
+                )
+
+            self.assertEqual(str(dataset), captured.get("path"))
+
     def test_generate_preflight_reports_missing_simulator_before_login(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             evaluator = Path(directory) / "evaluator.yaml"

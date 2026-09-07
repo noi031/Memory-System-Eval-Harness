@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import threading
 
 from performance.profile import LoadSpec, Profile, TargetSpec
 from performance.records import RequestRecord
@@ -200,6 +201,8 @@ def _make_stub_run_case(calls: list[str]):
         summary = {
             "metrics": {"search": {"submitted": 1}, "commit": {"submitted": 0}},
             "marker": f'{case["label"]}-{len(calls)}',
+            "status": "completed",
+            "runner_timeout": False,
         }
         (case_dir / "summary.json").write_text(
             json.dumps(summary, ensure_ascii=False), encoding="utf-8"
@@ -290,5 +293,78 @@ def test_resume_skips_only_parseable_summary(tmp_path):
         resume=True,
     )
     # summary.json 损坏的 c1 视为未完成，重新执行。
+    assert calls == ["c1", "c2"]
+    assert [run["scenario"] for run in manifest["runs"]] == ["c1", "c2"]
+
+
+# -- case timeout: stop engine + real completion persistence -------------
+
+
+class _BlockingEngine:
+    """run() 阻塞直到 stop() 被调用；记录 stop 调用（验证超时回收）。"""
+
+    def __init__(self, profile, scene):
+        self._stop_requested = threading.Event()
+
+    def run(self):
+        self._stop_requested.wait(10.0)
+        from types import SimpleNamespace
+
+        return SimpleNamespace(records=[])
+
+    def stop(self):
+        self._stop_requested.set()
+
+
+def test_run_case_timeout_stops_engine_and_persists_timeout(tmp_path, monkeypatch):
+    import performance.suite as suite_mod
+
+    scene = _write_scene(tmp_path)
+    case = {"label": "generic-case", "scene": "scene_generic"}
+    case_dir = tmp_path / "out"
+    monkeypatch.setattr(suite_mod, "Engine", _BlockingEngine)
+
+    run = run_case(
+        case,
+        _profile(),
+        scene_path=scene,
+        case_dir=case_dir,
+        timeout_s=0.1,
+    )
+
+    assert run["status"] == "TIMEOUT"
+    assert run["runner_timeout"] is True
+    summary = json.loads((case_dir / "summary.json").read_text(encoding="utf-8"))
+    assert summary["status"] == "TIMEOUT"
+    assert summary["runner_timeout"] is True
+    # 超时产物不视为已完成的 run，resume 不得跳过。
+    assert suite_mod._load_completed_run(case, case_dir, timeout_s=0.1) is None
+
+
+def test_resume_reruns_timed_out_case(tmp_path):
+    calls: list[str] = []
+    suite_dir = tmp_path / "suite"
+    (suite_dir / "c1").mkdir(parents=True)
+    (suite_dir / "c1" / "summary.json").write_text(
+        json.dumps({
+            "metrics": {"search": {"submitted": 0}},
+            "status": "TIMEOUT",
+            "runner_timeout": True,
+        }),
+        encoding="utf-8",
+    )
+    manifest = run_suite(
+        profile={"name": "test"},
+        suite_dir=suite_dir,
+        profile_name="test",
+        base_url="http://127.0.0.1:8010",
+        timeout_s=30.0,
+        scenarios=["c1", "c2"],
+        select_cases=_select_cases,
+        build_profile=_build_profile,
+        run_case=_make_stub_run_case(calls),
+        resume=True,
+    )
+    # 标记 TIMEOUT 的 c1 视为未完成，resume 重新执行。
     assert calls == ["c1", "c2"]
     assert [run["scenario"] for run in manifest["runs"]] == ["c1", "c2"]

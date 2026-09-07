@@ -331,6 +331,29 @@ def _load_prior_import_rows(resume_source: str) -> list[dict]:
         return list(csv.DictReader(handle))
 
 
+def _apply_qa_resume_started_at(
+    summary: dict, source_csv: str, log: logging.Logger
+) -> None:
+    """续跑延续源运行的原始启动时间：写入 resume schema 并回填 run_started_at。
+
+    批次耗时/吞吐按「原启动 → 本次结束」计算，因此 summary 的
+    ``resume.original_started_at`` 取源运行的 ``run_started_at``。
+    """
+    source_summary_path = Path(source_csv).parent / "summary.json"
+    if not source_summary_path.is_file():
+        return
+    try:
+        with open(source_summary_path, encoding="utf-8") as f:
+            source_summary = json.load(f)
+    except (OSError, ValueError) as exc:
+        log.warning("读取续跑源 summary 失败: %s", exc)
+        return
+    source_started_at = source_summary.get("run_started_at")
+    if source_started_at:
+        summary.setdefault("resume", {})["original_started_at"] = source_started_at
+        summary["run_started_at"] = source_started_at
+
+
 def run_locomo(
     args: argparse.Namespace,
     run: EvalRun,
@@ -754,18 +777,7 @@ def run_locomo(
     summary["run_finished_at"] = run.finished_at_iso()
     if qa_resume_state:
         # 续跑延续源运行的原始启动时间：批次耗时/吞吐按「原启动 → 本次结束」计算。
-        source_summary_path = Path(qa_resume_state.source_csv).parent / "summary.json"
-        if source_summary_path.is_file():
-            try:
-                with open(source_summary_path, encoding="utf-8") as f:
-                    source_summary = json.load(f)
-            except (OSError, ValueError) as exc:
-                log.warning("读取续跑源 summary 失败: %s", exc)
-                source_summary = {}
-            source_started_at = source_summary.get("run_started_at")
-            if source_started_at:
-                summary["qa_resume"]["original_started_at"] = source_started_at
-                summary["run_started_at"] = source_started_at
+        _apply_qa_resume_started_at(summary, qa_resume_state.source_csv, log)
     blackbox = write_blackbox_artifacts(
         qa_rows=[result.to_csv_row() for result in qa_results],
         judge_rows=judge_report.rows,

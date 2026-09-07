@@ -173,6 +173,52 @@ def test_phase_tenant_counts_distributes_across_tenants(server):
     assert sorted(r.tenant_idx for r in burst) == [0, 0, 1, 2]
 
 
+def test_burst_phase_jobs_keep_own_response_ids():
+    """并发 phase job 各持独立 Ctx：record() 后的 note() 只补写本 job 记录。
+
+    两个 job 的 record 与 note 之间用 Event 固定交错；旧实现共享 Ctx 时，
+    前一个响应的 message_id/archive_id 会落到后一个请求记录上。
+    """
+    import itertools
+    import threading
+
+    counter = itertools.count()
+    lock = threading.Lock()
+    reached = threading.Event()
+    order = {"n": 0}
+
+    def main(ctx):
+        pass
+
+    def burst_job(ctx):
+        i = next(counter)
+        ctx.record(op="open", stage_ms=1.0, status="ok", session_id=f"s{i}")
+        with lock:
+            order["n"] += 1
+            if order["n"] == 2:
+                reached.set()
+        reached.wait(3.0)
+        ctx.note(message_id=f"m{i}", archive_id=f"a{i}")
+
+    def schedule(ctx):
+        ctx.at_time(0.0, burst_job, count=2, max_workers=2, name="burst")
+
+    profile = load_profile(
+        {
+            "name": "p",
+            "target": {"base_url": "http://127.0.0.1:8010", "read_timeout_s": 5},
+            "load": {"workers": 1, "duration_s": 0.5},
+        }
+    )
+    result = Engine(profile, _scene(task=main, schedule=schedule)).run()
+    burst = [r for r in result.records if r.extra == "burst"]
+    assert len(burst) == 2
+    for record in burst:
+        idx = record.session_id[1:]  # "s0" -> "0"
+        assert record.message_id == f"m{idx}"
+        assert record.archive_id == f"a{idx}"
+
+
 def test_at_time_rejects_empty_tenant_counts(server):
     _, _, base_url = server
 

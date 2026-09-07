@@ -176,5 +176,73 @@ class ManifestDifferencesTests(unittest.TestCase):
         self.assertEqual([], manifest_differences(expected, dict(expected)))
 
 
+class ApplyQaResumeStartedAtTests(unittest.TestCase):
+    """run_eval._apply_qa_resume_started_at：续跑收尾把源启动时间写入 resume schema。"""
+
+    def _make_source_run(self, root: Path, started_at: str | None) -> Path:
+        source_dir = root / "source-run"
+        source_dir.mkdir()
+        payload = {}
+        if started_at is not None:
+            payload["run_started_at"] = started_at
+        (source_dir / "summary.json").write_text(
+            json.dumps(payload), encoding="utf-8"
+        )
+        (source_dir / "qa_results.csv").write_text("", encoding="utf-8")
+        return source_dir
+
+    def test_original_started_at_goes_into_resume_schema(self):
+        import logging
+
+        from run_eval import _apply_qa_resume_started_at
+
+        with tempfile.TemporaryDirectory() as directory:
+            source_dir = self._make_source_run(Path(directory), "2026-01-02T03:04:05")
+            summary = {"resume": {"enabled": True, "source": str(source_dir)}}
+            _apply_qa_resume_started_at(
+                summary, str(source_dir / "qa_results.csv"), logging.getLogger("test")
+            )
+            self.assertEqual(
+                "2026-01-02T03:04:05", summary["resume"]["original_started_at"]
+            )
+            self.assertEqual("2026-01-02T03:04:05", summary["run_started_at"])
+
+    def test_source_without_started_at_leaves_summary_untouched(self):
+        import logging
+
+        from run_eval import _apply_qa_resume_started_at
+
+        with tempfile.TemporaryDirectory() as directory:
+            source_dir = self._make_source_run(Path(directory), None)
+            summary = {"resume": {"enabled": True}}
+            _apply_qa_resume_started_at(
+                summary, str(source_dir / "qa_results.csv"), logging.getLogger("test")
+            )
+            self.assertNotIn("original_started_at", summary["resume"])
+            self.assertNotIn("run_started_at", summary)
+
+    def test_missing_or_broken_source_summary_is_safe(self):
+        import logging
+
+        from run_eval import _apply_qa_resume_started_at
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            summary = {"resume": {}}
+            logger = logging.getLogger("test")
+            # 源 summary 缺失。
+            _apply_qa_resume_started_at(summary, str(root / "no-such.csv"), logger)
+            self.assertEqual({}, summary["resume"])
+            # 源 summary JSON 损坏。
+            source_dir = root / "broken-run"
+            source_dir.mkdir()
+            (source_dir / "summary.json").write_text("{not json", encoding="utf-8")
+            (source_dir / "qa_results.csv").write_text("", encoding="utf-8")
+            _apply_qa_resume_started_at(
+                summary, str(source_dir / "qa_results.csv"), logger
+            )
+            self.assertEqual({}, summary["resume"])
+
+
 if __name__ == "__main__":
     unittest.main()

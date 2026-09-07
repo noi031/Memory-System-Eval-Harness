@@ -186,8 +186,9 @@ def diagnose_case(case_dir: Path) -> dict[str, Any] | None:
 def diagnose_runs(runs: list[dict[str, Any]]) -> dict[str, Any]:
     """对一组已完成的 run（含 output_dir）聚合内存泄漏判定。
 
-    任一窗口足够的 case 判 FAIL 则整体 FAIL；有 INCONCLUSIVE（短窗口/无数据）
-    无 FAIL 则 INCONCLUSIVE；全部 PASS 则 PASS。无任何可判数据时为 INCONCLUSIVE。
+    任一 case 判 FAIL 则整体 FAIL；存在 INCONCLUSIVE（短窗口/缺 RSS）且无
+    FAIL 则整体 INCONCLUSIVE；全部 case 都有可判数据且全 PASS 才判 PASS。
+    缺 RSS 采样的 case 保留带原因的 INCONCLUSIVE 项，不丢弃。
     """
     per_case: list[dict[str, Any]] = []
     for run in runs:
@@ -195,7 +196,13 @@ def diagnose_runs(runs: list[dict[str, Any]]) -> dict[str, Any]:
         if not output_dir:
             continue
         diag = diagnose_case(Path(output_dir))
-        if diag is not None:
+        if diag is None:
+            per_case.append({
+                "case": str(Path(output_dir).name),
+                "verdict": "INCONCLUSIVE",
+                "reason": "无 RSS 采样（/metrics 缺失或无 resident memory 指标）",
+            })
+        else:
             per_case.append(diag)
     verdicts = [item["verdict"] for item in per_case]
     if not verdicts:
