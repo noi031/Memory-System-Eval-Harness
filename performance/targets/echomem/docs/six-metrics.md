@@ -86,6 +86,9 @@ open -> add -> commit -> completed -> Search marker 命中后才开始计时。
 准备 stress-a/b/c/d 四个独立租户，各自检索自己的种子事实。
 采集故障前样本 -> 对 A 注入 reject 或 delay -> 采集故障中样本 -> 撤销故障。
 调用 PR449 `/api/inspect/test-control/fault`，携带测试 Token。
+该接口的 `duration_s` 只能在 0.1 到 300 秒之间，`delay_ms` 必须为 0 到 30000 的整数。
+平台在正式套件启动前校验这些参数；例如填 600 秒会直接报配置错误，不先灌种或反复运行 24 轮。
+报告分别保留控制接口启用/撤销的 HTTP 状态与负载观测结果；控制请求失败不能只归因为基线不健康。
 必须看到 A 实际返回 429/503，或者延迟实际增加；控制接口返回 200 不足以证明故障生效。
 每个 B/C/D 的故障前和故障中至少 100 个 Search，计算
 `(during_p95 - before_p95) / before_p95`，取最差旁观租户。

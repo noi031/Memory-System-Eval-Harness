@@ -9,7 +9,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 from performance.targets.echomem.acceptance.six_metrics import (
-    evaluate_six, jain, module_issues, search_stats, write_report,
+    configure_profile, evaluate_six, jain, module_issues, search_stats, write_report,
 )
 from performance.targets.echomem.orchestrator.suites import six_metric_cases
 from performance.targets.echomem.protocol import anchor_marker, recall_quality
@@ -32,6 +32,38 @@ def good_reads(count=100, tenants=4, **overrides):
 
 
 class EvidenceContractTests(unittest.TestCase):
+    def test_invalid_fault_duration_stops_before_workload(self):
+        from performance.targets.echomem.probes import fault_isolation as probe
+        for value in (600, 0, float('nan'), float('inf')):
+            with self.subTest(duration=value):
+                checks = []
+                ctx = SimpleNamespace(params={"endpoint": "http://unused/api/inspect/test-control/fault",
+                                              "duration_s": value},
+                                      check=lambda name, **kw: checks.append({"name": name, **kw}))
+                with patch.object(probe, 'sample_search') as search, patch.object(probe, 'control') as control:
+                    probe.run(ctx)
+                search.assert_not_called()
+                control.assert_not_called()
+                self.assertFalse(json.loads(checks[0]['detail'])['workload_started'])
+        with tempfile.TemporaryDirectory() as root:
+            tenant_file = Path(root) / 'tenants.json'
+            tenant_file.write_text(json.dumps({'tenants': [{'tenant_id': str(n)} for n in range(4)]}))
+            config = {'name': '4U8G', 'tenant_config': str(tenant_file), 'base_url': 'http://unused',
+                      'fault_isolation': {'duration_s': 600}}
+            with self.assertRaisesRegex(ValueError, '300'):
+                configure_profile(config)
+            config['fault_isolation']['duration_s'] = 300
+            self.assertEqual(configure_profile(config)['fault_isolation']['duration_s'], 300)
+
+    def test_fault_control_error_is_retained_separately_from_baseline(self):
+        payload = {'target_tenant': 'a', 'fault_type': 'reject', 'repetition': 1, 'checks': [
+            {'name': 'fault-control-enable', 'status': 'FAIL', 'detail': json.dumps({'status_code': 400})},
+            {'name': 'fault-isolation', 'status': 'INCONCLUSIVE', 'detail': json.dumps({'baseline_healthy': False})}]}
+        result = evaluate_six({'fault_isolation': {'cases': [payload]}}, {})
+        observed = next(c['observed'] for c in result['checks'] if c['id'] == 'M2')
+        self.assertEqual(observed['control_enable_failed_cases'], 1)
+        self.assertEqual(observed['cases'][0]['control_checks'][0]['http_status'], 400)
+
     def test_module_issues_preserve_degradation_and_request_failures(self):
         rows = [{"op": "read", "status": "ok", "quality_ok": False, "degraded": True,
                  "degraded_reasons": '["engine_not_enabled:resource_engine"]'},

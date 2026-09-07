@@ -13,6 +13,7 @@ from performance.stats import percentile
 
 
 def configure_profile(profile: dict) -> dict:
+    from performance.targets.echomem.probes.fault_isolation import validate_fault_config
     if str(profile.get("name", "")).upper() != "4U8G":
         raise ValueError("six-metrics currently requires a 4U8G profile")
     tenant_config = json.loads(Path(profile["tenant_config"]).read_text(encoding="utf-8"))
@@ -24,6 +25,7 @@ def configure_profile(profile: dict) -> dict:
     fault = {"enabled": True, "endpoint": base + "/api/inspect/test-control/fault",
              "token_env": "ECHOMEM_TEST_CONTROL_TOKEN", "samples": 100, "repeats": 3,
              **profile.get("fault_isolation", {})}
+    validate_fault_config(fault)
     observable = {"enabled": True, "expected_tenants": ids,
                   "expected_lanes": ["recall_engine", "recall_intent_llm", "recall_query_embedding", "commit"],
                   "token_env": "ECHOMEM_TEST_CONTROL_TOKEN", **profile.get("tenant_observability", {})}
@@ -175,8 +177,17 @@ def evaluate_six(suite: dict, profile: dict) -> dict:
     fault_cases = []
     for payload in fault.get("cases", []):
         detail = probe_detail(payload, "fault-isolation")
+        controls = []
+        for control_name in ("fault-control-enable", "fault-control-disable"):
+            control = probe_detail(payload, control_name)
+            if control:
+                controls.append({"name": control_name, "status": control.get("status"),
+                                 "http_status": control.get("status_code"),
+                                 "returncode": control.get("returncode"),
+                                 "invalid_duration_contract": control.get("invalid_duration_contract")})
         fault_cases.append({**detail, "target_tenant": payload.get("target_tenant") or detail.get("target_tenant"),
-                            "fault_type": payload.get("fault_type"), "repetition": payload.get("repetition")})
+                            "fault_type": payload.get("fault_type"), "repetition": payload.get("repetition"),
+                            "control_checks": controls})
     expected_tenants = (profile.get("fairness_expectations") or {}).get("tenant_ids", [])
     repeats = int((profile.get("fault_isolation") or {}).get("repeats", 3))
     expected_matrix = {(t, kind, repeat) for t in expected_tenants for kind in ("reject", "delay")
@@ -194,6 +205,8 @@ def evaluate_six(suite: dict, profile: dict) -> dict:
     add("M2", "单租户故障隔离", fault_status,
         "故障控制 / Recall", "轮流对每个租户注入拒绝/延迟，多轮保留全部错误和前中后采样。",
         {"expected_cases": expected_fault_cases, "completed_cases": len(fault_cases),
+         "control_enable_failed_cases": sum(any(c["name"] == "fault-control-enable" and c["status"] != "PASS"
+                                                  for c in f["control_checks"]) for f in fault_cases),
          "missing_cases": [list(key) for key in sorted(expected_matrix - observed_matrix)],
          "unique_observed_cases": len(observed_matrix), "cases": fault_cases})
 

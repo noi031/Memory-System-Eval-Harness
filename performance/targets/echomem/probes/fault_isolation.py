@@ -15,6 +15,7 @@ INCONCLUSIVE。
 from __future__ import annotations
 
 import json
+import math
 import os
 import shlex
 import subprocess
@@ -25,6 +26,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from statistics import median
 from typing import Any
+from urllib.parse import urlsplit
 
 from performance.ctx import Ctx
 from performance.targets.echomem.probes._client import EchoMemHTTP, load_tenant_specs
@@ -33,6 +35,21 @@ from performance.targets.echomem.protocol import recall_quality
 PASS = "PASS"
 FAIL = "FAIL"
 INCONCLUSIVE = "INCONCLUSIVE"
+
+
+def validate_fault_config(config: dict[str, Any]) -> None:
+    """Validate the PR449 control contract before issuing any workload."""
+    endpoint = str(config.get("endpoint") or "")
+    if urlsplit(endpoint).path.rstrip('/') != '/api/inspect/test-control/fault':
+        return
+    if str(config.get("fault_type", "reject")) not in {"reject", "delay"}:
+        raise ValueError("PR449 fault_type must be reject or delay")
+    duration = float(config.get("duration_s", 300))
+    delay = float(config.get("delay_ms", 1000))
+    if not math.isfinite(duration) or not 0.1 <= duration <= 300:
+        raise ValueError("PR449 fault duration_s must be between 0.1 and 300 seconds")
+    if not math.isfinite(delay) or not delay.is_integer() or not 0 <= delay <= 30000:
+        raise ValueError("PR449 fault delay_ms must be an integer between 0 and 30000")
 
 
 def percentile(values: list[float], q: float = 0.95) -> float | None:
@@ -190,6 +207,13 @@ def _detail(fields: dict[str, Any]) -> str:
 
 def run(ctx: Ctx) -> None:
     params = ctx.params
+    try:
+        validate_fault_config(params)
+    except (TypeError, ValueError) as exc:
+        ctx.check("fault-isolation", status=INCONCLUSIVE,
+                  reason=str(exc), detail=_detail({"configuration_valid": False,
+                  "error_code": "invalid_fault_configuration", "workload_started": False}))
+        return
     tenant_config = str(params.get("tenant_config") or "")
     target_tenant = str(params.get("target_tenant") or "")
     bystander_csv = str(params.get("bystander_tenants") or "")
