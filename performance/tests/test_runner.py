@@ -252,7 +252,7 @@ def test_run_suite_resume_merges_completed_runs(server, tmp_path):
     _, _, base_url = server
     tenants_path = tmp_path / "tenants.json"
     tenants_path.write_text(
-        json.dumps({"tenants": [{"tenant_id": "t1", "auth_key": "k1"}]}),
+        json.dumps({"tenants": [{"tenant_id": f"t{i}", "auth_key": f"k{i}"} for i in range(4)]}),
         encoding="utf-8",
     )
     profile = {

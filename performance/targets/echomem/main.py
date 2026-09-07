@@ -94,6 +94,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--profile", default="", help="只运行一个 profile；默认运行全部")
     parser.add_argument("--out-dir", required=True, type=Path)
     parser.add_argument("--quick", action="store_true", help="bounded smoke matrix")
+    parser.add_argument("--six-metrics", action="store_true",
+                        help="4U8G six-metric acceptance with strict evidence gates")
     parser.add_argument("--scenarios", default="", help="覆盖场景列表，逗号分隔")
     parser.add_argument("--quick-duration-cap-s", type=float, default=30.0)
     parser.add_argument("--quick-case-timeout-s", type=float, default=120.0)
@@ -106,7 +108,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--quick-include-seed",
         action="store_true",
-        help="quick 默认跳过真实模型灌种；打开后保留灌种",
+        help="quick 保留配置的灌种会话数；默认只缩小会话数，不跳过灌种",
     )
     parser.add_argument(
         "--resume",
@@ -167,6 +169,10 @@ def _scenario_list(text: str) -> list[str] | None:
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+    if args.six_metrics and args.quick:
+        parser.error("--six-metrics cannot use quick-mode evidence")
+    if args.six_metrics and args.resume:
+        parser.error("six-metrics requires a fresh output directory until resume provenance is verified")
 
     child_env = dict(os.environ)
     if args.env_file is not None:
@@ -200,6 +206,9 @@ def main(argv: list[str] | None = None) -> int:
             suite_dir = args.out_dir / name
             suite_dir.mkdir(parents=True, exist_ok=True)
             profile = _resolve_profile(profile, args.profiles)
+            if args.six_metrics:
+                from performance.targets.echomem.acceptance.six_metrics import configure_profile
+                profile = configure_profile(profile)
             command_result: dict[str, Any] = {}
             suite_path = suite_dir / "suite.json"
 
@@ -221,6 +230,8 @@ def main(argv: list[str] | None = None) -> int:
                 # quick 在 4U8G 上用 bounded 目录；完整目录含长时报告/容量
                 # case，适合正式验收但会让诊断运行看起来卡住。
                 profile_name = "4u8g" if args.quick and name.upper() == "4U8G" else "complete"
+                if args.six_metrics:
+                    profile_name = "six-metrics"
                 case_timeout = args.quick_case_timeout_s if args.quick else args.timeout_s
                 suite = run_suite(
                     profile,
@@ -250,16 +261,33 @@ def main(argv: list[str] | None = None) -> int:
             tenant_config = (
                 read_json(Path(profile["tenant_config"])) if profile["tenant_config"] else {}
             )
-            probe_artifacts, probe_commands = run_configured_probes(
-                profile,
-                base_url=str(profile.get("base_url") or ""),
-                suite_dir=suite_dir,
-                auth_headers={},
-                tenant_config=tenant_config,
-                quick=args.quick,
-                timeout_s=args.timeout_s,
-            )
+            if args.skip_run or (args.six_metrics and not suite.get("resource_evidence")):
+                probe_artifacts, probe_commands = {}, []
+            else:
+                visibility = (suite.get("seed") or {}).get("visibility", [])
+                if visibility and isinstance(profile.get("fault_isolation"), dict):
+                    profile["fault_isolation"] = {
+                        **profile["fault_isolation"],
+                        "queries": {r["tenant_id"]: r["marker"] for r in visibility},
+                    }
+                probe_artifacts, probe_commands = run_configured_probes(
+                    profile,
+                    base_url=str(profile.get("base_url") or ""),
+                    suite_dir=suite_dir,
+                    auth_headers={},
+                    tenant_config=tenant_config,
+                    quick=args.quick,
+                    timeout_s=args.timeout_s,
+                )
             suite = {**suite, **probe_artifacts}
+            if not args.skip_run:
+                suite_path.write_text(json.dumps(suite, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+            if args.six_metrics:
+                from performance.targets.echomem.acceptance.six_metrics import evaluate_six, write_report
+                six = evaluate_six(suite, profile)
+                (suite_dir / "six-metrics.json").write_text(
+                    json.dumps(six, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+                write_report(six, suite_dir / "six-metrics.html")
             command_result["probes"] = probe_commands
 
             completed_runs, submitted_runs = _formal_run_counts(suite)
@@ -276,6 +304,7 @@ def main(argv: list[str] | None = None) -> int:
                 "completed_runs": completed_runs,
                 "submitted_runs": submitted_runs,
                 "probe_artifacts": probe_artifacts,
+                "six_metric_status": six["status"] if args.six_metrics else None,
                 **probe_artifacts,
                 "command": command_result,
                 "objectives": objective_statuses({
@@ -328,4 +357,6 @@ def main(argv: list[str] | None = None) -> int:
     )
     write_objective_suite_html(result, args.out_dir / "objective-suite.html")
     print(args.out_dir / "objective-suite.html")
+    if args.six_metrics and any(p.get("six_metric_status") != PASS for p in output_profiles):
+        return 1 if any(p.get("six_metric_status") == "FAIL" for p in output_profiles) else 2
     return 0 if output_profiles else 2

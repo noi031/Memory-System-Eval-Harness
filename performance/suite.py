@@ -326,6 +326,9 @@ class SeedContext:
     tenant_id: str
     auth_key: str
     queries: list[str]
+    agent_id: str = "default"
+    user_id: str = "default"
+    account_id: str = "default"
 
 
 def _run_prepare_command(command: str) -> dict:
@@ -455,20 +458,30 @@ def run_suite(
     cases = select_cases(profile_name, scenarios)
     manifest["scenarios"] = [case["label"] for case in cases]
 
+    def progress(stage: str, scenario: str = "") -> None:
+        payload = {"updated_at": now_iso(), "stage": stage, "current_scenario": scenario,
+                   "planned_cases": len(cases), "finished_cases": len(manifest["runs"])}
+        temporary = suite_dir / "progress.json.tmp"
+        temporary.write_text(json.dumps(payload, ensure_ascii=False) + "\n", encoding="utf-8")
+        temporary.replace(suite_dir / "progress.json")
+
     def finish() -> dict:
         """写盘收尾：acceptance 缺失时先经 evaluate 钩子求值。"""
         if evaluate is not None and "acceptance" not in manifest:
             manifest["acceptance"] = evaluate(manifest)
+        progress("finished")
         return _finalize_suite(manifest, suite_dir)
 
     prepare_command = profile.get("prepare_command")
     if prepare_command:
+        progress("prepare")
         prepare = _run_prepare_command(str(prepare_command))
         manifest["prepare"] = prepare
         if prepare["status"] != "ok":
             return finish()
 
     preflight_config = str(profile.get("preflight_config") or "")
+    progress("preflight")
     if preflight is not None:
         manifest["preflight"] = preflight(preflight_config)
         if preflight_config and not manifest["preflight"].get("ok"):
@@ -490,6 +503,7 @@ def run_suite(
     )
     tenant_config = profile.get("tenant_config")
     if tenant_config and seed is not None:
+        progress("seed")
         try:
             contexts, seed_summary = seed(
                 base_url,
@@ -506,6 +520,7 @@ def run_suite(
         manifest["seed"] = {"status": "skipped", "reason": "no tenant_config"}
 
     for case in cases:
+        progress("load", str(case["label"]))
         case_dir = suite_dir / _fs_safe_label(case["label"])
         if resume:
             completed_run = _load_completed_run(case, case_dir, timeout_s)
@@ -526,12 +541,21 @@ def run_suite(
             case_profile.params["queries"] = [
                 query for ctx in usable for query in ctx.queries
             ]
+            case_profile.params["tenant_query_pools"] = {
+                str(index): list(ctx.queries) for index, ctx in enumerate(usable)
+            }
+            case_profile.params["tenant_identities"] = {
+                str(index): {"agent_id": ctx.agent_id, "user_id": ctx.user_id,
+                             "account_id": ctx.account_id, "tenant_id": ctx.tenant_id}
+                for index, ctx in enumerate(usable)
+            }
         run = run_case(
             case, case_profile,
             case_dir=case_dir, timeout_s=timeout_s,
         )
         manifest["runs"].append(run)
+        progress("load", str(case["label"]))
 
     if evaluate is not None:
         manifest["acceptance"] = evaluate(manifest)
-    return _finalize_suite(manifest, suite_dir)
+    return finish()

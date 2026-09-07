@@ -46,6 +46,10 @@ class RequestRecord:
     real_recall: bool = False
     quality_ok: bool = True
     degraded: bool = False
+    query_type: str = "unclassified"
+    expected_marker: str = ""
+    marker_found: bool = False
+    degraded_reasons: str = ""
     # -- worker-level failure context --------------------------------------
     detail: str = ""
 
@@ -86,5 +90,9 @@ CSV_FIELDS: list[str] = [
     "quality_ok",
     "degraded",
     "query",
+    "query_type",
+    "expected_marker",
+    "marker_found",
+    "degraded_reasons",
     "detail",
 ]

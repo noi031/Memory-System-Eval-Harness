@@ -292,12 +292,14 @@ def test_seed_tenant_against_mock(server):
     assert context.client is client
     assert context.seed_sessions == 2
     assert context.seed_messages == 8
-    assert context.queries[:4] == [
+    expected_prefixes = [
         "PERFANCHOR-0-0-0",
         "PERFANCHOR-0-0-1",
         "PERFANCHOR-0-1-0",
         "PERFANCHOR-0-1-1",
     ]
+    assert all(query.startswith(prefix + "-") for query, prefix in zip(context.queries[:4], expected_prefixes))
+    assert len({query.rsplit("-", 1)[1] for query in context.queries[:4]}) == 1
     assert len(context.queries) == 12  # 4 anchor queries + 8 fragments
 
     info = context.to_dict()

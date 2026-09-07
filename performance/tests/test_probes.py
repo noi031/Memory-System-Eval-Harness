@@ -278,6 +278,7 @@ def test_fault_isolation_control_http_injects_target_tenant(tmp_path):
             pass
 
         def do_POST(self):
+            captured["token"] = self.headers.get("X-EchoMem-Test-Token")
             length = int(self.headers.get("Content-Length") or 0)
             captured["body"] = json.loads(self.rfile.read(length).decode("utf-8"))
             body = b"{}"
@@ -296,14 +297,20 @@ def test_fault_isolation_control_http_injects_target_tenant(tmp_path):
             action="disable",
             target_tenant="t1",
             timeout_s=10,
+            token="test-only-token",
         )
     finally:
         httpd.shutdown()
         httpd.server_close()
     assert result["status"] == "PASS"
     assert result["status_code"] == 200
+    assert captured["token"] == "test-only-token"
     assert captured["body"] == {
         "action": "disable",
         "target_tenant": "t1",
         "tenant": "t1",
+        "tenant_id": "t1",
+        "fault_type": "reject",
+        "duration_s": 300,
+        "delay_ms": 1000,
     }
