@@ -95,10 +95,50 @@ code{{background:#f0f3f5;padding:2px 4px}}.scroll{{overflow:auto}}
 <section class="scroll"><h2>逐 profile 目标状态</h2>
 <table><thead><tr><th>Profile</th><th>目标</th><th>状态</th><th>说明</th><th>归属</th><th>证据</th></tr></thead>
 <tbody>{"".join(rows)}</tbody></table></section>
+<section class="scroll"><h2>内存泄漏诊断</h2>{"".join(_leak_sections(result))}</section>
 <section class="scroll"><h2>探针与黑盒证据明细</h2>
 <p class="muted">这里显示真实 HTTP 探针实际检查到的内容。没有真实输入、控制能力或服务端观测时，状态保持 INCONCLUSIVE。</p>
 {"".join(details)}</section>
 </main></html>"""
+
+
+
+def _leak_sections(result: dict[str, Any]) -> list[str]:
+    """渲染内存泄漏诊断（suite 收尾时由通用模块挂到 profile）。"""
+    sections = []
+    for profile in result.get("profiles") or []:
+        leak = profile.get("memory_leak")
+        if not isinstance(leak, dict):
+            continue
+        rows = []
+        for item in leak.get("per_case") or []:
+            meas = item.get("measurements") or {}
+            slope = meas.get("slope_mb_per_min")
+            rows.append(
+                "<tr>"
+                f"<td>{html.escape(str(item.get('case', '')))}</td>"
+                f"<td>{html.escape(str(item.get('verdict', '')))}</td>"
+                f"<td>{html.escape(str(slope if slope is not None else '-'))}</td>"
+                f"<td>{html.escape(str(meas.get('projected_growth_mb_per_hour') or '-'))}</td>"
+                f"<td>{html.escape(str(meas.get('window_s') or '-'))}</td>"
+                f"<td>{html.escape(str(item.get('reason', '')))}</td>"
+                "</tr>"
+            )
+        verdict = str(leak.get("verdict") or "INCONCLUSIVE")
+        cls = {"PASS": "pass", "FAIL": "fail"}.get(verdict, "inconclusive")
+        body = "".join(rows) or "<tr><td colspan='6' class='muted'>无 RSS 采样数据</td></tr>"
+        sections.append(
+            f"<h3>{html.escape(str(profile.get('name')))}："
+            f"<span class='{cls}'>{html.escape(verdict)}</span>"
+            f"<span class='muted'> {html.escape(str(leak.get('reason', '')))}</span></h3>"
+            "<table><thead><tr><th>case</th><th>判定</th><th>斜率MB/min</th>"
+            "<th>预计MB/h</th><th>窗口s</th><th>说明</th></tr></thead>"
+            f"<tbody>{body}</tbody></table>"
+        )
+    if sections:
+        sections.insert(0, "<p class='muted'>压测收尾自动诊断（RSS 斜率阈值 5 MB/min，"
+                             "观测窗口 <600s 不判泄漏）。</p>")
+    return sections
 
 
 def write_objective_suite_html(result: dict[str, Any], path: Path) -> None:

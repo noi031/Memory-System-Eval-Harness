@@ -23,6 +23,8 @@ import statistics
 import threading
 from dataclasses import dataclass
 from pathlib import Path
+
+from performance.memory_leak import diagnose_runs
 from typing import Any, Callable
 
 from performance.engine import Engine, load_scene
@@ -353,6 +355,9 @@ def _finalize_suite(manifest: dict, suite_dir: Path) -> dict:
     """写 suite.json / acceptance.json 并返回 manifest（acceptance 缺省 NOT_RUN）。"""
     if "acceptance" not in manifest:
         manifest["acceptance"] = {"status": "NOT_RUN", "reason": "no evaluator"}
+    runs = manifest.get("runs") or []
+    if runs:
+        manifest["memory_leak"] = diagnose_runs(runs)
     (suite_dir / "suite.json").write_text(
         json.dumps(manifest, ensure_ascii=False, indent=2) + "\n",
         encoding="utf-8",

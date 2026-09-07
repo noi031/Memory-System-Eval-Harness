@@ -11,6 +11,12 @@ import json
 from collections import Counter
 from typing import Any, Iterable
 
+from performance.memory_leak import (
+    MIN_LEAK_WINDOW_S,
+    RSS_LEAK_SLOPE_MB_PER_MIN,
+    evaluate_memory_leak,
+    rss_trend_mb_per_min,
+)
 from performance.records import RequestRecord
 from performance.targets.echomem.protocol import is_anchor_query
 
@@ -257,7 +263,6 @@ def fairness_measurements(fairness: dict[str, Any]) -> dict[str, Any]:
 # 租户公平性判定阈值：组间读 P95 max/min 比达到该值判不均衡。
 FAIRNESS_MAX_MIN_RATIO = 3.0
 # RSS 斜率泄漏判定阈值（MB/分钟）：超过即判疑似泄漏。
-RSS_LEAK_SLOPE_MB_PER_MIN = 5.0
 
 
 def _verdict(verdict: str, reason: str) -> dict[str, Any]:
@@ -372,39 +377,6 @@ def tenant_fairness(records: list[RequestRecord]) -> dict[str, Any]:
         }
     return result
 
-
-def rss_trend_mb_per_min(series: list[tuple[float, float]]) -> dict[str, Any]:
-    """Least-squares slope of RSS (bytes) over time, in MB per minute.
-
-    Needs at least 4 samples across the observed window; fewer samples
-    return an undecidable result. The slope together with the cooling
-    settle delta distinguishes a slow leak from index-size growth.
-    """
-    n = len(series)
-    if n < 4:
-        return {"slope_mb_per_min": None, "r2": None, "samples": n}
-    xs = [ts for ts, _ in series]
-    ys = [value / 1024 / 1024 for _, value in series]  # MB
-    mean_x = sum(xs) / n
-    mean_y = sum(ys) / n
-    s_xy = sum((x - mean_x) * (y - mean_y) for x, y in zip(xs, ys))
-    s_xx = sum((x - mean_x) ** 2 for x in xs)
-    if s_xx <= 0:
-        return {"slope_mb_per_min": None, "r2": None, "samples": n}
-    slope = s_xy / s_xx  # MB per second
-    ss_res = sum((y - (mean_y + slope * (x - mean_x))) ** 2 for x, y in zip(xs, ys))
-    ss_tot = sum((y - mean_y) ** 2 for y in ys)
-    r2 = round(1 - ss_res / ss_tot, 4) if ss_tot > 0 else None
-    return {
-        "slope_mb_per_min": round(slope * 60, 3),
-        "r2": r2,
-        "samples": n,
-    }
-
-
-# ---------------------------------------------------------------------- #
-#  Feature verdicts: the four EchoMem guarantees, evaluated per run       #
-# ---------------------------------------------------------------------- #
 
 FEATURE_LABELS: dict[str, str] = {
     "commit_guarantee": "特性1 commit 异步/成功保证/不阻塞检索",
@@ -589,53 +561,7 @@ def evaluate_features(summary: dict[str, Any]) -> dict[str, Any]:
 
     # -- 特性3: 无内存泄漏（RSS 归一校正后斜率） ---------------------------
     resources = summary.get("resources") or {}
-    trend = resources.get("rss_trend") or {}
-    normalized = resources.get("rss_normalized") or {}
-    # 优先用扣除注入数据增长后的净斜率（归一口径），无归一数据时回退原始斜率
-    slope = (
-        (normalized.get("net_trend") or {}).get("slope_mb_per_min")
-        or trend.get("slope_mb_per_min")
-    )
-    unsettled = resources.get("rss_unsettled_mb")
-    if slope is None:
-        features["memory_leak"] = _verdict(
-            "INCONCLUSIVE", "RSS 采样不足（<4 帧）或 /metrics 不可用，无法判定泄漏趋势"
-        )
-    elif slope >= RSS_LEAK_SLOPE_MB_PER_MIN:
-        features["memory_leak"] = _verdict(
-            "FAIL",
-            f"RSS 上升斜率 {slope} MB/min ≥ 泄漏判定阈值 "
-            f"{RSS_LEAK_SLOPE_MB_PER_MIN} MB/min"
-            f"（预计每小时增长 {round(slope * 60, 1)} MB）",
-        )
-    else:
-        settle_note = (
-            f"冷却后未回落 {unsettled}MB"
-            if unsettled is not None
-            else "冷却后未回落量不可测（/metrics 采样缺失）"
-        )
-        features["memory_leak"] = _verdict(
-            "PASS",
-            f"RSS 上升斜率 {slope} MB/min < 泄漏判定阈值 "
-            f"{RSS_LEAK_SLOPE_MB_PER_MIN} MB/min（{settle_note}）",
-        )
-    features["memory_leak"]["measurements"] = {
-        "slope_mb_per_min": slope,
-        "slope_source": "rss_net" if normalized.get("net_trend") else "rss_raw",
-        "projected_growth_mb_per_hour": (
-            round(slope * 60, 1) if slope is not None else None
-        ),
-        "rss_baseline_mb": resources.get("rss_baseline_mb"),
-        "rss_peak_mb": resources.get("rss_peak_mb"),
-        "rss_unsettled_mb": unsettled,
-        "rss_normalized": {
-            "net_peak_mb": normalized.get("net_peak_mb"),
-            "net_settled_mb": normalized.get("net_settled_mb"),
-            "injected_mb": normalized.get("injected_mb"),
-        },
-        "trend_r2": trend.get("r2"),
-        "trend_samples": trend.get("samples"),
-    }
+    features["memory_leak"] = evaluate_memory_leak(resources)
 
     # -- 特性4: 资源利用率随时间变化图（报告内容完整性） -------------------------
     server = summary.get("server") or {}

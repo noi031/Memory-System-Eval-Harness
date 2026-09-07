@@ -305,6 +305,7 @@ def main(argv: list[str] | None = None) -> int:
                 "submitted_runs": submitted_runs,
                 "probe_artifacts": probe_artifacts,
                 "six_metric_status": six["status"] if args.six_metrics else None,
+                "memory_leak": suite.get("memory_leak"),
                 **probe_artifacts,
                 "command": command_result,
                 "objectives": objective_statuses({

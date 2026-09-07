@@ -206,6 +206,15 @@ python performance/run.py --target echomem \
   （`metrics_enabled` 时）。
 - 向用户汇报：跑了哪些 label、completed/submitted 计数、O1–O7 状态、失败/
   INCONCLUSIVE 项及原因。
+- **内存泄漏诊断（自动）**：压测收尾（`_finalize_suite`）自动从各 case 的
+  `metrics_samples.csv` 的 resident memory 序列算 RSS 斜率（MB/min），判定结果
+  挂在 `manifest["memory_leak"]` 并渲染进报告「内存泄漏诊断」节。判定口径：
+  斜率 ≥ `RSS_LEAK_SLOPE_MB_PER_MIN`（5 MB/min）判 FAIL；观测窗口
+  < `MIN_LEAK_WINDOW_S`（600s）判 INCONCLUSIVE（短窗口斜率受预热/GC 主导，
+  不判泄漏）；全部 pass 才 PASS。诊断逻辑在通用模块
+  `performance/memory_leak.py`，任何 target 的 suite 收尾都会自动获得。
+  报告生成可用 `python -m performance.targets.echomem.rebuild_report
+  --results-dir <results>` 随时从磁盘重建（含诊断）。
 
 ---
 

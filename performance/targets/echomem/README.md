@@ -212,6 +212,11 @@ commit 异步/成功保证、租户公平性、无内存泄漏、资源利用率
 重试与对账、search 质量断言、读写隔离粒度、错误类型正确性、故障注入、
 模型与配置预检、N×N 租户隔离、饱和拒绝契约、热租户旁观公平性。每特性带
 `measurements` 量化证据；状态 pass / fail / not_run / known_limit / env_error。
+其中「无内存泄漏」为通用能力：压测收尾（`suite.py` `_finalize_suite`）自动基于
+各 case 的 `*_resident_memory_bytes` 指标做最小二乘趋势诊断，结果写入
+`suite.json` 的 `memory_leak` 字段，报告渲染为「内存泄漏诊断」节；判定口径
+（`performance/memory_leak.py`）：斜率 ≥ 5 MB/min 判 FAIL，采样窗口 < 600 s
+判 INCONCLUSIVE，其余 PASS。
 
 ### 4.5 延迟阈值（`runner.py` 摘要 parameters）
 

@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import itertools
 import json
 import sys
 from pathlib import Path
@@ -62,15 +63,16 @@ def rebuild_metric_coverage(case_dir: Path) -> dict[str, Any] | None:
         return None
     frames: list[MetricsFrame] = []
     with csv_path.open(encoding="utf-8") as handle:
-        rows = list(csv.DictReader(handle))
-    for ts, group_rows in __import__("itertools").groupby(rows, key=lambda r: r["ts"]):
-        samples: dict[str, list[tuple[dict[str, str], float]]] = {}
-        for row in group_rows:
-            labels = json.loads(row["labels"])
-            samples.setdefault(row["metric"], []).append(
-                (labels, float(row["value"]))
-            )
-        frames.append(MetricsFrame(ts=float(ts), samples=samples))
+        for ts, group_rows in itertools.groupby(
+            csv.DictReader(handle), key=lambda r: r["ts"]
+        ):
+            samples: dict[str, list[tuple[dict[str, str], float]]] = {}
+            for row in group_rows:
+                labels = json.loads(row["labels"])
+                samples.setdefault(row["metric"], []).append(
+                    (labels, float(row["value"]))
+                )
+            frames.append(MetricsFrame(ts=float(ts), samples=samples))
     if not frames:
         return None
     monitor = type("_Monitor", (), {"frames": frames})()
@@ -175,6 +177,7 @@ def main(argv: list[str] | None = None) -> int:
         output_profiles_entry = {
             **profile,
             **probe_artifacts,  # 探针执行结果覆盖同名配置字段（渲染读 profile 顶层）
+            "memory_leak": manifest.get("memory_leak"),
             "name": name,
             "suite": str(partial_dir / "suite.json"),
             "profile_execution_status": profile_execution_status,
