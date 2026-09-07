@@ -32,6 +32,25 @@ def good_reads(count=100, tenants=4, **overrides):
 
 
 class EvidenceContractTests(unittest.TestCase):
+    def test_recovery_cursor_compares_accepted_key_without_exporting_it(self):
+        from performance.targets.echomem.probes.commit_recovery import idempotency_cursor_evidence
+        key = 'private-retry-key-for-unit-test'
+        receipt = {'archive_id': 'original', 'status': 'completed'}
+        cursor = {'last_successful': receipt}
+        accepted = {'idempotency_key': key}
+        evidence = idempotency_cursor_evidence(cursor, 200, accepted, 'original', key)
+        self.assertTrue(evidence['key_persistence_failed'])
+        self.assertNotIn(key, json.dumps(evidence))
+        for status, echoed, current in (
+            (404, accepted, receipt), (200, {}, receipt),
+            (200, accepted, {**receipt, 'archive_id': 'another'}),
+            (200, accepted, {**receipt, 'status': 'pending'}),
+            (200, accepted, {**receipt, 'idempotency_key': key}),
+        ):
+            with self.subTest(http=status, echo=bool(echoed), receipt=current):
+                result = idempotency_cursor_evidence({'last_successful': current}, status, echoed, 'original', key)
+                self.assertFalse(result['key_persistence_failed'])
+
     def test_invalid_fault_duration_stops_before_workload(self):
         from performance.targets.echomem.probes import fault_isolation as probe
         for value in (600, 0, float('nan'), float('inf')):

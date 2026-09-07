@@ -122,6 +122,28 @@ def decode_fs_read_payload(payload: dict[str, Any]) -> dict[str, Any]:
     return decoded if isinstance(decoded, dict) else payload
 
 
+def idempotency_cursor_evidence(
+    cursor: dict[str, Any], cursor_http_status: int | None,
+    accepted_payload: dict[str, Any], archive_id: str, idempotency_key: str,
+) -> dict[str, Any]:
+    """Compare receipt identity without including retry keys in diagnostics."""
+    receipt = cursor.get("last_successful")
+    receipt = receipt if isinstance(receipt, dict) else {}
+    accepted_key_matches = accepted_payload.get("idempotency_key") == idempotency_key
+    receipt_matches = bool(archive_id and receipt.get("archive_id") == archive_id)
+    receipt_key_matches = receipt.get("idempotency_key") == idempotency_key
+    return {
+        "cursor_http_status": cursor_http_status,
+        "accepted_key_echo_matches": accepted_key_matches,
+        "receipt_archive_matches": receipt_matches,
+        "receipt_key_present": bool(receipt.get("idempotency_key")),
+        "receipt_key_matches": receipt_key_matches,
+        "key_persistence_failed": bool(cursor_http_status == 200 and accepted_key_matches
+                                       and receipt_matches and receipt.get("status") == "completed"
+                                       and not receipt_key_matches),
+    }
+
+
 def _docker_engine_post(path: str) -> tuple[int, str]:
     """POST to the mounted Docker Engine socket using only the stdlib."""
     request = (
@@ -629,6 +651,13 @@ def run(ctx: Ctx) -> None:
         if isinstance(cursor_response.payload, dict)
         else {}
     )
+    key_evidence = idempotency_cursor_evidence(
+        source_payloads["commit_cursor"], cursor_response.status_code,
+        accepted_payload, str(archive_id), idempotency_key,
+    )
+    if final_state == "completed" and key_evidence["key_persistence_failed"]:
+        idempotency_status = FAIL
+        idempotency_reason = "Accepted retry key was not preserved in the recovered archive's completed cursor receipt"
     source_ids = {
         source: sorted(values_from_payload(source_payload)[0])
         for source, source_payload in source_payloads.items()
@@ -779,6 +808,7 @@ def run(ctx: Ctx) -> None:
         elapsed_s=elapsed,
         detail=_detail({
             "status_code": replay_response.status_code if replay_response else None,
+            **key_evidence,
             "archive_id": replay_archive_id,
             "replayed": replayed,
             "same_archive": str(replay_archive_id or "") == str(archive_id),
