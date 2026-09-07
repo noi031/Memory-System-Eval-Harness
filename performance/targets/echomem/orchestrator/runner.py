@@ -15,6 +15,8 @@ from __future__ import annotations
 import csv
 import json
 import time
+import subprocess
+import os
 from pathlib import Path
 from typing import Any
 
@@ -41,7 +43,7 @@ from performance.targets.echomem.orchestrator.suites import (
     build_case_profile,
     select_cases,
 )
-from performance.targets.echomem.protocol import is_anchor_query
+from performance.targets.echomem.protocol import anchor_marker, is_anchor_query, recall_quality
 
 SCENES_DIR = Path(__file__).resolve().parent.parent / "scenes"
 
@@ -59,6 +61,20 @@ def summarize_case_records(records: list[RequestRecord]) -> dict:
         "commit_delay_threshold_s": 10.0,
         "search_delay_threshold_s": 2.5,
     }
+    reads = [r for r in records if r.op == "read"]
+    from performance.stats import percentile
+    import statistics
+    summary["details"]["query_classes"] = {}
+    for query_type in ("recall", "no_recall", "unclassified"):
+        rows = [r for r in reads if r.query_type == query_type]
+        values = [r.stage_ms / 1000 for r in rows]
+        summary["details"]["query_classes"][query_type] = {
+            "submitted": len(rows),
+            "quality_passed": sum(r.status == "ok" and r.quality_ok for r in rows),
+            "degraded": sum(r.degraded for r in rows),
+            "mean_s": statistics.mean(values) if values else None,
+            "p95_s": percentile(values, 95) if values else None,
+        }
     return summary
 
 
@@ -113,14 +129,7 @@ def _write_search_results(case_dir: Path, records: list[RequestRecord]) -> None:
     for record in records:
         if record.op != "read":
             continue
-        if record.status == "ok":
-            status_code = "200"
-        elif record.error_type == "http_4xx" and (
-            record.retry_after_s is not None or record.reason_code
-        ):
-            status_code = "429"
-        else:
-            status_code = "500"
+        status_code = record.http_status if record.http_status is not None else ""
         rows.append(
             {
                 "query": record.query,
@@ -229,11 +238,38 @@ def _prepare_seed(
     contexts = preparer.prepare(
         seed_sessions, seed_messages, commit_poll_timeout_s=600.0
     )
+    if not preparer.keys_independent() or len(contexts) != max_tenants:
+        raise RuntimeError("All requested tenants must have distinct, nonempty credentials")
+    visibility = []
+    for ctx in contexts:
+        markers = list(dict.fromkeys(anchor_marker(q) for q in ctx.queries if anchor_marker(q)))
+        if not markers:
+            raise RuntimeError(f"Seed did not generate recall markers: tenant={ctx.tenant_id}")
+        for query in markers:
+            deadline = time.monotonic() + 60
+            while True:
+                response = ctx.client.search("", query, timeout_s=10)
+                quality = recall_quality(response.payload, query)
+                # Visibility is a setup prerequisite; degradation remains a
+                # measured quality failure rather than hiding all load evidence.
+                if response.status_code == 200 and quality["marker_found"]:
+                    visibility.append({"tenant_id": ctx.tenant_id, "marker": query, "visible": True,
+                                       "quality_ok": quality["quality_ok"], "degraded": quality["degraded"],
+                                       "degraded_reasons": quality["degraded_reasons"]})
+                    break
+                if time.monotonic() >= deadline:
+                    raise RuntimeError(f"Seed marker not found: tenant={ctx.tenant_id} marker={query}; "
+                                       f"http_status={response.status_code}, hits={quality['hit_count']}, "
+                                       f"degraded={quality['degraded']}")
+                time.sleep(1)
     return [
         SeedContext(
             tenant_id=ctx.tenant_id,
             auth_key=ctx.auth_key,
             queries=list(ctx.queries),
+            agent_id=ctx.client.agent_id,
+            user_id=ctx.client.user_id,
+            account_id=ctx.client.account_id,
         )
         for ctx in contexts
     ], {
@@ -242,6 +278,8 @@ def _prepare_seed(
         "identity_mode": preparer.identity_mode(),
         "seed_sessions_per_tenant": seed_sessions,
         "seed_messages_per_session": seed_messages,
+        "visibility": visibility,
+        "keys_independent": preparer.keys_independent(),
     }
 
 
@@ -266,6 +304,33 @@ def run_suite(
     case，历史 run 合并进最终 suite.json（语义见通用层）。
     """
     metrics_enabled = bool(profile.get("metrics_enabled", True))
+    observation_before = None
+    if profile.get("six_metrics"):
+        container = str(profile.get("resource_container") or (profile.get("commit_recovery") or {}).get("container") or "")
+        try:
+            from performance.targets.echomem.probes.docker_inspect import inspect_container
+            config = inspect_container(container)["HostConfig"]
+            cpus = float(config.get("NanoCpus", 0)) / 1e9
+            if not cpus and config.get("CpuPeriod", 0) > 0:
+                cpus = config.get("CpuQuota", 0) / config["CpuPeriod"]
+            resource = {"cpus": cpus, "memory_bytes": config.get("Memory"), "container": container}
+            if cpus != 4 or config.get("Memory") != 8 * 1024 ** 3:
+                raise ValueError("Container limits must be exactly 4 CPUs and 8 GiB")
+            profile = {**profile, "resource_evidence": resource}
+        except (OSError, subprocess.SubprocessError, ValueError) as exc:
+            suite_dir.mkdir(parents=True, exist_ok=True)
+            result = {"runs": [], "resource_preflight": {"status": "INCONCLUSIVE", "reason": str(exc)},
+                      "output_root": str(suite_dir), "instance_profile": profile.get("name")}
+            (suite_dir / "suite.json").write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8")
+            return result
+        observation = profile.get("tenant_observability", {})
+        from performance.targets.echomem.probes.tenant_observability import collect
+        observation_before = collect(
+            base_url=base_url, endpoint=str(observation.get("endpoint", "")),
+            token=os.environ.get(observation.get("token_env", "ECHOMEM_TEST_CONTROL_TOKEN"), ""),
+            expected_tenants=list(observation.get("expected_tenants", [])),
+            expected_lanes=list(observation.get("expected_lanes", [])), timeout_s=15,
+        )
 
     def _run_case(case, case_profile, *, case_dir, timeout_s):
         return run_case(
@@ -273,7 +338,7 @@ def run_suite(
             collect_metrics=metrics_enabled,
         )
 
-    return run_suite_impl(
+    result = run_suite_impl(
         profile,
         suite_dir=suite_dir,
         profile_name=profile_name,
@@ -291,3 +356,8 @@ def run_suite(
         seed=_prepare_seed,
         evaluate=evaluate_pr421_acceptance,
     )
+    if profile.get("resource_evidence"):
+        result["resource_evidence"] = profile["resource_evidence"]
+    if observation_before is not None:
+        result["tenant_observability_before"] = observation_before
+    return result

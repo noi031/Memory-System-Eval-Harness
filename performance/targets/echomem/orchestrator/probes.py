@@ -371,22 +371,52 @@ def run_configured_probes(
             "timeout_s",
             "control_timeout_s",
             "auth_header",
+            "token_env",
+            "fault_type",
+            "duration_s",
+            "delay_ms",
+            "queries",
         ):
             value = fault_isolation.get(key)
             if value not in (None, ""):
                 params[key] = value
-        payload, execution = run_configured_probe(
-            params,
-            probes_dir=PROBES_DIR,
-            scene="fault_isolation.py",
-            output=output,
-            base_url=base_url,
-            timeout_s=min(timeout_s, 600 if quick else 1800),
-            redact_values=redact,
-        )
-        commands.append(execution)
-        if payload:
-            artifacts["fault_isolation"] = {**payload, "path": str(output)}
+        cases = [params]
+        if profile.get("six_metrics"):
+            tenant_ids = list((profile.get("fairness_expectations") or {}).get("tenant_ids", []))
+            cases = [
+                {**params, "target_tenant": tenant,
+                 "bystander_tenants": ",".join(t for t in tenant_ids if t != tenant),
+                 "fault_type": fault_type, "samples": max(100, int(params.get("samples", 100))),
+                 "repetition": repetition}
+                for tenant in tenant_ids for fault_type in ("reject", "delay")
+                for repetition in range(1, int(fault_isolation.get("repeats", 3)) + 1)
+            ]
+        outcomes = []
+        expected_case_count = len(cases)
+        if profile.get("six_metrics") and not params.get("queries"):
+            cases = []
+            commands.append({"status": "INCONCLUSIVE", "reason": "No verified seed queries for tenant fault testing"})
+        if profile.get("six_metrics") and not os.environ.get(str(params.get("token_env") or "ECHOMEM_TEST_CONTROL_TOKEN")):
+            cases = []
+            commands.append({"status": "INCONCLUSIVE", "reason": "Test control token is missing; fault matrix was not started"})
+        for index, case_params in enumerate(cases):
+            case_output = output if not profile.get("six_metrics") else suite_dir / f"fault-isolation-{index:02d}.json"
+            payload, execution = run_configured_probe(
+                case_params, probes_dir=PROBES_DIR, scene="fault_isolation.py",
+                output=case_output, base_url=base_url,
+                timeout_s=min(timeout_s, 600 if quick else 1800), redact_values=redact,
+            )
+            commands.append(execution)
+            outcomes.append({**payload, "path": str(case_output),
+                             "target_tenant": case_params.get("target_tenant"),
+                             "fault_type": case_params.get("fault_type"),
+                             "repetition": case_params.get("repetition", 1)})
+            if profile.get("six_metrics") and not payload.get("checks"):
+                break
+        if profile.get("six_metrics"):
+            artifacts["fault_isolation"] = {"cases": outcomes, "expected_cases": expected_case_count}
+        elif outcomes:
+            artifacts["fault_isolation"] = outcomes[0]
 
     sweep_artifacts, sweep_commands = _run_limit_failure_sweep(
         profile,
@@ -396,6 +426,18 @@ def run_configured_probes(
     )
     artifacts.update(sweep_artifacts)
     commands.extend(sweep_commands)
+
+    observability = profile.get("tenant_observability")
+    if isinstance(observability, dict) and observability.get("enabled", True):
+        output = suite_dir / "tenant-observability.json"
+        payload, execution = run_configured_probe(
+            dict(observability), probes_dir=PROBES_DIR,
+            scene="tenant_observability.py", output=output,
+            base_url=base_url, timeout_s=min(timeout_s, 60),
+        )
+        commands.append(execution)
+        if payload:
+            artifacts["tenant_observability"] = {**payload, "path": str(output)}
 
     recovery = profile.get("commit_recovery")
     if isinstance(recovery, dict) and tenant_path.is_file():

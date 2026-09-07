@@ -196,7 +196,7 @@ def test_main_resume_merges_prior_runs(mock_server, tmp_path):
     _, state, base_url = mock_server()
     tenants_path = tmp_path / "tenants.json"
     tenants_path.write_text(
-        json.dumps({"tenants": [{"tenant_id": "t1", "auth_key": "k1"}]}),
+        json.dumps({"tenants": [{"tenant_id": f"t{i}", "auth_key": f"k{i}"} for i in range(4)]}),
         encoding="utf-8",
     )
     profiles_path = tmp_path / "instance-profiles.json"

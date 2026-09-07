@@ -447,7 +447,9 @@ def four_u8g_cases() -> list[dict]:
 
 def select_cases(profile_name: str, scenarios: list[str] | None) -> list[dict]:
     """按 profile 选 case；``scenarios`` 非空时按 label 过滤并保留顺序。"""
-    if profile_name == "4u8g":
+    if profile_name == "six-metrics":
+        catalog = six_metric_cases()
+    elif profile_name == "4u8g":
         catalog = four_u8g_cases()
     elif profile_name == "complete":
         catalog = complete_cases()
@@ -460,6 +462,25 @@ def select_cases(profile_name: str, scenarios: list[str] | None) -> list[dict]:
     if unknown:
         raise ValueError(f"unknown scenarios: {', '.join(unknown)}")
     return [by_label[item] for item in scenarios]
+
+
+def six_metric_cases() -> list[dict]:
+    cases = [
+        _case(label="recall-baseline", scene="scene_capacity", tenants=4,
+              duration_s=60, search_rps=8, commit_rpm=0, read_only=True),
+        _case(label="query-mixed", scene="scene_capacity", tenants=4,
+              duration_s=60, search_rps=8, commit_rpm=0, read_only=True,
+              query_mode="mixed"),
+        {**_FAIRNESS_BOUNDED_CASE, "duration_s": 120},
+        {**next(c for c in _COMPLETE_CASES if c["label"] == "search-priority-blackbox"),
+         "duration_s": 120, "sessions_per_tenant": 1, "commit_barrier_count": 32,
+         "barrier_at_s": 15},
+    ]
+    for level in (2, 4, 8, 16, 32):
+        cases.append(_case(label=f"capacity-{level}", scene="scene_capacity",
+                           tenants=level, duration_s=60, search_rps=level,
+                           search_workers=level * 2, commit_rpm=0, read_only=True))
+    return cases
 
 
 def build_case_profile(
@@ -491,6 +512,8 @@ def build_case_profile(
 def _apply_barrier_params(params: dict[str, Any], case: dict) -> None:
     """按场景把 barrier/burst 字段翻译进 params（与 case['scene'] 一致）。"""
     scene_name = case["scene"]
+    params["query_mode"] = case.get("query_mode", "recall")
+    params["commit_poll_timeout_s"] = case.get("commit_poll_timeout_s", 180)
     if scene_name == "scene_d_burst":
         params["burst_commits"] = int(case.get("commit_barrier_count", 32))
         params["burst_window_s"] = float(case.get("commit_burst_window_s", 10.0))
@@ -508,6 +531,7 @@ def _apply_barrier_params(params: dict[str, Any], case: dict) -> None:
         params.update(
             {
                 "barrier_count": barrier_count,
+                "barrier_at_s": float(case.get("barrier_at_s", 0)),
                 "barrier_distribution": str(
                     case.get("commit_tenant_distribution", "uniform")
                 ),

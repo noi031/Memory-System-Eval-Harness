@@ -1,0 +1,30 @@
+{
+  "profiles": [
+    {
+      "name": "4U8G",
+      "base_url": "http://127.0.0.1:8010",
+      "resource_container": "echomem-stress-4u8g",
+      "tenant_config": "./tenants.json",
+      "preflight_config": "./echomem.config.json",
+      "fault_isolation": {
+        "samples": 100,
+        "repeats": 3,
+        "token_env": "ECHOMEM_TEST_CONTROL_TOKEN"
+      },
+      "tenant_observability": {
+        "expected_lanes": [
+          "recall_engine",
+          "recall_intent_llm",
+          "recall_query_embedding",
+          "commit"
+        ],
+        "token_env": "ECHOMEM_TEST_CONTROL_TOKEN"
+      },
+      "commit_recovery": {
+        "messages": 12,
+        "content_chars": 1000,
+        "recovery_timeout_s": 180
+      }
+    }
+  ]
+}

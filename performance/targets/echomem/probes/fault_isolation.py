@@ -15,6 +15,8 @@ INCONCLUSIVE。
 from __future__ import annotations
 
 import json
+import math
+import os
 import shlex
 import subprocess
 import time
@@ -24,13 +26,30 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from statistics import median
 from typing import Any
+from urllib.parse import urlsplit
 
 from performance.ctx import Ctx
 from performance.targets.echomem.probes._client import EchoMemHTTP, load_tenant_specs
+from performance.targets.echomem.protocol import recall_quality
 
 PASS = "PASS"
 FAIL = "FAIL"
 INCONCLUSIVE = "INCONCLUSIVE"
+
+
+def validate_fault_config(config: dict[str, Any]) -> None:
+    """Validate the PR449 control contract before issuing any workload."""
+    endpoint = str(config.get("endpoint") or "")
+    if urlsplit(endpoint).path.rstrip('/') != '/api/inspect/test-control/fault':
+        return
+    if str(config.get("fault_type", "reject")) not in {"reject", "delay"}:
+        raise ValueError("PR449 fault_type must be reject or delay")
+    duration = float(config.get("duration_s", 300))
+    delay = float(config.get("delay_ms", 1000))
+    if not math.isfinite(duration) or not 0.1 <= duration <= 300:
+        raise ValueError("PR449 fault duration_s must be between 0.1 and 300 seconds")
+    if not math.isfinite(delay) or not delay.is_integer() or not 0 <= delay <= 30000:
+        raise ValueError("PR449 fault delay_ms must be an integer between 0 and 30000")
 
 
 def percentile(values: list[float], q: float = 0.95) -> float | None:
@@ -49,6 +68,10 @@ def control(
     action: str,
     target_tenant: str = "",
     timeout_s: float,
+    token: str = "",
+    fault_type: str = "reject",
+    duration_s: float = 300,
+    delay_ms: int = 1000,
 ) -> dict[str, Any]:
     endpoint = str(config.get("endpoint") or "").strip()
     command = str(config.get("command") or "").strip()
@@ -60,11 +83,16 @@ def control(
                 data=json.dumps(
                     {
                         "action": action,
+                        "tenant_id": target_tenant,
+                        "fault_type": fault_type,
+                        "duration_s": duration_s,
+                        "delay_ms": delay_ms,
                         "target_tenant": target_tenant,
                         "tenant": target_tenant,
                     }
                 ).encode("utf-8"),
-                headers={"Content-Type": "application/json"},
+                headers={"Content-Type": "application/json",
+                         **({"X-EchoMem-Test-Token": token} if token else {})},
                 method="POST",
             )
             with urllib.request.urlopen(request, timeout=timeout_s) as response:
@@ -127,19 +155,24 @@ def sample_search(
     workers: int,
     timeout_s: float,
     phase: str,
+    queries: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     def one(tenant_id: str, index: int) -> dict[str, Any]:
         started = time.monotonic()
+        query = (queries or {}).get(tenant_id, f"PR397 fault isolation sample {index}")
         response = clients[tenant_id].search(
             sessions[tenant_id],
-            f"PR397 fault isolation {phase} {index}",
+            query,
             timeout_s=timeout_s,
         )
+        quality = recall_quality(response.payload, query)
         return {
             "tenant": tenant_id,
             "status_code": response.status_code,
             "elapsed_s": time.monotonic() - started,
             "error": response.error,
+            "quality_ok": bool(queries and quality["quality_ok"]),
+            "degraded": quality["degraded"], "degraded_reasons": quality["degraded_reasons"],
         }
 
     jobs = [
@@ -155,12 +188,12 @@ def sample_search(
         latencies = [
             float(row["elapsed_s"])
             for row in selected
-            if isinstance(row.get("status_code"), int)
-            and 200 <= row["status_code"] < 300
         ]
+        successful = [r for r in selected if isinstance(r.get("status_code"), int)
+                      and 200 <= r["status_code"] < 300 and r["quality_ok"]]
         by_tenant[tenant_id] = {
             "submitted": len(selected),
-            "succeeded": len(latencies),
+            "succeeded": len(successful),
             "p95_s": percentile(latencies),
             "median_s": median(latencies) if latencies else None,
             "rows": selected,
@@ -169,11 +202,18 @@ def sample_search(
 
 
 def _detail(fields: dict[str, Any]) -> str:
-    return json.dumps(fields, ensure_ascii=False)[:500]
+    return json.dumps(fields, ensure_ascii=False)
 
 
 def run(ctx: Ctx) -> None:
     params = ctx.params
+    try:
+        validate_fault_config(params)
+    except (TypeError, ValueError) as exc:
+        ctx.check("fault-isolation", status=INCONCLUSIVE,
+                  reason=str(exc), detail=_detail({"configuration_valid": False,
+                  "error_code": "invalid_fault_configuration", "workload_started": False}))
+        return
     tenant_config = str(params.get("tenant_config") or "")
     target_tenant = str(params.get("target_tenant") or "")
     bystander_csv = str(params.get("bystander_tenants") or "")
@@ -185,6 +225,14 @@ def run(ctx: Ctx) -> None:
     control_timeout_s = float(params.get("control_timeout_s", 30))
     auth_header = str(params.get("auth_header") or "X-Auth-Key")
     base_url = ctx.base_url
+    token = os.environ.get(str(params.get("token_env", "ECHOMEM_TEST_CONTROL_TOKEN")), "")
+    if endpoint and not token:
+        ctx.check("fault-isolation", status=INCONCLUSIVE,
+                  reason="Fault control token missing; deployment control plane not connected")
+        return
+    control_args = {"token": token, "fault_type": str(params.get("fault_type", "reject")),
+                    "duration_s": float(params.get("duration_s", 300)),
+                    "delay_ms": int(params.get("delay_ms", 1000))}
 
     if not tenant_config or not target_tenant:
         ctx.check(
@@ -228,7 +276,7 @@ def run(ctx: Ctx) -> None:
             tenant_id=spec.tenant_id,
             user_id=spec.user_id,
             account_id=spec.account_id,
-            agent_id="pr397-fault-isolation",
+            agent_id=spec.agent_id,
             auth_header=auth_header,
         )
         for tenant_id, spec in selected.items()
@@ -242,10 +290,12 @@ def run(ctx: Ctx) -> None:
     before = sample_search(
         clients, sessions, count=samples, workers=workers,
         timeout_s=timeout_s, phase="before",
+        queries=params.get("queries"),
     )
     enable = control(
         {"endpoint": endpoint, "command": command},
         action="enable", target_tenant=target_tenant, timeout_s=control_timeout_s,
+        **control_args,
     )
     during: dict[str, Any] = {}
     disable: dict[str, Any] = {
@@ -257,12 +307,14 @@ def run(ctx: Ctx) -> None:
             during = sample_search(
                 clients, sessions, count=samples, workers=workers,
                 timeout_s=timeout_s, phase="during",
+                queries=params.get("queries"),
             )
     finally:
         # 无论采样是否抛异常，故障结束后都必须恢复真实依赖。
         disable = control(
             {"endpoint": endpoint, "command": command},
             action="disable", target_tenant=target_tenant, timeout_s=control_timeout_s,
+            **control_args,
         )
 
     degradations: dict[str, float] = {}
@@ -272,6 +324,25 @@ def run(ctx: Ctx) -> None:
         if baseline and degraded is not None:
             degradations[tenant_id] = (float(degraded) - float(baseline)) / float(baseline)
     bystander_p95_degradation = max(degradations.values(), default=None)
+    after = sample_search(clients, sessions, count=samples, workers=workers,
+                          timeout_s=timeout_s, phase="after", queries=params.get("queries"))
+    target_before = before.get("by_tenant", {}).get(target_tenant, {})
+    target_during = during.get("by_tenant", {}).get(target_tenant, {})
+    fault_observed = (
+        any(row.get("status_code") in (429, 503) for row in target_during.get("rows", []))
+        if control_args["fault_type"] == "reject"
+        else bool(target_before.get("median_s") is not None
+                  and target_during.get("median_s") is not None
+                  and target_during["median_s"] - target_before["median_s"]
+                  >= control_args["delay_ms"] / 2000)
+    )
+    healthy_bystanders = all(
+        block.get("by_tenant", {}).get(t, {}).get("succeeded", 0) == samples
+        for block in (before, during, after) for t in bystanders
+    )
+    recovered_target = after.get("by_tenant", {}).get(target_tenant, {}).get("succeeded", 0) == samples
+    baseline_healthy = all(before.get("by_tenant", {}).get(t, {}).get("succeeded", 0) == samples
+                           for t in selected)
 
     ctx.check(
         "fault-control-enable",
@@ -292,13 +363,16 @@ def run(ctx: Ctx) -> None:
         enable.get("status") == PASS
         and disable.get("status") == PASS
         and len(degradations) == len(bystanders)
+        and fault_observed
     )
-    if not complete:
+    if not baseline_healthy:
+        status, reason = INCONCLUSIVE, "故障注入前基线已有错误或降级，保留数据但不能归因于单租户故障"
+    elif not complete:
         status, reason = INCONCLUSIVE, "故障控制或旁观租户前后 Search P95 证据不完整"
-    elif bystander_p95_degradation is not None and bystander_p95_degradation <= 0.20:
+    elif recovered_target and healthy_bystanders and bystander_p95_degradation is not None and bystander_p95_degradation <= 0.20:
         status, reason = PASS, "旁观租户 Search P95 劣化不超过 20%"
     else:
-        status, reason = FAIL, "至少一个旁观租户 Search P95 劣化超过 20%"
+        status, reason = FAIL, "旁观租户延迟/质量未达标，或目标租户未恢复；详见逐租户数据"
 
     ctx.check(
         "fault-isolation",
@@ -306,8 +380,15 @@ def run(ctx: Ctx) -> None:
         reason=reason,
         detail=_detail({
             "target_tenant": target_tenant,
+            "fault_observed": fault_observed,
+            "healthy_bystanders": healthy_bystanders,
+            "baseline_healthy": baseline_healthy,
+            "samples_per_tenant": samples,
+            "before": before,
+            "during": during,
+            "after": after,
             "bystanders": bystanders,
-            "fault_recovered": disable.get("status") == PASS,
+            "fault_recovered": disable.get("status") == PASS and recovered_target,
             "bystander_p95_degradation": bystander_p95_degradation,
             "degradation_by_tenant": degradations,
             "p95_before_by_tenant": {

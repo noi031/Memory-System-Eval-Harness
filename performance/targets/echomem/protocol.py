@@ -16,6 +16,8 @@
 from __future__ import annotations
 
 from typing import Any
+import json
+import re
 
 from performance.ctx import Ctx, Response, PollResult
 from performance.records import content_hash
@@ -37,6 +39,38 @@ def is_anchor_query(query: str) -> bool:
     return ANCHOR_PREFIX in query or WRITE_ANCHOR_PREFIX in query
 
 
+def anchor_marker(query: str) -> str:
+    """Extract the stable marker, never the surrounding question text."""
+    match = re.search(r"(?:PERFANCHOR|PERFTAIL)-[A-Za-z0-9-]+", query)
+    return match.group(0) if match else ""
+
+
+def identity(ctx: Ctx, name: str) -> str:
+    scoped = ctx.params.get("tenant_identities", {}).get(str(ctx.tenant_idx), {})
+    return str(scoped.get(name, ctx.params.get(name, "default")))
+
+
+def recall_quality(payload: Any, marker: str = "", query_type: str = "recall") -> dict:
+    result = payload.get("result", payload) if isinstance(payload, dict) else {}
+    if not isinstance(result, dict):
+        result = {}
+    items = result.get("items")
+    valid = isinstance(items, list)
+    items = items if valid else []
+    degraded = bool(result.get("degraded_reasons")) or result.get("status") in {"degraded", "error", "failed"}
+    hit = bool(marker and marker in json.dumps(items, ensure_ascii=False))
+    return {
+        "hit_count": len(items), "degraded": degraded,
+        "real_recall": bool(items),
+        "quality_ok": bool(valid and not degraded and (
+            not items if query_type == "no_recall" else hit if marker else bool(items)
+        )),
+        "query_type": query_type, "expected_marker": marker,
+        "marker_found": hit,
+        "degraded_reasons": json.dumps(result.get("degraded_reasons") or [], ensure_ascii=False),
+    }
+
+
 # --------------------------------------------------------------------- #
 #  端点级函数：一个函数 = 一个 EchoMem HTTP 端点                         #
 # --------------------------------------------------------------------- #
@@ -44,14 +78,13 @@ def is_anchor_query(query: str) -> bool:
 def search(ctx: Ctx, query: str, *, top_k: int = 5) -> Response:
     """POST /api/retrieval/search 并记录质量断言字段。
 
-    HTTP 错误记 error；200 但空结果对锚词查询记为 quality 失败
-    （degraded 除外）。
+    HTTP 错误记 error；200 但空结果、错误标记或降级均不能通过召回质量断言。
     """
     resp = ctx.post(
         "/api/retrieval/search",
         body={
             "query": query,
-            "agent_id": str(ctx.params.get("agent_id", "default")),
+            "agent_id": identity(ctx, "agent_id"),
             "limit": top_k,
             "include_explain": True,
             "include_debug": True,
@@ -59,31 +92,12 @@ def search(ctx: Ctx, query: str, *, top_k: int = 5) -> Response:
         op="read",
         query=query,
     )
+    marker = anchor_marker(query)
+    query_type = "recall" if marker else "no_recall" if query in NO_RECALL_QUERIES else "unclassified"
     if not resp.ok:
+        ctx.note(quality_ok=False, query_type=query_type, expected_marker=marker)
         return resp
-    result = resp.json.get("result") if isinstance(resp.json, dict) else None
-    if not isinstance(result, dict):
-        return resp
-    items = result.get("items") or []
-    hit_count = len(items)
-    degraded = bool(result.get("degraded_reasons")) or str(
-        result.get("status") or ""
-    ).lower() == "degraded"
-    real_recall = (
-        bool(result.get("explain"))
-        or bool(result.get("debug"))
-        or hit_count > 0
-    )
-    quality_ok = True
-    if is_anchor_query(query):
-        # A degraded empty result is a capacity artifact, not a recall defect.
-        quality_ok = hit_count >= 1 or degraded
-    ctx.note(
-        hit_count=hit_count,
-        real_recall=real_recall,
-        quality_ok=quality_ok,
-        degraded=degraded,
-    )
+    ctx.note(**recall_quality(resp.json, marker, query_type))
     return resp
 
 
@@ -92,12 +106,12 @@ def open_session(ctx: Ctx, *, title: str = "perf-write-tx") -> Response:
     return ctx.post(
         "/api/sessions/open",
         body={
-            "agent_id": str(ctx.params.get("agent_id", "default")),
+            "agent_id": identity(ctx, "agent_id"),
             "title": title,
             "metadata": {
                 "title": title,
-                "account_id": str(ctx.params.get("account_id", "default")),
-                "user_id": str(ctx.params.get("user_id", "default")),
+                "account_id": identity(ctx, "account_id"),
+                "user_id": identity(ctx, "user_id"),
             },
         },
         op="open",
@@ -161,8 +175,19 @@ def poll_commit(
 
 def task_read(ctx: Ctx) -> None:
     """一次测量式检索（场景 A 读路径）：``search`` 取 query 池下一条。"""
-    query = ctx.choose(ctx.params.get("queries") or DEFAULT_QUERIES)
+    pool = ctx.params.get("tenant_query_pools", {}).get(str(ctx.tenant_idx))
+    pool = pool or ctx.params.get("queries") or DEFAULT_QUERIES
+    mode = ctx.params.get("query_mode", "recall")
+    if mode in {"recall", "mixed"}:
+        anchors = [q for q in pool if is_anchor_query(q)]
+        pool = anchors or pool
+    if mode == "mixed":
+        pool = list(pool) * len(NO_RECALL_QUERIES) + NO_RECALL_QUERIES * len(pool)
+    query = ctx.choose(pool)
     search(ctx, query, top_k=int(ctx.params.get("top_k", 5)))
+
+
+NO_RECALL_QUERIES = ["你好", "谢谢", "计算 2 加 3", "把 hello 翻译成中文"]
 
 
 def task_write(ctx: Ctx) -> None:

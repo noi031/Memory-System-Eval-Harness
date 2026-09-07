@@ -1,5 +1,9 @@
 # EchoMem 压测 target（`performance/targets/echomem`）
 
+六项 4U8G 指标的输入、步骤、分母与判定见 [六指标用例](docs/six-metrics.md)。
+从仓库根目录运行 `python -m performance --target echomem`。
+正式六指标使用 `--six-metrics`，默认不包含 soak。
+
 EchoMem 记忆服务的正式压测与验收入口。复用通用 HTTP 压测框架
 （`performance/`：`engine.py` worker 池 + `ctx.py` 请求原语 + `suite.py`
 套件编排 + `probe.py` 探针），本目录提供 EchoMem 的：
@@ -9,7 +13,7 @@ EchoMem 记忆服务的正式压测与验收入口。复用通用 HTTP 压测框
   bounded 目录 / quick 收敛子集；
 - **验收**（`acceptance/`）：O1–O7 产品目标、PR421 门禁、调度 7 检查、
   13 特性判定、preflight / seed / probes 编排；
-- **CLI**（`main.py`）：`python run.py --target echomem ...`。
+- **CLI**（`main.py`）：`python -m performance --target echomem ...`（仓库根目录）。
 
 ---
 
@@ -83,7 +87,7 @@ search-priority-blackbox, saturation, capacity-2, capacity-4, capacity-8`。
 `--quick` 时经 `apply_quick`：`duration_s = min(原值, QUICK_DURATION_CAP_S)`、
 barrier 计数双 cap（全局 cap 与 case `quick_barrier_count_cap`）、
 `quick_commit_rpm` 覆盖 commit_rpm（capacity-* 为 0）、sessions 压到 1；
-默认跳过真实模型灌种（`--quick-include-seed` 打开）。
+当前 quick 缩小灌种会话数，但仍执行灌种；它是诊断模式，不代替正式六指标验收。
 
 ---
 
@@ -91,18 +95,18 @@ barrier 计数双 cap（全局 cap 与 case `quick_barrier_count_cap`）、
 
 ### 3.1 前置条件
 
-- EchoMem 运行在 8010（`start_echomem.bat`）；
-- 租户凭据：BAT 流程自动 provision 并把 key 写入环境变量
-  `ECHOMEM_TENANT_<N>_KEY`；手动 CLI 需要预先设置。
+- 已部署 EchoMem HTTP 服务，使用 profile 的 `base_url` 指定地址；
+- 独立租户凭据写入仅本机可读的 `tenant_config`，或通过 `auth_key_env` 引用环境变量。
+  测试环境可以使用 [六指标文档](docs/six-metrics.md) 中的 provision 命令创建身份。
 
 ### 3.2 CLI
 
 ```
-python run.py --target echomem \
+python -m performance --target echomem \
     --profiles <instance-profiles.json> \
     [--profile 4U8G] \
     --out-dir <results dir> \
-    [--quick] [--scenarios a,b,c] [--resume] \
+    [--quick | --six-metrics] [--scenarios a,b,c] [--resume] \
     [--quick-duration-cap-s 30] [--quick-case-timeout-s 120] \
     [--quick-barrier-count-cap 32] [--quick-include-seed] \
     [--timeout-s 7200] [--skip-run] [--suite-path <json>] [--env-file <env>]
@@ -114,6 +118,7 @@ python run.py --target echomem \
 | `--profile` | 只跑指定 profile（默认全部） |
 | `--out-dir` | 输出根目录；每 profile 的 suite 目录为 `<out>/<profile 名>`（如 `4U8G`），case 目录为 `<suite>/<label>`。quick+4U8G 用 4u8g bounded 矩阵（22 例），否则用 complete 矩阵（26 例） |
 | `--quick` | bounded smoke 矩阵（QUICK_SCENARIOS + 收敛） |
+| `--six-metrics` | 4U8G 六指标目录，9 个负载场景及配置化探针；不含 soak，与 quick/resume 互斥 |
 | `--scenarios` | 按 label 过滤并保序（逗号分隔） |
 | `--resume` | 跳过 case 目录已有 `summary.json` 的已完成场景，从第一个未完成场景继续；历史 run 合并进最终报告 |
 | `--timeout-s` | 单 case 超时（默认 7200） |
@@ -141,7 +146,8 @@ TIMEOUT 语义）→ `run_configured_probes`（8 类探针）→ `evaluate_pr421
 按 `tenant_config` 解析租户；每租户打开 `seed_sessions` 个会话、每会话写
 `seed_messages` 条消息，消息携带唯一 anchor token（后续作检索质量锚点）；
 commit 轮询到 completed。检索 query 由种子消息片段 + 锚词自动生成，纯合成、
-无真实 LLM。
+样本构造不调用 LLM；服务端的记忆生成、Embedding 和检索使用真实模型。
+灌种后还必须 Search 命中唯一标记，单凭 completed 不算准备成功。
 
 ### 3.5 探针（`probes/`，8 类，按 profile 配置段启用）
 
@@ -218,19 +224,19 @@ commit 异步/成功保证、租户公平性、无内存泄漏、资源利用率
 ## 5. 快速开始
 
 ```bat
-:: 完整 26 例（数小时，先 start_echomem.bat）
-python run.py --target echomem ^
+:: 完整 26 例（数小时，先部署服务并准备自己的配置）
+python -m performance --target echomem ^
     --profiles _config/instance-profiles.json --out-dir results\<ts>
 
 :: bounded smoke（分钟级）
-python run.py --target echomem --profiles _config/instance-profiles.json ^
+python -m performance --target echomem --profiles _config/instance-profiles.json ^
     --out-dir results\<ts> --quick --scenarios baseline,fairness-bounded
 
 :: 中断后续跑（跳过已完成场景）
-python run.py --target echomem --profiles _config/instance-profiles.json ^
+python -m performance --target echomem --profiles _config/instance-profiles.json ^
     --out-dir results\<ts> --resume
 ```
 
-完整一键流程见根目录 `START_BAT/run_full_stress_echomem.bat`（自动 provision
-租户 + 写配置 + 压测 + 报告；`RESUME=1` + `RESUME_OUT_DIR` 续跑）。输出：
+Windows BAT 由部署方另行提供，不在本仓库中；`_config/instance-profiles.json`
+代表部署方准备的配置文件，不是仓库内置环境。输出：
 `<out>/objective-suite.html`（O1–O7 可视化报告）。

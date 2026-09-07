@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import logging
 import time
+import uuid
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -297,13 +298,18 @@ def seed_tenant(
     anchor_queries: list[str] = []
     seed_messages = 0
     started = time.perf_counter()
+    run_tag = uuid.uuid4().hex[:12]
     for session_idx in range(sessions):
         messages: list[tuple[str, str]] = []
         for msg_idx in range(messages_per_session):
             user_msg, assistant_msg = _message_pair(idx, session_idx, msg_idx)
+            old_anchor = _anchor(idx, session_idx, msg_idx)
+            marker = f"{old_anchor}-{run_tag}"
+            user_msg = user_msg.replace(old_anchor, marker)
+            assistant_msg = assistant_msg.replace(old_anchor, marker)
             messages.append(("user", user_msg))
             messages.append(("assistant", assistant_msg))
-            anchor_queries.append(_anchor(idx, session_idx, msg_idx))
+            anchor_queries.append(marker)
         texts = _seed_session_flow(
             client,
             idx,
@@ -323,7 +329,7 @@ def seed_tenant(
     )
     return TenantContext(
         idx=idx,
-        tenant_id=client.account_id or client.tenant_id,
+        tenant_id=client.tenant_id or client.account_id,
         user_id=client.user_id,
         auth_key=client.auth_key,
         client=client,
@@ -376,7 +382,7 @@ def seed_tenant_from_conversations(
     )
     return TenantContext(
         idx=idx,
-        tenant_id=client.account_id or client.tenant_id,
+        tenant_id=client.tenant_id or client.account_id,
         user_id=client.user_id,
         auth_key=client.auth_key,
         client=client,

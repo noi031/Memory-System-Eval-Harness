@@ -35,6 +35,7 @@ from performance.targets.echomem.probes._client import (
     extract_message,
     ordered_message_ids_from_payload,
     values_from_payload,
+    status_from,
 )
 
 PASS = "PASS"
@@ -47,7 +48,7 @@ def now() -> str:
 
 
 def _detail(fields: dict[str, Any]) -> str:
-    return json.dumps(fields, ensure_ascii=False)[:500]
+    return json.dumps(fields, ensure_ascii=False)
 
 
 def load_tenant(path: Path, tenant_id: str) -> dict[str, str]:
@@ -119,6 +120,28 @@ def decode_fs_read_payload(payload: dict[str, Any]) -> dict[str, Any]:
     except json.JSONDecodeError:
         return payload
     return decoded if isinstance(decoded, dict) else payload
+
+
+def idempotency_cursor_evidence(
+    cursor: dict[str, Any], cursor_http_status: int | None,
+    accepted_payload: dict[str, Any], archive_id: str, idempotency_key: str,
+) -> dict[str, Any]:
+    """Compare receipt identity without including retry keys in diagnostics."""
+    receipt = cursor.get("last_successful")
+    receipt = receipt if isinstance(receipt, dict) else {}
+    accepted_key_matches = accepted_payload.get("idempotency_key") == idempotency_key
+    receipt_matches = bool(archive_id and receipt.get("archive_id") == archive_id)
+    receipt_key_matches = receipt.get("idempotency_key") == idempotency_key
+    return {
+        "cursor_http_status": cursor_http_status,
+        "accepted_key_echo_matches": accepted_key_matches,
+        "receipt_archive_matches": receipt_matches,
+        "receipt_key_present": bool(receipt.get("idempotency_key")),
+        "receipt_key_matches": receipt_key_matches,
+        "key_persistence_failed": bool(cursor_http_status == 200 and accepted_key_matches
+                                       and receipt_matches and receipt.get("status") == "completed"
+                                       and not receipt_key_matches),
+    }
 
 
 def _docker_engine_post(path: str) -> tuple[int, str]:
@@ -434,6 +457,23 @@ def run(ctx: Ctx) -> None:
     commit_submitted_at = now()
     commit_request_elapsed_before_kill_s = time.monotonic() - commit_started
     accepted_202 = commit_box.get("status_code") == 202
+    accepted_payload = commit_box.get("payload") or {}
+    accepted_payload = accepted_payload.get("result", accepted_payload)
+    accepted_archive = accepted_payload.get("archive_id") or accepted_payload.get("commit_id")
+    state_before_kill = "unknown"
+    if accepted_202 and accepted_archive:
+        before = client.commit_status(session_id, str(accepted_archive))
+        state_before_kill = status_from(before.payload)
+    pending_before_kill = state_before_kill in {"pending", "queued", "running", "processing", "in_progress", "awaiting_engines"}
+    ctx.check("pending-before-kill", status=PASS if accepted_202 and pending_before_kill else INCONCLUSIVE,
+              reason="Crash must interrupt an accepted unfinished Commit",
+              detail=_detail({"accepted_202": accepted_202, "state": state_before_kill,
+                              "session_id": session_id, "archive_id": accepted_archive}))
+    if require_accepted_202 and not (accepted_202 and pending_before_kill):
+        ctx.check("commit-recovery", status=INCONCLUSIVE,
+                  reason="No accepted unfinished Commit to interrupt; container was not restarted",
+                  detail=_detail({"accepted_202": accepted_202, "state": state_before_kill}))
+        return
     control = kill_and_start(
         container, 0, pid=pid, restart_command=restart_command
     )
@@ -544,35 +584,8 @@ def run(ctx: Ctx) -> None:
         )
         return
 
-    replay_response = client.commit(session_id, idempotency_key=idempotency_key)
-    replay_payload = replay_response.payload if isinstance(replay_response.payload, dict) else {}
-    replay_result = (
-        replay_payload.get("result")
-        if isinstance(replay_payload.get("result"), dict)
-        else replay_payload
-    )
-    replay_archive_id = (
-        replay_result.get("archive_id")
-        or replay_result.get("commit_id")
-        or replay_result.get("id")
-    )
-    replayed = bool(replay_result.get("replayed")) if isinstance(replay_result, dict) else False
-    same_archive = str(replay_archive_id or "") == str(archive_id)
-    idempotency_status = (
-        PASS
-        if replayed and same_archive
-        else INCONCLUSIVE
-        if same_archive
-        else FAIL
-    )
-    idempotency_reason = (
-        "same idempotency key returned the same archive with replayed=true"
-        if idempotency_status == PASS
-        else "same-key Commit returned the original archive, but the optional replayed flag was false"
-        if idempotency_status == INCONCLUSIVE
-        else "same-key Commit replay did not return the original archive"
-    )
-
+    # Observe autonomous recovery before making another mutation. Retrying
+    # first could re-enqueue the work and falsely prove crash replay.
     terminal = []
     deadline = time.monotonic() + max(1.0, recovery_timeout_s)
     while time.monotonic() < deadline:
@@ -599,6 +612,24 @@ def run(ctx: Ctx) -> None:
         time.sleep(max(0.2, poll_s))
     final_state = terminal[-1].get("state") if terminal else None
 
+    replay_response = None
+    replay_archive_id = None
+    replayed = False
+    idempotency_status = INCONCLUSIVE
+    idempotency_reason = "Replay probe skipped: original Commit did not autonomously complete"
+    if final_state == "completed":
+        replay_response = client.commit(session_id, idempotency_key=idempotency_key)
+        replay_payload = replay_response.payload if isinstance(replay_response.payload, dict) else {}
+        replay_result = replay_payload.get("result") if isinstance(replay_payload.get("result"), dict) else replay_payload
+        replay_archive_id = replay_result.get("archive_id") or replay_result.get("commit_id") or replay_result.get("id")
+        replayed = replay_result.get("replayed") is True
+        same_archive = str(replay_archive_id or "") == str(archive_id)
+        idempotency_status = PASS if replayed and same_archive else INCONCLUSIVE if same_archive else FAIL
+        idempotency_reason = (
+            "same idempotency key returned the same archive with replayed=true" if idempotency_status == PASS
+            else "same archive returned, but replayed=true was not evidenced" if idempotency_status == INCONCLUSIVE
+            else "same-key replay did not return the original archive")
+
     history = client.get_history(session_id, limit=200)
     memories = client.get_commit_memories(session_id, str(archive_id))
 
@@ -620,6 +651,13 @@ def run(ctx: Ctx) -> None:
         if isinstance(cursor_response.payload, dict)
         else {}
     )
+    key_evidence = idempotency_cursor_evidence(
+        source_payloads["commit_cursor"], cursor_response.status_code,
+        accepted_payload, str(archive_id), idempotency_key,
+    )
+    if final_state == "completed" and key_evidence["key_persistence_failed"]:
+        idempotency_status = FAIL
+        idempotency_reason = "Accepted retry key was not preserved in the recovered archive's completed cursor receipt"
     source_ids = {
         source: sorted(values_from_payload(source_payload)[0])
         for source, source_payload in source_payloads.items()
@@ -694,6 +732,7 @@ def run(ctx: Ctx) -> None:
             final_state == "completed"
             and reconciliation_status == PASS
             and order_status == PASS
+            and cursor_status == PASS
             and idempotency_status == PASS
             and history.status_code
             and history.status_code < 400
@@ -714,9 +753,8 @@ def run(ctx: Ctx) -> None:
             "same idempotency key returned the original archive with replayed=true, "
             "and all server-assigned message IDs were found in durable readback"
             if status == PASS
-            else "same idempotency key returned the original archive but replayed was false"
-            if idempotency_status == FAIL
-            else "Commit did not reach a terminal completed state within the recovery window"
+            else f"Original Commit terminal state: {final_state or 'unknown'}; {idempotency_reason}; "
+                 f"message_set={reconciliation_status}, order={order_status}, cursor={cursor_status}"
         )
 
     elapsed = time.monotonic() - started
@@ -737,6 +775,8 @@ def run(ctx: Ctx) -> None:
                 "status_code": commit_box.get("status_code"),
             },
             "accepted_202": accepted_202,
+            "autonomous_recovery_observed": final_state == "completed",
+            "replay_submitted_after_completion": replay_response is not None,
             "idempotency_key": idempotency_key,
             "session_id": session_id,
             "archive_id": archive_id,
@@ -767,11 +807,12 @@ def run(ctx: Ctx) -> None:
         reason=idempotency_reason,
         elapsed_s=elapsed,
         detail=_detail({
-            "status_code": replay_response.status_code,
+            "status_code": replay_response.status_code if replay_response else None,
+            **key_evidence,
             "archive_id": replay_archive_id,
             "replayed": replayed,
             "same_archive": str(replay_archive_id or "") == str(archive_id),
-            "error": replay_response.error,
+            "error": replay_response.error if replay_response else "not_submitted",
         }),
     )
     ctx.check(
