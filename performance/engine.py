@@ -20,7 +20,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
-from performance.ctx import Ctx, Phase
+from performance.ctx import Ctx, Phase, close_all_connections
 from performance.profile import ArrivalSpec, Profile, TenantSpec
 from performance.records import RequestRecord
 
@@ -175,6 +175,7 @@ class Engine:
         self.records: list[RequestRecord] = []
         self._records_lock = threading.Lock()
         self._stop = threading.Event()
+        self._interrupt = threading.Event()
         self._seq_counter = itertools.count()
         self._data_cursor = 0
         self._data_lock = threading.Lock()
@@ -227,6 +228,12 @@ class Engine:
         )
 
     def stop(self) -> None:
+        # 中断在途 HTTP 请求（关闭活跃连接，阻塞读立即以 OSError 返回并
+        # 映射为 stopped），同时通知 worker 停止。仅 suite 超时回收路径
+        # 调用；引擎自然收尾只 set _stop，让在途请求正常完成，不产生
+        # stopped 记录。
+        self._interrupt.set()
+        close_all_connections()
         self._stop.set()
 
     # -- worker orchestration ---------------------------------------------
@@ -363,6 +370,7 @@ class Engine:
             params=self.profile.params,
             duration_s=self.profile.load.duration_s,
             stop=self._stop,
+            interrupt=self._interrupt,
             record_fn=self._record,
             seq_fn=self._next_seq,
             choose_fn=self._choose,

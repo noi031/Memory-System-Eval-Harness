@@ -18,7 +18,7 @@ import threading
 import time
 import urllib.parse
 from dataclasses import dataclass, field
-from typing import Any, Callable, Sequence
+from typing import Any, Callable, NoReturn, Sequence
 
 from performance.records import RequestRecord
 
@@ -136,6 +136,7 @@ class Ctx:
         checks: list[ProbeCheck] | None = None,
         extra: str = "",
         tenant_count: int = 1,
+        interrupt: threading.Event | None = None,
     ):
         self._scene = scene
         self._worker_id = worker_id
@@ -146,6 +147,7 @@ class Ctx:
         self._params = params
         self._duration_s = duration_s
         self._stop = stop
+        self._interrupt = interrupt
         self._record_fn = record_fn
         self._seq_fn = seq_fn
         self._choose_fn = choose_fn
@@ -254,6 +256,7 @@ class Ctx:
                 headers=headers,
                 base_headers=self._headers,
                 timeout_s=timeout_s if timeout_s is not None else self._read_timeout_s,
+                interrupt=self._interrupt,
             )
         except TransportError as exc:
             status, error_type, http_status, body_text, body_json, reason = (
@@ -325,6 +328,7 @@ class Ctx:
                     headers=headers,
                     base_headers=self._headers,
                     timeout_s=self._read_timeout_s,
+                    interrupt=self._interrupt,
                 )
             except TransportError as exc:
                 status, error_type, http_status, body_text, body_json, reason = (
@@ -539,6 +543,22 @@ class TransportError(Exception):
 # measurements and exhaust client sockets under load churn.
 _connection_local = threading.local()
 
+# 全局活跃连接注册表：引擎超时中断时由 close_all_connections() 关闭，
+# 让阻塞在传输读取里的 worker 立即以 OSError 返回（Windows/Linux 均实测
+# 跨线程 close 可打断阻塞 recv）。
+_ACTIVE_CONNECTIONS: set[http.client.HTTPConnection] = set()
+_CONNECTIONS_LOCK = threading.Lock()
+
+
+def close_all_connections() -> None:
+    """Close every live keep-alive connection (engine timeout interrupt)."""
+    with _CONNECTIONS_LOCK:
+        conns = list(_ACTIVE_CONNECTIONS)
+        _ACTIVE_CONNECTIONS.clear()
+    for conn in conns:
+        with contextlib.suppress(OSError):
+            conn.close()
+
 
 def _reuse_connection(base_url: str, timeout_s: float) -> http.client.HTTPConnection:
     parsed = urllib.parse.urlsplit(base_url)
@@ -552,12 +572,16 @@ def _reuse_connection(base_url: str, timeout_s: float) -> http.client.HTTPConnec
             conn = http.client.HTTPConnection(host, port, timeout=timeout_s)
         conn._reuse_key = (host, port)
         _connection_local.conn = conn
+    with _CONNECTIONS_LOCK:
+        _ACTIVE_CONNECTIONS.add(conn)
     return conn
 
 
 def _drop_connection() -> None:
     conn = getattr(_connection_local, "conn", None)
     if conn is not None:
+        with _CONNECTIONS_LOCK:
+            _ACTIVE_CONNECTIONS.discard(conn)
         with contextlib.suppress(OSError):
             conn.close()
         _connection_local.conn = None
@@ -573,12 +597,17 @@ def _do_request(
     headers: dict[str, str] | None = None,
     base_headers: dict[str, str] | None = None,
     timeout_s: float,
+    interrupt: threading.Event | None = None,
 ) -> tuple[str, str, int | None, str, dict[str, Any] | None, str]:
     """Execute one request; never raises for HTTP/transport failures.
 
     Returns ``(status, error_type, http_status, body_text, body_json,
     reason_code)``.  ``status`` is ``ok`` for any 2xx/3xx response; all
     other outcomes are ``error`` with a classified ``error_type``.
+    ``interrupt``（引擎超时中断）置位时由 ``close_all_connections`` 关闭
+    活跃连接，在途阻塞读立即以 OSError 返回并映射为
+    ``error_type="stopped"``；未中断时传输行为不变，请求仍受
+    ``timeout_s`` 读取超时约束。
     """
     url = path
     if params:
@@ -594,18 +623,27 @@ def _do_request(
     }:
         request_headers["Content-Type"] = "application/json"
 
+    def _stopped() -> NoReturn:
+        raise _transport_fail("stopped")
+
     for attempt in (0, 1):
+        if interrupt is not None and interrupt.is_set():
+            _stopped()
         conn = _reuse_connection(base_url, timeout_s)
         try:
             conn.request(method, url, body=payload, headers=request_headers)
         except TimeoutError as exc:
             _drop_connection()
+            if interrupt is not None and interrupt.is_set():
+                _stopped()
             raise _transport_fail("timeout") from exc
         except (OSError, http.client.HTTPException) as exc:
             # The connection failed before this request's bytes were sent
             # (stale keep-alive or refused connect); retry once on a fresh
             # connection.  A send-phase failure never duplicates a write.
             _drop_connection()
+            if interrupt is not None and interrupt.is_set():
+                _stopped()
             if attempt == 0:
                 continue
             raise _transport_fail("connection") from exc
@@ -613,19 +651,32 @@ def _do_request(
             response = conn.getresponse()
         except TimeoutError as exc:
             _drop_connection()
+            if interrupt is not None and interrupt.is_set():
+                _stopped()
             raise _transport_fail("timeout") from exc
         except (OSError, http.client.HTTPException) as exc:
             # The request may already have been delivered; report it, never
             # retry (a retry could duplicate a write).
             _drop_connection()
+            if interrupt is not None and interrupt.is_set():
+                _stopped()
             raise _transport_fail("connection") from exc
+        if interrupt is not None and interrupt.is_set():
+            _drop_connection()
+            _stopped()
         try:
             raw = response.read()
         except TimeoutError as exc:
             _drop_connection()
+            if interrupt is not None and interrupt.is_set():
+                _stopped()
             raise _transport_fail("timeout") from exc
         except (OSError, http.client.HTTPException) as exc:
+            # 连接被外部关闭（引擎超时中断 close_all_connections）时，
+            # 阻塞读以 OSError 返回，映射为 stopped。
             _drop_connection()
+            if interrupt is not None and interrupt.is_set():
+                _stopped()
             raise _transport_fail("connection") from exc
         body_text = raw.decode("utf-8", errors="replace")
         response_headers = {key.lower(): value for key, value in response.getheaders()}

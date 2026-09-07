@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import http.server
 import threading
+import time
 
 import pytest
 
-from performance.ctx import AssertionFailure, Ctx, Phase
+from performance.ctx import AssertionFailure, Ctx, Phase, close_all_connections
 from performance.tests.conftest import MockState
 
 
@@ -16,6 +18,7 @@ def make_ctx(
     params: dict | None = None,
     extra: str = "",
     stop: threading.Event | None = None,
+    interrupt: threading.Event | None = None,
 ) -> tuple[Ctx, list, list]:
     records: list = []
     seq_values: list = []
@@ -53,8 +56,16 @@ def make_ctx(
         choose_fn=choose_fn,
         phases=phases,
         extra=extra,
+        interrupt=interrupt,
     )
     return ctx, records, phases
+
+
+def _start_raw_server(handler_cls) -> http.server.ThreadingHTTPServer:
+    httpd = http.server.ThreadingHTTPServer(("127.0.0.1", 0), handler_cls)
+    thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+    thread.start()
+    return httpd
 
 
 def test_request_ok(server):
@@ -261,3 +272,80 @@ def test_manual_record_and_note(server):
     assert len(records) == 1
     assert records[0].op == "txn"
     assert records[0].archive_id == "a1"
+
+
+# -- transport interrupt (engine timeout): bounded exit -------------------
+
+
+def test_request_aborts_on_interrupt_while_body_stalled():
+    """引擎超时中断关闭连接后，阻塞在响应体读取的请求立即以 stopped 返回。"""
+    release = threading.Event()
+
+    class StallHandler(http.server.BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
+
+        def log_message(self, *args):
+            pass
+
+        def do_GET(self):
+            # 发完 header 后挂起 body，直到测试收尾释放。
+            self.send_response(200)
+            self.send_header("Content-Type", "application/octet-stream")
+            self.send_header("Content-Length", "4096")
+            self.end_headers()
+            release.wait(10)
+
+    httpd = _start_raw_server(StallHandler)
+    try:
+        base_url = f"http://127.0.0.1:{httpd.server_port}"
+        interrupt = threading.Event()
+        ctx, records, _ = make_ctx(base_url, interrupt=interrupt)
+        outcome: dict = {}
+
+        def _run():
+            outcome["resp"] = ctx.get("/stall", op="stall")
+
+        worker = threading.Thread(target=_run)
+        worker.start()
+        time.sleep(0.3)  # 让请求进入 body 读取并阻塞
+        interrupt.set()  # 模拟 case 超时后 Engine.stop() 的中断
+        close_all_connections()
+        worker.join(2.0)
+        assert not worker.is_alive(), "interrupt 后阻塞读应立即返回"
+        resp = outcome["resp"]
+        assert resp.status == "error"
+        assert resp.record.error_type == "stopped"
+    finally:
+        release.set()
+        httpd.shutdown()
+        httpd.server_close()
+
+
+def test_request_slow_stream_succeeds_within_budget():
+    """数据间隙大于请求轮询粒度但小于整体预算的慢流响应仍成功。"""
+    class SlowHandler(http.server.BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
+
+        def log_message(self, *args):
+            pass
+
+        def do_GET(self):
+            self.send_response(200)
+            self.send_header("Content-Type", "application/octet-stream")
+            self.send_header("Content-Length", "3")
+            self.end_headers()
+            for _ in range(3):
+                time.sleep(0.3)  # 数据间隙（0.3s）小于 read_timeout_s(5s) 的慢流不被误杀
+                self.wfile.write(b"x")
+            self.wfile.flush()
+
+    httpd = _start_raw_server(SlowHandler)
+    try:
+        base_url = f"http://127.0.0.1:{httpd.server_port}"
+        ctx, records, _ = make_ctx(base_url)  # read_timeout_s=5.0
+        resp = ctx.get("/slow", op="slow")
+        assert resp.ok
+        assert resp.body_text == "xxx"
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
