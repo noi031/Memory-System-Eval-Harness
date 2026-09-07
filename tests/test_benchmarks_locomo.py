@@ -956,29 +956,6 @@ class BuildSummaryTests(unittest.TestCase):
         self.assertEqual(500, summary["total_completion_tokens"])
         self.assertEqual(1.5, summary["avg_qa_elapsed_s"])
 
-    def test_qa_prompt_append_fields(self):
-        summary = build_summary(
-            dataset_path="/data/locomo.json",
-            sample_filter="all",
-            total_samples=1,
-            total_questions=1,
-            import_report=self._import_report(completed=1, total=1),
-            resume_qa=False,
-            qa_results=[],
-            judge_report=self._judge_report(),
-            qa_options=QAOptions(
-                profile=VIKINGBOAT_0411_PROFILE,
-                system_prompt_append="extra prompt",
-                system_prompt_append_sha256="deadbeef",
-                system_prompt_append_source="custom.txt",
-            ),
-            session_mode="locomo",
-            evaluation_identity={},
-        )
-        self.assertTrue(summary["qa_prompt_append"]["enabled"])
-        self.assertEqual("custom.txt", summary["qa_prompt_append"]["source"])
-        self.assertEqual("deadbeef", summary["qa_prompt_append"]["sha256"])
-
     def test_agent_options_included(self):
         options = {
             "agent_plugin": "echomem_mcp",
@@ -1068,9 +1045,6 @@ class QAOptionsTests(unittest.TestCase):
         self.assertEqual(0, opts.top_k)
         self.assertEqual(0, opts.memory_budget_chars)
         self.assertTrue(opts.tools_enabled)
-        self.assertEqual("", opts.system_prompt_append)
-        self.assertEqual("", opts.system_prompt_append_sha256)
-        self.assertEqual("", opts.system_prompt_append_source)
 
     def test_frozen(self):
         opts = QAOptions(profile=VIKINGBOAT_0411_PROFILE)
@@ -1427,11 +1401,9 @@ class RunEvalParserTests(unittest.TestCase):
     def test_eval_infra_params(self):
         self.assertEqual(4, self.args.concurrency)
         self.assertEqual("results", self.args.out_dir)
-        self.assertFalse(self.args.allow_diagnostics)
 
     def test_qa_profile_params(self):
         self.assertIsNone(self.args.qa_profile)
-        self.assertEqual("", self.args.qa_prompt_file)
         self.assertEqual(10, self.args.checkpoint_interval)
         self.assertEqual("", self.args.resume)
         self.assertEqual("", self.args.reuse_memory_from)

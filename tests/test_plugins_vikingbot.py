@@ -672,24 +672,6 @@ class VikingBotSendMessageTests(unittest.TestCase):
         self.assertEqual("search_read", kwargs["tool_set"])
 
     @patch("plugins.vikingbot.plugin.answer_one_vikingbot_question")
-    def test_system_prompt_append_passed_from_extra(self, mock_answer):
-        mock_answer.return_value = _make_qa_result()
-        plugin = _make_plugin()
-        plugin.send_message("s1", "msg", extra={
-            "system_prompt_append": "extra instructions",
-            "system_prompt_append_sha256": "abc123",
-            "system_prompt_append_source": "test",
-        })
-        kwargs = mock_answer.call_args.kwargs
-        self.assertIn("extra instructions", kwargs["system_prompt_append"])
-        self.assertIn(
-            "answer with only the exact answer",
-            kwargs["system_prompt_append"],
-        )
-        self.assertEqual("abc123", kwargs["system_prompt_append_sha256"])
-        self.assertEqual("test", kwargs["system_prompt_append_source"])
-
-    @patch("plugins.vikingbot.plugin.answer_one_vikingbot_question")
     def test_llm_error_propagates_to_response_error(self, mock_answer):
         mock_answer.return_value = _make_qa_result(llm_error="model failed")
         plugin = _make_plugin()
@@ -820,29 +802,6 @@ class VikingBotSendMessageTests(unittest.TestCase):
         self.assertEqual({"key": "value"}, resp.extra["trace"])
 
     @patch("plugins.vikingbot.plugin.answer_one_vikingbot_question")
-    def test_documents_with_tools_merges_incoming_system_prompt_append(self, mock_answer):
-        mock_answer.return_value = _make_qa_result()
-        plugin = _make_plugin(
-            _documents_mode=True,
-            _tool_calling=True,
-            path_title_map={"hotpotqa/D1": "D1"},
-            _docs_memory_budget_chars=8000,
-            _top_k=10,
-        )
-        plugin.send_message("s1", "Q", extra={
-            "question_id": "q1",
-            "question": "Q",
-            "answer": "A",
-            "system_prompt_append": "keep this",
-        })
-        kwargs = mock_answer.call_args.kwargs
-        self.assertIn("keep this", kwargs["system_prompt_append"])
-        self.assertIn(
-            "answer with only the exact answer",
-            kwargs["system_prompt_append"],
-        )
-
-    @patch("plugins.vikingbot.plugin.answer_one_vikingbot_question")
     def test_benchmark_answer_append_injected_in_non_documents_mode(self, mock_answer):
         mock_answer.return_value = _make_qa_result()
         plugin = _make_plugin()
@@ -850,11 +809,9 @@ class VikingBotSendMessageTests(unittest.TestCase):
             "question_id": "q1",
             "question": "Q",
             "answer": "A",
-            "system_prompt_append": "keep this",
         })
         kwargs = mock_answer.call_args.kwargs
-        # 非 documents 模式同样注入 concise 指令，且保留外部 append
-        self.assertIn("keep this", kwargs["system_prompt_append"])
+        # 非 documents 模式同样注入 concise 指令（F1/EM 评测要求简短精确回答）
         self.assertIn(
             "answer with only the exact answer",
             kwargs["system_prompt_append"],

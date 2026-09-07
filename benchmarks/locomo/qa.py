@@ -34,9 +34,6 @@ class QAOptions:
     top_k: int = 0
     memory_budget_chars: int = 0
     tools_enabled: bool = True
-    system_prompt_append: str = ""
-    system_prompt_append_sha256: str = ""
-    system_prompt_append_source: str = ""
     agent_options: dict[str, Any] = field(default_factory=dict)
 
 
@@ -134,13 +131,6 @@ def build_qa_tasks(
             "qa_profile": options.profile,
             "profile_source": profile_source(options.profile),
             "tools_enabled": options.tools_enabled,
-            "system_prompt_append": options.system_prompt_append,
-            "system_prompt_append_sha256": (
-                options.system_prompt_append_sha256
-            ),
-            "system_prompt_append_source": (
-                options.system_prompt_append_source
-            ),
             "agent_options": options.agent_options,
         })
     return tasks

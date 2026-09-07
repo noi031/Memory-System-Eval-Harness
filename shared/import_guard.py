@@ -17,15 +17,11 @@ def incomplete_imports(rows: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
     ]
 
 
-def require_complete_imports(
-    rows: list[dict[str, Any]],
-    *,
-    allow_incomplete: bool = False,
-) -> None:
+def require_complete_imports(rows: list[dict[str, Any]]) -> None:
     if not rows:
         raise RuntimeError("memory import produced no records; check the dataset and sample filter")
     failed = incomplete_imports(rows)
-    if not failed or allow_incomplete:
+    if not failed:
         return
     details = ", ".join(
         str(row.get("question_id") or row.get("sample_id") or row.get("session_id") or "unknown")
@@ -37,5 +33,5 @@ def require_complete_imports(
         details += f", ... (+{len(failed) - 8})"
     raise RuntimeError(
         f"memory import incomplete for {len(failed)}/{len(rows)} records: {details}. "
-        "QA was not started. Use --allow-diagnostics only for diagnostics."
+        "QA was not started."
     )

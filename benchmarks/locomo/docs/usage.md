@@ -105,12 +105,6 @@ python run_eval.py --dataset locomo --sample conv-30 --tool-calling
 # 自然无工具对照（默认即关闭工具调用，flag 可省略）
 python run_eval.py --dataset locomo --sample conv-30
 
-# 追加仅保存在本地的实验 prompt
-python run_eval.py --dataset locomo \
-  --sample conv-30 \
-  --tool-calling \
-  --qa-prompt-file /path/to/local-prompt.txt
-
 # 从中断运行继续（统一 --resume）：复用身份，跳过已完成 import batch，
 # 只重新 QA 失败/缺失题、只重判缺失 Judge 行；指标（token/延迟/精度）按整轮累计
 python run_eval.py --dataset locomo \
@@ -167,7 +161,7 @@ python run_eval.py --dataset locomo \
 ## 参数说明
 
 > **参数归属**: benchmark 只定义数据集参数、Judge 参数和评测基础设施参数
-> (`--concurrency`、`--out-dir`、`--allow-diagnostics`)。LLM 参数、
+> (`--concurrency`、`--out-dir`)。LLM 参数、
 > QA 检索参数、记忆后端参数和插件特有参数均由所选插件及其记忆后端声明，
 > 详见 `benchmarks/doc/设计意图.md`。切换 `--agent-plugin` 后可用参数会变化，
 > 使用 `--help` 查看。
@@ -324,13 +318,11 @@ python run_eval.py --dataset locomo \
 |---|---|---|
 | `--agent-plugin` | `vikingbot` | QA 阶段使用的 agent 插件名，见 `plugins/` 目录。切换后可用参数会变化 |
 | `--qa-profile` | 自动 | 开启 `--tool-calling` 默认选择 `vikingboat0411`；关闭默认选择 `vikingboat0411-natural-no-tools`。显式指定时可覆盖 |
-| `--qa-prompt-file` | (空) | 将本地 UTF-8 文件追加到所选 profile 的 system prompt；`summary.json` 和 resume manifest 仅记录文件名和 SHA-256 |
 | `--checkpoint-interval` | `10` | 每完成 N 题写一次 `qa_results.checkpoint.csv`；0 表示关闭 |
 | `--resume` | (空) | **统一续跑**：从先前运行目录或 CSV 恢复——复用身份，跳过已完成 import batch（只补中断/缺失的），恢复健康 QA 答案，复用一致 Judge 判定；只跑缺失/失败部分。summary/blackbox 指标对合并后的整轮累计（token/延迟/精度不会只算本轮） |
 | `--reuse-memory-from` | (空) | 复用身份+已注入记忆、QA/Judge 全量重跑（指标只算本轮） |
 | `--concurrency` | `4` | QA 并发数 |
 | `--out-dir` | `results` | 结果目录 |
-| `--allow-diagnostics` | false | 导入未完成或 provenance 不一致仍继续；仅限诊断 |
 
 ### Judge 参数
 | 参数 | 默认值 | 说明 |

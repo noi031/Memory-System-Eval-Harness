@@ -18,7 +18,6 @@ agent 插件加载、记忆后端健康检查、日志收尾），每个数据�
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import logging
 import os
@@ -274,14 +273,6 @@ def build_locomo_parser(
         ),
     )
     qa.add_argument(
-        "--qa-prompt-file",
-        default="",
-        help=(
-            "Append a local UTF-8 text file to the selected profile's system "
-            "prompt; the file content is not copied into repository metadata"
-        ),
-    )
-    qa.add_argument(
         "--checkpoint-interval",
         type=int,
         default=10,
@@ -322,20 +313,6 @@ def build_locomo_parser(
         help="Persist partial Judge CSV after every N completed questions (0=off)",
     )
     return parser
-
-
-def load_qa_prompt_append(path_value: str) -> tuple[str, str, str]:
-    value = str(path_value or "").strip()
-    if not value:
-        return "", "", ""
-    path = Path(value).expanduser().resolve()
-    if not path.is_file():
-        raise ValueError(f"QA prompt file does not exist: {path}")
-    prompt = path.read_text(encoding="utf-8").strip()
-    if not prompt:
-        raise ValueError(f"QA prompt file is empty: {path}")
-    digest = hashlib.sha256(prompt.encode("utf-8")).hexdigest()
-    return prompt, digest, path.name
 
 
 def _load_prior_import_rows(resume_source: str) -> list[dict]:
@@ -412,12 +389,6 @@ def run_locomo(
         raise ValueError("judge concurrency must be >= 1")
     if args.judge_checkpoint_interval < 0:
         raise ValueError("judge checkpoint interval must be >= 0")
-
-    (
-        system_prompt_append,
-        system_prompt_append_sha256,
-        system_prompt_append_source,
-    ) = load_qa_prompt_append(args.qa_prompt_file)
 
     dataset_path = resolve_dataset_path("locomo", args.dataset_path)
     config.dataset_path = dataset_path
@@ -498,9 +469,6 @@ def run_locomo(
         top_k=config.top_k,
         memory_budget_chars=config.memory_budget_chars,
         tools_enabled=bool(getattr(args, "tool_calling", False)),
-        system_prompt_append=system_prompt_append,
-        system_prompt_append_sha256=system_prompt_append_sha256,
-        system_prompt_append_source=system_prompt_append_source,
         agent_options=agent_options,
     )
     qa_resume_manifest = build_qa_resume_manifest(
@@ -550,10 +518,7 @@ def run_locomo(
         import_report.total,
     )
     try:
-        require_complete_imports(
-            import_report.rows,
-            allow_incomplete=args.allow_diagnostics,
-        )
+        require_complete_imports(import_report.rows)
     except RuntimeError as exc:
         run.save_summary({
             "status": "failed",
@@ -586,15 +551,11 @@ def run_locomo(
         memory_provenance["expected_session_count"],
         provenance_path,
     )
-    if (
-        memory_provenance["status"] != "matched"
-        and not args.allow_diagnostics
-    ):
+    if memory_provenance["status"] != "matched":
         message = (
             "EchoMemory provenance mismatch: expected "
             f"{memory_provenance['expected_session_count']} sessions but found "
-            f"{memory_provenance['actual_session_count']}; use "
-            "--allow-diagnostics only for diagnostics"
+            f"{memory_provenance['actual_session_count']}"
         )
         run.save_summary({
             "status": "failed",
@@ -1034,10 +995,7 @@ def run_hotpotqa(
             len(import_report.document_path_titles),
         )
     try:
-        require_complete_imports(
-            import_report.rows,
-            allow_incomplete=args.allow_diagnostics,
-        )
+        require_complete_imports(import_report.rows)
     except RuntimeError as exc:
         run.save_summary({
             "status": "failed",
@@ -1446,10 +1404,7 @@ def run_longmemeval(
         import_report.total,
     )
     try:
-        require_complete_imports(
-            import_report.rows,
-            allow_incomplete=args.allow_diagnostics,
-        )
+        require_complete_imports(import_report.rows)
     except RuntimeError as exc:
         run.save_summary({
             "status": "failed",

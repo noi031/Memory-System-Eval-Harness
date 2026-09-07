@@ -396,9 +396,6 @@ class VikingBotPlugin(AgentPlugin):
             "retrieval_uri_dedup": self._retrieval_uri_dedup,
             "search_tool_target_uri_schema": self._search_tool_target_uri_schema,
             "tools_enabled": self._tool_calling,
-            "system_prompt_append": extra.get("system_prompt_append", ""),
-            "system_prompt_append_sha256": extra.get("system_prompt_append_sha256", ""),
-            "system_prompt_append_source": extra.get("system_prompt_append_source", ""),
         }
         for key, val in config_fields.items():
             if val is not None:
@@ -424,10 +421,7 @@ class VikingBotPlugin(AgentPlugin):
         kwargs["path_title_map"] = self.path_title_map
         kwargs["user_memory_budget_chars"] = self._docs_memory_budget_chars
         kwargs["agent_memory_budget_chars"] = self._docs_memory_budget_chars
-        existing_append = (extra.get("system_prompt_append") or "").strip()
-        kwargs["system_prompt_append"] = "\n\n".join(
-            part for part in (existing_append, _BENCHMARK_ANSWER_APPEND) if part
-        )
+        kwargs["system_prompt_append"] = _BENCHMARK_ANSWER_APPEND
         qa = answer_one_vikingbot_question(self.memory_client, self._llm, **kwargs)
         return AgentResponse(
             text=qa.response,
@@ -458,7 +452,7 @@ class VikingBotPlugin(AgentPlugin):
         """Send a question and receive the agent's response.
 
         *extra* carries benchmark context (question_id, question, answer,
-        question_time, sample_id, category, system_prompt_append).  All
+        question_time, sample_id, category).  All
         agent-level configuration is read from instance attributes set
         in setup().  In document mode (``--import-mode documents``) the
         shared document corpus is retrieved; with tools enabled this runs
@@ -471,11 +465,8 @@ class VikingBotPlugin(AgentPlugin):
                 return self._answer_documents_with_tools(message, extra)
             return self._send_documents(message, extra)
 
-        existing_append = (extra.get("system_prompt_append") or "").strip()
         kwargs = self._answer_kwargs(message, extra)
-        kwargs["system_prompt_append"] = "\n\n".join(
-            part for part in (existing_append, _BENCHMARK_ANSWER_APPEND) if part
-        )
+        kwargs["system_prompt_append"] = _BENCHMARK_ANSWER_APPEND
         qa = answer_one_vikingbot_question(
             self.memory_client,
             self._llm,

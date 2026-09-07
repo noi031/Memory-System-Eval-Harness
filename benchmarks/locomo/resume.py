@@ -77,9 +77,6 @@ def build_qa_resume_manifest(
                 "memory_budget_chars": options.memory_budget_chars,
                 "tools_enabled": options.tools_enabled,
                 "checkpoint_interval": options.checkpoint_interval,
-                "system_prompt_append_sha256": (
-                    options.system_prompt_append_sha256
-                ),
                 "agent_options": options.agent_options,
             },
             "files": contract_files,
@@ -105,12 +102,6 @@ def build_qa_resume_manifest(
             "memory_budget_chars": config.memory_budget_chars,
             "tools_enabled": options.tools_enabled,
             "question_timeout_s": config.question_timeout_s,
-            "system_prompt_append_sha256": (
-                options.system_prompt_append_sha256
-            ),
-            "system_prompt_append_source": (
-                options.system_prompt_append_source
-            ),
             "agent_options": options.agent_options,
         },
         "qa_contract": {

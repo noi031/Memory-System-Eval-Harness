@@ -13,6 +13,7 @@ seed / acceptance 求值。
 from __future__ import annotations
 
 import csv
+import json
 import time
 from pathlib import Path
 from typing import Any
@@ -190,6 +191,13 @@ def run_case(
         summary = result["summary"]
         details = summary.setdefault("details", {})
         details["pr421_metric_coverage"] = metric_coverage(monitor, started, time.time())
+        # coverage 在通用层写盘 summary.json 之后才算出，必须同步写回，
+        # 保证磁盘 summary 与内存一致（--resume / rebuild_report 都以
+        # 磁盘 summary.json 为唯一数据源）。
+        (case_dir / "summary.json").write_text(
+            json.dumps(summary, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
     return result
 
 

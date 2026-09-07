@@ -85,7 +85,6 @@ python run_eval.py --dataset hotpotqa \
 | `--resume` | (空) | **统一续跑**：复用先前运行身份，跳过已完成 import batch（只补中断/缺失的），恢复健康 QA 答案；只跑缺失/失败部分。summary 指标对合并后的整轮累计 |
 | `--reuse-memory-from` | (空) | 复用先前运行的**记忆**（身份 + 已导入语料），但**全新重跑全部 QA**。documents 模式不重新注入语料，仅从数据集重建 path→title 映射。适合改完记忆算法/LLM 后在同一语料上重测 |
 | `--out-dir` | `results` | 结果目录 |
-| `--allow-diagnostics` | false | 导入未完成仍继续，仅限诊断 |
 
 ### 插件参数 (LLM / QA / 记忆后端 / 插件特有)
 
@@ -93,7 +92,7 @@ HotpotQA 默认使用 `vikingbot` 插件。LLM 凭据、QA 检索行为、记忆
 和 VikingBot 特有参数均由插件声明，不由 benchmark `run_eval` 直接定义。
 
 benchmark 只定义数据集参数、评测基础设施参数 (`--concurrency`、`--checkpoint-interval`、
-`--resume`、`--out-dir`、`--allow-diagnostics`) 和本数据集特有的 `--import-mode`。切换
+`--resume`、`--out-dir`) 和本数据集特有的 `--import-mode`。切换
 `--agent-plugin` 后可用参数会变化，使用 `--help` 查看。
 
 参数归属的完整设计说明见 `benchmarks/doc/设计意图.md`。

@@ -13,7 +13,7 @@ and dynamic run_eval. It provides:
     their add_arguments() to declare LLM and QA behavior params. Benchmark
     run_eval does NOT call these directly.
   - add_eval_args: declares benchmark-infra params (--concurrency,
-    --out-dir, --allow-diagnostics). Called by every run_eval.
+    --out-dir). Called by every run_eval.
   - add_judge_args: declares the three judge-LLM params shared by all
     benchmarks that use LLM-based judging. Called by benchmark run_eval.
   - resolve_llm_credentials: complementary fallback between two sets of
@@ -251,18 +251,11 @@ def add_qa_args(parser) -> None:
 def add_eval_args(parser) -> None:
     """Add benchmark infrastructure args shared by all run_eval scripts.
 
-    Declares --concurrency, --out-dir, and --allow-diagnostics (continue
-    past incomplete imports or memory provenance mismatches for diagnostic
-    runs).
+    Declares --concurrency and --out-dir.
     """
     g = parser.add_argument_group("Evaluation")
     g.add_argument("--concurrency", type=int, default=4, help="Number of concurrent QA tasks")
     g.add_argument("--out-dir", default="results", help="Results root directory")
-    g.add_argument(
-        "--allow-diagnostics",
-        action="store_true",
-        help="Continue past incomplete memory imports or provenance mismatches (diagnostics only)",
-    )
 
 
 def add_judge_args(parser) -> None:

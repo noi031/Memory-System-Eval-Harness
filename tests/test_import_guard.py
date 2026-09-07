@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 
-from shared.import_guard import incomplete_imports, require_complete_imports
+from shared.import_guard import require_complete_imports
 
 
 class ImportGuardTests(unittest.TestCase):
@@ -14,11 +14,6 @@ class ImportGuardTests(unittest.TestCase):
         rows = [{"sample_id": "conv-30", "status": "timeout"}]
         with self.assertRaisesRegex(RuntimeError, "conv-30=timeout"):
             require_complete_imports(rows)
-
-    def test_allows_explicit_diagnostic_mode(self) -> None:
-        rows = [{"sample_id": "conv-30", "status": "timeout"}]
-        require_complete_imports(rows, allow_incomplete=True)
-        self.assertEqual(rows, incomplete_imports(rows))
 
 
 if __name__ == "__main__":

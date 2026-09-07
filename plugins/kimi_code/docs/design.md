@@ -51,9 +51,8 @@ harness_session_id -> kimi_session_id
 1. 非零退出码：返回 `AgentResponse(error=stderr)`，不抛异常
 2. 超时：返回 `AgentResponse(error="kimi timed out after Ns", extra={"timed_out": True})`
 3. `extra=None`：容错为 `{}`
-4. `system_prompt_append`：从 extra 取出，拼到消息前面
-5. `question_timeout_s`：从 extra 取，传给 runner
-6. 默认无 memory backend -> `NullMemoryClient`，`inject_memories` 自动 no-op
+4. `question_timeout_s`：从 extra 取，传给 runner
+5. 默认无 memory backend -> `NullMemoryClient`，`inject_memories` 自动 no-op
 
 ## 边界条件
 

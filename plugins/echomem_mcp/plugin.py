@@ -718,9 +718,6 @@ class EchoMemMCPPlugin(AgentPlugin):
             )
         else:
             system_prompt = _SYSTEM_PROMPT if self._tool_calling else _NO_TOOLS_SYSTEM_PROMPT
-        prompt_append = str(extra.get("system_prompt_append") or "").strip()
-        if prompt_append:
-            system_prompt += "\n\nAdditional evaluation instructions:\n" + prompt_append
         messages: list[dict[str, Any]] = [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": f"{time_context}{message}"},

@@ -43,6 +43,13 @@
   无需额外包装层。
 - **CLI 参数驱动**：所有连接地址、模型配置、记忆后端、插件选择通过 CLI 参数
  传入，可写在 `.bat` / `.sh` 脚本中固化。环境变量作为默认值，CLI 参数覆盖。
+- **Skill 交互式产品说明**：`benchmarks/skills/`（`locomo` / `hotpotqa` /
+  `longmemeval`）、`dynamic/skills/`（`dynamic`）与 `performance/skills` 提供以
+  skill 形式编写的交互式操作手册。AI 助手收到「跑评测 / 压测」请求时加载对应
+  `SKILL.md`：
+  先列出该数据集全部可配置参数，逐项向用户追问并解释参数含义、给出默认/推荐值
+  （不替用户拍板），再生成评测命令并执行、交付结果。人类用户也可直接阅读
+  `SKILL.md` 当作带参数说明的操作手册。
 - **预检**：评测启动时自动验证数据集、记忆后端连通性和模型配置，通过后才进入
   正式评测流程。
 
@@ -94,6 +101,7 @@ benchmarks/                 # 静态数据集评测
   hotpotqa/                 #   HotpotQA: F1/EM 官方指标
   longmemeval/              #   LongMemEval: LLM yes/no accuracy
   doc/                      #   benchmark 通用文档
+  skills/                   #   交互式 skill 操作手册（locomo / hotpotqa / longmemeval）
 dynamic/                    # 动态评测 (generate / replay)
   workflows.py              #   generate / replay 工作流
   simulator.py              #   场景与查询生成
@@ -102,6 +110,7 @@ dynamic/                    # 动态评测 (generate / replay)
   model_client.py           #   动态 LLM 客户端
   prompt_config.py          #   prompt 配置加载
   configs/                  #   evaluator / user_simulator YAML 配置
+  skills/                   #   交互式 skill 操作手册（dynamic）
   results/                  #   运行结果
 performance/        # 性能压测与正式验收（多租户并发读写、注入/检索延迟、CPU/RSS、O1-O7）
   engine.py                  #   通用场景引擎（场景=Python 文件，画像=YAML）
@@ -124,6 +133,7 @@ performance/        # 性能压测与正式验收（多租户并发读写、注�
     main.py                  #   通用场景引擎 CLI（python -m performance --target general：run / validate / probe / list）
     scenes/                  #   通用场景（不针对具体系统的临时压测放这里，结果落到 results/）
     probes/                  #   通用探针
+  skills/echomem-stress/     #   正式压测交互式 skill 操作手册
 
 正式套件的 barrier 场景会在正式提交屏障前只执行少量 seed warm-up；
 屏障本身会按场景配置单独准备精确数量的未提交 session。不要把
@@ -261,7 +271,6 @@ python run_eval.py --dataset <locomo|hotpotqa|longmemeval|dynamic> \
 | `--question-timeout-s` | `120`（`0`=不额外限制） | 每题检索 + 回答超时（秒） |
 | `--concurrency` | `4`（`dynamic` 不适用） | QA 并发数 |
 | `--out-dir` | `results` | 结果根目录 |
-| `--allow-diagnostics` | 关 | 诊断运行：跳过不完整导入 / provenance 不匹配 |
 | `--judge-model` / `--judge-api-key` / `--judge-base-url` | 默认同 `--llm-*` | Judge LLM（仅 `locomo` / `longmemeval`） |
 | `--memory-backend` | `echomem` / `openviking`，默认 `echomem` | 记忆后端（`vikingbot` / `echo_agent` 支持） |
 | `--echomem-url` | 默认 `http://127.0.0.1:8010` | 记忆后端地址 |
@@ -282,7 +291,6 @@ python run_eval.py --dataset <locomo|hotpotqa|longmemeval|dynamic> \
 | `--session-mode` | `auto` / `locomo` / `single`，默认 `auto` | 会话组织方式 |
 | `--max-sessions` | `0`=全部 | 每个 sample 最多导入的原始 session 数 |
 | `--qa-profile` | `vikingboat0411` / `vikingboat0411-natural-no-tools`，默认按 `--tool-calling` 推断 | QA 执行 profile |
-| `--qa-prompt-file` | 空 | 追加到 system prompt 的文本文件 |
 | `--checkpoint-interval` | `10`（`0`=关） | 每 N 题落盘 QA CSV |
 | `--resume` | 空 | 续跑（run 目录或 qa_results CSV） |
 | `--reuse-memory-from` | 空 | 复用身份 + 已导入记忆，QA/Judge 全量重跑 |

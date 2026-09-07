@@ -36,27 +36,12 @@ from benchmarks.locomo.resume import (
     write_judge_resume_manifest,
     write_qa_resume_manifest,
 )
-from run_eval import load_qa_prompt_append
 from shared.eval_base import EvalConfig
 from shared.qa import QAResult
 from plugins.base import AgentResponse
 
 
 class LocomoCliDefaultsTests(unittest.TestCase):
-    def test_local_prompt_file_is_hashed_without_embedding_path(self):
-        with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / "candidate.txt"
-            path.write_text("  local prompt experiment  \n", encoding="utf-8")
-
-            prompt, digest, source = load_qa_prompt_append(str(path))
-
-        self.assertEqual("local prompt experiment", prompt)
-        self.assertEqual(
-            hashlib.sha256(prompt.encode("utf-8")).hexdigest(),
-            digest,
-        )
-        self.assertEqual("candidate.txt", source)
-
     def test_vendored_locomo_dataset_has_expected_hash(self):
         dataset = (
             Path(__file__).resolve().parents[1]

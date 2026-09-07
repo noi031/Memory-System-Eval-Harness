@@ -383,9 +383,8 @@ class KimiCodePlugin(AgentPlugin):
     ) -> AgentResponse:
         extra = extra or {}
         timeout_s = extra.get("question_timeout_s", self._runner.default_timeout_s)
-        system_append = extra.get("system_prompt_append", "")
 
-        full_message = f"{system_append}\n\n{message}" if system_append else message
+        full_message = message
 
         args = ["-p", full_message, "--output-format", "stream-json"]
         if self._model:

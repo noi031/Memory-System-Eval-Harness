@@ -314,8 +314,6 @@ def answer_one_vikingbot_question(
     search_tool_target_uri_schema: bool = False,
     tools_enabled: bool = True,
     system_prompt_append: str = "",
-    system_prompt_append_sha256: str = "",
-    system_prompt_append_source: str = "",
     search_resources_mode: bool = False,
     path_title_map: dict[str, str] | None = None,
 ) -> QAResult:
@@ -415,8 +413,6 @@ def answer_one_vikingbot_question(
             ),
             "tools_enabled": tools_enabled,
             "search_resources_mode": search_resources_mode,
-            "system_prompt_append_sha256": system_prompt_append_sha256,
-            "system_prompt_append_source": system_prompt_append_source,
         },
         "model_request": {
             "base_url": llm.base_url.rstrip("/"),

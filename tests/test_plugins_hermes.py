@@ -325,19 +325,6 @@ class HermesSendMessageTests(unittest.TestCase):
         resp = plugin.send_message("s1", "hi", extra=None)
         self.assertIsInstance(resp, AgentResponse)
 
-    def test_system_prompt_append_prepended(self):
-        runner = _FakeRunner([CLIRunResult(
-            stdout=_hermes_output("ok"), stderr="", returncode=0, elapsed_s=0.01,
-        )])
-        plugin = _make_plugin(runner=runner)
-        plugin.send_message("s1", "question", extra={"system_prompt_append": "You are a math expert."})
-
-        args = runner.calls[0]["args"]
-        # args = ["chat", "-q", <full_message>, "-Q", "--yolo", "--source", "tool"]
-        message = args[2]
-        self.assertTrue(message.startswith("You are a math expert."))
-        self.assertIn("question", message)
-
     def test_question_timeout_passed_to_runner(self):
         runner = _FakeRunner([CLIRunResult(
             stdout=_hermes_output("ok"), stderr="", returncode=0, elapsed_s=0.01,
