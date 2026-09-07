@@ -8,6 +8,7 @@ import pytest
 
 from performance.engine import Engine, SceneError, SceneModule, load_scene, split_workers
 from performance.profile import Profile, TargetSpec, load_profile
+from performance.targets.echomem.protocol import task_read
 
 
 def _scene(*, tasks: dict | None = None, task=None, schedule=None, name="test") -> SceneModule:
@@ -70,6 +71,16 @@ def test_single_task_run(server):
     assert result.records
     assert all(r.status == "ok" for r in result.records)
     assert result.elapsed_s > 0
+
+
+def test_search_request_carries_agent_id(server):
+    """回归：/api/retrieval/search 必须携带非空 agent_id（EchoMem require_text 校验）。"""
+    httpd, state, base_url = server
+    profile = _profile(base_url, workers=2, duration_s=1.5, mix={"read": 1})
+    result = Engine(profile, _scene(tasks={"read": task_read})).run()
+    assert result.records
+    assert state.search_agent_ids, "no search request reached the server"
+    assert all(aid == "default" for aid in state.search_agent_ids)
 
 
 def test_worker_ids_and_tenant_binding(server):

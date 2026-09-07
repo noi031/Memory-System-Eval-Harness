@@ -246,6 +246,7 @@ def run_suite(
     base_url: str = "",
     timeout_s: float = 120.0,
     scenarios: list[str] | None = None,
+    resume: bool = False,
 ) -> dict:
     """执行单个 instance profile 的正式套件（通用编排 + echomem 钩子）。
 
@@ -253,7 +254,8 @@ def run_suite(
     ``performance.suite.run_suite``；这里传入 echomem 的 case 选择、Profile
     构造（auth_headers 恒为空，租户凭据由灌种上下文按 case 覆盖）、单 case
     执行、preflight/seed/acceptance 钩子。``metrics_enabled`` 控制 case 级
-    服务端 /metrics 采样。
+    服务端 /metrics 采样。``resume`` 为 True 时跳过已有 summary.json 的
+    case，历史 run 合并进最终 suite.json（语义见通用层）。
     """
     metrics_enabled = bool(profile.get("metrics_enabled", True))
 
@@ -271,6 +273,7 @@ def run_suite(
         timeout_s=timeout_s,
         scenarios=scenarios,
         quick=quick,
+        resume=resume,
         select_cases=select_cases,
         build_profile=lambda case, url, tenant_count, q: build_case_profile(
             case, base_url=url, tenant_count=tenant_count, auth_headers={}, quick=q

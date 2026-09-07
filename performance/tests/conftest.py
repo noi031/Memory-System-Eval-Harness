@@ -42,6 +42,7 @@ class MockState:
         self.archives = itertools.count(1)
         self.poll_counts: dict[tuple[str, str], int] = {}
         self.search_queries: list[str] = []
+        self.search_agent_ids: list[str] = []
         self.connections = 0
 
 
@@ -117,6 +118,7 @@ def _make_handler(state: MockState):
             if path == "/api/retrieval/search":
                 query = body.get("query", "")
                 state.search_queries.append(query)
+                state.search_agent_ids.append(str(body.get("agent_id", "")))
                 result: dict = {}
                 if not state.search_empty:
                     result["items"] = [{"text": f"recalled {query}"}]

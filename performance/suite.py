@@ -37,6 +37,14 @@ def _seconds(stage_ms: float) -> float:
     return stage_ms / 1000.0
 
 
+_FS_UNSAFE_CHARS = str.maketrans({c: "_" for c in '<>:"/\\|?*'})
+
+
+def _fs_safe_label(label: str) -> str:
+    """把 case 标签转为文件系统安全的目录名（Windows 不允许 ``:`` 等字符）。"""
+    return label.translate(_FS_UNSAFE_CHARS)
+
+
 def _rate_limited(record: RequestRecord) -> bool:
     """限流样本：http_4xx 且带 Retry-After 或 reason_code。"""
     return (
@@ -353,6 +361,40 @@ def _finalize_suite(manifest: dict, suite_dir: Path) -> dict:
     return manifest
 
 
+def _load_completed_run(
+    case: dict, case_dir: Path, timeout_s: float | None
+) -> dict | None:
+    """从已有 case 目录重建 run dict；summary.json 缺失/损坏时返回 None。
+
+    resume 模式用它跳过已完成的 case：run 的状态信息只在 suite.json 里，
+    case 目录唯一可靠信号是 run_case 收尾写下的 summary.json（含 metrics
+    契约摘要）。重建字段与 ``run_case`` 的返回结构一致，使历史 run 能
+    直接合并进 manifest，保证 O1-O7 求值证据完整。
+    """
+    summary_path = case_dir / "summary.json"
+    if not summary_path.is_file():
+        return None
+    try:
+        summary = json.loads(summary_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(summary, dict):
+        return None
+    return {
+        "scenario": case["label"],
+        "scenario_label": case["label"],
+        "scene": case["scene"],
+        "repetition": 1,
+        "policy": "server-observe",
+        "status": "completed",
+        "duration_s": float(case.get("duration_s") or 0),
+        "case_timeout_s": float(timeout_s or 0),
+        "runner_timeout": False,
+        "output_dir": str(case_dir.resolve()),
+        "summary": summary,
+    }
+
+
 def run_suite(
     profile: dict,
     *,
@@ -362,6 +404,7 @@ def run_suite(
     timeout_s: float = 120.0,
     scenarios: list[str] | None = None,
     quick: QuickSpec | None = None,
+    resume: bool = False,
     select_cases: Callable[[str, list[str] | None], list[dict]],
     build_profile: Callable[[dict, str, int, QuickSpec | None], Profile],
     run_case: Callable[[dict, Profile, Path, float | None], dict],
@@ -381,6 +424,10 @@ def run_suite(
     max_tenants, sessions, messages) 返回 (contexts, seed 摘要)；``evaluate``
     收 manifest 返回 acceptance 摘要。各阶段失败按 prepare/preflight/seed
     段记录并提前返回（仍写 suite.json / acceptance.json）。
+
+    ``resume`` 为 True 时跳过已完成的 case（case 目录含可解析的
+    summary.json），把其历史 run 重建后合并进 manifest，从第一个未完成
+    的 case 继续执行；suite.json 因此同时包含历史与本次的 runs。
     """
     suite_dir = Path(suite_dir)
     suite_dir.mkdir(parents=True, exist_ok=True)
@@ -430,11 +477,17 @@ def run_suite(
         manifest["preflight"] = {"status": "NOT_RUN", "config": preflight_config}
 
     contexts = None
-    seed_sessions = max(int(case.get("sessions_per_tenant", 1)) for case in cases)
+    seed_sessions = int(
+        profile.get("seed_sessions")
+        or max(int(case.get("sessions_per_tenant", 1)) for case in cases)
+    )
     include_seed = bool(profile.get("quick_include_seed"))
     if quick is not None and not include_seed and not quick.include_seed:
         seed_sessions = min(seed_sessions, 1)
-    seed_messages = max(int(case.get("messages_per_session", 3)) for case in cases)
+    seed_messages = int(
+        profile.get("seed_messages")
+        or max(int(case.get("messages_per_session", 3)) for case in cases)
+    )
     tenant_config = profile.get("tenant_config")
     if tenant_config and seed is not None:
         try:
@@ -453,6 +506,12 @@ def run_suite(
         manifest["seed"] = {"status": "skipped", "reason": "no tenant_config"}
 
     for case in cases:
+        case_dir = suite_dir / _fs_safe_label(case["label"])
+        if resume:
+            completed_run = _load_completed_run(case, case_dir, timeout_s)
+            if completed_run is not None:
+                manifest["runs"].append(completed_run)
+                continue
         tenant_count = case["tenants"]
         case_profile = build_profile(case, base_url, tenant_count, quick)
         if contexts:
@@ -469,7 +528,7 @@ def run_suite(
             ]
         run = run_case(
             case, case_profile,
-            case_dir=suite_dir / case["label"], timeout_s=timeout_s,
+            case_dir=case_dir, timeout_s=timeout_s,
         )
         manifest["runs"].append(run)
 

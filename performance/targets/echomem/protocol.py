@@ -51,7 +51,7 @@ def search(ctx: Ctx, query: str, *, top_k: int = 5) -> Response:
         "/api/retrieval/search",
         body={
             "query": query,
-            "agent_id": "",
+            "agent_id": str(ctx.params.get("agent_id", "default")),
             "limit": top_k,
             "include_explain": True,
             "include_debug": True,

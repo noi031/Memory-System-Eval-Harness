@@ -6,7 +6,12 @@ import json
 
 from performance.profile import LoadSpec, Profile, TargetSpec
 from performance.records import RequestRecord
-from performance.suite import run_case, summarize_case_records
+from performance.suite import (
+    _fs_safe_label,
+    run_case,
+    run_suite,
+    summarize_case_records,
+)
 
 
 def _record(**overrides):
@@ -117,6 +122,15 @@ def test_summarize_empty_records():
     assert summary["metrics"]["per_tenant"] == {}
 
 
+# -- fs-safe label --------------------------------------------------------
+
+
+def test_fs_safe_label_replaces_windows_illegal_chars():
+    assert _fs_safe_label("C8:1@1") == "C8_1@1"
+    assert _fs_safe_label("a/b?c*d") == "a_b_c_d"
+    assert _fs_safe_label("plain@1") == "plain@1"
+
+
 # -- run_case ------------------------------------------------------------
 
 
@@ -154,3 +168,127 @@ def test_run_case_writes_outputs_and_hooks(tmp_path):
     assert summary["details"] == {"custom": True}
     assert summary["metrics"]["search"]["submitted"] > 0
     assert summary["metrics"]["commit"]["completed"] > 0
+
+
+# -- run_suite resume ----------------------------------------------------
+
+
+def _suite_cases():
+    return [
+        {"label": "c1", "scene": "scene_generic", "tenants": 1, "duration_s": 1.0},
+        {"label": "c2", "scene": "scene_generic", "tenants": 1, "duration_s": 1.0},
+    ]
+
+
+def _select_cases(profile_name, scenarios):
+    cases = _suite_cases()
+    if scenarios is None:
+        return cases
+    return [case for case in cases if case["label"] in scenarios]
+
+
+def _build_profile(case, base_url, tenant_count, quick):
+    return _profile()
+
+
+def _make_stub_run_case(calls: list[str]):
+    """把每次执行记进 calls，并按 run_case 语义写 summary.json。"""
+
+    def _run_case(case, profile, *, case_dir, timeout_s):
+        calls.append(case["label"])
+        case_dir.mkdir(parents=True, exist_ok=True)
+        summary = {
+            "metrics": {"search": {"submitted": 1}, "commit": {"submitted": 0}},
+            "marker": f'{case["label"]}-{len(calls)}',
+        }
+        (case_dir / "summary.json").write_text(
+            json.dumps(summary, ensure_ascii=False), encoding="utf-8"
+        )
+        return {
+            "scenario": case["label"],
+            "scenario_label": case["label"],
+            "scene": case["scene"],
+            "repetition": 1,
+            "policy": "server-observe",
+            "status": "completed",
+            "duration_s": 0.0,
+            "case_timeout_s": 0.0,
+            "runner_timeout": False,
+            "output_dir": str(case_dir.resolve()),
+            "summary": summary,
+        }
+
+    return _run_case
+
+
+def test_run_suite_resume_skips_completed_cases(tmp_path):
+    calls: list[str] = []
+    suite_dir = tmp_path / "suite"
+    kwargs = {
+        "profile": {"name": "test"},
+        "suite_dir": suite_dir,
+        "profile_name": "test",
+        "base_url": "http://127.0.0.1:8010",
+        "timeout_s": 30.0,
+        "select_cases": _select_cases,
+        "build_profile": _build_profile,
+        "run_case": _make_stub_run_case(calls),
+    }
+    # 第一轮只跑完 c1（模拟中断：c2 及之后未执行）。
+    manifest = run_suite(**kwargs, scenarios=["c1"])
+    assert calls == ["c1"]
+    assert [run["scenario"] for run in manifest["runs"]] == ["c1"]
+
+    # 第二轮 resume 跑完整场景列表：c1 跳过（已有 summary.json），c2 执行。
+    calls.clear()
+    manifest = run_suite(**kwargs, scenarios=["c1", "c2"], resume=True)
+    assert calls == ["c2"]
+    assert [run["scenario"] for run in manifest["runs"]] == ["c1", "c2"]
+    assert all(run["status"] == "completed" for run in manifest["runs"])
+    # c1 的历史 run 从盘上重建，保留首次执行的 marker。
+    assert manifest["runs"][0]["summary"]["marker"] == "c1-1"
+    # suite.json 写盘包含合并后的两条。
+    written = json.loads((suite_dir / "suite.json").read_text(encoding="utf-8"))
+    assert [run["scenario"] for run in written["runs"]] == ["c1", "c2"]
+
+
+def test_run_suite_without_resume_reruns_all(tmp_path):
+    calls: list[str] = []
+    kwargs = {
+        "profile": {"name": "test"},
+        "suite_dir": tmp_path / "suite",
+        "profile_name": "test",
+        "base_url": "http://127.0.0.1:8010",
+        "timeout_s": 30.0,
+        "scenarios": ["c1", "c2"],
+        "select_cases": _select_cases,
+        "build_profile": _build_profile,
+        "run_case": _make_stub_run_case(calls),
+    }
+    run_suite(**kwargs)
+    assert calls == ["c1", "c2"]
+    calls.clear()
+    run_suite(**kwargs)  # resume 缺省 False → 全部重跑
+    assert calls == ["c1", "c2"]
+
+
+def test_resume_skips_only_parseable_summary(tmp_path):
+    calls: list[str] = []
+    suite_dir = tmp_path / "suite"
+    (suite_dir / "c1").mkdir(parents=True)
+    (suite_dir / "c1" / "summary.json").write_text("{not json", encoding="utf-8")
+    manifest = run_suite(
+        profile={"name": "test"},
+        suite_dir=suite_dir,
+        profile_name="test",
+        base_url="http://127.0.0.1:8010",
+        timeout_s=30.0,
+        scenarios=["c1", "c2"],
+        select_cases=_select_cases,
+        build_profile=_build_profile,
+        run_case=_make_stub_run_case(calls),
+        resume=True,
+    )
+    # summary.json 损坏的 c1 视为未完成，重新执行。
+    assert calls == ["c1", "c2"]
+    assert [run["scenario"] for run in manifest["runs"]] == ["c1", "c2"]

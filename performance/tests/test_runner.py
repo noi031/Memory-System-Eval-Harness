@@ -245,3 +245,55 @@ def test_run_suite_no_tenant_config(server, tmp_path):
     assert manifest["seed"]["status"] == "skipped"
     assert manifest["runs"][0]["status"] == "completed"
     assert manifest["runs"][0]["summary"]["metrics"]["search"]["submitted"] > 0
+
+
+def test_run_suite_resume_merges_completed_runs(server, tmp_path):
+    """resume=True：已完成的 case 不再执行，历史 run 合并进 manifest。"""
+    _, _, base_url = server
+    tenants_path = tmp_path / "tenants.json"
+    tenants_path.write_text(
+        json.dumps({"tenants": [{"tenant_id": "t1", "auth_key": "k1"}]}),
+        encoding="utf-8",
+    )
+    profile = {
+        "name": "test-instance",
+        "base_url": base_url,
+        "tenant_config": str(tenants_path),
+    }
+    suite_dir = tmp_path / "suite"
+    # 第一轮只跑完 baseline（模拟中断：mixed 及之后未执行）。
+    run_suite(
+        profile,
+        suite_dir=suite_dir,
+        quick=QuickSpec(duration_cap_s=1.5),
+        profile_name="4u8g",
+        base_url=base_url,
+        timeout_s=60.0,
+        scenarios=["baseline"],
+    )
+    baseline_dir = suite_dir / "baseline"
+    baseline_before = (
+        baseline_dir / "summary.json"
+    ).read_text(encoding="utf-8")
+
+    # 第二轮 resume 跑完整场景列表：baseline 跳过，mixed 执行。
+    manifest = run_suite(
+        profile,
+        suite_dir=suite_dir,
+        quick=QuickSpec(duration_cap_s=1.5),
+        profile_name="4u8g",
+        base_url=base_url,
+        timeout_s=60.0,
+        scenarios=["baseline", "mixed"],
+        resume=True,
+    )
+    assert [run["scenario"] for run in manifest["runs"]] == ["baseline", "mixed"]
+    assert all(run["status"] == "completed" for run in manifest["runs"])
+    # baseline 未重跑：summary.json 内容原样保留，mixed 有本次结果。
+    assert (
+        baseline_dir / "summary.json"
+    ).read_text(encoding="utf-8") == baseline_before
+    assert (suite_dir / "mixed" / "summary.json").is_file()
+    # suite.json 写盘包含合并后的两条。
+    written = json.loads((suite_dir / "suite.json").read_text(encoding="utf-8"))
+    assert [run["scenario"] for run in written["runs"]] == ["baseline", "mixed"]

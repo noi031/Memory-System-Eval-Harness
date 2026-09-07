@@ -108,6 +108,14 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="quick 默认跳过真实模型灌种；打开后保留灌种",
     )
+    parser.add_argument(
+        "--resume",
+        action="store_true",
+        help=(
+            "跳过结果目录中已完成的场景（case 目录有 summary.json），"
+            "从第一个未完成场景继续；历史已完成的 run 合并进最终报告"
+        ),
+    )
     parser.add_argument("--timeout-s", type=float, default=7200.0)
     parser.add_argument(
         "--skip-run",
@@ -222,6 +230,7 @@ def main(argv: list[str] | None = None) -> int:
                     base_url=str(profile.get("base_url") or ""),
                     timeout_s=case_timeout,
                     scenarios=scenarios,
+                    resume=args.resume,
                 )
             else:
                 configured_suite = str(

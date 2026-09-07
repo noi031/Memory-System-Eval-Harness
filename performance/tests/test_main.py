@@ -189,3 +189,61 @@ def test_main_quick_mock(mock_server, tmp_path):
     for objective_id in ("O1", "O2", "O3", "O4", "O5", "O6", "O7"):
         assert objective_id in html
     assert "EchoMem 七项目标自动化验收" in html
+
+
+def test_main_resume_merges_prior_runs(mock_server, tmp_path):
+    """--resume：同一 out-dir 续跑时跳过已完成的场景并合并历史 run。"""
+    _, state, base_url = mock_server()
+    tenants_path = tmp_path / "tenants.json"
+    tenants_path.write_text(
+        json.dumps({"tenants": [{"tenant_id": "t1", "auth_key": "k1"}]}),
+        encoding="utf-8",
+    )
+    profiles_path = tmp_path / "instance-profiles.json"
+    profiles_path.write_text(
+        json.dumps(
+            {
+                "profiles": [
+                    {
+                        "name": "4U8G",
+                        "base_url": base_url,
+                        "tenant_config": str(tenants_path),
+                        "capability_probe": {
+                            "health_path": "/health",
+                            "metrics_path": "/metrics",
+                        },
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    out_dir = tmp_path / "out"
+    common = [
+        "--profiles", str(profiles_path),
+        "--profile", "4U8G",
+        "--out-dir", str(out_dir),
+        "--quick",
+        "--quick-duration-cap-s", "1.5",
+        "--quick-case-timeout-s", "30",
+        "--timeout-s", "60",
+    ]
+    # 第一轮只跑完 baseline（模拟中断：mixed 及之后未执行）。
+    assert main(common + ["--scenarios", "baseline"]) == 0
+    baseline_dir = out_dir / "4U8G" / "baseline"
+    baseline_before = (baseline_dir / "summary.json").read_text(encoding="utf-8")
+    first_search_count = len(state.search_queries)
+
+    # 第二轮 resume 跑完整场景列表：baseline 跳过，mixed 执行。
+    assert main(common + ["--scenarios", "baseline,mixed", "--resume"]) == 0
+
+    suite = json.loads((out_dir / "objective-suite.json").read_text(encoding="utf-8"))
+    profile = suite["profiles"][0]
+    assert profile["profile_execution_status"] == "completed"
+    assert profile["completed_runs"] == 2
+    assert profile["submitted_runs"] == 2
+    # baseline 未重跑：summary.json 原样保留；mixed 有本次结果。
+    assert (baseline_dir / "summary.json").read_text(encoding="utf-8") == baseline_before
+    assert (out_dir / "4U8G" / "mixed" / "summary.json").is_file()
+    # mixed 执行带来了新检索请求，而 baseline 的检索不再发生。
+    assert len(state.search_queries) > first_search_count
