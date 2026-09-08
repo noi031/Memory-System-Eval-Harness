@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import http.client
 import http.server
+import socket
 import threading
 import time
+from types import SimpleNamespace
 
 import pytest
 
@@ -14,6 +16,7 @@ from performance.ctx import (
     ConnectionRegistry,
     Ctx,
     Phase,
+    TransportError,
 )
 from performance.tests.conftest import MockState
 
@@ -339,6 +342,84 @@ def test_request_aborts_on_interrupt_while_body_stalled():
         release.set()
         httpd.shutdown()
         httpd.server_close()
+
+
+def test_request_aborts_on_interrupt_when_connection_close_detaches_socket():
+    """F-002：``Connection: close`` 响应把 sock 摘到响应句柄后，shutdown_all
+    仍能打断阻塞的 body 读取，worker 有界退出（不依赖服务端结束响应）。"""
+    release = threading.Event()
+
+    class CloseStallHandler(http.server.BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
+
+        def log_message(self, *args):
+            pass
+
+        def do_GET(self):
+            # ``Connection: close`` 让客户端 getresponse 把 sock 从连接上摘除
+            # （所有权转给响应句柄）；挂起 body 直到测试收尾释放。
+            self.send_response(200)
+            self.send_header("Content-Type", "application/octet-stream")
+            self.send_header("Content-Length", "4096")
+            self.send_header("Connection", "close")
+            self.end_headers()
+            release.wait(10)
+
+    httpd = _start_raw_server(CloseStallHandler)
+    try:
+        base_url = f"http://127.0.0.1:{httpd.server_port}"
+        interrupt = threading.Event()
+        registry = ConnectionRegistry()
+        ctx, records, _ = make_ctx(base_url, interrupt=interrupt, registry=registry)
+        outcome: dict = {}
+
+        def _run():
+            outcome["resp"] = ctx.get("/stall", op="stall")
+
+        worker = threading.Thread(target=_run)
+        worker.start()
+        time.sleep(0.3)  # 让请求进入 body 读取并阻塞（sock 已摘到响应句柄）
+        started = time.perf_counter()
+        interrupt.set()  # 模拟 case 超时后 Engine.stop() 的中断
+        registry.shutdown_all()  # body 仍挂起：shutdown 必须立即返回（F-002 有界停机）
+        shutdown_elapsed = time.perf_counter() - started
+        worker.join(2.0)
+        assert not worker.is_alive(), "响应摘除 sock 后停机仍应打断阻塞读"
+        assert shutdown_elapsed < 1.0, (
+            f"停机调用不应等待挂起的响应体（耗时 {shutdown_elapsed:.2f}s）"
+        )
+        resp = outcome["resp"]
+        assert resp.status == "error"
+        assert resp.record.error_type == "stopped"
+        assert len(registry) == 0, "worker 退出后注册表应回到基线"
+    finally:
+        release.set()
+        httpd.shutdown()
+        httpd.server_close()
+
+
+def test_registry_rejects_registration_after_shutdown():
+    """F-002：注册表停机后，迟到的连接/响应注册立即被关闭并拒绝（stopped）。"""
+    registry = ConnectionRegistry()
+    registry.shutdown_all()
+
+    left, right = socket.socketpair()
+    conn = http.client.HTTPConnection("127.0.0.1", 1)
+    conn.sock = left
+    with pytest.raises(TransportError) as excinfo:
+        registry.add(conn)
+    assert excinfo.value.error_type == "stopped"
+    assert left._closed, "停机后迟到注册的连接应被立即关闭"
+    assert len(registry) == 0
+
+    left2, right2 = socket.socketpair()
+    response = SimpleNamespace(fp=SimpleNamespace(raw=SimpleNamespace(_sock=left2)))
+    with pytest.raises(TransportError) as excinfo:
+        registry.register_response(response)
+    assert excinfo.value.error_type == "stopped"
+    assert left2.fileno() == -1, "停机后迟到的响应句柄应被立即取消"
+    right.close()
+    right2.close()
 
 
 def test_connection_registry_lifecycle():

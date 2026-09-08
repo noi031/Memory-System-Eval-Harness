@@ -414,3 +414,67 @@ def test_engine_stop_bounded_with_stalled_request():
         release.set()
         httpd.shutdown()
         httpd.server_close()
+
+
+def test_engine_stop_bounded_with_connection_close_stalled():
+    """F-002：``Connection: close`` 把 sock 摘到响应句柄的挂起响应，Engine.stop()
+    仍有界返回，worker 在窗口内退出（不依赖服务端结束响应）。"""
+    release = threading.Event()
+    arrived = threading.Event()
+
+    class CloseStallHandler(http.server.BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
+
+        def log_message(self, *args):
+            pass
+
+        def do_POST(self):
+            self.send_response(200)
+            self.send_header("Content-Type", "application/octet-stream")
+            self.send_header("Content-Length", "4096")
+            self.send_header("Connection", "close")
+            self.end_headers()
+            arrived.set()
+            release.wait(10)
+
+    httpd = http.server.ThreadingHTTPServer(("127.0.0.1", 0), CloseStallHandler)
+    server_thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+    server_thread.start()
+    try:
+        base_url = f"http://127.0.0.1:{httpd.server_port}"
+
+        def read(ctx):
+            ctx.post("/api/stall", op="stall")
+
+        profile = load_profile(
+            {
+                "name": "p",
+                "target": {"base_url": base_url, "read_timeout_s": 5},
+                "load": {"workers": 1, "duration_s": 30.0},
+            }
+        )
+        engine = Engine(profile, _scene(task=read))
+        holder: dict = {}
+
+        def _run():
+            holder["result"] = engine.run()
+
+        worker = threading.Thread(target=_run, daemon=True)
+        worker.start()
+        assert arrived.wait(2.0), "请求未到达服务端"
+        time.sleep(0.2)  # 让客户端进入 body 读取并阻塞（sock 已摘到响应句柄）
+        started = time.perf_counter()
+        engine.stop()
+        elapsed = time.perf_counter() - started
+        worker.join(2.0)
+        assert elapsed < 1.0, f"Engine.stop 不应等待挂起的响应体（耗时 {elapsed:.2f}s）"
+        assert not worker.is_alive(), "stop 后 worker 应在确认窗口内退出"
+        records = holder["result"].records
+        assert records
+        assert all(r.status == "error" and r.error_type == "stopped"
+                   for r in records)
+        assert len(engine._connections) == 0
+    finally:
+        release.set()
+        httpd.shutdown()
+        httpd.server_close()
