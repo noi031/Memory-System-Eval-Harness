@@ -673,6 +673,10 @@ def _cancel_socket(sock: Any) -> None:
             sock.close()
 
 
+# 建连阶段独立上限：保证停机确认窗口内即使 connect 阻塞也能结束。
+_CONNECT_TIMEOUT_CAP_S = 10.0
+
+
 def _reuse_connection(
     base_url: str, timeout_s: float, registry: ConnectionRegistry
 ) -> http.client.HTTPConnection:
@@ -680,12 +684,22 @@ def _reuse_connection(
     host = parsed.hostname or "127.0.0.1"
     port = parsed.port or (443 if parsed.scheme == "https" else 80)
     conn = getattr(_connection_local, "conn", None)
-    if conn is None or conn._reuse_key != (host, port):
+    if conn is None or conn._reuse_key != (host, port) or conn.sock is None:
         if parsed.scheme == "https":
             conn = http.client.HTTPSConnection(host, port, timeout=timeout_s)
         else:
             conn = http.client.HTTPConnection(host, port, timeout=timeout_s)
         conn._reuse_key = (host, port)
+        # 登记前先建连：注册表里不出现未连接连接——停机快照因此总能拿到
+        # socket 取消在途 I/O；停机后也不可能再经建连/重连路径发出请求
+        # （连接先于 add 建立，add 的关闭守卫拒绝停机后的迟到注册）。
+        # ``Connection: close`` 摘除 sock 的陈旧连接在此换新重建。
+        conn.timeout = min(timeout_s, _CONNECT_TIMEOUT_CAP_S)
+        conn.connect()
+        conn.timeout = timeout_s
+        if conn.sock is not None:
+            with contextlib.suppress(OSError):
+                conn.sock.settimeout(timeout_s)
         _connection_local.conn = conn
     registry.add(conn)
     return conn
@@ -744,7 +758,22 @@ def _do_request(
     for attempt in (0, 1):
         if interrupt is not None and interrupt.is_set():
             _stopped()
-        conn = _reuse_connection(base_url, timeout_s, registry)
+        try:
+            conn = _reuse_connection(base_url, timeout_s, registry)
+        except TimeoutError as exc:
+            # 建连超时：请求字节尚未发出，建连失败不会重复写。
+            _drop_connection(registry)
+            if interrupt is not None and interrupt.is_set():
+                _stopped()
+            raise _transport_fail("timeout") from exc
+        except (OSError, http.client.HTTPException) as exc:
+            # 建连失败（拒绝/不可达）：请求字节尚未发出，丢弃并重试一次。
+            _drop_connection(registry)
+            if interrupt is not None and interrupt.is_set():
+                _stopped()
+            if attempt == 0:
+                continue
+            raise _transport_fail("connection") from exc
         try:
             conn.request(method, url, body=payload, headers=request_headers)
         except TimeoutError as exc:

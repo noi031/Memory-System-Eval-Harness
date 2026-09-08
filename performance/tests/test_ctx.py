@@ -17,6 +17,8 @@ from performance.ctx import (
     Ctx,
     Phase,
     TransportError,
+    _drop_connection,
+    _reuse_connection,
 )
 from performance.tests.conftest import MockState
 
@@ -420,6 +422,18 @@ def test_registry_rejects_registration_after_shutdown():
     assert left2.fileno() == -1, "停机后迟到的响应句柄应被立即取消"
     right.close()
     right2.close()
+
+
+def test_reuse_connection_connects_before_registering(server):
+    """F-002：登记前必已建连——停机快照总能拿到 socket，杜绝停止后建连/重连发请求。"""
+    _, _, base_url = server
+    registry = ConnectionRegistry()
+    conn = _reuse_connection(base_url, 5.0, registry)
+    try:
+        assert conn.sock is not None, "登记前必须完成建连（不得出现未连接连接）"
+        assert len(registry) == 1
+    finally:
+        _drop_connection(registry)
 
 
 def test_connection_registry_lifecycle():

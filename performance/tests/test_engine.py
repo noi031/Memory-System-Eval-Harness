@@ -478,3 +478,73 @@ def test_engine_stop_bounded_with_connection_close_stalled():
         release.set()
         httpd.shutdown()
         httpd.server_close()
+
+
+def test_engine_stop_prevents_reconnect_after_connection_close():
+    """F-002：``Connection: close`` 后线程内连接已摘除 sock，stop 后的自动重连
+    不得发出请求——服务端收不到第二条请求，worker 有界退出。"""
+    requests_received: list[int] = []
+    proceed = threading.Event()
+
+    class CloseEveryHandler(http.server.BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
+
+        def log_message(self, *args):
+            pass
+
+        def do_POST(self):
+            length = int(self.headers.get("Content-Length", 0))
+            self.rfile.read(length)
+            requests_received.append(1)
+            body = b'{"ok":true}'
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Connection", "close")
+            self.end_headers()
+            self.wfile.write(body)
+
+    httpd = http.server.ThreadingHTTPServer(("127.0.0.1", 0), CloseEveryHandler)
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    try:
+        base_url = f"http://127.0.0.1:{httpd.server_port}"
+
+        def txn(ctx):
+            ctx.post("/api/a", op="first")
+            proceed.wait(10)
+            ctx.post("/api/b", op="second")
+
+        profile = load_profile(
+            {
+                "name": "p",
+                "target": {"base_url": base_url, "read_timeout_s": 5},
+                "load": {"workers": 1, "duration_s": 30.0},
+            }
+        )
+        engine = Engine(profile, _scene(task=txn))
+        holder: dict = {}
+
+        def _run():
+            holder["result"] = engine.run()
+
+        worker = threading.Thread(target=_run, daemon=True)
+        worker.start()
+        deadline = time.time() + 5.0
+        while len(requests_received) < 1 and time.time() < deadline:
+            time.sleep(0.02)
+        assert requests_received, "第一条请求未到达服务端"
+        engine.stop()  # 线程内连接已因 Connection: close 摘除 sock
+        proceed.set()  # 放行第二条请求 → 触发自动重连
+        worker.join(2.0)
+        assert not worker.is_alive(), "stop 后 worker 应在确认窗口内退出"
+        time.sleep(0.3)
+        assert len(requests_received) == 1, "stop 后不得发出任何请求"
+        records = holder["result"].records
+        ops = [(r.op, r.status, r.error_type) for r in records]
+        assert ("first", "ok", "") in ops
+        assert ("second", "error", "stopped") in ops
+        assert len(engine._connections) == 0
+    finally:
+        proceed.set()
+        httpd.shutdown()
+        httpd.server_close()
