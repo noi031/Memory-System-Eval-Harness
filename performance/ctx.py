@@ -14,6 +14,8 @@ from __future__ import annotations
 import contextlib
 import http.client
 import json
+import socket
+import ssl
 import threading
 import time
 import urllib.parse
@@ -137,6 +139,7 @@ class Ctx:
         extra: str = "",
         tenant_count: int = 1,
         interrupt: threading.Event | None = None,
+        registry: ConnectionRegistry,
     ):
         self._scene = scene
         self._worker_id = worker_id
@@ -148,6 +151,7 @@ class Ctx:
         self._duration_s = duration_s
         self._stop = stop
         self._interrupt = interrupt
+        self._registry = registry
         self._record_fn = record_fn
         self._seq_fn = seq_fn
         self._choose_fn = choose_fn
@@ -257,6 +261,7 @@ class Ctx:
                 base_headers=self._headers,
                 timeout_s=timeout_s if timeout_s is not None else self._read_timeout_s,
                 interrupt=self._interrupt,
+                registry=self._registry,
             )
         except TransportError as exc:
             status, error_type, http_status, body_text, body_json, reason = (
@@ -329,6 +334,7 @@ class Ctx:
                     base_headers=self._headers,
                     timeout_s=self._read_timeout_s,
                     interrupt=self._interrupt,
+                    registry=self._registry,
                 )
             except TransportError as exc:
                 status, error_type, http_status, body_text, body_json, reason = (
@@ -543,24 +549,76 @@ class TransportError(Exception):
 # measurements and exhaust client sockets under load churn.
 _connection_local = threading.local()
 
-# 全局活跃连接注册表：引擎超时中断时由 close_all_connections() 关闭，
-# 让阻塞在传输读取里的 worker 立即以 OSError 返回（Windows/Linux 均实测
-# 跨线程 close 可打断阻塞 recv）。
-_ACTIVE_CONNECTIONS: set[http.client.HTTPConnection] = set()
-_CONNECTIONS_LOCK = threading.Lock()
+
+class ConnectionRegistry:
+    """Per-owner keep-alive connection registry (one per Engine / probe run).
+
+    连接所有权随所有者生命周期：正常收尾（``close_all``，此时无并发读）关闭
+    并注销全部连接；超时中断（``shutdown_all``）只对底层 socket 做 shutdown——
+    有界、非阻塞、不等缓冲响应读取，被打断的 worker 在自己的错误路径关闭
+    连接。禁止进程级强引用集合：顺序 case 会跨 case 累积客户端描述符。
+    """
+
+    def __init__(self) -> None:
+        self._conns: set[http.client.HTTPConnection] = set()
+        self._lock = threading.Lock()
+
+    def add(self, conn: http.client.HTTPConnection) -> None:
+        with self._lock:
+            self._conns.add(conn)
+
+    def discard(self, conn: http.client.HTTPConnection) -> None:
+        with self._lock:
+            self._conns.discard(conn)
+
+    def __len__(self) -> int:
+        with self._lock:
+            return len(self._conns)
+
+    def shutdown_all(self) -> None:
+        """中断路径：快照并清空注册表，打断每个连接的在途读取。
+
+        shutdown 让 POSIX 上的阻塞读以 EOF 返回；``_real_close`` 立即关闭 OS
+        句柄（``socket.close`` 因 makefile 的 SocketIO 引用而延迟关 fd），
+        Windows 上 closesocket 打断 pending 阻塞读。两者都非阻塞、不等待
+        缓冲响应读取持有的锁；连接由被打断的 worker 在
+        :func:`_drop_connection` 中自行关闭。
+        """
+        with self._lock:
+            conns = list(self._conns)
+            self._conns.clear()
+        for conn in conns:
+            sock = getattr(conn, "sock", None)
+            if sock is None:
+                continue
+            if not isinstance(sock, ssl.SSLSocket):
+                with contextlib.suppress(OSError):
+                    sock.shutdown(socket.SHUT_RDWR)
+            real_close = getattr(sock, "_real_close", None)
+            if callable(real_close):
+                with contextlib.suppress(OSError):
+                    real_close()
+            else:
+                with contextlib.suppress(OSError):
+                    sock.close()
+
+    def close_all(self) -> None:
+        """正常收尾路径：快照并清空注册表，逐个完整关闭连接。
+
+        只在无并发读（workers 已 join）时调用——此时 response 读取已完成，
+        ``conn.close()`` 不会阻塞。
+        """
+        with self._lock:
+            conns = list(self._conns)
+            self._conns.clear()
+        for conn in conns:
+            with contextlib.suppress(OSError):
+                conn.close()
 
 
-def close_all_connections() -> None:
-    """Close every live keep-alive connection (engine timeout interrupt)."""
-    with _CONNECTIONS_LOCK:
-        conns = list(_ACTIVE_CONNECTIONS)
-        _ACTIVE_CONNECTIONS.clear()
-    for conn in conns:
-        with contextlib.suppress(OSError):
-            conn.close()
-
-
-def _reuse_connection(base_url: str, timeout_s: float) -> http.client.HTTPConnection:
+def _reuse_connection(
+    base_url: str, timeout_s: float, registry: ConnectionRegistry
+) -> http.client.HTTPConnection:
     parsed = urllib.parse.urlsplit(base_url)
     host = parsed.hostname or "127.0.0.1"
     port = parsed.port or (443 if parsed.scheme == "https" else 80)
@@ -572,16 +630,14 @@ def _reuse_connection(base_url: str, timeout_s: float) -> http.client.HTTPConnec
             conn = http.client.HTTPConnection(host, port, timeout=timeout_s)
         conn._reuse_key = (host, port)
         _connection_local.conn = conn
-    with _CONNECTIONS_LOCK:
-        _ACTIVE_CONNECTIONS.add(conn)
+    registry.add(conn)
     return conn
 
 
-def _drop_connection() -> None:
+def _drop_connection(registry: ConnectionRegistry) -> None:
     conn = getattr(_connection_local, "conn", None)
     if conn is not None:
-        with _CONNECTIONS_LOCK:
-            _ACTIVE_CONNECTIONS.discard(conn)
+        registry.discard(conn)
         with contextlib.suppress(OSError):
             conn.close()
         _connection_local.conn = None
@@ -598,16 +654,17 @@ def _do_request(
     base_headers: dict[str, str] | None = None,
     timeout_s: float,
     interrupt: threading.Event | None = None,
+    registry: ConnectionRegistry,
 ) -> tuple[str, str, int | None, str, dict[str, Any] | None, str]:
     """Execute one request; never raises for HTTP/transport failures.
 
     Returns ``(status, error_type, http_status, body_text, body_json,
     reason_code)``.  ``status`` is ``ok`` for any 2xx/3xx response; all
     other outcomes are ``error`` with a classified ``error_type``.
-    ``interrupt``（引擎超时中断）置位时由 ``close_all_connections`` 关闭
-    活跃连接，在途阻塞读立即以 OSError 返回并映射为
-    ``error_type="stopped"``；未中断时传输行为不变，请求仍受
-    ``timeout_s`` 读取超时约束。
+    ``interrupt``（引擎超时中断）置位时由 ``Engine.stop()`` shutdown 本注册表
+    连接的底层 socket，在途阻塞读立即返回并映射为 ``error_type="stopped"``；
+    OSError 与 EOF 两种返回都检查 interrupt，interrupt 后不再产生 ok 记录。
+    未中断时传输行为不变，请求仍受 ``timeout_s`` 读取超时约束。
     """
     url = path
     if params:
@@ -629,11 +686,11 @@ def _do_request(
     for attempt in (0, 1):
         if interrupt is not None and interrupt.is_set():
             _stopped()
-        conn = _reuse_connection(base_url, timeout_s)
+        conn = _reuse_connection(base_url, timeout_s, registry)
         try:
             conn.request(method, url, body=payload, headers=request_headers)
         except TimeoutError as exc:
-            _drop_connection()
+            _drop_connection(registry)
             if interrupt is not None and interrupt.is_set():
                 _stopped()
             raise _transport_fail("timeout") from exc
@@ -641,7 +698,7 @@ def _do_request(
             # The connection failed before this request's bytes were sent
             # (stale keep-alive or refused connect); retry once on a fresh
             # connection.  A send-phase failure never duplicates a write.
-            _drop_connection()
+            _drop_connection(registry)
             if interrupt is not None and interrupt.is_set():
                 _stopped()
             if attempt == 0:
@@ -650,34 +707,39 @@ def _do_request(
         try:
             response = conn.getresponse()
         except TimeoutError as exc:
-            _drop_connection()
+            _drop_connection(registry)
             if interrupt is not None and interrupt.is_set():
                 _stopped()
             raise _transport_fail("timeout") from exc
         except (OSError, http.client.HTTPException) as exc:
             # The request may already have been delivered; report it, never
             # retry (a retry could duplicate a write).
-            _drop_connection()
+            _drop_connection(registry)
             if interrupt is not None and interrupt.is_set():
                 _stopped()
             raise _transport_fail("connection") from exc
         if interrupt is not None and interrupt.is_set():
-            _drop_connection()
+            _drop_connection(registry)
             _stopped()
         try:
             raw = response.read()
         except TimeoutError as exc:
-            _drop_connection()
+            _drop_connection(registry)
             if interrupt is not None and interrupt.is_set():
                 _stopped()
             raise _transport_fail("timeout") from exc
         except (OSError, http.client.HTTPException) as exc:
-            # 连接被外部关闭（引擎超时中断 close_all_connections）时，
-            # 阻塞读以 OSError 返回，映射为 stopped。
-            _drop_connection()
+            # 连接被外部 shutdown（引擎超时中断）时，阻塞读以 OSError
+            # 返回，映射为 stopped。
+            _drop_connection(registry)
             if interrupt is not None and interrupt.is_set():
                 _stopped()
             raise _transport_fail("connection") from exc
+        if interrupt is not None and interrupt.is_set():
+            # shutdown 打断的读在部分平台以 EOF（b""）而非 OSError 返回：
+            # 读成功后同样检查 interrupt，保证中断后不产生 ok 记录。
+            _drop_connection(registry)
+            _stopped()
         body_text = raw.decode("utf-8", errors="replace")
         response_headers = {key.lower(): value for key, value in response.getheaders()}
         http_status = response.status

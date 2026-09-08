@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import http.server
+import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -323,3 +326,91 @@ def test_load_scene_missing_contract(tmp_path):
 def test_load_scene_not_found(tmp_path):
     with pytest.raises(SceneError, match="not found"):
         load_scene(tmp_path / "nope.py")
+
+
+# -- connection lifecycle (PR#31 F-006 / F-002) -------------------------
+
+
+def test_sequential_engines_release_connections(server):
+    """F-006：连续健康 Engine 结束后连接注册表回到基线，不跨 case 累积。"""
+    _, _, base_url = server
+
+    def read(ctx):
+        ctx.post("/api/retrieval/search", body={"query": "q"}, op="read")
+
+    profile = load_profile(
+        {
+            "name": "p",
+            "target": {"base_url": base_url, "read_timeout_s": 5},
+            "load": {"workers": 4, "duration_s": 0.4},
+        }
+    )
+    for _ in range(2):
+        engine = Engine(profile, _scene(task=read))
+        assert len(engine._connections) == 0
+        result = engine.run()
+        assert result.records
+        assert all(r.status == "ok" for r in result.records)
+        assert len(engine._connections) == 0, "run() 收尾后注册表应回到基线"
+
+
+def test_engine_stop_bounded_with_stalled_request():
+    """F-002：响应体挂起时 Engine.stop() 有界返回，worker 在窗口内退出。"""
+    release = threading.Event()
+    arrived = threading.Event()
+
+    class StallHandler(http.server.BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
+
+        def log_message(self, *args):
+            pass
+
+        def do_POST(self):
+            self.send_response(200)
+            self.send_header("Content-Type", "application/octet-stream")
+            self.send_header("Content-Length", "4096")
+            self.end_headers()
+            arrived.set()
+            release.wait(10)
+
+    httpd = http.server.ThreadingHTTPServer(("127.0.0.1", 0), StallHandler)
+    server_thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+    server_thread.start()
+    try:
+        base_url = f"http://127.0.0.1:{httpd.server_port}"
+
+        def read(ctx):
+            ctx.post("/api/stall", op="stall")
+
+        profile = load_profile(
+            {
+                "name": "p",
+                "target": {"base_url": base_url, "read_timeout_s": 5},
+                "load": {"workers": 1, "duration_s": 30.0},
+            }
+        )
+        engine = Engine(profile, _scene(task=read))
+        holder: dict = {}
+
+        def _run():
+            holder["result"] = engine.run()
+
+        worker = threading.Thread(target=_run, daemon=True)
+        worker.start()
+        assert arrived.wait(2.0), "请求未到达服务端"
+        time.sleep(0.2)  # 让客户端进入 body 读取并阻塞
+        started = time.perf_counter()
+        engine.stop()
+        elapsed = time.perf_counter() - started
+        worker.join(2.0)
+        assert elapsed < 1.0, f"Engine.stop 不应等待挂起的响应体（耗时 {elapsed:.2f}s）"
+        assert not worker.is_alive(), "stop 后 worker 应在确认窗口内退出"
+        records = holder["result"].records
+        assert records
+        assert all(r.status == "error" and r.error_type == "stopped"
+                   for r in records)
+        assert len(engine._connections) == 0
+    finally:
+        release.set()
+        httpd.shutdown()
+        httpd.server_close()

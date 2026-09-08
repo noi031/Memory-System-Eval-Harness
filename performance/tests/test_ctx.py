@@ -2,13 +2,19 @@
 
 from __future__ import annotations
 
+import http.client
 import http.server
 import threading
 import time
 
 import pytest
 
-from performance.ctx import AssertionFailure, Ctx, Phase, close_all_connections
+from performance.ctx import (
+    AssertionFailure,
+    ConnectionRegistry,
+    Ctx,
+    Phase,
+)
 from performance.tests.conftest import MockState
 
 
@@ -19,10 +25,12 @@ def make_ctx(
     extra: str = "",
     stop: threading.Event | None = None,
     interrupt: threading.Event | None = None,
+    registry: ConnectionRegistry | None = None,
 ) -> tuple[Ctx, list, list]:
     records: list = []
     seq_values: list = []
     phases: list = []
+    connections = registry if registry is not None else ConnectionRegistry()
 
     def record_fn(record) -> None:
         records.append(record)
@@ -57,6 +65,7 @@ def make_ctx(
         phases=phases,
         extra=extra,
         interrupt=interrupt,
+        registry=connections,
     )
     return ctx, records, phases
 
@@ -278,7 +287,11 @@ def test_manual_record_and_note(server):
 
 
 def test_request_aborts_on_interrupt_while_body_stalled():
-    """引擎超时中断关闭连接后，阻塞在响应体读取的请求立即以 stopped 返回。"""
+    """引擎超时中断 shutdown 连接后，阻塞在响应体读取的请求立即以 stopped 返回。
+
+    同时验证 F-002（停机本身有界：body 仍挂起时 shutdown_all 立即返回）与
+    F-006（worker 退出后注册表回到基线）。
+    """
     release = threading.Event()
 
     class StallHandler(http.server.BaseHTTPRequestHandler):
@@ -299,7 +312,8 @@ def test_request_aborts_on_interrupt_while_body_stalled():
     try:
         base_url = f"http://127.0.0.1:{httpd.server_port}"
         interrupt = threading.Event()
-        ctx, records, _ = make_ctx(base_url, interrupt=interrupt)
+        registry = ConnectionRegistry()
+        ctx, records, _ = make_ctx(base_url, interrupt=interrupt, registry=registry)
         outcome: dict = {}
 
         def _run():
@@ -308,17 +322,39 @@ def test_request_aborts_on_interrupt_while_body_stalled():
         worker = threading.Thread(target=_run)
         worker.start()
         time.sleep(0.3)  # 让请求进入 body 读取并阻塞
+        started = time.perf_counter()
         interrupt.set()  # 模拟 case 超时后 Engine.stop() 的中断
-        close_all_connections()
+        registry.shutdown_all()  # body 仍挂起：shutdown 必须立即返回（F-002 有界停机）
+        shutdown_elapsed = time.perf_counter() - started
         worker.join(2.0)
         assert not worker.is_alive(), "interrupt 后阻塞读应立即返回"
+        assert shutdown_elapsed < 1.0, (
+            f"停机调用不应等待挂起的响应体（耗时 {shutdown_elapsed:.2f}s）"
+        )
         resp = outcome["resp"]
         assert resp.status == "error"
         assert resp.record.error_type == "stopped"
+        assert len(registry) == 0, "worker 退出后注册表应回到基线"
     finally:
         release.set()
         httpd.shutdown()
         httpd.server_close()
+
+
+def test_connection_registry_lifecycle():
+    """ConnectionRegistry：add/discard 幂等，close_all 清空注册表。"""
+    registry = ConnectionRegistry()
+    assert len(registry) == 0
+    conn = http.client.HTTPConnection("127.0.0.1", 1)
+    registry.add(conn)
+    registry.add(conn)
+    assert len(registry) == 1
+    registry.discard(conn)
+    assert len(registry) == 0
+    other = http.client.HTTPConnection("127.0.0.1", 1)
+    registry.add(other)
+    registry.close_all()
+    assert len(registry) == 0
 
 
 def test_request_slow_stream_succeeds_within_budget():

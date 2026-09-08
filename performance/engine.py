@@ -20,7 +20,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
-from performance.ctx import Ctx, Phase, close_all_connections
+from performance.ctx import ConnectionRegistry, Ctx, Phase
 from performance.profile import ArrivalSpec, Profile, TenantSpec
 from performance.records import RequestRecord
 
@@ -176,6 +176,7 @@ class Engine:
         self._records_lock = threading.Lock()
         self._stop = threading.Event()
         self._interrupt = threading.Event()
+        self._connections = ConnectionRegistry()
         self._seq_counter = itertools.count()
         self._data_cursor = 0
         self._data_lock = threading.Lock()
@@ -188,38 +189,44 @@ class Engine:
 
     def run(self) -> RunResult:
         self._started_at = time.perf_counter()
-        assignment = self._assign_workers()
-        self._gates = self._build_gates()
-        workers: list[tuple[threading.Thread, Callable[[Ctx], None]]] = []
-        worker_index = 0
-        for task_name, count in assignment.items():
-            gate = self._gates.get(task_name)
-            for _ in range(count):
-                tenant_idx = worker_index % len(self._tenants())
-                ctx = self._make_ctx(worker_id=worker_index, tenant_idx=tenant_idx)
-                thread = threading.Thread(
-                    target=self._worker_loop,
-                    args=(ctx, self.scene.tasks[task_name], gate),
-                    name=f"perf-{task_name}-{worker_index}",
-                    daemon=True,
-                )
-                workers.append(thread)
-                worker_index += 1
-        for thread in workers:
-            thread.start()
+        try:
+            assignment = self._assign_workers()
+            self._gates = self._build_gates()
+            workers: list[tuple[threading.Thread, Callable[[Ctx], None]]] = []
+            worker_index = 0
+            for task_name, count in assignment.items():
+                gate = self._gates.get(task_name)
+                for _ in range(count):
+                    tenant_idx = worker_index % len(self._tenants())
+                    ctx = self._make_ctx(worker_id=worker_index, tenant_idx=tenant_idx)
+                    thread = threading.Thread(
+                        target=self._worker_loop,
+                        args=(ctx, self.scene.tasks[task_name], gate),
+                        name=f"perf-{task_name}-{worker_index}",
+                        daemon=True,
+                    )
+                    workers.append(thread)
+                    worker_index += 1
+            for thread in workers:
+                thread.start()
 
-        if self.scene.schedule is not None:
-            probe = self._make_ctx(worker_id=BURST_WORKER_ID, tenant_idx=0)
-            try:
-                self.scene.schedule(probe)
-            except Exception as exc:
-                self._record_worker_error(probe, exc)
+            if self.scene.schedule is not None:
+                probe = self._make_ctx(worker_id=BURST_WORKER_ID, tenant_idx=0)
+                try:
+                    self.scene.schedule(probe)
+                except Exception as exc:
+                    self._record_worker_error(probe, exc)
 
-        self._run_until_deadline()
+            self._run_until_deadline()
 
-        self._stop.set()
-        for thread in workers:
-            thread.join()
+            self._stop.set()
+            for thread in workers:
+                thread.join()
+        finally:
+            # 正常收尾（含异常路径）：关闭并注销本 Engine 全部 keep-alive
+            # 连接，顺序 case 不跨进程累积客户端描述符。超时中断路径下注册
+            # 表已在 stop() 中被 shutdown_all 清空，此处为幂等 no-op。
+            self._connections.close_all()
         self._finished_at = time.perf_counter()
         return RunResult(
             records=list(self.records),
@@ -228,13 +235,14 @@ class Engine:
         )
 
     def stop(self) -> None:
-        # 中断在途 HTTP 请求（关闭活跃连接，阻塞读立即以 OSError 返回并
-        # 映射为 stopped），同时通知 worker 停止。仅 suite 超时回收路径
-        # 调用；引擎自然收尾只 set _stop，让在途请求正常完成，不产生
-        # stopped 记录。
+        # 先传播停机，再有界打断在途 HTTP 请求：对本 Engine 注册表里的连接
+        # 做 shutdown + 立即关闭 OS 句柄（不等缓冲响应读取，不阻塞），阻塞读
+        # 立即返回并映射为 stopped；连接由 worker 在错误路径自行关闭。仅
+        # suite 超时回收路径调用；引擎自然收尾只 set _stop，让在途请求正常
+        # 完成，不产生 stopped 记录。
         self._interrupt.set()
-        close_all_connections()
         self._stop.set()
+        self._connections.shutdown_all()
 
     # -- worker orchestration ---------------------------------------------
 
@@ -377,6 +385,7 @@ class Engine:
             phases=self._phases,
             extra=extra,
             tenant_count=len(self._tenants()),
+            registry=self._connections,
         )
         return ctx
 
