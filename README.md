@@ -3,6 +3,10 @@
 记忆系统评测框架。全 CLI，无网页 UI。直接通过 Python 脚本完成数据集加载、
 记忆注入、Agent 问答、Judge 评分和结果报告。
 
+**EchoMem 六项本机压测**：任意 AI 或工程师均可直接阅读
+[单文件部署与运行手册](docs/echomem-six-metric-local-guide.md)。手册包含 PR32/PR449
+代码准备、真实模型配置、128 租户、默认/调优两组压测、M1-M6 命令与最终 HTML 结果。
+
 ## 设计目标
 
 ### 1. 支撑业界所有 agent 的评测
