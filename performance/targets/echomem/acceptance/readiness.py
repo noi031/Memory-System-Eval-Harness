@@ -1,4 +1,12 @@
-"""Read-only control-plane gates before expensive six-metric workloads."""
+"""Read-only control-plane gates before expensive six-metric workloads.
+
+Gates are two-tier. Hard gates (``target-url``, ``ready``) are black-box
+running prerequisites: losing them makes any load run meaningless. Optional
+evidence gates (``metrics``, ``resource-container``, ``fault_isolation``,
+``tenant_observability``) feed specific metrics; when ``strict=False`` their
+failure only degrades those metrics to INCONCLUSIVE/BLOCKED instead of
+blocking the run. The strict default keeps formal acceptance unchanged.
+"""
 
 from __future__ import annotations
 
@@ -72,8 +80,21 @@ def _get(url: str, token: str = "") -> tuple[int | None, dict]:
         return None, {}
 
 
-def check_readiness(profile: dict) -> dict:
-    """Only inspect Docker and GET APIs. Never export their raw responses."""
+_HARD_GATES = frozenset({"target-url", "ready"})
+_OPTIONAL_GATES = frozenset({
+    "metrics", "resource-container", "fault_isolation", "tenant_observability",
+})
+
+
+def check_readiness(profile: dict, *, strict: bool = True) -> dict:
+    """Inspect only Docker and GET APIs. Never export their raw responses.
+
+    ``strict=True`` (default): ``ok`` requires every non-advisory check to
+    PASS, keeping the formal-acceptance semantics. ``strict=False``: only hard
+    gates count toward ``ok``; optional evidence gates that fail are reported
+    in ``degraded`` so observation runs can continue with honest
+    INCONCLUSIVE/BLOCKED metrics.
+    """
     checks = []
     resource = {}
     inspected = {}
@@ -84,25 +105,33 @@ def check_readiness(profile: dict) -> dict:
 
     container = str(profile.get("resource_container") or "")
     require_4u8g = profile.get("require_4u8g", True) is not False
-    try:
-        inspected = inspect_container(container)
-        limits = inspected["HostConfig"]
-        cpus = float(limits.get("NanoCpus", 0)) / 1e9
-        if not cpus and limits.get("CpuPeriod", 0) > 0:
-            cpus = limits.get("CpuQuota", 0) / limits["CpuPeriod"]
-        resource = {"container": container, "container_id": inspected.get("Id"),
-                    "image_id": inspected.get("Image"), "cpus": cpus,
-                    "memory_bytes": limits.get("Memory"),
-                    "running": inspected.get("State", {}).get("Running") is True,
-                    "resource_policy": "fixed-4u8g" if require_4u8g else "host-default"}
-        resource_ok = resource["running"]
-        action = "Start the dedicated target container and verify Docker access."
-        if require_4u8g:
-            resource_ok = resource_ok and cpus == 4 and resource["memory_bytes"] == 8 * 1024**3
-            action = "Start the dedicated target with --cpus=4 --memory=8g; verify Docker access."
-        record("resource-container", resource_ok, "deployment", action, **resource)
-    except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError):
-        record("resource-container", False, "deployment", "Cannot inspect the target container; check its name and Docker access.")
+    if not container and not require_4u8g:
+        resource = {"container": "", "container_id": None, "image_id": None,
+                    "cpus": 0, "memory_bytes": 0, "running": None,
+                    "resource_policy": "host-default"}
+        record("resource-container", True, "deployment",
+               "No container configured; resource evidence is host-default for a process-level deployment.",
+               **resource)
+    else:
+        try:
+            inspected = inspect_container(container)
+            limits = inspected["HostConfig"]
+            cpus = float(limits.get("NanoCpus", 0)) / 1e9
+            if not cpus and limits.get("CpuPeriod", 0) > 0:
+                cpus = limits.get("CpuQuota", 0) / limits["CpuPeriod"]
+            resource = {"container": container, "container_id": inspected.get("Id"),
+                        "image_id": inspected.get("Image"), "cpus": cpus,
+                        "memory_bytes": limits.get("Memory"),
+                        "running": inspected.get("State", {}).get("Running") is True,
+                        "resource_policy": "fixed-4u8g" if require_4u8g else "host-default"}
+            resource_ok = resource["running"]
+            action = "Start the dedicated target container and verify Docker access."
+            if require_4u8g:
+                resource_ok = resource_ok and cpus == 4 and resource["memory_bytes"] == 8 * 1024**3
+                action = "Start the dedicated target with --cpus=4 --memory=8g; verify Docker access."
+            record("resource-container", resource_ok, "deployment", action, **resource)
+        except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError):
+            record("resource-container", False, "deployment", "Cannot inspect the target container; check its name and Docker access.")
 
     config_path = profile.get("preflight_config")
     if config_path:
@@ -158,5 +187,17 @@ def check_readiness(profile: dict) -> dict:
         record(section, code == 200 and schema_ok and clean, "EchoMem / deployment",
                "Verify protected API availability/token and clear prior test faults; 404 alone does not prove missing implementation.",
                http_status=code, schema_valid=schema_ok, no_active_faults=clean)
+    if not strict:
+        hard_ok = all(
+            c["status"] == "PASS"
+            for c in checks
+            if not c.get("advisory") and c["name"] in _HARD_GATES
+        )
+        degraded = [
+            c["name"] for c in checks
+            if c["name"] in _OPTIONAL_GATES and c["status"] != "PASS" and not c.get("skipped")
+        ]
+        return {"ok": hard_ok, "checks": checks, "resource_evidence": resource,
+                "degraded": degraded}
     return {"ok": all(c["status"] == "PASS" for c in checks if not c.get("advisory")),
             "checks": checks, "resource_evidence": resource}

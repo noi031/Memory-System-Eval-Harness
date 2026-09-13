@@ -47,7 +47,7 @@ def test_combined_observation_uses_same_semantic_seed_hook(tmp_path, monkeypatch
     from performance.targets.echomem.orchestrator import runner
     from performance.targets.echomem.acceptance import readiness
     from performance.targets.echomem.probes import tenant_observability
-    monkeypatch.setattr(readiness, "check_readiness", lambda _: {"ok":True,"resource_evidence":{}})
+    monkeypatch.setattr(readiness, "check_readiness", lambda _, **kw: {"ok":True,"resource_evidence":{}})
     monkeypatch.setattr(tenant_observability, "collect", lambda **kwargs: {})
     captured = {}
     def suite(profile, **kwargs):
@@ -58,7 +58,7 @@ def test_combined_observation_uses_same_semantic_seed_hook(tmp_path, monkeypatch
         suite_dir=tmp_path, scenarios=["m2-fairness-4t","m3-baseline","m3-flood-uniform"])
     assert captured["seed"].func is runner._prepare_semantic_seed
     assert captured["seed"].keywords == {
-        "reuse_seed": "/unit/cache", "dataset_path": "",
+        "reuse_seed": "/unit/cache", "kind": "locomo", "dataset_path": "",
         "sample_id": "conv-30", "session_key": "session_1",
         "search_timeout_s": 60,
     }
@@ -107,6 +107,28 @@ def test_m3_seed_carries_ground_truth_separately_from_query(monkeypatch):
     assert summary["seed_source"] == "locomo-single-session"
     assert summary["corpus_source"]["sample_id"] == "conv-30"
     assert summary["corpus_source"]["session_key"] == "session_1"
+    for query, sample in contexts[0].query_cases.items():
+        assert sample["aliases"]
+        assert all(alias not in query for alias in sample["aliases"])
+    assert "unit-secret" not in str(summary)
+
+
+def test_synthetic_seed_kind_uses_recallable_fixed_facts(monkeypatch):
+    from performance.targets.echomem.orchestrator import runner
+    from performance.targets.echomem.acceptance import capacity_seed
+    spec = SimpleNamespace(tenant_id="test-tenant", auth_key="unit-secret",
+                           user_id="test-user", account_id="test-tenant", agent_id="test-agent")
+    monkeypatch.setattr(runner, "load_tenant_specs", lambda *a, **k: [spec])
+    monkeypatch.setattr(capacity_seed, "prepare_actors", lambda *a, **k:
+                        {"status": "PASS", "healthy_actors": 1, "actor_count": 1})
+    contexts, summary = runner._prepare_semantic_seed(
+        "http://unused.invalid", "unused", 1, 1, 1, kind="synthetic")
+    assert summary["seed_source"] == "fresh"
+    assert summary["corpus_source"]["kind"] == "synthetic-fixed-facts"
+    assert summary["seed_documents_per_tenant"] == 5
+    assert summary["facts_per_tenant"] == 20
+    assert summary["query_variants_per_tenant"] == 40
+    assert len(contexts[0].query_cases) == 40
     for query, sample in contexts[0].query_cases.items():
         assert sample["aliases"]
         assert all(alias not in query for alias in sample["aliases"])

@@ -15,7 +15,7 @@ def setup_run(tmp_path, monkeypatch):
     profiles = tmp_path / "profiles.json"
     profiles.write_text(json.dumps({"profiles": [profile]}))
     monkeypatch.setattr(module, "_configure", lambda p, *a, **k: p)
-    monkeypatch.setattr(module, "check_readiness", lambda p: {"ok": True})
+    monkeypatch.setattr(module, "check_readiness", lambda p, **kw: {"ok": True})
     monkeypatch.setattr(module, "platform_snapshot", lambda: {"git_commit": "unit-test"})
     events = []
 
@@ -143,7 +143,7 @@ def test_cli_does_not_replace_published_partial_result(tmp_path, monkeypatch):
 
 def test_uncleared_fault_prevents_capacity_without_losing_checkpoint(tmp_path, monkeypatch):
     args, events = setup_run(tmp_path, monkeypatch)
-    monkeypatch.setattr(module, "check_readiness", lambda p: {"ok": False})
+    monkeypatch.setattr(module, "check_readiness", lambda p, **kw: {"ok": False})
     monkeypatch.setattr(module, "_run_m1_profiles", lambda *a: pytest.fail("capacity must not run"))
     with pytest.raises(RuntimeError, match="capacity_control_preflight_failed"):
         module.run(args)

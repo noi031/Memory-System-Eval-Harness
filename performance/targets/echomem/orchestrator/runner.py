@@ -8,6 +8,10 @@ echomem 的钩子：case 选择（``select_cases``）、case → Profile（含 q
 seed / acceptance 求值。
 
 ``run_case`` 与 ``summarize_case_records`` 仍在本模块导出，供测试直接使用。
+
+观测模式（``six_metrics_observation``）的前置 readiness 按硬门语义执行：
+可选证据门失败（无 Docker / 无受保护观测接口）不会让套件早退，对应指标
+在观测汇总层诚实降级。
 """
 
 from __future__ import annotations
@@ -270,9 +274,16 @@ def _preflight_stage(config: str, *, strict: bool = False) -> dict:
 
 
 def _prepare_semantic_seed(base_url, tenant_config, max_tenants, seed_sessions, seed_messages, *,
-                           reuse_seed=None, dataset_path="", sample_id="conv-30", session_key="session_1",
-                           search_timeout_s=60):
-    """Observation workloads share remembered facts, not a bare-marker routing gate."""
+                           reuse_seed=None, kind="locomo", dataset_path="", sample_id="conv-30",
+                           session_key="session_1", search_timeout_s=60):
+    """Observation workloads share remembered facts, not a bare-marker routing gate.
+
+    ``kind`` selects the shared seed corpus. ``synthetic`` uses fixed synthetic
+    facts whose aliases are plain values that real extraction keeps in the
+    retrieved facts; ``locomo`` keeps the historical LoCoMo single-session
+    corpus whose random evidence markers a real model may drop during
+    extraction, which makes seed validation fail without proving facts are lost.
+    """
     import uuid
     from performance.suite import SeedPreparationError
     from performance.targets.echomem.acceptance.capacity_seed import (
@@ -281,10 +292,6 @@ def _prepare_semantic_seed(base_url, tenant_config, max_tenants, seed_sessions, 
         validate_cached_actors,
         validate_search_timeout,
     )
-    from performance.targets.echomem.acceptance.semantic_corpus import (
-        DEFAULT_LOCOMO_DATASET,
-        build_locomo_session_corpus,
-    )
     from performance.targets.echomem.probes._client import EchoMemHTTP
 
     validate_search_timeout(search_timeout_s)
@@ -292,22 +299,45 @@ def _prepare_semantic_seed(base_url, tenant_config, max_tenants, seed_sessions, 
     if len(specs) != max_tenants or len({s.auth_key for s in specs}) != max_tenants:
         raise RuntimeError("Semantic seed requires all independent tenant credentials")
     run_tag = uuid.uuid4().hex
-    source_path = Path(dataset_path) if dataset_path else DEFAULT_LOCOMO_DATASET
+    if kind == "synthetic":
+        from performance.targets.echomem.acceptance.semantic_corpus import build_corpus
+        corpus_builder = lambda index: build_corpus(f"synthetic-{run_tag}-{index}", seed=42, memory_scale=1)
+        cache_compatible = lambda actor: actor.corpus.get("query_contract") == "explicit-chat-memory-v4"
+        cache_error = "Semantic cache is not the configured synthetic fixed-fact corpus"
+        corpus_source = {"kind": "synthetic-fixed-facts", "seed": 42, "memory_scale": 1}
+        seed_source = "fresh"
+    elif kind == "locomo":
+        from performance.targets.echomem.acceptance.semantic_corpus import (
+            DEFAULT_LOCOMO_DATASET,
+            build_locomo_session_corpus,
+        )
+        source_path = Path(dataset_path) if dataset_path else DEFAULT_LOCOMO_DATASET
+        corpus_builder = lambda index: build_locomo_session_corpus(
+            f"formal-recall-{run_tag}-{index}", dataset_path=source_path,
+            sample_id=sample_id, session_key=session_key)
+        def cache_compatible(actor):
+            source = actor.corpus.get("source") or {}
+            return (actor.corpus.get("query_contract") == "locomo-single-session-evidence-v1"
+                    and source.get("sample_id") == sample_id
+                    and source.get("session_key") == session_key)
+        cache_error = "Semantic cache is not the configured LoCoMo single-session corpus"
+        corpus_source = {"dataset": source_path.name, "sample_id": sample_id,
+                         "session_key": session_key}
+        seed_source = "locomo-single-session"
+    else:
+        raise ValueError(f"Unsupported semantic_seed_kind: {kind!r}")
     actors = [CapacityActor(index, 0, EchoMemHTTP(base_url, spec.auth_key,
                     tenant_id=spec.tenant_id, user_id=spec.user_id,
                     account_id=spec.account_id, agent_id=spec.agent_id),
-                build_locomo_session_corpus(f"formal-recall-{run_tag}-{index}",
-                    dataset_path=source_path, sample_id=sample_id, session_key=session_key))
+                corpus_builder(index))
               for index, spec in enumerate(specs)]
     if reuse_seed:
         from dataclasses import replace
         from performance.targets.echomem.acceptance.capacity_experiment import _load_actors
         cached, _ = _load_actors(Path(reuse_seed), base_url)
-        incompatible = [a for a in cached if a.corpus.get("query_contract") != "locomo-single-session-evidence-v1"
-                        or (a.corpus.get("source") or {}).get("sample_id") != sample_id
-                        or (a.corpus.get("source") or {}).get("session_key") != session_key]
+        incompatible = [a for a in cached if not cache_compatible(a)]
         if incompatible:
-            raise RuntimeError("Semantic cache is not the configured LoCoMo single-session corpus")
+            raise RuntimeError(cache_error)
         actors = []
         for spec in specs:
             matches = [a for a in cached if all(getattr(a.client, field) == getattr(spec, field)
@@ -334,9 +364,8 @@ def _prepare_semantic_seed(base_url, tenant_config, max_tenants, seed_sessions, 
     return contexts, {"status": "completed", "tenant_count": max_tenants,
                       "identity_mode": "independent", "keys_independent": True,
                       "seed_contract": "fixed-fact-in-items", "seed_evidence": evidence,
-                      "seed_source": "validated-cache" if reuse_seed else "locomo-single-session",
-                      "corpus_source": {"dataset": source_path.name, "sample_id": sample_id,
-                                        "session_key": session_key},
+                      "seed_source": "validated-cache" if reuse_seed else seed_source,
+                      "corpus_source": corpus_source,
                       "probe_queries": {actor.client.tenant_id: actor.corpus["recall_queries"][0] for actor in actors},
                       "corpus_fingerprints": [actor.corpus["fingerprint"] for actor in actors],
                       "corpus_counts_by_tenant_index": counts,
@@ -432,8 +461,15 @@ def run_suite(
     observation_before = None
     if profile.get("six_metrics") or profile.get("six_metrics_observation"):
         from performance.targets.echomem.acceptance.readiness import check_readiness
-        readiness = check_readiness(profile)
-        if not readiness["ok"]:
+        if profile.get("six_metrics_observation"):
+            # 观测模式：readiness 已在观测编排层按硬门语义算好并写入
+            # profile；缺失时按同样口径即时重算，可选证据门失败不早退。
+            readiness = profile.get("readiness")
+            if not isinstance(readiness, dict) or "ok" not in readiness:
+                readiness = check_readiness(profile, strict=False)
+        else:
+            readiness = check_readiness(profile)
+        if not readiness.get("ok"):
             suite_dir.mkdir(parents=True, exist_ok=True)
             result = {"runs": [], "resource_preflight": {"status": "INCONCLUSIVE", "readiness": readiness},
                       "output_root": str(suite_dir), "instance_profile": profile.get("name")}
@@ -441,13 +477,14 @@ def run_suite(
             return result
         profile = {**profile, "resource_evidence": readiness["resource_evidence"]}
         observation = profile.get("tenant_observability", {})
-        from performance.targets.echomem.probes.tenant_observability import collect
-        observation_before = collect(
-            base_url=base_url, endpoint=str(observation.get("endpoint", "")),
-            token=os.environ.get(observation.get("token_env", "ECHOMEM_TEST_CONTROL_TOKEN"), ""),
-            expected_tenants=list(observation.get("expected_tenants", [])),
-            expected_lanes=list(observation.get("expected_lanes", [])), timeout_s=15,
-        )
+        if observation.get("enabled"):
+            from performance.targets.echomem.probes.tenant_observability import collect
+            observation_before = collect(
+                base_url=base_url, endpoint=str(observation.get("endpoint", "")),
+                token=os.environ.get(observation.get("token_env", "ECHOMEM_TEST_CONTROL_TOKEN"), ""),
+                expected_tenants=list(observation.get("expected_tenants", [])),
+                expected_lanes=list(observation.get("expected_lanes", [])), timeout_s=15,
+            )
 
     def _run_case(case, case_profile, *, case_dir, timeout_s):
         return run_case(
@@ -472,6 +509,7 @@ def run_suite(
     semantic_seed = partial(
         _prepare_semantic_seed,
         reuse_seed=profile.get("semantic_seed_cache"),
+        kind=profile.get("semantic_seed_kind", "locomo"),
         dataset_path=profile.get("semantic_seed_dataset", ""),
         sample_id=profile.get("semantic_seed_sample", "conv-30"),
         session_key=profile.get("semantic_seed_session", "session_1"),

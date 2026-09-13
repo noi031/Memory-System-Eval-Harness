@@ -11,6 +11,9 @@ limit_failure_sweep / commit_recovery / fault_plan），每个探针以子进程
 返回 (artifacts, commands)：artifacts 的键即 suite 顶层合并键（如
 ``capability_probe``/``commit_recovery``/``fault_suite``），值带 ``path``；
 commands 是 run_command 结果（或 INCONCLUSIVE 标记）的列表。
+
+观测模式的故障控制面在 readiness 预检中已被判定不可用（degraded）时，
+不启动 24 例长采样矩阵，只记 INCONCLUSIVE 命令保留审计线索。
 """
 
 from __future__ import annotations
@@ -400,6 +403,13 @@ def run_configured_probes(
             artifacts["concurrent_commit"] = {**payload, "path": str(output)}
 
     fault_isolation = profile.get("fault_isolation")
+    degraded = set((profile.get("readiness") or {}).get("degraded") or [])
+    if (profile.get("six_metrics") or profile.get("six_metrics_observation")) \
+            and "fault_isolation" in degraded:
+        # 受保护故障控制面在 readiness 预检中已被判定不可用：
+        # 不启动 24 例长采样矩阵，记录 INCONCLUSIVE 命令保留审计线索。
+        commands.append({"status": "INCONCLUSIVE",
+                         "reason": "Fault control plane unavailable; fault matrix was not started"})
     if isinstance(fault_isolation, dict) and fault_isolation.get("enabled", True):
         output = suite_dir / "fault-isolation.json"
         params = {"tenant_config": str(tenant_path)}

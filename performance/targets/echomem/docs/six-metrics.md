@@ -30,7 +30,7 @@ expected_lanes 按实际启用配置填写；本轮未执行到的启用 lane �
 python -m performance --target echomem \
   --profiles /absolute/path/instance-profiles.json \
   --profile 4U8G --six-metrics \
-  --out-dir /absolute/path/results/run-001
+  --out-dir /absolute/path/performance/targets/echomem/results/run-001
 ```
 
 环境文件通过 `--env-file` 指定。测试控制 Token 只通过环境变量

@@ -20,6 +20,8 @@ EchoMem 仓库：<EchoMem 绝对路径>
 
 将这三份文件作为本次 EchoMem 压测的执行规范。即使当前 AI 没有 Skill 安装机制，
 也必须按照其中的 Discover、Configure、Preview、Validate、Execute、Explain 流程执行。
+执行任何会消耗模型额度、产生负载或破坏性效果的命令前，必须先向使用者展示
+实际范围、参数与命令并取得明确确认；默认值只是待确认提案，不得免确认执行。
 先核对两个仓库的 branch、commit 和 dirty state，不要静默 fetch、switch、reset。
 使用真实 LLM 和 qwen3.7-text-embedding-flash Embedding，运行完整 M1-M6。
 默认容量档位为 1、2、4、8、16、32，创建 32 个独立租户凭据。需要继续寻找更高
@@ -34,9 +36,12 @@ EchoMem 仓库：<EchoMem 绝对路径>
 说明负载调用了模型。`mock=false`、HTTP 200 或配置中写了模型名都不能作为调用证据。
 ```
 
-AI 必须先展示 readiness 和实际命令，再开始会消耗模型额度或重启容器的步骤。若它不能
+AI 必须先展示 readiness、实际范围、参数与命令，并**获得使用者明确确认**，
+再开始会消耗模型额度或重启容器的步骤。若它不能
 读取文件、执行 Shell、访问 Docker 或持续跟踪长任务，就不能声称已经完成压测。若只想
 先验证链路，将“运行完整 M1-M6”改成“运行 quick”；quick 的结果只能标记为 `PARTIAL`。
+quick 同样必须经使用者确认后才能运行——它是使用者做出的选择，不是 AI 可默认执行的
+动作。
 
 > 完整测试会对专用 EchoMem 容器注入租户故障，并在 M5 中执行真实 `kill -9` 和重启。
 > 请勿指向日常开发、共享或生产容器。
@@ -54,8 +59,11 @@ mkdir -p ~/.codex/skills/echomem-stress
 cp -R performance/skills/echomem-stress/. ~/.codex/skills/echomem-stress/
 ```
 
-其他 AI 不需要执行这段安装命令。无论使用哪种 AI，执行规范都要求先展示 readiness；在
-新机器上先跑 quick，链路通过后再选择 M1-M3、完整 M1-M6、单项、续跑或仅重建报告。
+其他 AI 不需要执行这段安装命令。无论使用哪种 AI，执行规范都要求先展示 readiness，且
+**任何会消耗模型额度、产生负载或破坏性效果的步骤（含 quick 链路检查）启动前，必须先
+向使用者展示范围、参数与实际命令并取得确认**；在
+新机器上是否先跑 quick，也要先征询使用者、由其决定后再执行。链路通过后再选择
+M1-M3、完整 M1-M6、单项、续跑或仅重建报告。
 M4 故障注入、M5 容器重启以及远程/共享资源操作仍需获得操作者明确授权。
 
 ## 测试内容
@@ -363,7 +371,7 @@ ECHOMEM_EMBEDDING_API_KEY=<真实 Embedding key>
 若 `config.json` 使用其他 `*_api_key_env` 名称，也要把对应变量加入 `test.env`。测试平台
 会在发压前分别验证 LLM 和 Embedding；任何一个失败都会阻止依赖真实记忆的场景。
 
-M1-M3 要采集真实内部阶段耗时，EchoMem 的被测配置必须启用 DEBUG JSON 日志：
+采集 M1-M3 的完整内部阶段耗时时，EchoMem 的被测配置应启用 DEBUG JSON 日志：
 
 ```json
 {
@@ -372,9 +380,12 @@ M1-M3 要采集真实内部阶段耗时，EchoMem 的被测配置必须启用 DE
 }
 ```
 
-profile 中的 `resource_container` 必须是该 EchoMem 容器的准确名称，并设置
+profile 中的 `resource_container` 是该 EchoMem 容器的准确名称，并设置
 `require_stage_observability: true`。运行器只保存白名单阶段、耗时、队列等待和脱敏后的
-trace 引用，不保存请求正文或原始 trace id。
+trace 引用，不保存请求正文或原始 trace id。无容器本地进程部署
+（`resource_container` 为空、`require_4u8g=false`）时此要求自动放宽：结构化
+日志窗口跳过、阶段证据仅来自 `/metrics` histogram，M1 资源口径与 M5 相应降级，
+观测运行仍正常产出报告（正式 `--six-metrics` 验收保持严格）。
 
 ## 5. 创建唯一的本机 profile
 
@@ -425,7 +436,9 @@ trace 引用，不保存请求正文或原始 trace id。
 
 `require_4u8g: false` 表示不检查固定 4U8G cgroup；Docker 未设置上限时 CPU 和内存字段
 可能显示为 `0`，含义是使用宿主机默认资源。为保证数据可比较，报告还会保存容器 ID、
-镜像 ID 和 Docker 资源配置。
+镜像 ID 和 Docker 资源配置。完全无容器的本地进程部署把 `resource_container` 留空并保持
+`require_4u8g: false`：readiness 按 host-default 判 PASS，M1 资源侧与 M5 自动降级
+（结构化日志窗口跳过、恢复探针不要求 `allow_container_restart`），观测运行照常出报告。
 
 `required_embedding_model` 是硬性预检条件。本例只接受真实成功调用
 `qwen3.7-text-embedding-flash`；如果服务实际使用其他 Embedding，正式发压前会直接停止。
@@ -476,13 +489,18 @@ Commit 权重为 `1:2:4:8`。报告逐租户展示计划速率、实际请求数
 
 ## 6. 先运行快速链路检查
 
+**结果目录固定位置（非协商）**：所有压测结果必须写入
+`performance/targets/echomem/results/` 之下，一次运行一个子目录（如
+`performance/targets/echomem/results/local-six-metrics-quick/`）。禁止把
+结果写到仓库根 `results/`、临时目录或其他任意位置。
+
 所有命令均在测试平台仓库根目录执行：
 
 ```bash
 bash -n performance/targets/echomem/run_six_metrics.sh
 performance/targets/echomem/run_six_metrics.sh quick \
   .local-stress/six-metrics.profile.json \
-  results/local-six-metrics-quick \
+  performance/targets/echomem/results/local-six-metrics-quick \
   .local-stress/test.env
 ```
 
@@ -495,17 +513,17 @@ profile 文件只有一个 profile 时，脚本会自动选择 `Local`，不需�
 ```bash
 performance/targets/echomem/run_six_metrics.sh full \
   .local-stress/six-metrics.profile.json \
-  results/local-six-metrics-default \
+  performance/targets/echomem/results/local-six-metrics-default \
   .local-stress/test.env
 ```
 
 默认组结束后，将第 2.1 节的调优字段合并进 EchoMem 完整配置、重启 Core，并使用**新的
-结果目录**运行第二组：
+结果目录**（仍在 `performance/targets/echomem/results/` 下）运行第二组：
 
 ```bash
 performance/targets/echomem/run_six_metrics.sh full \
   .local-stress/six-metrics.profile.json \
-  results/local-six-metrics-tuned \
+  performance/targets/echomem/results/local-six-metrics-tuned \
   .local-stress/test.env
 ```
 
@@ -516,7 +534,7 @@ performance/targets/echomem/run_six_metrics.sh full \
   --profiles .local-stress/six-metrics.profile.json \
   --metrics M1,M2,M3 \
   --env-file .local-stress/test.env \
-  --out-dir results/local-m1-m3-tuned
+  --out-dir performance/targets/echomem/results/local-m1-m3-tuned
 ```
 
 执行顺序为 `M1 → M2 → M3 → M4 → M5`，M6 从开始到结束持续采样。默认不运行 soak。
@@ -529,7 +547,7 @@ performance/targets/echomem/run_six_metrics.sh full \
   --profiles .local-stress/six-metrics.profile.json \
   --metrics M1 \
   --env-file .local-stress/test.env \
-  --out-dir results/local-m1
+  --out-dir performance/targets/echomem/results/local-m1
 ```
 
 `--metrics` 可使用 `M1` 到 `M6`，也可传 `M1,M2,M3`。只测 M6：
@@ -537,7 +555,7 @@ performance/targets/echomem/run_six_metrics.sh full \
 ```bash
 performance/targets/echomem/run_six_metrics.sh m6 \
   .local-stress/six-metrics.profile.json \
-  results/local-m6 \
+  performance/targets/echomem/results/local-m6 \
   .local-stress/test.env
 ```
 
@@ -547,17 +565,18 @@ performance/targets/echomem/run_six_metrics.sh m6 \
 .venv/bin/python -m performance.targets.echomem.observation_run \
   --profiles .local-stress/six-metrics.profile.json \
   --env-file .local-stress/test.env \
-  --out-dir results/local-six-metrics-full \
+  --out-dir performance/targets/echomem/results/local-six-metrics-full \
   --resume
 ```
 
 ## 8. 查看报告
 
-最终给人阅读的主结果始终是本次 `OUTPUT_DIR/report.html`。例如默认组和调优组分别为：
+最终给人阅读的主结果始终是本次 `OUTPUT_DIR/report.html`，其中 `OUTPUT_DIR`
+位于 `performance/targets/echomem/results/` 之下。例如默认组和调优组分别为：
 
 ```text
-results/local-six-metrics-default/report.html
-results/local-six-metrics-tuned/report.html
+performance/targets/echomem/results/local-six-metrics-default/report.html
+performance/targets/echomem/results/local-six-metrics-tuned/report.html
 ```
 
 不能只交付 HTML；同目录的结构化分母和逐请求证据必须一起保留：

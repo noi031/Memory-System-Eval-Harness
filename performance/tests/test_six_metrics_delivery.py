@@ -151,6 +151,19 @@ def test_readiness_allows_unrestricted_local_container(delivery_profile, monkeyp
     assert result["resource_evidence"]["memory_bytes"] == 0
 
 
+def test_readiness_allows_process_deployment_without_container(delivery_profile, monkeypatch):
+    local = {**delivery_profile, "name": "Local", "require_4u8g": False,
+             "resource_container": "", "fault_isolation": {"enabled": False},
+             "tenant_observability": {"enabled": False}}
+    with patch("performance.targets.echomem.acceptance.readiness._get", side_effect=[
+            (200, {"ready": True}), (200, {})]):
+        result = check_readiness(local)
+    assert result["ok"] is True
+    resource = next(c for c in result["checks"] if c["name"] == "resource-container")
+    assert resource["status"] == "PASS"
+    assert result["resource_evidence"]["resource_policy"] == "host-default"
+
+
 def test_readiness_missing_token_never_calls_protected_api(delivery_profile, monkeypatch):
     monkeypatch.delenv("ECHOMEM_TEST_CONTROL_TOKEN", raising=False)
     with patch("performance.targets.echomem.acceptance.readiness.inspect_container", return_value=docker_result()), \

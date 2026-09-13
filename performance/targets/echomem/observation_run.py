@@ -1,4 +1,12 @@
-"""Run the EchoMem M1-M6 observation suite and publish one report."""
+"""Run the EchoMem M1-M6 observation suite and publish one report.
+
+Evidence gates are two-tier (see ``acceptance.readiness``): hard gates
+(target-url, ready) abort the run; optional evidence gates (metrics,
+resource-container, fault_isolation, tenant_observability) that fail only
+degrade the affected metrics to INCONCLUSIVE/BLOCKED while the report is
+still published, so a local process deployment without Docker or protected
+observation APIs can run the observation suite honestly.
+"""
 
 from __future__ import annotations
 
@@ -192,6 +200,10 @@ def _validate_stage_observability_config(
 ) -> None:
     if not profile.get("require_stage_observability") or not set(selected) & {"M1", "M2", "M3"}:
         return
+    # 无容器时允许降级运行：结构化日志窗口无法采集，阶段证据
+    # 仅来自 /metrics histogram，缺日志侧的交叉校验不会阻断压测。
+    if not profile.get("resource_container"):
+        return
     document = read_json(Path(profile["preflight_config"]))
     runtime = document.get("runtime") if isinstance(document.get("runtime"), dict) else {}
     logging = document.get("logging") if isinstance(document.get("logging"), dict) else {}
@@ -199,8 +211,6 @@ def _validate_stage_observability_config(
         raise ValueError("M1-M3 stage observability requires runtime.log_level=DEBUG")
     if str(logging.get("format") or "").lower() != "json":
         raise ValueError("M1-M3 stage observability requires logging.format=json")
-    if not profile.get("resource_container"):
-        raise ValueError("M1-M3 stage observability requires resource_container for bounded Docker log collection")
 
 
 def _configure(profile: dict[str, Any], selected: list[str], *, quick: bool) -> dict[str, Any]:
@@ -214,9 +224,10 @@ def _configure(profile: dict[str, Any], selected: list[str], *, quick: bool) -> 
         "fault_isolation": {**(profile.get("fault_isolation") or {}), "enabled": needs_fault},
         "tenant_observability": {**(profile.get("tenant_observability") or {}),
                                   "enabled": needs_m6_behaviors},
-    })
+    }, strict=False)
     if not readiness.get("ok"):
         raise RuntimeError(json.dumps(readiness, ensure_ascii=False))
+    degraded = set(readiness.get("degraded") or [])
     if not profile.get("preflight_config"):
         raise ValueError("preflight_config is required for real LLM and embedding verification")
     _validate_stage_observability_config(profile, selected)
@@ -270,7 +281,7 @@ def _configure(profile: dict[str, Any], selected: list[str], *, quick: bool) -> 
     base_url = str(profile.get("base_url") or "").rstrip("/")
     phase = 15 if quick or m6_only else 60
     fault = {
-        "enabled": "M4" in selected or needs_m6_behaviors,
+        "enabled": True,
         "endpoint": base_url + "/api/inspect/test-control/fault",
         "token_env": "ECHOMEM_TEST_CONTROL_TOKEN",
         "samples": 10 if quick else 100,
@@ -283,6 +294,10 @@ def _configure(profile: dict[str, Any], selected: list[str], *, quick: bool) -> 
         "observation_only": True,
         "behavior_case_only": m6_only,
     }
+    if "fault_isolation" in degraded:
+        # 受保护故障控制面不可用：跳过 24 例长采样矩阵，
+        # M4 走 BLOCKED（无 cases），不浪费压测时间打无效流量。
+        fault["enabled"] = False
     recovery = {
         "enabled": "M5" in selected or needs_m6_behaviors,
         "tenant": tenant_ids[0],
@@ -293,7 +308,11 @@ def _configure(profile: dict[str, Any], selected: list[str], *, quick: bool) -> 
         "expected_image_id": readiness["resource_evidence"].get("image_id"),
         **(profile.get("commit_recovery") or {}),
     }
-    if ("M5" in selected or needs_m6_behaviors) and recovery.get("allow_container_restart") is not True:
+    has_restart_control = bool(
+        recovery.get("container") or recovery.get("pid") or recovery.get("restart_command")
+    )
+    if (("M5" in selected or needs_m6_behaviors) and has_restart_control
+            and recovery.get("allow_container_restart") is not True):
         raise ValueError("M5/M6 RESET requires commit_recovery.allow_container_restart=true for the dedicated target container")
     return {
         **profile,
@@ -311,7 +330,7 @@ def _configure(profile: dict[str, Any], selected: list[str], *, quick: bool) -> 
         "fault_isolation": fault if ("M4" in selected or needs_m6_behaviors) else {"enabled": False},
         "tenant_observability": {
             **(profile.get("tenant_observability") or {}),
-            "enabled": "M6" in selected,
+            "enabled": "M6" in selected and "tenant_observability" not in degraded,
             "expected_tenants": tenant_ids,
             "expected_lanes": lanes,
             "token_env": "ECHOMEM_TEST_CONTROL_TOKEN",
@@ -421,7 +440,7 @@ def run(args: argparse.Namespace, *, output_lock=None) -> dict[str, Any]:
         if "M1" in selected:
             publish_stage(selected)
             try:
-                suite["capacity_start_readiness"] = check_readiness(profile)
+                suite["capacity_start_readiness"] = check_readiness(profile, strict=False)
                 if not suite["capacity_start_readiness"].get("ok"):
                     raise RuntimeError("capacity_control_preflight_failed")
                 m1_reports = _run_m1_profiles(profile, args, output)
@@ -430,7 +449,7 @@ def run(args: argparse.Namespace, *, output_lock=None) -> dict[str, Any]:
                 if any((level.get("recovery") or {}).get("state") not in {"RECOVERED", "NO_BOUNDARY_OBSERVED"}
                        for report in m1_reports for level in report.get("levels", [])):
                     raise RuntimeError("capacity_recovery_unproven_before_next_metric")
-                if not check_readiness(profile).get("ok"):
+                if not check_readiness(profile, strict=False).get("ok"):
                     raise RuntimeError("post_capacity_readiness_failed")
             except Exception as exc:
                 result = publish_stage(selected, exc)

@@ -81,11 +81,14 @@ Prometheus Histogram 则按窗口累计值增量独立统计并与日志覆盖�
 
 ## 完整运行
 
+结果目录固定位于 `performance/targets/echomem/results/` 之下（禁止写到
+仓库根 `results/` 或其他位置），一次运行一个子目录：
+
 ```bash
 .venv/bin/python -m performance.targets.echomem.observation_run \
   --profiles .local-stress/six-metrics.profile.json \
   --profile 4U8G \
-  --out-dir results/echomem-4u8g-$(date +%Y%m%d-%H%M%S)
+  --out-dir performance/targets/echomem/results/echomem-4u8g-$(date +%Y%m%d-%H%M%S)
 ```
 
 完整运行包括 M1 的跨租户 T 阶梯、租户内 U 阶梯及 Search/Commit/mixed/hotspot
@@ -111,7 +114,7 @@ M3 基线不要求 100% 准确率：必须每租户至少观察到一次真实�
 # 将 M1 替换为 M2、M3、M4、M5 或 M6
 .venv/bin/python -m performance.targets.echomem.observation_run \
   --profiles .local-stress/six-metrics.profile.json --profile 4U8G \
-  --out-dir results/m1 --metrics M1
+  --out-dir performance/targets/echomem/results/m1 --metrics M1
 ```
 
 M6 单项会使用 4 个独立租户，以最长 45 秒负载与终态观察、8 个 Commit 屏障的真实基线/洪泛负载，
@@ -124,7 +127,7 @@ quick smoke 使用短窗口和小样本，报告固定标记
 ```bash
 .venv/bin/python -m performance.targets.echomem.observation_run \
   --profiles .local-stress/six-metrics.profile.json --profile 4U8G \
-  --out-dir results/smoke --quick
+  --out-dir performance/targets/echomem/results/smoke --quick
 ```
 
 quick 一般需要 10 到 40 分钟，取决于真实模型和 Commit 恢复时间。
@@ -283,7 +286,7 @@ Jain 接近 1 只说明租户之间均匀，并不说明性能好；短窗口不
 ```bash
 python -m performance.targets.echomem.acceptance.contention_matrix \
   --base-url "$ECHOMEM_BASE_URL" --container "$ECHOMEM_CONTAINER" \
-  --seed-directory "$SEED_DIR" --output results/contention-paced \
+  --seed-directory "$SEED_DIR" --output performance/targets/echomem/results/contention-paced \
   --expected-lanes commit,recall_engine,recall_intent_llm,recall_query_embedding \
   --repeats 3 --duration-s 120 --search-rps 0.5 \
   --commits-per-tenant 8 --commit-submit-rps 2 --commit-timeout-s 360

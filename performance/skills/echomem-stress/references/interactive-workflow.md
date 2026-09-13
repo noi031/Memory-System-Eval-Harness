@@ -1,87 +1,106 @@
-# EchoMem Stress Interactive Workflow
+# EchoMem 压测交互式工作流
 
-This reference defines the product experience for guiding another engineer from
-an unknown local machine to a reproducible M1-M6 HTML report.
+本参考定义产品体验：如何在未知的本地机器上，引导另一位工程师产出可复现
+的 M1-M6 HTML 报告。
 
-## 1. Start screen
+## 1. 起始画面
 
-Begin with facts, not a long questionnaire. Inspect the machine and show:
+从事实开始，而不是长篇问卷。检查机器并展示：
 
-| Check | Ready when |
+| 检查项 | 就绪条件 |
 | --- | --- |
-| Harness | repository found; branch, commit, and dirty state recorded |
-| EchoMem | repository/deployment found; `/api/v1/system/ready` succeeds |
-| Runtime | Python 3.11+ dependencies installed; Docker reachable when needed |
-| Real models | both LLM and Embedding preflights succeed |
-| Tenants | independent credentials exist; 32 recommended for capacity steps |
-| Control plane | fault and tenant-observability endpoints authenticate |
-| Recovery target | a dedicated local container is identified for M5 |
-| Output | new directory, or an existing directory explicitly selected to resume |
+| 套件 | 找到仓库；记录分支、commit 与脏状态 |
+| EchoMem | 找到仓库/部署；`/api/v1/system/ready` 成功 |
+| 运行时 | Python 3.11+ 依赖已装；需要时 Docker 可达 |
+| 真实模型 | LLM 与 Embedding 的 preflight 都成功 |
+| 租户 | 存在独立凭据；容量档推荐 32 个 |
+| 控制面 | fault 与 tenant-observability 端点可鉴权（仅完整覆盖需要；见下） |
+| 恢复目标 | 为 M5 识别出专用本地容器（仅完整覆盖需要；见下） |
+| 输出 | 新目录，必须位于 `performance/targets/echomem/results/` 之下；或用户明确选择续跑的既有目录 |
 
-Use these states: `READY`, `NEEDS_SETUP`, `BLOCKED`, and `DANGEROUS_TARGET`.
-Never echo secret values while checking them.
+状态枚举：`READY`、`DEGRADED`、`NEEDS_SETUP`、`BLOCKED`、`DANGEROUS_TARGET`。
+`DEGRADED` 表示硬门（`target-url`、`ready`）通过，但一个或多个可选证据门
+失败（`/metrics`、`resource-container`、`fault_isolation`、
+`tenant_observability`）：运行继续并照常产出 `report.html`，受影响指标
+诚实降级——缺 fault 控制面时 M4 BLOCKED；缺 tenant-observability 面或其
+token 时 M6 BLOCKED；host-default（无容器）时 M1 资源口径 0/None、无专用
+容器时 M5 BLOCKED、结构化日志阶段证据不可用。`BLOCKED` 只保留给真正
+中止运行的硬门失败（target-url/ready）。检查过程中绝不回显密钥值。
 
-When the profile pins `required_embedding_model`, compare the successful
-Embedding preflight model name exactly. For the current formal profile the value
-is `qwen3.7-text-embedding-flash`; a working request to a different model is not
-an acceptable substitute.
+profile 钉住 `required_embedding_model` 时，逐字比较成功的 Embedding
+preflight 模型名。当前正式 profile 的值为 `qwen3.7-text-embedding-flash`；
+能工作的其他模型请求不可作为替代。
 
-If setup is missing, direct the user to the single local guide:
-`performance/targets/echomem/README.md`. Do not invent a second deployment path.
+设置缺失时，把用户引向唯一本地指南 `performance/targets/echomem/README.md`。
+不要发明第二条部署路径。
 
-## 2. Scope chooser
+## 2. 范围选择器
 
-Do not ask again when the user already named metrics or a mode. Otherwise use
-M1-M3 as the default scope. The available explicit alternatives are:
+**确认门不可跳过**：任何会消耗模型额度、产生负载或破坏性效果的步骤启动
+之前，必须已获得用户确认。用户已点名指标或模式时，点名本身即范围确认，
+但预览命令仍须展示并获得确认；用户未点名时，把默认范围 M1-M3 作为提案
+请求确认，禁止以「默认」为由直接执行。可用的显式备选：
 
-1. **Quick chain check (recommended on a new machine)**: real HTTP and real
-   providers with shortened sampling. It validates wiring, not capacity.
-2. **First three metrics (default)**: M1 capacity, M2 fairness, and M3 Search priority.
-3. **Full M1-M6**: includes tenant fault injection and real container restart.
-4. **Single metric**: accept one or more of `M1` through `M6`.
-5. **Resume**: continue the same profile and output directory with `--resume`.
-6. **Report only**: rebuild or inspect existing evidence without new load.
+1. **快速链路检查（新机器推荐）**：真实 HTTP 与真实 provider、缩短采样。
+   验证接线，不验证容量。同样必须先确认再跑——quick 是用户的选择，不是
+   助手的默认动作。
+2. **前三项指标（默认提案）**：M1 容量、M2 公平性、M3 Search 优先级。
+3. **完整 M1-M6**：含租户故障注入与真实容器重启。
+4. **单指标**：接受 M1 至 M6 中一个或多个。
+5. **续跑**：同一 profile 与输出目录用 `--resume` 继续。
+6. **纯报告**：不施加新负载，只重建或检查既有证据。
 
-Before execution, display a concise preview:
-
-```text
-Target:        EchoMem <branch>@<commit>
-Harness:       <branch>@<commit>
-Scope:         M1,M2,M3
-Models:        <llm-name> / <embedding-name> (preflight passed)
-Tenants:       32 independent credentials
-Resources:     observed Docker limits, or host-default
-Destructive:   none | tenant fault | container kill/restart
-Output:        <absolute path>
-```
-
-Also display the distinction between configured actors and measured overlap:
+执行前展示简洁预览：
 
 ```text
-Hot-user levels:       1,2,4,8,16,32
-Required concurrency:  32 simultaneous in-flight requests
-EchoMem limits:         observed and reported; not used to cap client load
-Heterogeneous tenants: Search weights 8:4:2:1 / Commit weights 1:2:4:8
+目标:        EchoMem <branch>@<commit>
+套件:        <branch>@<commit>
+范围:        M1,M2,M3
+模型:        <llm-name> / <embedding-name>（preflight 通过）
+租户:        32 个独立凭据
+资源:        观测到的 Docker 限制，或 host-default
+破坏性:      无 | 租户故障 | 容器 kill/重启
+输出:        <绝对路径>
 ```
 
-M4 and M5 must target a dedicated test deployment. Remote login, shared compute,
-fault injection, and container kill/restart require explicit authorization for
-that run; having this skill installed is not authorization.
+预览必须展示**最终生效的参数值**（默认值或用户覆盖后的值），并标注每个
+数值来源是「默认」还是「本次指定」：
 
-## 3. Local preparation
+```text
+热用户档位:          1,2,4,8,16,32（默认；可覆盖）
+要求并发:            32 个同时在途请求（默认；0 = 不校验）
+每档时长:            300s（默认；quick 15s）
+每用户 Search RPS:   1（默认）
+租户总数:            32（默认；M2 至少 8 个独立凭据）
+M4 采样:             10/100 样本 × 3 重复（默认，按 quick/full）
+M5 样本:             3（默认；每次 202→kill→恢复）
+M5 恢复超时:         180s（默认；探针默认值）
+M6 采样间隔:         20s（默认）
+EchoMem 限制:        观测并报告；不用于封顶客户端负载
+异构租户:            Search 权重 8:4:2:1 / Commit 权重 1:2:4:8
+```
 
-Use the checked-out code's own configuration:
+每一项都可被用户覆盖：确认「档位/并发/用户数/时长加大或减小」的意图后，
+把对应 profile 字段改掉再预览（配置键与默认值见 SKILL.md「参数配置」
+表）。用户明确说「就用默认」后不再追问同一项；用户未提及时，展示
+默认值提案请求一次整体确认，确认前不得按默认值执行。
 
-1. Deploy EchoMem from its repository, copying its current
-   `configs/config.example.json`. Change credentials through environment variables;
-   do not substitute a harness-owned config template.
-2. Enable the protected test control only on the dedicated test deployment with
-   `ECHOMEM_TEST_CONTROL_ENABLED=true` and a random
-   `ECHOMEM_TEST_CONTROL_TOKEN` present on both service and runner sides.
-3. Confirm these endpoints exist for full coverage:
-   `GET/POST /api/inspect/test-control/fault` and
-   `GET /api/inspect/tenant-observability`.
-4. Provision independent tenants:
+M4 与 M5 必须针对专用测试部署。远程登录、共享计算、故障注入与容器
+kill/重启需要当次运行获得明确授权；安装本 skill 不等于授权。
+
+## 3. 本地准备
+
+使用检出代码自带的配置：
+
+1. 从其仓库部署 EchoMem，复制其当前 `configs/config.example.json`。凭据
+   通过环境变量修改；不要用套件自持的配置模板替代。
+2. 仅在专用测试部署上开启受保护测试控制：`ECHOMEM_TEST_CONTROL_ENABLED=true`
+   且服务端与运行端持有相同的随机 `ECHOMEM_TEST_CONTROL_TOKEN`。
+3. 完整覆盖需要确认这些端点存在：`GET/POST /api/inspect/test-control/fault`
+   与 `GET /api/inspect/tenant-observability`。端点缺失（404）或 token 缺失
+   只降级 M4/M6（BLOCKED），观测运行照常进行；正式 `--six-metrics` 验收
+   仍要求它们。
+4. 开通独立租户：
 
 ```bash
 .venv/bin/python -m performance.targets.echomem.provision \
@@ -92,145 +111,140 @@ Use the checked-out code's own configuration:
 chmod 600 .local-stress/tenants.json .local-stress/test.env
 ```
 
-5. Create one local profile by following
-   `performance/targets/echomem/README.md`. Use absolute paths, set
-   `require_4u8g` according to the actual test objective, and identify the
-   dedicated recovery container. Keep profiles and env files out of Git.
+5. 按 `performance/targets/echomem/README.md` 创建本地 profile：用绝对
+   路径，按实际测试目标设置 `require_4u8g`，识别专用恢复容器。无容器
+   本地进程部署：留空 `resource_container` 并设 `require_4u8g=false`（
+   M1 资源侧与 M5 将降级）。profile 与 env 文件都不得进入 Git。
 
-Run a quick chain check before a formal run:
+正式运行前，先向用户确认是否要做快速链路检查；用户同意后再执行（quick
+同样是消耗真实模型额度的步骤，不是免确认动作）：
 
 ```bash
 performance/targets/echomem/run_six_metrics.sh quick \
   .local-stress/six-metrics.profile.json \
-  results/local-six-metrics-quick \
+  performance/targets/echomem/results/local-six-metrics-quick \
   .local-stress/test.env
 ```
 
-Quick results are `PARTIAL` by design. They must never be reported as a capacity
-boundary or formal acceptance result.
+快速结果按设计是 `PARTIAL`，绝不能报成容量边界或正式验收结果。
 
-After the command exits, verify the report contract:
+命令退出后验证报告契约（`OUTPUT` 必须位于
+`performance/targets/echomem/results/` 之下）：
 
 ```bash
 test -f "OUTPUT/report.html"
 ```
 
-If `OUTPUT/report.html` does not exist, classify the run as `WRONG_ENTRYPOINT`
-and rerun with the commands in section 5; do not reinterpret or rename another
-HTML artifact as the current M1-M6 report.
+若 `OUTPUT/report.html` 不存在，归类为 `WRONG_ENTRYPOINT` 并用第 5 节命令
+重跑；不要重新解释或改名其他 HTML 工件为当前 M1-M6 报告。
 
-## 4. Six metric test cases
+## 4. 六项指标测试用例
 
-### M1: Capacity, hot users, and DAU
+### M1：容量、热用户与 DAU
 
-Pre-seed each tenant with a unique natural-language fact and verify that Search
-can retrieve it. Increase tenant count and hot users per tenant in configured
-steps. At each level run real Search, Commit, and mixed traffic, then record P50,
-P95, P99, throughput, error classes, recall numerator/denominator, CPU, memory,
-pending Commit depth, and recovery after load stops.
+为每个租户预灌唯一自然语言事实并验证 Search 可取回。按配置档位增加每
+租户租户数与热用户数。每个档位跑真实 Search、Commit 与混合流量，记录
+P50/P95/P99、吞吐、错误分类、召回分子/分母、CPU、内存、pending Commit
+深度与负载停止后的恢复。
 
-The boundary is the last sustainable level followed by the first level with
-persistent blocking, request failure, crash, OOM, or backlog that does not drain.
-An API/provider error is a failure type, not proof of EchoMem capacity. Convert
-the measured peak throughput into read-heavy, balanced, and write-heavy DAU
-estimates; label these as model-based conversions rather than measured users.
+边界是最后一个可持续档位之后第一个出现持久阻塞、请求失败、崩溃、OOM
+或无法排空的积压的档位。API/provider 错误是失败类型，不是 EchoMem 容量
+的证据。把实测峰值吞吐换算为读重、均衡、写重 DAU 估计；标注为基于模型的
+换算而非实测用户。
 
-For the default 32-tenant target, distinguish these measurements:
+对默认 32 租户目标，区分这些测量：
 
-- configured active tenants or hot users at the 32 level;
-- actual peak simultaneous in-flight HTTP requests;
-- the last level whose backlog drains after load stops;
-- the first level with persistent blocking, timeout, rejection, crash, OOM, or
-  non-draining backlog.
+- 32 档位上配置的活动租户或热用户数；
+- 实际峰值同时在途 HTTP 请求数；
+- 负载停止后积压能排空的最后一个档位；
+- 第一个出现持久阻塞、超时、拒绝、崩溃、OOM 或积压不排空的档位。
 
-Do not read EchoMem `max_concurrency`, queue capacity, or worker count and reduce
-the generator target. Capture those settings in the report as explanatory
-evidence. A service-side rejection or queue limit is a measured boundary result.
-Users may append 64 and 128 levels after the first pass without changing the test
-logic.
+禁止读取 EchoMem `max_concurrency`、队列容量或 worker 数来降低生成器
+目标。把相关设置作为解释性证据写进报告；服务侧拒绝或队列上限是实测的
+边界结果。用户可在首轮后追加 64/128 档而不改变测试逻辑。
 
-### M2: Equal-tier fairness
+### M2：等权重公平性
 
-Run 4 and 8 independently authenticated tenants with equal offered Search and
-Commit load. Each Commit uses its own session and terminal-state polling. Report
-per-tenant Commit completions/second and Search P95. Compute Jain separately for
-Commit throughput and the inverse of Search latency so that larger means better.
-List zero-completion tenants explicitly. The equal-weight Jain denominator must
-not include duplicate credentials masquerading as tenants.
+跑 4 与 8 个独立鉴权租户，施加相等的 Search 与 Commit 负载。每个 Commit
+用自己的会话并轮询终态。逐租户报告 Commit 完成/秒与 Search P95；分别对
+Commit 吞吐与 Search 时延倒数计算 Jain（较大者更好）。显式列出零完成
+租户。等权重 Jain 分母不得包含冒充租户的重复凭据。
 
-### M3: Search priority under Commit floods
+### M3：Commit 洪泛下的 Search 优先级
 
-Measure a pre-seeded hot-memory Search baseline, then repeat the same Search
-queries while real Commits remain outstanding. Run both:
+先测预灌热内存 Search 基线，再在真实 Commit 未完成时重复同样查询。两个
+用例：
 
-- `m3-flood-uniform`: Commit load spread across all tenants.
-- `m3-flood-single-tenant`: one tenant produces all Commits while every tenant
-  continues Search, exposing noisy-neighbor coupling.
+- `m3-flood-uniform`：Commit 负载铺满所有租户。
+- `m3-flood-single-tenant`：单租户产生全部 Commit，其余租户持续 Search，
+  暴露吵闹邻居耦合。
 
-Count only Search samples whose timestamps overlap confirmed unfinished Commits.
-Report baseline and overlap-window Search P95/P99, degradation ratio, errors,
-recall quality, and Commit planned/202/rejected/completed/non-terminal counts.
-This scenario measures cross-operation priority; it does not replace M2 fairness.
+只统计时间戳与未完成 Commit 重叠的 Search 样本。报告基线与重叠窗口的
+Search P95/P99、劣化比、错误、召回质量与 Commit planned/202/rejected/
+completed/non-terminal 计数。该场景测跨操作优先级，不替代 M2 公平性。
 
-Run an additional `m3-heterogeneous-tenants` case with four independent tenants.
-Apply Search weights `8:4:2:1` and Commit weights `1:2:4:8`, then report each
-tenant's configured weight, planned rate, actual arrivals, Search P95/errors and
-recall quality, and Commit completions. This verifies that one run can model a
-read-heavy tenant, two intermediate tenants, and a write-heavy tenant instead of
-assuming all tenants have identical request costs and rates.
+另跑 `m3-heterogeneous-tenants` 用例，四个独立租户。施加 Search 权重
+`8:4:2:1`、Commit 权重 `1:2:4:8`，逐租户报告配置权重、计划速率、实际
+到达、Search P95/错误与召回质量、Commit 完成数。这验证一次运行能模拟读重
+租户、两个中间租户与写重租户，而不是假设所有租户请求成本与速率相同。
 
-### M4: One-tenant fault isolation
+### M4：单租户故障隔离
 
-For each repeat, measure bystander tenants before the fault, inject `delay` and
-then `reject` into one authenticated tenant, keep bystanders searching during the
-fault, clear it, and measure recovery. Report every bystander's before/during/after
-P95, error rate, and percentage degradation. The target tenant must be excluded
-from the bystander denominator. A control endpoint response alone is not evidence;
-the workload must show that the target fault was exercised.
+每次重复：先测故障前旁观租户基线，向一个已鉴权租户注入 `delay` 再注入
+`reject`，故障期间旁观租户持续 Search，清除故障后测恢复。报告每个旁观者
+的前/中/后 P95、错误率与劣化百分比。目标租户必须排除在旁观者分母之外。
+控制端点响应本身不是证据；负载必须证明目标故障被施压。故障控制面缺失
+（404/无 token）时矩阵被跳过并记 INCONCLUSIVE 审计命令，M4 置 BLOCKED。
 
-### M5: Accepted Commit crash recovery
+### M5：被接受 Commit 的崩溃恢复
 
-Submit a uniquely marked Commit with an idempotency key. Only after the service
-returns 202 and before terminal completion, kill the dedicated EchoMem container
-or process. Restart it and poll the original operation without creating a
-replacement. Repeat the same idempotency key, then reconcile Commit status,
-history, archive, and cursor. Report accepted/recovered samples and exact missing,
-duplicate, or reordered message IDs. Passing requires every configured sample,
-not only the successful subset.
+提交带幂等键的唯一标记 Commit。只有服务返回 202 且未到终态时，kill 专用
+EchoMem 容器或进程。重启后不新建替代请求，轮询原操作；重复同一幂等键，
+再对账 Commit 状态、历史、归档与 cursor。报告 accepted/recovered 样本与
+精确的缺失、重复、乱序消息 ID。通过要求每个配置样本都覆盖，不只成功子集。
+无容器且无 pid/restart_command 时不要求 `allow_container_restart`，恢复
+探针早退 INCONCLUSIVE，M5 置 BLOCKED。
 
-### M6: Per-tenant lane observability
+### M6：按租户 lane 可观测性
 
-Sample the protected observability endpoint throughout M1-M5 and deliberately
-cover normal execution, queueing, rejection, reset, and restart generations.
-For every observed `tenant_id x lane`, require queue depth, total wait duration,
-total execution duration, and rejection count. Report expected versus observed
-cells, missing frames, negative/non-monotonic values, reset events, and whether
-all active tenants and lanes are represented. Metrics-family existence alone is
-not full M6 coverage.
+在整个 M1-M5 期间采样受保护可观测端点，刻意覆盖正常执行、排队、拒绝、
+重置与重启世代。对每个观测到的 `tenant_id x lane`，要求队列深度、等待总
+时长、执行总时长与拒绝计数。报告期望/观测单元格、缺失帧、负/非单调值、
+重置事件，以及是否所有活动租户与 lane 都被覆盖。仅有 metrics 族存在不是
+完整 M6 覆盖。tenant-observability 面缺失（404/无 token）时不启动采样
+线程，M6 置 BLOCKED。
 
-## 5. Commands
+## 5. 命令
 
-Formal full run:
+**执行前提**：以下任何命令只要会消耗模型额度、产生负载或破坏性效果，
+启动前必须先向用户展示实际范围、参数与命令并**获得明确确认**（见第 2 节
+确认门）。纯报告渲染不调用模型时仍需声明范围与输出路径。
+
+正式完整运行：
 
 ```bash
+# OUTPUT 必须形如 performance/targets/echomem/results/<run-name>/
 performance/targets/echomem/run_six_metrics.sh full PROFILE OUTPUT ENV_FILE
 ```
 
-First three or selected metrics:
+前三项或所选指标：
 
 ```bash
+# OUTPUT 必须形如 performance/targets/echomem/results/<run-name>/
 .venv/bin/python -m performance.targets.echomem.observation_run \
   --profiles PROFILE \
   --env-file ENV_FILE \
   --out-dir OUTPUT
 ```
 
-Omitting `--metrics` intentionally selects `M1,M2,M3`. Use an explicit metrics
-list for every other scope. The `full` wrapper explicitly selects all six.
+CLI 层 `--metrics` 缺省选择 `M1,M2,M3`、`full` 包装选择全部六项——这描述
+的是工具事实，**不是免确认许可**：实际传给运行器的指标列表必须来自用户
+已确认的范围，未确认前禁止直接调用。
 
-Resume in the same output directory:
+同目录续跑：
 
 ```bash
+# OUTPUT 必须形如 performance/targets/echomem/results/<run-name>/
 .venv/bin/python -m performance.targets.echomem.observation_run \
   --profiles PROFILE \
   --env-file ENV_FILE \
@@ -238,117 +252,103 @@ Resume in the same output directory:
   --resume
 ```
 
-Never overwrite an old result with a fresh run. Use a new output directory unless
-the user explicitly selected `--resume` with the same profile and metric set.
+禁止用新运行覆盖旧结果。除非用户显式选择同一 profile 与指标集的
+`--resume`，否则用 `performance/targets/echomem/results/` 下的新子目录。
 
-## 6. Progress presentation
+## 6. 进度呈现
 
-Keep one live report at `OUTPUT/report.html`. Create it after preflight and
-refresh it after memory seeding, each M1 level, each M2 tenant tier, each M3 flood
-mode, each M4 fault phase, each M5 recovery sample, and final M6 collection. Each
-refresh must use persisted evidence, retain the full denominator, and label
-unfinished metrics as running, partial, blocked, or not selected. Verify the
-file modification time advances and tell the user the path, update time,
-completed/total work, current denominator, latest P95, and error count. Do not
-flood chat with every request or wait until the whole run finishes to publish.
+在 `OUTPUT/report.html` 维持一份实时报告。preflight 后创建，并在记忆灌种、
+每个 M1 档位、每个 M2 租户层、每个 M3 洪泛模式、每个 M4 故障相位、每个
+M5 恢复样本与最终 M6 采集后刷新。每次刷新必须用持久化证据、保留完整
+分母，并把未完成指标标注为 running / partial / blocked / not selected。
+验证文件修改时间在推进，并告诉用户路径、更新时间、完成/总工作量、当前
+分母、最新 P95 与错误数。不要用逐请求消息刷屏，也不要等到全跑完才发布。
 
-When an error occurs, continue independent metrics when safe and classify it as:
+出错时，在安全前提下继续独立指标，并把错误归类为：
 
-- external provider: authentication, balance, quota, rate limit, model timeout;
-- deployment/control: readiness, missing token, protected endpoint, container;
-- EchoMem Search/Recall, routing/admission, Commit/recovery, engine, tenant
-  isolation, or observability;
-- harness execution or evidence defect.
+- 外部 provider：鉴权、余额、配额、限流、模型超时；
+- 部署/控制：readiness、缺 token、受保护端点、容器；
+- EchoMem：Search/Recall、路由/准入、Commit/恢复、引擎、租户隔离或
+  可观测性；
+- 套件执行或证据缺陷。
 
-Provider failure blocks recall-dependent conclusions but does not erase valid M5
-recovery or M6 control-plane evidence. A missing test-control endpoint blocks M4
-or M6; do not call it an EchoMem performance failure.
+Provider 失败只阻塞依赖召回结论的指标，不抹掉有效的 M5 恢复或 M6 控制面
+证据。测试控制端点缺失使 M4/M6 降级为 BLOCKED——查 `readiness["degraded"]`
+区分部署/控制缺失与 EchoMem 缺陷，不要把缺失端点称为 EchoMem 性能失败。
 
-## 7. Report delivery
+## 7. 报告交付
 
-Inspect and preserve:
+检查并保留：
 
-- `execution-manifest.json`: versions, config fingerprint, provider preflight;
-- `summary.json`: structured M1-M6 results and denominators;
-- `suite.json`: case/probe evidence;
-- `records.csv` and `metrics_samples.csv`: raw request and resource samples;
-- `report.html`: visual report with test method after each metric.
+- `execution-manifest.json`：版本、配置指纹、provider preflight；
+- `summary.json`：结构化 M1-M6 结果与分母；
+- `suite.json`：case/探针证据；
+- `records.csv` 与 `metrics_samples.csv`：原始请求与资源样本；
+- `report.html`：可视报告，每项指标后附测试方法。
 
-Open `report.html` for the user. Put the overall conclusion first, then M1, M2,
-M3, M4, M5, M6. For every selected metric state what it reflects, how it was
-tested, the measured denominator, charts/data, status, failure types, and concrete
-improvements grouped by EchoMem modules: external providers, Search/Recall,
-routing/admission, Commit/recovery, memory engine, tenant isolation/control,
-observability, and harness/deployment.
+为用户打开 `report.html`。结论在前，然后 M1、M2、M3、M4、M5、M6。对每个
+所选指标说明它反映什么、怎么测的、测得分母、图表/数据、状态、失败类型
+与按 EchoMem 模块分组的具体改进：外部 provider、Search/Recall、
+路由/准入、Commit/恢复、内存引擎、租户隔离/控制、可观测性、套件/部署。
 
-Add these report-wide audits after the six metric sections:
+六项指标之后追加报告级审计：
 
-1. **Invalid-input matrix**: exercise missing/invalid auth, malformed JSON,
-   missing/invalid Search fields, invalid session operations, unknown Commit
-   status/memory/history/archive/cursor targets, invalid filesystem URI, and
-   protected endpoints without a token. Show every case and status; do not report
-   only the successful subset.
-2. **API call ledger**: list every six-metric runtime endpoint with HTTP method,
-   path, exact or minimum observed call count, and coverage state. Product APIs
-   unrelated to M1-M6 are outside this ledger and must be labeled as such.
-3. **Module timing evidence**: chart HTTP endpoint P50/P95/P99 and any explicit
-   timing fields returned by EchoMem. Mark router, recall, admission, Commit, and
-   atomic-engine stages as unobservable when the service does not expose them;
-   never manufacture stage timing through subtraction.
+1. **invalid-input 矩阵**：施压缺失/非法鉴权、畸形 JSON、缺失/非法 Search
+   字段、非法会话操作、非法 Commit 状态/记忆/历史/归档/cursor 目标、
+   非法文件系统 URI、无 token 的受保护端点。展示每个用例与状态；不要只报
+   成功子集。
+2. **API 调用台账**：列出每个六指标运行时端点的方法、路径、精确或最少
+   观测调用次数与覆盖状态。与 M1-M6 无关的产品 API 在台账之外并标注。
+3. **模块时延证据**：画 HTTP 端点 P50/P95/P99 与 EchoMem 返回的任何显式
+   时延字段。服务不暴露 router/recall/admission/Commit/atomic-engine 阶段
+   时，标注为不可观测；禁止用减法制造阶段时延。
 
-## 8. Report display contract
+## 8. 报告展示契约
 
-The repository report generator, not the agent, owns HTML structure, styling,
-charts, status calculation, and escaping. The agent owns timely regeneration,
-validation, opening the result, and a concise explanation. Do not create a
-parallel `*-explained.html`, rename another artifact to `report.html`, or paste
-secret/raw payloads into the page.
+仓库报告生成器（而非 agent）拥有 HTML 结构、样式、图表、状态计算与转义。
+agent 负责及时重新生成、验证、打开结果与简洁讲解。禁止创建并行的
+`*-explained.html`、把其他工件改名成 `report.html`，或把密钥/原始 payload
+贴进页面。
 
-The top of `report.html` must make the run understandable without opening raw
-JSON. Show, in this order:
+`report.html` 顶部必须让读者不看原始 JSON 就能理解运行。按序展示：
 
-1. an overall conclusion naming the measured boundary and the largest blocker;
-2. generation/update time and run state (`RUNNING`, `PARTIAL`, `PASS`, `FAIL`,
-   `BLOCKED`, `INCONCLUSIVE`, or `NOT_SELECTED`), with text as well as color;
-3. EchoMem/harness commits, profile/config fingerprint, real model names, actual
-   resource limits, selected metrics, elapsed time, and completed/total work;
-4. provider and deployment preflight state without secret values.
+1. 总体结论：点名实测边界与最大阻塞项；
+2. 生成/更新时间与运行状态（`RUNNING`、`PARTIAL`、`PASS`、`FAIL`、
+   `BLOCKED`、`INCONCLUSIVE`、`NOT_SELECTED`），文字与颜色都要有；
+3. EchoMem/套件 commit、profile/配置指纹、真实模型名、实际资源限制、
+   所选指标、耗时与完成/总工作量；
+4. 不含密钥值的 provider 与部署 preflight 状态。
 
-Every metric section must keep the same reading order:
+每个指标小节保持相同阅读顺序：
 
-1. **What it reflects** and **how it was tested** in plain language.
-2. A status card with the primary value, numerator/denominator, latest completed
-   level or phase, errors, and confidence limitation.
-3. A chart for comparison or trend, followed by the exact-value table used to
-   draw it. Tooltips or labels must expose exact values; charts never replace
-   denominators.
-4. Failure classes split into EchoMem, external provider, deployment/control,
-   and harness/evidence causes. Keep unknown failures visible.
-5. Concrete improvement suggestions grouped by the responsible EchoMem module,
-   plus the exact rerun condition for partial or inconclusive evidence.
-6. Links to the relevant persisted JSON/CSV/log evidence using relative paths.
+1. **反映什么**与**怎么测的**，用平实语言。
+2. 状态卡片：主值、分子/分母、最新完成档位或相位、错误与置信限制。
+3. 对比/趋势图表，其后是绘图所用的精确值表格。提示或标签必须暴露精确
+   值；图表绝不能替代分母。
+4. 失败分类：EchoMem、外部 provider、部署/控制、套件/证据。未知失败
+   保持可见。
+5. 按责任 EchoMem 模块分组的具体改进建议，以及 partial/inconclusive 证据
+   的确切重跑条件。
+6. 用相对路径链接相关持久化 JSON/CSV/日志证据。
 
-Use these metric-specific visuals and tables:
+各指标专用可视化与数据：
 
-| Metric | Required visual | Required exact data |
+| 指标 | 必需可视化 | 必需精确数据 |
 | --- | --- | --- |
-| M1 capacity | load-level lines/bars for Search P95/P99, strict-success throughput, error rate, CPU, RSS, and Commit backlog | configured tenants/hot users, observed peak in-flight, Search sent/strict-success/quality-fail/non-200/transport error, recall hits/attempts, Commit planned/202/completed/failed/pending, backlog drain result, provider errors, first blocking level |
-| M2 fairness | per-tenant Commit throughput and Search P95 bars, plus Jain summary | credential-unique tenant count, offered/actual Search and Commit per tenant, completions, errors, inverse-latency input, both Jain numerators/denominators, zero-completion tenants |
-| M3 priority | baseline versus overlapping-flood Search P95/P99 for uniform, single-tenant, and heterogeneous cases | confirmed unfinished-Commit overlap window, overlapping Search count, recall hits/attempts, Commit planned/202/rejected/completed/non-terminal, per-tenant configured weights and actual arrivals |
-| M4 isolation | each bystander's before/during/after Search P95 and degradation percentage | injected tenant and fault type, control response, exercised-fault evidence, bystander-only denominator, errors and recovery samples for every repeat |
-| M5 recovery | acceptance-to-recovery funnel and per-sample outcome table | planned, 202 accepted, killed while non-terminal, recovered terminal, replayed idempotency key, history/archive/cursor missing/duplicate/order mismatches; failed samples remain in the denominator |
-| M6 observability | tenant-by-lane coverage matrix and queue-depth/wait/execute/reject charts | expected and observed cells, sample timestamps, queue depth, wait/execute totals or deltas, rejected count, missing/non-monotonic/reset frames, generation/restart boundaries |
+| M1 容量 | Search P95/P99、严格成功吞吐、错误率、CPU、RSS、Commit 积压的载入档位线/条 | 配置租户/热用户、观测峰值在途、Search 发送/严格成功/质量失败/非 200/传输错误、召回命中/尝试、Commit planned/202/completed/failed/pending、积排空结果、provider 错误、首个阻塞档位 |
+| M2 公平性 | 逐租户 Commit 吞吐与 Search P95 条，加 Jain 汇总 | 凭据唯一租户数、每租户提供/实际 Search 与 Commit、完成、错误、倒时延输入、两个 Jain 分子/分母、零完成租户 |
+| M3 优先级 | 基线与重叠洪泛 Search P95/P99（uniform、单租户、异构） | 确认未完成 Commit 重叠窗口、重叠 Search 数、召回命中/尝试、Commit planned/202/rejected/completed/non-terminal、逐租户配置权重与实际到达 |
+| M4 隔离 | 每个旁观者的前/中/后 Search P95 与劣化百分比 | 注入租户与故障类型、控制响应、被施压故障证据、仅旁观者分母、每次重复的错误与恢复样本 |
+| M5 恢复 | 接受到恢复漏斗与逐样本结果表 | planned、202 接受、非终态时 kill、终态恢复、重放幂等键、历史/归档/cursor 缺失/重复/乱序；失败样本留在分母 |
+| M6 可观测性 | 租户×lane 覆盖矩阵与队列深度/等待/执行/拒绝图 | 期望与观测单元格、样本时间戳、队列深度、等待/执行总量或增量、拒绝数、缺失/非单调/重置帧、世代/重启边界 |
 
-After M1-M6, render the invalid-input matrix, API call ledger, Search/Recall and
-Commit/Atomic module timing distributions, and raw artifact index. For module
-timings, show observation count and P50/P95/P99 plus queue wait when available;
-identify whether each value came from a trace-correlated JSON log or a Prometheus
-window delta. Never mix endpoint latency, model latency, and internal stage time
-in one unlabeled series.
+M1-M6 之后渲染 invalid-input 矩阵、API 调用台账、Search/Recall 与
+Commit/Atomic 模块时延分布与原始工件索引。模块时延展示观测数与
+P50/P95/P99，有排队等待时一并给出；标明每个值来自 trace 关联 JSON 日志
+还是 Prometheus 窗口增量。禁止把端点时延、模型时延与内部阶段时间混入
+一条未标注的序列。
 
-On every live refresh, preserve completed sections and prior denominators. The
-agent must verify that `report.html` exists, its modification time advanced, its
-displayed checkpoint matches persisted evidence, and no selected metric silently
-disappeared. If the generator cannot render an available field, report
-`REPORT_CONTRACT_GAP`, patch the canonical generator, regenerate the same file,
-and rerun its focused tests before presenting the result.
+每次实时刷新保留已完成小节与既往分母。agent 必须验证 `report.html`
+存在、修改时间推进、展示的检查点与持久化证据一致，且没有任何所选指标
+静默消失。生成器无法渲染可用字段时，报 `REPORT_CONTRACT_GAP`、修补规范
+生成器、重新生成同一文件并在展示前重跑其聚焦测试。
