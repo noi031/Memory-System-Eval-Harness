@@ -30,7 +30,8 @@ def setup_run(tmp_path, monkeypatch):
     monkeypatch.setattr(module, "run_suite", suite)
     monkeypatch.setattr(module, "run_configured_probes", probes)
     args = argparse.Namespace(profiles=profiles, profile="4U8G", env_file=None,
-        out_dir=tmp_path / "out", metrics="M1,M3", quick=False, resume=False, timeout_s=600)
+        out_dir=tmp_path / "out", metrics="M1,M3", quick=False, resume=False,
+        timeout_s=600, scenarios="", probes="")
     return args, events
 
 

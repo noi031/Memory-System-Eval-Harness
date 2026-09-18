@@ -6,42 +6,25 @@
 
 ## 交给任意 AI 助手的完整任务
 
-这份手册不依赖 Codex。让 AI 在测试平台仓库中工作，并把下面一段直接发给它；替换两个
-绝对路径，不要把密钥写进提示词：
+压测执行规范一律以本仓库 `performance/skills/echomem-stress/SKILL.md` 及其
+`references/`（interactive-workflow.md、chart-report-workflow.md）为准。让 AI 在测试
+平台仓库中工作，先完整阅读该 skill 的全部文件，再按其中的
+Discover → Configure → Preview → Validate → Execute → Explain 流程执行。
 
-```text
-EchoMem 仓库：<EchoMem 绝对路径>
-测试平台仓库：<Memory-System-Eval-Harness 绝对路径>
+本 README 只描述 EchoMem 本机部署与环境准备，**不预设任何压测范围、指标、档位、
+并发、租户数、模型或时长**——这些全部由使用者在 skill 引导下逐项指定并确认。
+执行任何会消耗模型额度、产生负载或破坏性效果的命令前，AI 必须先向使用者展示
+实际范围、参数与命令并取得明确确认；使用者未指名时逐项询问，默认值只是待确认
+提案，不得免确认执行。先核对两个仓库的 branch、commit 和 dirty state，不要静默
+fetch、switch、reset。
 
-先完整阅读：
-1. <测试平台仓库>/performance/targets/echomem/README.md
-2. <测试平台仓库>/performance/skills/echomem-stress/SKILL.md
-3. <测试平台仓库>/performance/skills/echomem-stress/references/interactive-workflow.md
-
-将这三份文件作为本次 EchoMem 压测的执行规范。即使当前 AI 没有 Skill 安装机制，
-也必须按照其中的 Discover、Configure、Preview、Validate、Execute、Explain 流程执行。
-执行任何会消耗模型额度、产生负载或破坏性效果的命令前，必须先向使用者展示
-实际范围、参数与命令并取得明确确认；默认值只是待确认提案，不得免确认执行。
-先核对两个仓库的 branch、commit 和 dirty state，不要静默 fetch、switch、reset。
-使用真实 LLM 和 qwen3.7-text-embedding-flash Embedding，运行完整 M1-M6。
-默认容量档位为 1、2、4、8、16、32，创建 32 个独立租户凭据。需要继续寻找更高
-边界时，由使用者在 profile 中追加 64、128 等档位并补足独立租户凭据。
-先跑默认配置基线，再跑并发调优配置；两个结果目录和配置指纹必须分开。
-测试平台不得根据 EchoMem 的 worker、queue、provider budget 或 max concurrency 自动降载。
-保留超时、拒绝、Provider 异常、pending、空召回和质量失败的原始分母。
-允许对本次专用容器执行 M4 delay/reject 故障注入和 M5 kill/restart。
-完成后打开 report.html，逐项解释数据、分母、错误归属和 EchoMem 模块改进建议。
+测试平台不得根据 EchoMem 的 worker、queue、provider budget 或 max concurrency
+自动降载。保留超时、拒绝、Provider 异常、pending、空召回和质量失败的原始分母。
 报告顶部必须列出实际预检的 LLM、Embedding、Endpoint、真实请求状态和配置指纹。
 预检成功只证明模型可用；只有同时采到压测期间的模型阶段日志或 Provider 指标，才可
 说明负载调用了模型。`mock=false`、HTTP 200 或配置中写了模型名都不能作为调用证据。
-```
-
-AI 必须先展示 readiness、实际范围、参数与命令，并**获得使用者明确确认**，
-再开始会消耗模型额度或重启容器的步骤。若它不能
-读取文件、执行 Shell、访问 Docker 或持续跟踪长任务，就不能声称已经完成压测。若只想
-先验证链路，将“运行完整 M1-M6”改成“运行 quick”；quick 的结果只能标记为 `PARTIAL`。
-quick 同样必须经使用者确认后才能运行——它是使用者做出的选择，不是 AI 可默认执行的
-动作。
+AI 不能读取文件、执行 Shell、访问 Docker 或持续跟踪长任务时，就不能声称已经完成
+压测。quick 链路检查的结果只能标记为 `PARTIAL`，且同样必须经使用者确认后才能运行。
 
 > 完整测试会对专用 EchoMem 容器注入租户故障，并在 M5 中执行真实 `kill -9` 和重启。
 > 请勿指向日常开发、共享或生产容器。
@@ -200,7 +183,7 @@ Embedding 至少确认以下字段；维度必须与被测版本的索引配置�
       "provider": "openai_compatible",
       "api_base": "https://dashscope.aliyuncs.com/compatible-mode/v1",
       "api_key_env": "ECHOMEM_EMBEDDING_API_KEY",
-      "model": "qwen3.7-text-embedding-flash",
+      "model": "<使用者确认的实际 Embedding 模型名>",
       "dimensions": 1024
     }
   }
@@ -246,20 +229,17 @@ docker inspect --format '{{.Name}}' "$(docker compose ps -q core)"
 
 输出通常类似 `/echomem-core-1`；profile 使用去掉开头 `/` 后的 `echomem-core-1`。
 
-### 2.1 默认基线与并发调优必须分开
+### 2.1 并发调优（可选）与配置指纹
 
-不要只跑一份改过的配置。容量测试至少保留两组：
-
-1. **默认基线**：只替换 endpoint、模型名和 key，保留被测版本所有调度默认值。它回答
-   “用户按默认配置部署后能承受多少”。
-2. **并发调优组**：提高会提前截断请求的本地并发和队列旋钮。它回答“解除保守配置后，
-   当前机器、EchoMem 和 Provider 组合能承受多少”。
+容量测试**每次独立运行**：当前生效配置即被测基线，一次运行一个结果目录与配置
+指纹，禁止合并不同配置的结果。是否需要并发调优由使用者按需决定；调优实验必须
+使用单独指纹与独立结果目录，禁止把调优数字描述成默认部署基线。
 
 当前 4U8G `small` 默认通常包含 `model.max_concurrent=4`、Retrieval admission=8、
 `llm_max_concurrent=4`、`embed_max_concurrent=4`、Recall LLM/Embedding=1/2，以及较小的
 Recall 队列。这些值可能在默认 32 客户端并发前先形成排队，不能把该现象描述成硬件极限。
 
-若团队已经测过 `qwen3.7-text-embedding-flash` 的 8/16/32/64 Provider 并发，可在运行
+若团队已对该确切账户、端点与模型记录过 Provider 并发证据，可在运行
 备注中引用该证据并跳过重复阶梯；仍需做一次真实鉴权、模型名、返回维度和单条向量检查。
 没有既有证据的机器不得假定 Provider 支持 64 并发。
 
@@ -318,8 +298,8 @@ Commit executor+gate 为 `5+3=8`，不超过 4 核的 2 倍约束。
 
 ### 后续扩展到 128 并发时核对什么
 
-128 个租户、128 个热用户和 128 个同时在途 HTTP 请求不是同一个指标。当前首轮仍以
-32 租户为上限；下面是扩展时的核对表，不是已完成的 128 并发测试结论。
+128 个租户、128 个热用户和 128 个同时在途 HTTP 请求不是同一个指标。下面是扩展
+并发实验时的核对表，不是已完成的 128 并发测试结论；实际档位以使用者确认的值为准。
 
 | 层级 | 128 并发实验需要核对的内容 |
 | --- | --- |
@@ -333,7 +313,7 @@ Commit executor+gate 为 `5+3=8`，不超过 4 核的 2 倍约束。
 
 配置应通过被测版本启动校验，并保留 `instance_profile_resolved` 和实际资源限制。
 “不让内部配置影响发压”指测试平台不读取这些值来偷偷降低客户端负载，并不代表
-服务端配置对性能没有影响。默认配置和调优配置必须分开报告，不能混用容量边界。
+服务端配置对性能没有影响。不同配置的运行必须分开报告，不能混用容量边界。
 
 ## 3. 安装测试平台
 
@@ -385,199 +365,163 @@ profile 中的 `resource_container` 是该 EchoMem 容器的准确名称，并�
 trace 引用，不保存请求正文或原始 trace id。无容器本地进程部署
 （`resource_container` 为空、`require_4u8g=false`）时此要求自动放宽：结构化
 日志窗口跳过、阶段证据仅来自 `/metrics` histogram，M1 资源口径与 M5 相应降级，
-观测运行仍正常产出报告（正式 `--six-metrics` 验收保持严格）。
+观测运行仍正常产出报告。
 
 ## 5. 创建唯一的本机 profile
 
-新建 `.local-stress/six-metrics.profile.json`，只放下面这一个 profile。将三处绝对路径和
-容器名替换为本机实际值：
+新建 `.local-stress/six-metrics.profile.json`，只放当前这一个 profile。profile
+与密钥 env 文件都不得进入 Git。**所有数值（档位、并发目标、时长、租户数等）由
+使用者按 `performance/skills/echomem-stress/SKILL.md` 引导逐项确认后填写**，
+本 README 不预设任何数值。字段结构与语义如下：
 
-```json
-{
-  "profiles": [
-    {
-      "name": "Local",
-      "base_url": "http://127.0.0.1:8010",
-      "resource_container": "echomem-core-1",
-      "require_4u8g": false,
-      "tenant_config": "/absolute/path/to/Memory-System-Eval-Harness/.local-stress/tenants.json",
-      "preflight_config": "/absolute/path/to/EchoMem/deploy/single-node/config.json",
-      "m1_tenant_levels": [1, 2, 4, 8, 16, 32],
-      "m1_user_levels": [1, 2, 4, 8, 16, 32],
-      "required_concurrency": 32,
-      "required_embedding_model": "qwen3.7-text-embedding-flash",
-      "require_stage_observability": true,
-      "m1_duration_s": 300,
-      "m1_search_rps_per_user": 1,
-      "dau_scenarios": [
-        {"name": "read-heavy", "searches_per_user_day": 50, "commits_per_user_day": 5, "peak_to_average_ratio": 3},
-        {"name": "balanced", "searches_per_user_day": 20, "commits_per_user_day": 20, "peak_to_average_ratio": 5},
-        {"name": "write-heavy", "searches_per_user_day": 5, "commits_per_user_day": 50, "peak_to_average_ratio": 8}
-      ],
-      "fault_isolation": {
-        "samples": 100,
-        "repeats": 3,
-        "token_env": "ECHOMEM_TEST_CONTROL_TOKEN"
-      },
-      "tenant_observability": {
-        "token_env": "ECHOMEM_TEST_CONTROL_TOKEN"
-      },
-      "commit_recovery": {
-        "allow_container_restart": true,
-        "samples": 3,
-        "messages": 12,
-        "content_chars": 1000,
-        "recovery_timeout_s": 180
-      }
-    }
-  ]
-}
-```
+| 字段 | 语义与约束 |
+| --- | --- |
+| `name` | 唯一本机 profile 名；文件只有一个 profile 时运行器自动选择，无需 `--profile` |
+| `base_url` | 被测 EchoMem 的 HTTP 地址（如 `http://127.0.0.1:8010`） |
+| `resource_container` | 容器名（如 `echomem-core-1`）。无容器本地进程部署留空 → host-default 降级：M1 资源口径 0/None、结构化日志窗口跳过、M5 不要求 `allow_container_restart` |
+| `require_4u8g` | 按实际测试目标设置；Docker 未设上限时 CPU/内存字段可能显示 `0`（宿主机默认资源）。报告保存容器 ID、镜像 ID 与 Docker 资源配置 |
+| `tenant_config` / `preflight_config` | tenants.json 与 EchoMem `deploy/single-node/config.json` 的绝对路径 |
+| `m1_tenant_levels` / `m1_user_levels` | M1 容量档位，由使用者指定；只加档位不补足独立租户凭据时正式运行直接失败 |
+| `required_concurrency` | 需要观测到的同时在途请求数目标，**不等同于配置的用户数**；测试平台不会读取 EchoMem 的 `max_concurrency`、队列容量或 worker 数后主动降载 |
+| `required_embedding_model` | 硬性预检条件：只接受真实成功调用该模型名；服务实际使用其他 Embedding 时正式发压前直接停止 |
+| `require_stage_observability` | 为 true 时要求 DEBUG JSON 日志与容器以采集白名单阶段事件；host-default 下自动放宽 |
+| `m1_duration_s` / `m1_search_rps_per_user` | 由使用者指定 |
+| `dau_scenarios` | 三种业务画像（读重/均衡/写重）的 DAU 换算输入 |
+| `fault_isolation` / `tenant_observability` / `commit_recovery` | M4/M6/M5 专用段；控制面端点缺失或 token 缺失时对应指标如实降级（BLOCKED），不会阻断运行 |
 
-`require_4u8g: false` 表示不检查固定 4U8G cgroup；Docker 未设置上限时 CPU 和内存字段
-可能显示为 `0`，含义是使用宿主机默认资源。为保证数据可比较，报告还会保存容器 ID、
-镜像 ID 和 Docker 资源配置。完全无容器的本地进程部署把 `resource_container` 留空并保持
-`require_4u8g: false`：readiness 按 host-default 判 PASS，M1 资源侧与 M5 自动降级
-（结构化日志窗口跳过、恢复探针不要求 `allow_container_restart`），观测运行照常出报告。
-
-`required_embedding_model` 是硬性预检条件。本例只接受真实成功调用
-`qwen3.7-text-embedding-flash`；如果服务实际使用其他 Embedding，正式发压前会直接停止。
-
-`seed_search_timeout_s` 控制 M2/M3 等 observation 场景在记忆准备后的单次召回验证等待时间，
-默认 60 秒。例如配置 `"seed_search_timeout_s": 120` 可保留超过 60 秒的慢响应。
-这不修改正式场景的请求超时、发压强度、服务配置或质量断言，也不覆盖 M1 独立容量扫描。
-必须使用新的结果目录区分不同配置；旧超时仍保留为失败。每条验证记录包含实际延迟、
-等待上限、传输错误类型、合成问题和预期事实。HTTP 200 或更长等待不代表召回质量通过。
+`seed_search_timeout_s` 控制 M2/M3 等 observation 场景在记忆准备后的单次召回验证
+等待时间，默认 60 秒。例如配置 `"seed_search_timeout_s": 120` 可保留超过 60 秒的
+慢响应。这不修改正式场景的请求超时、发压强度、服务配置或质量断言，也不覆盖 M1
+独立容量扫描。必须使用新的结果目录区分不同配置；旧超时仍保留为失败。每条验证
+记录包含实际延迟、等待上限、传输错误类型、合成问题和预期事实。HTTP 200 或更长
+等待不代表召回质量通过。
 
 M1 独立命令 `python -m performance.targets.echomem.acceptance.capacity_experiment`
-可用 `--search-workers 128` 显式配置客户端 Search 工作线程数。
-不要把线程数当作实际并发；实际在途峰值与每档 `planned/sent/not_sent` 必须一起检查。
-若出现 `generator_saturated`，说明客户端没有发出该请求，不能归因为 EchoMem 拒绝。
-提高客户端工作线程数不改变服务端 worker、模型配额或队列配置，实际数量记录在每档 measurement 的 `pools`。
+可用 `--search-workers <N>` 显式配置客户端 Search 工作线程数。不要把线程数当作
+实际并发；实际在途峰值与每档 `planned/sent/not_sent` 必须一起检查。若出现
+`generator_saturated`，说明客户端没有发出该请求，不能归因为 EchoMem 拒绝。提高
+客户端工作线程数不改变服务端 worker、模型配额或队列配置，实际数量记录在每档
+measurement 的 `pools`。
 
 还必须核对最外层 `recall.max_inflight`，不能只调 `recall.concurrency.*`。
 当前已验证的 EchoMem 版本在未配置该字段时默认 16；`ECHOMEM_RECALL_MAX_INFLIGHT`
 环境变量优先于 JSON。以目标版本源码和实际日志为准，不能假设所有版本默认值相同。
 出现 `RETRIEVAL_BUSY` 时核查 `retrieval_admission_rejected` 中的 `in_flight/max_inflight`。
 例如内部阶段均为 128、外层仍为 16 时，实际同时执行 Recall 仍会被 16 限制。
-调优实验可显式设置 `recall.max_inflight: 128`，并同时核对 HTTP、租户、模型预算及供应商限额；
-不要无条件设置为 0 来关闭保护。此配置通常需要重启生效，须按部署流程授权执行。
-默认配置与调优配置分开保存结果，不能将配置拒绝边界描述为硬件极限。
+调优实验可显式设置 `recall.max_inflight`，并同时核对 HTTP、租户、模型预算及
+供应商限额；不要无条件设置为 0 来关闭保护。此配置通常需要重启生效，须按部署
+流程授权执行。配置拒绝边界不能描述为硬件极限。
 
-`required_concurrency: 32` 表示首轮需要观察到至少 32 个同时在途请求，不等同于仅配置了
-32 个用户。需要扩展时，可将两组 M1 档位和该值一起提高到 64、128。测试平台不会读取
-EchoMem 的 `max_concurrency`、队列容量或 worker 数后主动
-降低负载；这些服务端限制会原样写入报告，用来解释排队、拒绝或容量边界。
-
-首轮得到 32 租户数据后，如需继续寻找 64/128 的边界，使用者再显式扩展：
+租户开通（独立凭据，不耗模型额度）：
 
 ```bash
 .venv/bin/python -m performance.targets.echomem.provision \
   --base-url http://127.0.0.1:8010 \
-  --count 128 \
+  --count <使用者确认的租户数> \
   --out .local-stress/tenants.json \
   --env-file .local-stress/test.env
 ```
 
-并把 `m1_tenant_levels`、`m1_user_levels` 追加到目标档位，同时将
-`required_concurrency` 改为 64 或 128。只改档位而没有补足独立租户凭据时，正式运行应
-直接失败；这能避免把重复 key 误报成多租户容量。
+`tenants.json` 只保存 `auth_key_env` 名称，真实租户 key 位于 Git 忽略的 `test.env`。
+只改档位而没有补足独立租户凭据时，正式运行应直接失败；这能避免把重复 key 误报成
+多租户容量。
 
 M3 除等负载场景外还会运行异构租户场景：四个独立租户的 Search 权重为 `8:4:2:1`，
-Commit 权重为 `1:2:4:8`。报告逐租户展示计划速率、实际请求数、Search P95/错误/召回质量
-与 Commit 完成量，用于验证读多写少、读写均衡、写多读少租户能在同一轮被真实压测。
+Commit 权重为 `1:2:4:8`。报告逐租户展示计划速率、实际请求数、Search P95/错误/召回
+质量与 Commit 完成量，用于验证读多写少、读写均衡、写多读少租户能在同一轮被真实
+压测。
 
-## 6. 先运行快速链路检查
+## 6. 运行观测套件
 
 **结果目录固定位置（非协商）**：所有压测结果必须写入
 `performance/targets/echomem/results/` 之下，一次运行一个子目录（如
-`performance/targets/echomem/results/local-six-metrics-quick/`）。禁止把
-结果写到仓库根 `results/`、临时目录或其他任意位置。
+`performance/targets/echomem/results/<run-name>/`）。禁止把结果写到仓库根
+`results/`、临时目录或其他任意位置。
 
-所有命令均在测试平台仓库根目录执行：
-
-```bash
-bash -n performance/targets/echomem/run_six_metrics.sh
-performance/targets/echomem/run_six_metrics.sh quick \
-  .local-stress/six-metrics.profile.json \
-  performance/targets/echomem/results/local-six-metrics-quick \
-  .local-stress/test.env
-```
-
-profile 文件只有一个 profile 时，脚本会自动选择 `Local`，不需要再写 `--profile`。
-`quick` 使用真实 HTTP、模型、租户、故障和重启，但缩短采样时间，结果固定视为
-`PARTIAL`，只用于确认整条链路能跑通。
-
-## 7. 运行完整六项测试
-
-```bash
-performance/targets/echomem/run_six_metrics.sh full \
-  .local-stress/six-metrics.profile.json \
-  performance/targets/echomem/results/local-six-metrics-default \
-  .local-stress/test.env
-```
-
-默认组结束后，将第 2.1 节的调优字段合并进 EchoMem 完整配置、重启 Core，并使用**新的
-结果目录**（仍在 `performance/targets/echomem/results/` 下）运行第二组：
-
-```bash
-performance/targets/echomem/run_six_metrics.sh full \
-  .local-stress/six-metrics.profile.json \
-  performance/targets/echomem/results/local-six-metrics-tuned \
-  .local-stress/test.env
-```
-
-两组不得共用输出目录。若主要关注前三项，可把 `full` 命令替换为：
+所有命令均在测试平台仓库根目录执行，统一使用 Python 模块入口（仓库不提供
+shell 包装）。实际传给运行器的指标、profile、env 文件与输出目录必须来自
+使用者按 skill 流程确认的范围与参数：
 
 ```bash
 .venv/bin/python -m performance.targets.echomem.observation_run \
-  --profiles .local-stress/six-metrics.profile.json \
-  --metrics M1,M2,M3 \
-  --env-file .local-stress/test.env \
-  --out-dir performance/targets/echomem/results/local-m1-m3-tuned
+  --profiles PROFILE --env-file ENV_FILE \
+  --out-dir performance/targets/echomem/results/<run-name> \
+  --metrics <使用者确认的指标>
 ```
 
-执行顺序为 `M1 → M2 → M3 → M4 → M5`，M6 从开始到结束持续采样。默认不运行 soak。
-机器速度、模型限流和容量边界不同会影响总时长，M1 的逐档容量测试通常最耗时。
+profile 文件只有一个 profile 时，脚本会自动选择该 profile，不需要再写 `--profile`。
+quick 链路检查（加 `--quick`）使用真实 HTTP、模型、租户，但缩短采样时间，结果
+固定视为 `PARTIAL`，只用于确认整条链路能跑通；quick 是使用者的选择，须先确认
+再运行。
 
-只测一项：
+### 6.1 三个参数的分工（大白话）
+
+`--metrics` / `--scenarios` / `--probes` 回答三个不同的问题，不要混用：
+
+| 参数 | 问的是 | 类比 | 缺省时 |
+|---|---|---|---|
+| `--metrics` | **要什么结论**（M1 容量 … M6 可观测，选哪些指标出报告） | 体检项目：查哪些科目 | 默认 `M1,M2,M3` |
+| `--scenarios` | **打什么负载**（跑哪几种流量场景，为结论产生证据） | 怎么练：跑圈、举铁还是冲刺 | 按所选指标自动推导（自动挡）；M4/M6 的依赖窗口自动补上 |
+| `--probes` | **验什么功能**（一次性行为检查：隔离、恢复、边界） | 专项质检：卡尺量、拉力测 | 跑 profile 里配置了的全部探针；指标必需的探针不可被排除 |
+
+一句话：`--metrics` 是"体检报告要哪些科目"，`--scenarios` 是"用哪几种训练量来
+制造数据"，`--probes` 是"另外做哪些专项检测"。只给 `--metrics` 就能跑（自动挡）；
+给了 `--scenarios`/`--probes` 就是手动挡，按你点的执行（指标必需的探针仍然会跑，
+保证结论有证据）。
+
+## 7. 指标组合与续跑
+
+`--metrics` 接受 `M1` 到 `M6` 的任意组合（如 `M1,M2,M3`），CLI 缺省选择
+`M1,M2,M3`；实际传给运行器的指标列表必须来自使用者已确认的范围。执行顺序为
+`M1 → M2 → M3 → M4 → M5`，M6 从开始到结束持续采样。默认不运行 soak。机器速度、
+模型限流和容量边界不同会影响总时长，M1 的逐档容量测试通常最耗时。
+
+`--scenarios` 从 6 个负载场景里选（`--help` 会列出全部）：M2 公平性 2 例
+（`m2-fairness-4t` / `m2-fairness-8t`）+ M3 洪泛 4 例（`m3-baseline` /
+`m3-flood-uniform` / `m3-flood-single-tenant` / `m3-heterogeneous-tenants`）。
+不传时按指标推导（M2 → 公平性 2 例，M3 → 洪泛 4 例；M4 自动补 `m3-baseline`，
+M6 自动补 `m3-baseline` + `m3-flood-uniform`）；显式传了 `--scenarios` 就以它为准，
+依赖窗口仍自动补齐，例如只跑基线加探针：
 
 ```bash
 .venv/bin/python -m performance.targets.echomem.observation_run \
-  --profiles .local-stress/six-metrics.profile.json \
-  --metrics M1 \
-  --env-file .local-stress/test.env \
-  --out-dir performance/targets/echomem/results/local-m1
+  --profiles PROFILE --env-file ENV_FILE \
+  --out-dir performance/targets/echomem/results/<run-name> \
+  --metrics M3,M4 --scenarios m3-baseline
 ```
 
-`--metrics` 可使用 `M1` 到 `M6`，也可传 `M1,M2,M3`。只测 M6：
-
-```bash
-performance/targets/echomem/run_six_metrics.sh m6 \
-  .local-stress/six-metrics.profile.json \
-  performance/targets/echomem/results/local-m6 \
-  .local-stress/test.env
-```
-
-中断后使用原 profile、原输出目录和 `--resume`：
+`--probes` 从 14 个探针里选（`--help` 会列出全部），例如只做隔离与断连恢复专项：
 
 ```bash
 .venv/bin/python -m performance.targets.echomem.observation_run \
-  --profiles .local-stress/six-metrics.profile.json \
-  --env-file .local-stress/test.env \
-  --out-dir performance/targets/echomem/results/local-six-metrics-full \
-  --resume
+  --profiles PROFILE --env-file ENV_FILE \
+  --out-dir performance/targets/echomem/results/<run-name> \
+  --metrics M3 --probes nxn-isolation,disconnect-recovery
+```
+
+单指标或组合示例（参数以使用者确认为准）：
+
+```bash
+.venv/bin/python -m performance.targets.echomem.observation_run \
+  --profiles PROFILE --env-file ENV_FILE \
+  --out-dir performance/targets/echomem/results/<run-name> --metrics M1
+```
+
+中断后使用原 profile、原输出目录和 `--resume` 续跑；禁止用新运行覆盖旧结果，
+除非使用者显式选择同一 profile 与指标集的 `--resume`，否则使用
+`performance/targets/echomem/results/` 下的新子目录：
+
+```bash
+.venv/bin/python -m performance.targets.echomem.observation_run \
+  --profiles PROFILE --env-file ENV_FILE \
+  --out-dir performance/targets/echomem/results/<run-name> --resume
 ```
 
 ## 8. 查看报告
 
 最终给人阅读的主结果始终是本次 `OUTPUT_DIR/report.html`，其中 `OUTPUT_DIR`
-位于 `performance/targets/echomem/results/` 之下。例如默认组和调优组分别为：
-
-```text
-performance/targets/echomem/results/local-six-metrics-default/report.html
-performance/targets/echomem/results/local-six-metrics-tuned/report.html
-```
+位于 `performance/targets/echomem/results/` 之下，例如
+`performance/targets/echomem/results/<run-name>/report.html`。
 
 不能只交付 HTML；同目录的结构化分母和逐请求证据必须一起保留：
 

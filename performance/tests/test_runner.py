@@ -15,7 +15,7 @@ from performance.targets.echomem.orchestrator.runner import (
 from performance.targets.echomem.orchestrator.suites import (
     QuickSpec,
     build_case_profile,
-    complete_cases,
+    six_metric_observation_cases,
 )
 
 
@@ -29,7 +29,28 @@ def _record(**overrides):
 
 
 def _baseline_case():
-    return next(case for case in complete_cases() if case["label"] == "baseline")
+    return next(case for case in six_metric_observation_cases() if case["label"] == "m3-baseline")
+
+
+def _fake_semantic_seed(base_url, tenant_config, max_tenants, seed_sessions, seed_messages, **kw):
+    """确定性假语义灌种：真实语义校验依赖真实模型，编排测试不落该路径。"""
+    from performance.suite import SeedContext
+    contexts = [
+        SeedContext(
+            tenant_id=f"t{index}", auth_key=f"k{index}",
+            agent_id=f"a{index}", user_id=f"u{index}", account_id=f"ac{index}",
+            queries=[f"q{index}-a", f"q{index}-b"],
+            query_cases={f"q{index}-a": {"query": f"q{index}-a"},
+                         f"q{index}-b": {"query": f"q{index}-b"}},
+        )
+        for index in range(max_tenants)
+    ]
+    return contexts, {
+        "status": "completed", "tenant_count": max_tenants,
+        "identity_mode": "independent", "keys_independent": True,
+        "seed_contract": "fixed-fact-in-items",
+        "seed_evidence": {"healthy_actors": max_tenants},
+    }
 
 
 # -- summarize_case_records ----------------------------------------------
@@ -131,7 +152,7 @@ def test_run_case(server, tmp_path):
     case_dir = tmp_path / "case"
     run = run_case(case, profile, case_dir=case_dir, timeout_s=30.0)
     assert run["status"] == "completed"
-    assert run["scenario"] == "baseline"
+    assert run["scenario"] == "m3-baseline"
     assert run["scene"] == "scene_capacity"
     assert run["repetition"] == 1
     assert run["policy"] == "server-observe"
@@ -198,11 +219,13 @@ def test_run_case_metrics_disabled(server, tmp_path):
 # -- run_suite -----------------------------------------------------------
 
 
-def test_run_suite(server, tmp_path):
+def test_run_suite(server, tmp_path, monkeypatch):
     _, _, base_url = server
+    from performance.targets.echomem.orchestrator import runner as runner_module
+    monkeypatch.setattr(runner_module, "_prepare_semantic_seed", _fake_semantic_seed)
     tenants_path = tmp_path / "tenants.json"
     tenants_path.write_text(
-        json.dumps({"tenants": [{"tenant_id": "t1", "auth_key": "k1"}]}),
+        json.dumps({"tenants": [{"tenant_id": f"t{i}", "auth_key": f"k{i}"} for i in range(4)]}),
         encoding="utf-8",
     )
     profile = {
@@ -215,19 +238,18 @@ def test_run_suite(server, tmp_path):
         profile,
         suite_dir=suite_dir,
         quick=QuickSpec(duration_cap_s=1.5),
-        profile_name="4u8g",
         base_url=base_url,
         timeout_s=60.0,
-        scenarios=["baseline"],
+        scenarios=["m3-baseline"],
     )
     assert (suite_dir / "suite.json").is_file()
     assert (suite_dir / "acceptance.json").is_file()
     assert "acceptance" in manifest
-    assert manifest["scenarios"] == ["baseline"]
+    assert manifest["scenarios"] == ["m3-baseline"]
     assert manifest["runs"]
     assert manifest["runs"][0]["status"] == "completed"
     assert manifest["seed"]["status"] == "completed"
-    assert manifest["seed"]["tenant_count"] == 1
+    assert manifest["seed"]["tenant_count"] == 4
     assert manifest["probe_artifacts"] == {}
     assert manifest["preflight"]["status"] == "NOT_RUN"
 
@@ -240,19 +262,20 @@ def test_run_suite_no_tenant_config(server, tmp_path):
         profile,
         suite_dir=suite_dir,
         quick=QuickSpec(duration_cap_s=1.5),
-        profile_name="4u8g",
         base_url=base_url,
         timeout_s=60.0,
-        scenarios=["baseline"],
+        scenarios=["m3-baseline"],
     )
     assert manifest["seed"]["status"] == "skipped"
     assert manifest["runs"][0]["status"] == "completed"
     assert manifest["runs"][0]["summary"]["metrics"]["search"]["submitted"] > 0
 
 
-def test_run_suite_resume_merges_completed_runs(server, tmp_path):
+def test_run_suite_resume_merges_completed_runs(server, tmp_path, monkeypatch):
     """resume=True：已完成的 case 不再执行，历史 run 合并进 manifest。"""
     _, _, base_url = server
+    from performance.targets.echomem.orchestrator import runner as runner_module
+    monkeypatch.setattr(runner_module, "_prepare_semantic_seed", _fake_semantic_seed)
     tenants_path = tmp_path / "tenants.json"
     tenants_path.write_text(
         json.dumps({"tenants": [{"tenant_id": f"t{i}", "auth_key": f"k{i}"} for i in range(4)]}),
@@ -264,39 +287,37 @@ def test_run_suite_resume_merges_completed_runs(server, tmp_path):
         "tenant_config": str(tenants_path),
     }
     suite_dir = tmp_path / "suite"
-    # 第一轮只跑完 baseline（模拟中断：mixed 及之后未执行）。
+    # 第一轮只跑完 m3-baseline（模拟中断：m3-flood-uniform 未执行）。
     run_suite(
         profile,
         suite_dir=suite_dir,
         quick=QuickSpec(duration_cap_s=1.5),
-        profile_name="4u8g",
         base_url=base_url,
         timeout_s=60.0,
-        scenarios=["baseline"],
+        scenarios=["m3-baseline"],
     )
-    baseline_dir = suite_dir / "baseline"
+    baseline_dir = suite_dir / "m3-baseline"
     baseline_before = (
         baseline_dir / "summary.json"
     ).read_text(encoding="utf-8")
 
-    # 第二轮 resume 跑完整场景列表：baseline 跳过，mixed 执行。
+    # 第二轮 resume 跑完整场景列表：m3-baseline 跳过，m3-flood-uniform 执行。
     manifest = run_suite(
         profile,
         suite_dir=suite_dir,
         quick=QuickSpec(duration_cap_s=1.5),
-        profile_name="4u8g",
         base_url=base_url,
         timeout_s=60.0,
-        scenarios=["baseline", "mixed"],
+        scenarios=["m3-baseline", "m3-flood-uniform"],
         resume=True,
     )
-    assert [run["scenario"] for run in manifest["runs"]] == ["baseline", "mixed"]
+    assert [run["scenario"] for run in manifest["runs"]] == ["m3-baseline", "m3-flood-uniform"]
     assert all(run["status"] == "completed" for run in manifest["runs"])
-    # baseline 未重跑：summary.json 内容原样保留，mixed 有本次结果。
+    # m3-baseline 未重跑：summary.json 内容原样保留，m3-flood-uniform 有本次结果。
     assert (
         baseline_dir / "summary.json"
     ).read_text(encoding="utf-8") == baseline_before
-    assert (suite_dir / "mixed" / "summary.json").is_file()
+    assert (suite_dir / "m3-flood-uniform" / "summary.json").is_file()
     # suite.json 写盘包含合并后的两条。
     written = json.loads((suite_dir / "suite.json").read_text(encoding="utf-8"))
-    assert [run["scenario"] for run in written["runs"]] == ["baseline", "mixed"]
+    assert [run["scenario"] for run in written["runs"]] == ["m3-baseline", "m3-flood-uniform"]

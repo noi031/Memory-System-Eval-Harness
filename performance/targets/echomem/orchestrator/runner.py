@@ -1,17 +1,16 @@
-"""单 instance profile 的正式套件执行（echomem 侧薄包装）。
+"""单个 instance profile 的观测套件执行（echomem 侧薄包装）。
 
 通用编排 ``performance.suite.run_suite`` 负责 prepare → preflight → 灌种
-→ 逐 case → acceptance → suite.json/acceptance.json 的整体流程；本模块挂
-echomem 的钩子：case 选择（``select_cases``）、case → Profile（含 quick
-收敛与 barrier/burst 参数，``build_case_profile``）、单 case 执行
+→ 逐 case → acceptance → suite.json 的整体流程；本模块挂 echomem 的钩子：
+case 选择（``six_metric_observation_cases`` 按 label 过滤）、case → Profile
+（含 quick 收敛与 barrier 参数，``build_case_profile``）、单 case 执行
 （``run_case``，summarize 包装 + commit/search 证据 CSV）、preflight /
 seed / acceptance 求值。
 
 ``run_case`` 与 ``summarize_case_records`` 仍在本模块导出，供测试直接使用。
 
-观测模式（``six_metrics_observation``）的前置 readiness 按硬门语义执行：
-可选证据门失败（无 Docker / 无受保护观测接口）不会让套件早退，对应指标
-在观测汇总层诚实降级。
+观测模式的前置 readiness 按硬门语义执行：可选证据门失败（无 Docker / 无
+受保护观测接口）不会让套件早退，对应指标在观测汇总层诚实降级。
 """
 
 from __future__ import annotations
@@ -39,15 +38,12 @@ from performance.targets.echomem.acceptance.evaluate import (
 from performance.targets.echomem.acceptance.metrics import metric_coverage
 from performance.targets.echomem.acceptance.observation import _commit_window_evidence
 from performance.targets.echomem.acceptance.preflight import run_preflight
-from performance.targets.echomem.acceptance.seed import (
-    TenantPreparer,
-    load_tenant_specs,
-)
 from performance.targets.echomem.orchestrator.suites import (
     QuickSpec,
     build_case_profile,
-    select_cases,
+    six_metric_observation_cases,
 )
+from performance.targets.echomem.probes._client import load_tenant_specs
 from performance.targets.echomem.protocol import is_anchor_query
 
 SCENES_DIR = Path(__file__).resolve().parent.parent / "scenes"
@@ -227,8 +223,8 @@ def run_case(
         details = summary.setdefault("details", {})
         details["pr421_metric_coverage"] = metric_coverage(monitor, started, time.time())
         # coverage 在通用层写盘 summary.json 之后才算出，必须同步写回，
-        # 保证磁盘 summary 与内存一致（--resume / rebuild_report 都以
-        # 磁盘 summary.json 为唯一数据源）。
+        # 保证磁盘 summary 与内存一致（--resume 以磁盘 summary.json 为
+        # 唯一数据源）。
     # Persist the effective, quick-capped workload, not credentials or query pools.
     contract = {"version": "echomem-case-v1", "tenant_count": len(profile.tenants),
                 "query_mode": profile.params.get("query_mode", "recall")}
@@ -375,80 +371,18 @@ def _prepare_semantic_seed(base_url, tenant_config, max_tenants, seed_sessions, 
                       "validated_queries_per_tenant": 4, "seed_search_timeout_s": search_timeout_s}
 
 
-def _prepare_seed(
-    base_url: str,
-    tenant_config: str,
-    max_tenants: int,
-    seed_sessions: int,
-    seed_messages: int,
-) -> tuple[list[SeedContext], dict]:
-    """灌种：解析租户规格 → TenantPreparer 打开真实 session，返回上下文与摘要。"""
-    specs = load_tenant_specs(tenant_config, tenant_count=max_tenants)
-    preparer = TenantPreparer(base_url, tenant_specs=specs)
-    contexts = preparer.prepare(
-        seed_sessions, seed_messages, commit_poll_timeout_s=600.0
-    )
-    if not preparer.keys_independent() or len(contexts) != max_tenants:
-        raise RuntimeError("All requested tenants must have distinct, nonempty credentials")
-    from performance.targets.echomem.acceptance.semantic_corpus import assess_retrieval
-
-    visibility = []
-    for ctx in contexts:
-        query_cases = dict(getattr(ctx, "query_cases", {}) or {})
-        if not query_cases:
-            raise RuntimeError(f"Seed did not generate semantic recall cases: tenant={ctx.tenant_id}")
-        for query, sample in query_cases.items():
-            deadline = time.monotonic() + 60
-            while True:
-                response = ctx.client.search("", query, timeout_s=10)
-                quality = assess_retrieval(response.payload, sample)
-                # Visibility is a setup prerequisite; degradation remains a
-                # measured quality failure rather than hiding all load evidence.
-                if response.status_code == 200 and quality["matched_expected_fact"]:
-                    visibility.append({"tenant_id": ctx.tenant_id, "query_id": sample["id"], "visible": True,
-                                       "quality_ok": quality["quality_ok"], "degraded": quality["degraded"],
-                                       "intent_rejected": quality["intent_rejected"],
-                                       "degraded_reasons": quality["degraded_reasons"]})
-                    break
-                if time.monotonic() >= deadline:
-                    raise RuntimeError(f"Seed fact not found: tenant={ctx.tenant_id} query_id={sample['id']}; "
-                                       f"http_status={response.status_code}, hits={quality['hit_count']}, "
-                                       f"intent_rejected={quality['intent_rejected']}, degraded={quality['degraded']}")
-                time.sleep(1)
-    return [
-        SeedContext(
-            tenant_id=ctx.tenant_id,
-            auth_key=ctx.auth_key,
-            queries=list(ctx.queries),
-            agent_id=ctx.client.agent_id,
-            user_id=ctx.client.user_id,
-            account_id=ctx.client.account_id,
-            query_cases=dict(ctx.query_cases),
-        )
-        for ctx in contexts
-    ], {
-        "status": "completed",
-        "tenant_count": len(contexts),
-        "identity_mode": preparer.identity_mode(),
-        "seed_sessions_per_tenant": seed_sessions,
-        "seed_messages_per_session": seed_messages,
-        "visibility": visibility,
-        "keys_independent": preparer.keys_independent(),
-    }
-
-
 def run_suite(
     profile: dict,
     *,
     suite_dir: Path,
     quick: QuickSpec | None = None,
-    profile_name: str = "4u8g",
+    profile_name: str = "six-metrics-observation",
     base_url: str = "",
     timeout_s: float = 120.0,
     scenarios: list[str] | None = None,
     resume: bool = False,
 ) -> dict:
-    """执行单个 instance profile 的正式套件（通用编排 + echomem 钩子）。
+    """执行单个 instance profile 的观测套件（通用编排 + echomem 钩子）。
 
     profile = instance-profiles JSON 里的单个 profile dict。通用流程见
     ``performance.suite.run_suite``；这里传入 echomem 的 case 选择、Profile
@@ -459,16 +393,13 @@ def run_suite(
     """
     metrics_enabled = bool(profile.get("metrics_enabled", True))
     observation_before = None
-    if profile.get("six_metrics") or profile.get("six_metrics_observation"):
+    if profile.get("six_metrics_observation"):
         from performance.targets.echomem.acceptance.readiness import check_readiness
-        if profile.get("six_metrics_observation"):
-            # 观测模式：readiness 已在观测编排层按硬门语义算好并写入
-            # profile；缺失时按同样口径即时重算，可选证据门失败不早退。
-            readiness = profile.get("readiness")
-            if not isinstance(readiness, dict) or "ok" not in readiness:
-                readiness = check_readiness(profile, strict=False)
-        else:
-            readiness = check_readiness(profile)
+        # 观测模式：readiness 已在观测编排层按硬门语义算好并写入 profile；
+        # 缺失时按同样口径即时重算，可选证据门失败不早退。
+        readiness = profile.get("readiness")
+        if not isinstance(readiness, dict) or "ok" not in readiness:
+            readiness = check_readiness(profile, strict=False)
         if not readiness.get("ok"):
             suite_dir.mkdir(parents=True, exist_ok=True)
             result = {"runs": [], "resource_preflight": {"status": "INCONCLUSIVE", "readiness": readiness},
@@ -493,23 +424,17 @@ def run_suite(
         )
 
     def _select_cases(name, scenarios):
-        if profile.get("six_metrics_observation"):
-            from performance.targets.echomem.orchestrator.suites import six_metric_observation_cases
-            catalog = six_metric_observation_cases(quick=quick is not None)
-            if scenarios is None:
-                return catalog
-            selected = set(scenarios)
-            return [case for case in catalog if case["label"] in selected]
-        if profile.get("six_metrics"):
-            from performance.targets.echomem.orchestrator.suites import six_metric_cases
-            return six_metric_cases(profile.get("capacity_levels"))
-        return select_cases(name, scenarios)
+        catalog = six_metric_observation_cases(quick=quick is not None)
+        if scenarios is None:
+            return catalog
+        selected = set(scenarios)
+        return [case for case in catalog if case["label"] in selected]
 
     from functools import partial
     semantic_seed = partial(
         _prepare_semantic_seed,
         reuse_seed=profile.get("semantic_seed_cache"),
-        kind=profile.get("semantic_seed_kind", "locomo"),
+        kind=profile.get("semantic_seed_kind") or "synthetic",
         dataset_path=profile.get("semantic_seed_dataset", ""),
         sample_id=profile.get("semantic_seed_sample", "conv-30"),
         session_key=profile.get("semantic_seed_session", "session_1"),
@@ -531,14 +456,14 @@ def run_suite(
         run_case=_run_case,
         preflight=lambda config: _preflight_stage(
             config,
-            strict=bool(profile.get("six_metrics") or profile.get("six_metrics_observation")),
+            strict=bool(profile.get("six_metrics_observation")),
         ),
-        seed=(semantic_seed if profile.get("six_metrics_observation") else _prepare_seed),
+        seed=semantic_seed,
         evaluate=evaluate_pr421_acceptance,
     )
     if profile.get("resource_evidence"):
         result["resource_evidence"] = profile["resource_evidence"]
-    if profile.get("six_metrics") or profile.get("six_metrics_observation"):
+    if profile.get("six_metrics_observation"):
         result["readiness"] = readiness
     if observation_before is not None:
         result["tenant_observability_before"] = observation_before

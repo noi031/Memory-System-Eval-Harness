@@ -1,3 +1,12 @@
+"""M1 capacity chain and search-summary unit tests.
+
+Covers the capacity exploration statistics pipeline (arrival planning,
+query mixing, search summary with error breakdowns, qps baselines, recovery
+boundary observation, evaluation levels) that the observation suite's M1
+uses. The former formal capacity report / publish / confirmation /
+evidence-merge modules are gone, so no test targets their HTML rendering.
+"""
+
 import json
 import http.client
 import urllib.error
@@ -14,17 +23,9 @@ from performance.targets.echomem.acceptance.capacity_statistics import (
     wilson,
 )
 from performance.targets.echomem.acceptance.semantic_corpus import build_corpus
-from performance.targets.echomem.acceptance.capacity_report import render
-from performance.targets.echomem.acceptance.capacity_publish import redacted_resources, seed_summary
 from performance.targets.echomem.acceptance.capacity_recovery import crash_reason, observe_recovery
 from performance.targets.echomem.acceptance.capacity_seed import CapacityActor, seed_actor
 from performance.targets.echomem.acceptance.capacity_experiment import run_exploration
-from performance.targets.echomem.acceptance.capacity_confirmation import (
-    _aggregate,
-    estimate_dau,
-    recompute_confirmation,
-)
-from performance.targets.echomem.acceptance.capacity_evidence_merge import merge
 from performance.targets.echomem.probes.docker_inspect import resource_values
 from performance.targets.echomem.acceptance.preflight import config_digest, valid_model_response
 from performance.targets.echomem.probes._client import _transport_error_type
@@ -235,14 +236,6 @@ def test_observation_mode_records_slow_errors_without_performance_rejection():
     assert "slo_observed" not in result
 
 
-def test_observation_report_does_not_inherit_zero_capacity_from_old_slo():
-    html = render({"assessment_mode": "observe", "max_hot_users": 0,
-                   "dau": {"status": "ZERO_UNDER_LOCKED_SLO"}, "levels": []})
-    assert "绝对最大容量<strong>尚未确定</strong>" in html
-    assert "DAU<strong>0</strong>" not in html
-    assert "结论已撤销" in html
-
-
 def test_actual_oom_or_restart_is_boundary_evidence():
     assert crash_reason({"restart_count": 0}, {"running": True, "restart_count": 1}) == "container-restarted-during-load"
     assert crash_reason({}, {"running": False, "oom_killed": True}) == "container-oom"
@@ -364,8 +357,6 @@ def test_route_path_counts_preserve_failures_without_timing_and_unknown_layers()
 
 
 def test_invalid_search_durations_are_counted_without_polluting_percentiles():
-    import json
-
     rows = [{"sent": True, "success": True, "elapsed_s": duration,
              "executed_layers": ["rule"], "start_s": index * 10}
             for index, duration in enumerate([None, float('nan'), float('inf'), -1, True, "oops", .3])]
@@ -413,155 +404,6 @@ def test_completion_mode_fails_on_first_http_or_transport_error():
                             assessment_mode="completion")
     assert result["status"] == "FAIL"
     assert result["completion_contract"]["search_http_or_transport_errors"] == 1
-
-
-def test_completion_confirmation_is_zero_error_level_not_capacity_maximum(tmp_path):
-    from performance.targets.echomem.acceptance.capacity_confirmation import _finalize
-    suite = {"assessment_mode": "completion", "levels": [
-        {"hot_users": 2, "status": "PASS", "mixed_aggregate": {}},
-        {"hot_users": 4, "status": "FAIL", "mixed_aggregate": {}},
-    ]}
-    result = _finalize(suite)
-    assert result["boundary"]["status"] == "ZERO_ERROR_CONFIRMED"
-    assert result["zero_error_max_hot_users"] == 2
-    assert result["first_nonzero_error_hot_users"] == 4
-    assert result["max_hot_users"] is None
-    assert result["dau"] is None
-
-
-def test_capacity_evidence_merge_keeps_zero_error_separate_from_hard_maximum(tmp_path):
-    source = tmp_path / "source.json"
-    source.write_text(json.dumps({"levels": [{"hot_users": 4,
-        "pure_aggregate": {"search": {"sent": 10}},
-        "mixed_aggregate": {"search": {"sent": 10}, "commit": {"submitted": 4}}}]}))
-    result = merge([source], zero_error_level=4, first_nonzero_error=8)
-    assert result["max_hot_users"] is None
-    assert result["zero_error_max_hot_users"] == 4
-    assert result["boundary"]["not_a_capacity_maximum"] is True
-    assert len(result["levels"]) == 2
-
-
-def test_report_never_labels_highest_attempted_level_as_maximum():
-    html = render({"status": "BLOCKED", "max_hot_users": 128, "dau": 12345,
-                   "environment": {}, "seed": {"actors": []}, "levels": []})
-    assert "尚未测得最大热用户数和 DAU" in html
-    assert "<strong>128</strong>" not in html
-    assert "<strong>12345</strong>" not in html
-
-
-def test_report_escapes_untrusted_evidence_and_does_not_dump_config():
-    html = render({"environment": {"host": "<script>alert(1)</script>", "api_key": "unit-secret"}})
-    assert "<script>" not in html and "unit-secret" not in html
-
-
-def test_report_renders_confirmed_repeats_and_conditional_dau():
-    search = {"planned": 300, "sent": 300, "success": 300, "mean_s": .2,
-              "p95_s": .4, "p99_s": .6, "degraded": 0, "timeout_censored": 0,
-              "quality_rate": 1.0, "atomic_p95_s": .05,
-              "route_path_timings": {"fast_path": {"observations": 200,
-                  "fraction_of_sent": 2 / 3, "mean_s": .15, "p50_s": .14,
-                  "p95_s": .25, "min_s": .1, "max_s": .3},
-                  "intent_llm": {"observations": 100, "fraction_of_sent": 1 / 3,
-                  "mean_s": 1.8, "p50_s": 1.7, "p95_s": 2.2,
-                  "min_s": 1.2, "max_s": 2.5}}}
-    commit = {"accepted_202": 3, "completed": 3, "p95_s": 4.0}
-    aggregate = {"status": "PASS", "search": search, "commit": commit,
-                 "duration_s": 540, "identity_count": 1, "tenant_count": 1,
-                 "mixed": False, "effective_search_rps": .55}
-    report = {"status": "PASS", "manifest": {}, "seed": {"actors": []},
-              "boundary": {"status": "CONFIRMED", "evidence": "three-repeats",
-                           "highest_pass": 1, "first_fail": 2},
-              "max_hot_users": 1,
-              "dau": {"status": "CONDITIONAL_ESTIMATE", "estimates": [
-                  {"conservative_dau": 100.0}, {"conservative_dau": 300.0}]},
-              "levels": [{"hot_users": 1, "tenant_count": 1, "users_per_tenant": 1,
-                          "status": "PASS", "pure_aggregate": aggregate,
-                          "mixed_aggregate": {**aggregate, "mixed": True},
-                          "repeats": [{"repeat": 1, "seed_status": "PASS",
-                                       "pure": aggregate,
-                                       "mixed": {**aggregate, "mixed": True}}]}]}
-    html = render(report)
-    assert "最大热用户数<strong>1</strong>" in html
-    assert "条件估算 100–300" in html
-    assert "三轮边界确认" in html
-    assert "Commit 完成" in html
-    assert "Search 路由路径延迟拆解" in html
-    assert "意图 LLM 路径" in html
-
-
-def test_observation_report_renders_route_path_breakdown():
-    search = {"planned": 2, "sent": 2, "success": 2, "errors": 0,
-              "mean_s": 1.1, "p50_s": 1.1, "p95_s": 2.0, "p99_s": 2.0,
-              "timeout_censored": 0, "not_sent": 0, "degraded": 0,
-              "transport_or_http_errors": 0, "http_status_counts": {"200": 2},
-              "atomic_p95_s": .1, "route_path_timings": {
-                  "fast_path": {"observations": 1, "fraction_of_sent": .5,
-                                "mean_s": .2, "p50_s": .2, "p95_s": .2,
-                                "min_s": .2, "max_s": .2},
-                  "intent_llm": {"observations": 1, "fraction_of_sent": .5,
-                                 "mean_s": 2.0, "p50_s": 2.0, "p95_s": 2.0,
-                                 "min_s": 2.0, "max_s": 2.0}}}
-    html = render({"assessment_mode": "observe", "levels": [{
-        "search": search, "commit": {}, "cells": [], "identity_count": 1,
-        "tenant_count": 1, "duration_s": 1, "mixed": False,
-        "load_mode": "search", "sent_search_rps": 2.0,
-        "effective_search_rps": 2.0}]})
-    assert "Search 路由路径延迟拆解" in html
-    assert "快速路径（未调用意图 LLM）" in html
-    assert "意图 LLM 路径" in html
-
-
-def test_observation_report_renders_complete_error_breakdown():
-    search = search_summary([
-        {"sent": True, "success": True, "http_status": 200, "elapsed_s": .1},
-        {"sent": True, "success": False, "http_status": 429, "elapsed_s": .1,
-         "reason_code": "TENANT_RATE_LIMITED"},
-        {"sent": True, "success": False, "http_status": None, "elapsed_s": 5,
-         "transport_error_type": "timeout", "timeout_censored": True},
-    ])
-    html = render({"assessment_mode": "observe", "levels": [{
-        "search": search, "commit": {}, "cells": [], "identity_count": 1,
-        "tenant_count": 1, "duration_s": 1, "mixed": False,
-        "load_mode": "search", "sent_search_rps": 3.0,
-        "effective_search_rps": 1.0}]})
-    assert "Search 错误完整拆分" in html
-    assert "TENANT_RATE_LIMITED: 1" in html
-    assert "timeout: 1" in html
-    assert "分母对账" in html
-    assert "不能据此断言是模型 API Key" in html
-    assert "性能基线与异常拐点" in html
-    assert "未采集Provider错误码" in html
-
-
-def test_observation_report_derives_per_level_resources_from_raw_samples():
-    search = search_summary([
-        {"sent": True, "success": True, "http_status": 200, "elapsed_s": .1},
-    ])
-    html = render({"assessment_mode": "observe", "levels": [{
-        "search": search, "commit": {}, "cells": [], "identity_count": 1,
-        "tenant_count": 1, "duration_s": 1, "mixed": False,
-        "load_mode": "search", "sent_search_rps": 1.0,
-        "effective_search_rps": 1.0,
-        "resources": [
-            {"cpu_percent_one_core_100": 125.0, "rss_bytes": 512 * 1048576},
-            {"cpu_percent_one_core_100": 250.5, "rss_bytes": 768 * 1048576},
-        ],
-    }]})
-    assert "250.500" in html
-    assert "768.000" in html
-
-
-def test_redacted_zero_capacity_report_has_no_broken_seed_link():
-    html = render({"status": "FAIL", "publication": {"redacted": True},
-                   "manifest": {}, "seed_summary": {"queries": 0, "strict_valid": 0},
-                   "boundary": {"status": "CONFIRMED", "evidence": "three-repeats",
-                                "highest_pass": 0, "first_fail": 1},
-                   "max_hot_users": 0,
-                   "dau": {"status": "ZERO_UNDER_LOCKED_SLO", "estimates": []},
-                   "levels": []})
-    assert "容量边界为 0" in html
-    assert "seed-evidence.json" not in html
-    assert "最大热用户数<strong>0</strong>" in html
 
 
 def test_marker_failure_does_not_skip_fixed_semantic_questions():
@@ -677,85 +519,3 @@ def test_no_recall_does_not_require_an_atomic_engine_execution():
     assert result["cells"][1]["query_type"] == "no_recall"
     assert result["cells"][1]["atomic_p95_s"] is None
     assert result["slo_observed"] is True
-
-
-def test_confirmation_aggregate_shifts_repeats_and_dau_is_conditional():
-    source = {"mixed": True, "identity_count": 1, "tenant_count": 1,
-              "per_user_search_rps": 1, "request_timeout_s": 10, "commit_deadline_s": 180,
-              "duration_s": 10, "elapsed_with_drain_s": 11, "planned_search": 1,
-              "rows": [{"op": "read", "start_s": 2, "end_s": 3}]}
-    aggregate = _aggregate([source, source])
-    assert aggregate["duration_s"] == 20 and aggregate["repeat_count"] == 2
-    assert aggregate["rows"][1]["start_s"] == 22
-    estimates = estimate_dau({"effective_search_rps": 8, "duration_s": 100,
-                              "identity_count": 2, "per_user_commit_interval_s": 300,
-                              "commit": {"completed": 20}})
-    assert len(estimates) == 6
-    assert all(row["conservative_dau"] <= row["search_limited_dau"] for row in estimates)
-    assert all(row["steady_commit_capacity_rps"] == 2 / 300 for row in estimates)
-
-
-def test_confirmation_can_be_recomputed_from_raw_files(tmp_path):
-    root = tmp_path / "confirmation"
-    root.mkdir()
-    (root / "report.json").write_text(json.dumps({
-        "topology": "cross-tenant", "levels_requested": [1], "fixed_tenants": 4,
-        "repeats": 3, "pure_duration_s": 180, "mixed_duration_s": 300,
-        "manifest": {"cpus": 4, "memory_bytes": 8 * 1024**3},
-    }))
-
-    def measurement(mixed):
-        rows = []
-        for kind in (("recall", "no_recall") if mixed else ("recall",)):
-            for index in range(150):
-                rows.append({"op": "read", "identity_index": 0, "query_type": kind,
-                             "sent": True, "success": True, "elapsed_s": .2,
-                             "start_s": index,
-                             "engine_results": ([{"engine_id": "atomic_engine",
-                                                  "duration_seconds": .05}]
-                                                if kind == "recall" else [])})
-        if mixed:
-            rows.extend([{"op": "commit_submit", "identity_index": 0,
-                          "accepted_202": True, "accepted_at_s": 1},
-                         {"op": "commit_done", "identity_index": 0, "success": True,
-                          "elapsed_s": 1, "end_s": 2}])
-        return {"rows": rows, "mixed": mixed, "identity_count": 1,
-                "tenant_count": 1, "duration_s": 300 if mixed else 180,
-                "elapsed_with_drain_s": 300 if mixed else 180,
-                "planned_search": len([r for r in rows if r["op"] == "read"]),
-                "per_user_search_rps": 1, "request_timeout_s": 10,
-                "commit_deadline_s": 180, "per_user_commit_interval_s": 300}
-
-    for repeat in range(1, 4):
-        directory = root / f"level-1-repeat-{repeat:02d}"
-        directory.mkdir()
-        (directory / "seed-evidence.json").write_text(json.dumps({"status": "PASS"}))
-        (directory / "pure-measurement.json").write_text(json.dumps(measurement(False)))
-        (directory / "mixed-measurement.json").write_text(json.dumps(measurement(True)))
-    result = recompute_confirmation(root, assessment_mode="slo")
-    assert result["derived_from_raw"] is True
-    assert result["levels"][0]["status"] == "PASS"
-    assert result["levels"][0]["pure_aggregate"]["search"]["engine_timings"]["atomic_engine"]["p95_s"] == .05
-    assert result["status"] == "INCONCLUSIVE"  # no adjacent failed level yet
-
-
-def test_published_seed_and_resources_are_aggregate_only(tmp_path):
-    directory = tmp_path / "level-1-repeat-01"
-    directory.mkdir()
-    (directory / "seed-evidence.json").write_text(json.dumps({"actors": [{
-        "status": "PASS", "auth_key": "must-not-leak", "input_documents": 5,
-        "input_characters": 400, "queries": [{"success": True,
-        "matched_expected_fact": True, "degraded": False, "hit_count": 1}],
-    }]}))
-    (directory / "pure-measurement.json").write_text("{}")
-    (directory / "mixed-measurement.json").write_text("{}")
-    (directory / "pure-measurement-resources.json").write_text(json.dumps([{
-        "cpu_percent_one_core_100": 50, "rss_bytes": 100,
-        "working_set_bytes": 90, "pids": 4, "container": "private-name",
-    }]))
-    seed = seed_summary(tmp_path)
-    resources, summary = redacted_resources(tmp_path)
-    assert seed["strict_valid"] == 1 and "auth_key" not in json.dumps(seed)
-    assert resources == [{"cpu_percent_one_core_100": 50, "rss_bytes": 100,
-                          "working_set_bytes": 90, "pids": 4}]
-    assert summary["rss_peak_bytes"] == 100

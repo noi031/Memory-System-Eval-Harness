@@ -14,7 +14,7 @@
 示例请求：
 
 > 读取本仓库 performance/skills/echomem-stress/SKILL.md。用所选 profile
-> 与 M1-M3 范围测试我的本地 EchoMem。开始前先展示命令，把失败留在分母
+> 与用户指定的范围测试我的本地 EchoMem。开始前先展示命令，把失败留在分母
 > 里，并用仓库渲染器生成 report.html。结论在前，用图表与精确值，说明
 > 测试方法与模块级问题，折叠技术证据。不要用远端服务器，也不要编造缺失
 > 的测量。
@@ -37,7 +37,7 @@ HTML。
 （host-default 与无容器降级均合法，对应指标按证据规则降级）。不要把
 API key 或租户凭据复制进报告或可分发的归档。
 
-M1-M3 准备完成后（执行前必须先向请求者展示实际范围、参数与命令并获得
+范围与参数确认后（执行前必须先向请求者展示实际范围、参数与命令并获得
 确认——耗额度/负载步骤不得免确认）：
 
 ```bash
@@ -145,7 +145,7 @@ worker、512/4096 字符输入与新 Commit 会话。记录每个用户的实际
 
 ```bash
 .venv/bin/python -m pytest tests/test_commit_diagnostic_dashboard.py \
-  tests/test_commit_failure_evidence.py tests/test_scoped_probe_report.py -q
+  tests/test_commit_failure_evidence.py -q
 ```
 
 返回绝对 HTML 路径（支持时给出可点击链接）、两三条实测发现与任何缺口。

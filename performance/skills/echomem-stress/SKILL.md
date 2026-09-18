@@ -2,14 +2,17 @@
 name: echomem-stress
 description: >
   交互式准备、启动、监控、续跑并解读 EchoMem 真实模型 M1-M6 压测
-  （Memory-System-Eval-Harness）。当用户要求对 EchoMem 做压测、测量容量、
+  （Memory-System-Eval-Harness），是 performance 子系统的快速开始与
+  全参数配置入口。当用户要求对 EchoMem 做压测、测量容量、
   公平性、Search 优先级、租户故障隔离、Commit 恢复、可观测性，或生成
   HTML 报告时使用。
 ---
 
 # EchoMem 压测
 
-以引导式产品流程运行仓库的真实 HTTP 六项指标套件。开始运行前先读
+以引导式产品流程运行仓库的真实 HTTP 六项指标套件，是 performance 子系统的
+**快速开始与全参数配置入口**（根 README 只讲设计目标；评测系统架构见
+`performance/docs/设计意图.md`）。开始运行前先读
 `references/interactive-workflow.md`；以 `performance/targets/echomem/README.md`
 作为安装与 CLI 的权威参考。
 
@@ -20,14 +23,18 @@ description: >
 
 1. **套件仓库**：`Memory-System-Eval-Harness` 检出，`.venv` 已创建并
    `pip install -r requirements.txt`；确认含
-   `performance/targets/echomem/observation_run.py`。
+   `performance/targets/echomem/observation_run.py`。Windows 用户先按
+   「命令 → 跨平台启动决策」确定运行平台（WSL 全量 / Windows 降级），
+   再按所选平台准备 venv（Linux venv 与 Windows venv 不能混用）。选 WSL
+   路线的用户先按「常见问题与排查 → WSL 虚拟机反复重启 / 被空闲电源管理
+   关机」配置 `%USERPROFILE%\.wslconfig`，避免压测期间虚拟机被回收。
 2. **EchoMem 部署**：真实服务可达（`/api/v1/system/ready` 200）；被测版本
    满足 M1-M3（当前 `origin/develop`）或完整 M1-M6（PR449 同步）的版本
    要求（见证据规则）。
 3. **真实模型**：EchoMem 配置真实 LLM 与 Embedding；`test.env` 里有
    `ECHOMEM_LLM_API_KEY` / `ECHOMEM_EMBEDDING_API_KEY`；profile 钉住
    `required_embedding_model` 时 preflight 逐字匹配。
-4. **租户与密钥**：`provision` 开通独立租户（容量档推荐 32），
+4. **租户与密钥**：`provision` 按用户指定的数量开通独立租户，
    `tenants.json` 只存 `auth_key_env` 名，密钥在 Git 忽略的 `test.env`。
 5. **profile**：按 README 创建唯一本机 profile（绝对路径、`require_4u8g`
    按目标设置；无 Docker 时留空 `resource_container` 并设
@@ -73,10 +80,10 @@ HTML 路径、证据范围与验证结果，而不是只给一段文字总结或
 - 遵守两级 readiness 门禁（`acceptance/readiness.py`）。**硬门**（
   `target-url`、`ready`）失败会中止运行；**可选证据门**（`/metrics`、
   `resource-container`、`fault_isolation`、`tenant_observability`）只喂养
-  特定指标，观测入口（`observation_run` / `run_six_metrics.sh`）以降级
+  特定指标，观测入口（`observation_run`）以降级
   模式运行它们：门失败只出现在 `readiness["degraded"]` 里并让受影响的
-  指标降级，不会阻断整个运行。正式 `--six-metrics` 验收保持严格语义，
-  仍要求 4U8G 与专用容器重启。
+  指标降级，不会阻断整个运行。正式验收路径已并入同一入口：profile 的
+  `six_metrics_observation` 打开时保持严格语义，仍要求 4U8G 与专用容器重启。
 - **没有 Docker 或没有受保护观测接口的运行同样有效**，且仍必须产出
   `report.html`。缺失证据的诚实映射：
   - 无容器（`resource_container` 为空、`require_4u8g=false` →
@@ -90,16 +97,16 @@ HTML 路径、证据范围与验证结果，而不是只给一段文字总结或
   降级只把受影响指标推向 INCONCLUSIVE/PARTIAL/BLOCKED，**绝不伪造
   PASS/MEASURED**；每个被跳过的探针都在 `execution-manifest.json` 留下
   INCONCLUSIVE 命令供审计。
-- 当前 M1-M6 流程只允许 `performance.targets.echomem.observation_run` 或
-  `performance/targets/echomem/run_six_metrics.sh`。输出若无 `report.html`，
+- 当前 M1-M6 流程只允许 `performance.targets.echomem.observation_run`。
+  输出若无 `report.html`，
   停止并报 `WRONG_ENTRYPOINT`；禁止把其他 HTML 工件冒充当前六指标结果。
 - **确认门不可跳过（最高优先级）**：任何会消耗模型额度、产生负载或破坏性
   效果的步骤（preflight 之后的正式压测、quick 链路检查、M4 故障注入、
   M5 kill/重启）启动之前，**必须**先向用户确认实际范围、参数与命令。
-  用户要求压测但未指名范围时，把默认范围 M1、M2、M3 作为**提案**呈现并
-  请求确认；未经确认不得以「默认」为由直接执行。用户点名范围时，点名本身
-  是范围确认，但预览命令仍须展示并获得确认。`full` 包装始终是显式 M1-M6，
-  同样须先确认。
+  用户未指名范围或参数时，助手必须逐项询问获取，不得提供或采用任何默认
+  提案与默认参数。用户点名范围时，点名本身是范围确认，但预览命令仍须
+  展示并获得确认。显式 `--metrics M1,M2,M3,M4,M5,M6` 的完整运行始终须先
+  确认。
 - 把 `<OUTPUT>/report.html` 当作实时工件。在 preflight、记忆灌种、每个
   M1 档位、每个 M2/M3 场景、每个 M4 故障相位、每个 M5 恢复样本、最终 M6
   采集之后，都更新或重新生成同一个文件。未完成的指标要明确标注
@@ -124,10 +131,10 @@ HTML 路径、证据范围与验证结果，而不是只给一段文字总结或
    是硬门（失败即停）；`/metrics`、`resource-container`、`fault_isolation`、
    `tenant_observability` 是可选证据门（失败只降级相关指标并记入
    `readiness["degraded"]`，绝不当作整场阻塞）。
-3. 范围未明确时，把默认范围 M1-M3 作为**提案**请求确认，确认后再继续。
-   新机器上的 quick M1-M3 链路检查同样必须先向用户确认再跑——「quick」是
-   用户的选择，不是助手的默认动作。只有用户明确选择时才跑完整 M1-M6、
-   单指标、续跑或纯报告。
+3. 范围未明确时，向用户询问并获取明确的范围与全部参数，不得提供任何默认
+   提案或默认参数，确认后再继续。新机器上的 quick M1-M3 链路检查同样必须
+   先向用户确认再跑——「quick」是用户的选择，不是助手的默认动作。只有
+   用户明确选择时才跑完整 M1-M6、单指标、续跑或纯报告。
 4. 预览确切命令、所选指标、预估破坏性动作与输出目录（必须位于
    `performance/targets/echomem/results/` 之下，见「命令」节）。M4 故障注入、
    M5 kill/重启、root 登录或使用远端/共享资源前，必须获得用户明确授权。
@@ -144,11 +151,10 @@ HTML 路径、证据范围与验证结果，而不是只给一段文字总结或
 
 1. **发现**：检查本地仓库、EchoMem 就绪度、Docker 访问、profile、租户
    凭据、provider 配置与受保护端点。
-2. **配置**：逐项向用户确认参数并主动给出默认值（见「参数配置」小节）：
-   指标范围、档位 level、并发目标、每租户用户数、租户总数、每档时长、
-   输出目录，以及本次运行是否允许故障注入或重启专用容器。默认值只是
-   **待确认提案**：用户不指定时，把全部默认值展示出来请求一次整体确认，
-   确认后才生效；用户指定则用指定值。未确认前不得启动任何会消耗模型
+2. **配置**：逐项向用户确认参数：指标范围、档位 level、并发目标、每租户
+   用户数、租户总数、每档时长，以及本次运行是否允许故障注入或
+   重启专用容器。skill 不提供任何默认提案或默认参数：用户不指定某项时，
+   询问获取，不得假设。确认后才生效。未确认前不得启动任何会消耗模型
    额度或产生负载的步骤。不要一次抛全部问题——按「范围 → 档位/负载 →
    时长 → 破坏性」分两三轮问完，但每一轮问完都必须拿到明确答复才能继续
    到执行。
@@ -164,49 +170,19 @@ HTML 路径、证据范围与验证结果，而不是只给一段文字总结或
    fault/tenant-observability 控制面、`/metrics` 不可达）以及补齐证据需要
    的配置，而不是把降级当成 EchoMem 缺陷。
 
-容量或最大租户请求遵循 `performance/targets/echomem/README.md` 的双跑
-流程：先保留目标版本默认调度配置，再跑单独指纹的调优配置（抬高本地
-admission、模型、embedding、provider 预算与队列上限）。禁止合并两个结果
-目录，也不得把调优数字描述成默认部署基线。若团队已对该确切账户、端点与
-模型记录过 8/16/32/64 provider 并发证据，直接复用并只跑单调用
-身份/维度 preflight，不要重复花费配额做 provider 扫描。
+每次压测都是独立运行：当前生效配置即被测基线，一次运行一个结果目录与
+配置指纹，禁止合并不同配置的结果。调优与否由使用者按需决定；调优实验
+须使用单独指纹与独立结果目录，禁止把调优数字描述成默认部署基线。若团队
+已对该确切账户、端点与模型记录过 provider 并发证据，直接复用并只跑单
+调用身份/维度 preflight，不要重复花费配额做 provider 扫描。
 
-默认首轮容量上限为 32 租户、32 个观测到的在途请求。**以下只是默认值，
-每次运行都必须在启动任何耗额度/负载步骤之前向用户确认，允许覆盖；
-用户未确认前不得按默认值直接执行**：
-
-| 参数 | 配置键 | 默认值 | 说明 |
-| --- | --- | --- | --- |
-| 指标范围 | `--metrics` | `M1,M2,M3` | `full` 包装显式选 M1-M6 |
-| Embedding 模型 | `required_embedding_model` | `qwen3.7-text-embedding-flash` | preflight 逐字匹配；可改，但改后须真实可用 |
-| 租户档位 | `m1_tenant_levels` | `[1,2,4,8,16,32]`（quick `[1,2]`） | 每档租户数 |
-| 用户档位 | `m1_user_levels` | `[1,2,4,8,16,32]`（quick `[1,2]`） | 每租户热用户数 |
-| 并发目标 | `required_concurrency` | `32` | 校验档位覆盖；0 = 跳过校验 |
-| 每档时长 | `m1_duration_s` | `300`（quick `15`） | 秒 |
-| 每用户 Search RPS | `m1_search_rps_per_user` | `1` | M1 负载强度 |
-| 租户总数 | `provision --count` | `32` | M2 至少 8 个独立凭据 |
-| M4 采样 | `fault_isolation.samples` / `repeats` | `10`（quick）/ `100`（full）/ `3` | 故障矩阵轮次 |
-| M5 样本 | `commit_recovery.samples` | `3`（m6_only `1`） | 每次 202→kill→恢复 |
-| M5 恢复超时 | `commit_recovery.recovery_timeout_s` | `180` | 秒；探针默认 |
-| M6 采样间隔 | `tenant_observability.max_sampling_gap_s` | `20` | 秒 |
-
-覆盖示例（用户要求更高档位时）：
-
-```json
-{
-  "m1_tenant_levels": [1, 2, 4, 8, 16, 32, 64, 128],
-  "m1_user_levels": [1, 2, 4, 8, 16, 32, 64, 128],
-  "required_concurrency": 128
-}
-```
-
-在预览时向用户展示最终生效的参数值（默认或已覆盖），而不是只展示命令。
-预览必须获得用户确认后才能进入执行（第 4 步）。
-解释 32 个配置热用户与 32 个观测到的同时在途请求是两个不同事实，两个都
-要报告。记录 EchoMem 并发与队列设置用于诊断，但禁止用它们降低发出的
+在预览时向用户展示最终生效的每个参数值，而不是只展示命令。预览必须获得
+用户确认后才能进入执行（第 4 步）。
+解释配置的热用户数与观测到的同时在途请求数是两个不同事实，两个都要
+报告。记录 EchoMem 并发与队列设置用于诊断，但禁止用它们降低发出的
 客户端负载。
 
-M3 必须同时含等负载公平/优先级证据与异构租户用例。默认异构用例对四个
+M3 必须同时含等负载公平/优先级证据与异构租户用例。异构用例对四个
 独立租户施加 Search 权重 `[8,4,2,1]` 与 Commit 权重 `[1,2,4,8]`，证明一次
 真实运行中不同租户可收到不同的 Search 与 Commit 强度。
 
@@ -237,30 +213,83 @@ trace 引用关联响应轨迹，逐阶段报告观测数、P50/P95/P99 与排�
 
 ## 命令
 
+**启动入口跨平台（非协商）**：一切启动一律用 Python 模块入口直接调用，
+**禁止新增或依赖任何 sh 启动包装**（仓库不提供 shell 包装）。跨平台的权威
+入口是
+`python -m performance.targets.echomem.observation_run`。Python 可执行文件
+按运行平台选择：Windows 用 `.venv\Scripts\python.exe`（PowerShell 调用），
+WSL/Linux 用 `.venv/bin/python`（挂载部署时用 WSL 内专用 venv，见下）。
+
+**跨平台启动决策（Windows 用户必须先决策）**：Windows 上无法直接安装
+Docker（容器运行时不可用），评测因此有两条路线。启动之前必须向用户说明
+两条路线的证据差异并让其决策，未决策前不得按任何默认平台开跑：
+
+- **路线 A：WSL（+ Docker）全量评测**。被测 EchoMem 与评测都运行在 WSL
+  里（Windows 工作目录经 `/mnt/<盘>` 或专用挂载点双向同步，修改在
+  Windows、运行在 WSL）。可获得容器身份与资源采样（profile 填
+  `resource_container`，`require_4u8g` 按实际资源设置）、结构化日志窗口
+  （M1 阶段证据）、M5 容器 kill/restart（`allow_container_restart`）。
+- **路线 B：Windows 本地降级评测**。直接在 Windows 上运行（`.venv` 或
+  conda），profile **留空 `resource_container` 并设 `require_4u8g=false`**
+  → 自动进入 host-default 降级模式：M1 资源口径记为 0/None，结构化日志
+  窗口跳过（阶段证据仅来自 `/metrics` histogram），M5 恢复不再要求
+  `allow_container_restart`。观测运行照常产出 `report.html`，报告如实
+  标注降级证据（见「证据规则」与「常见问题」）。
+
 **结果目录固定位置（非协商）**：所有压测结果必须写入套件仓库的
 `performance/targets/echomem/results/` 目录之下，一次运行一个子目录（如
 `performance/targets/echomem/results/m1-m3-run1/`）。禁止把结果写到仓库根
-`results/`、临时目录或其他任意位置；输出目录属于预览时必须展示给用户并
-获确认的参数之一。
+`results/`、临时目录或其他任意位置。
 
-在套件仓库根目录、profile 与密钥 env 文件均在 Git 之外的前提下运行：
+在套件仓库根目录、profile 与密钥 env 文件均在 Git 之外的前提下，统一用
+Python 模块入口启动（`PY` 为所选平台的 Python 可执行文件）：
 
 ```bash
-performance/targets/echomem/run_six_metrics.sh quick PROFILE OUTPUT ENV_FILE
-performance/targets/echomem/run_six_metrics.sh full PROFILE OUTPUT ENV_FILE
+# 链路检查（quick：真实 HTTP/模型/租户，采样缩短，结果标记 PARTIAL）
+"$PY" -m performance.targets.echomem.observation_run \
+  --profiles PROFILE --env-file ENV_FILE --out-dir OUTPUT --quick
 
-.venv/bin/python -m performance.targets.echomem.observation_run \
+# 完整六项（M1→M2→M3→M4→M5 顺序执行，M6 全程采样）
+"$PY" -m performance.targets.echomem.observation_run \
   --profiles PROFILE --env-file ENV_FILE --out-dir OUTPUT \
-  # OUTPUT 必须形如 performance/targets/echomem/results/<run-name>/
+  --metrics M1,M2,M3,M4,M5,M6
 
-.venv/bin/python -m performance.targets.echomem.observation_run \
+# 只测 M1（或任意 M1-M6 组合，如 M1,M2,M3）
+"$PY" -m performance.targets.echomem.observation_run \
+  --profiles PROFILE --env-file ENV_FILE --out-dir OUTPUT --metrics M1
+
+# 中断后续跑（原 profile、原输出目录）
+"$PY" -m performance.targets.echomem.observation_run \
   --profiles PROFILE --env-file ENV_FILE --out-dir OUTPUT --resume
+
+# 租户开通（独立凭据，不耗模型额度）
+"$PY" -m performance.targets.echomem.provision \
+  --base-url http://127.0.0.1:8010 --count 32 \
+  --out .local-stress/tenants.json --env-file .local-stress/test.env
+
+# 手动挡：只跑基线负载 + 隔离/断连恢复专项探针
+"$PY" -m performance.targets.echomem.observation_run \
+  --profiles PROFILE --env-file ENV_FILE --out-dir OUTPUT \
+  --metrics M3 --scenarios m3-baseline \
+  --probes nxn-isolation,disconnect-recovery
 ```
 
-无 Docker 的本地部署：profile 里留空 `resource_container` 并设
-`require_4u8g=false`；观测入口以降级模式运行并仍产出 `report.html`（见
-证据规则）。运行 M4/M5 或 `full` 包装前等待用户明确授权——其破坏性动作
-需要专用测试部署。
+### 三个参数的分工（大白话）
+
+- `--metrics` = **要什么结论**（体检项目：M1-M6 里查哪些科目，默认
+  `M1,M2,M3`）；
+- `--scenarios` = **打什么负载**（6 个观测场景里跑哪几个：M2 公平性
+  `m2-fairness-4t/8t`，M3 洪泛 `m3-baseline / m3-flood-uniform /
+  m3-flood-single-tenant / m3-heterogeneous-tenants`；缺省按指标自动推导，
+  M4/M6 的依赖窗口自动补上）；
+- `--probes` = **验什么功能**（14 个专项检查里做哪几个：隔离、恢复、边界、
+  契约等；缺省跑 profile 配置了的全部，指标必需的探针不可排除）。
+
+只给 `--metrics` 即可运行（自动挡）；给了 `--scenarios`/`--probes` 就是
+手动挡，按你点的执行。`--help` 的 epilog 会列出全部可选值。
+
+`OUTPUT` 必须形如 `performance/targets/echomem/results/<run-name>/`。运行
+M4/M5 或完整 M1-M6 前等待用户明确授权——其破坏性动作需要专用测试部署。
 
 ## 常见问题与排查
 
@@ -272,14 +301,57 @@ performance/targets/echomem/run_six_metrics.sh full PROFILE OUTPUT ENV_FILE
 - **M1 资源数值全是 0/None**：host-default 模式——没有容器就没有
   CPU/内存样本。容量数字仍是实测的，只有 M1 资源侧降级。
 - **运行后没有 `report.html`**：停止并报 `WRONG_ENTRYPOINT`。M1-M6 入口
-  只有 `observation_run` / `run_six_metrics.sh`；用上方命令重跑，而不是
+  只有 `observation_run`；用上方命令重跑，而不是
   改名其他工件。
 - **readiness 显示某个可选门失败但运行继续**：这是设计行为——只有
   `target-url` / `ready` 是硬门，其余门只降级相关指标。不要因可选门
   降级而停止运行。
-- **正式验收仍然严格**：`--six-metrics` 要求 4U8G 与
-  `allow_container_restart`，不做降级。需要验收结论的用户应走该入口，
-  而不是降级的观测运行。
+- **正式验收仍然严格**：profile 的 `six_metrics_observation` 打开时要求
+  4U8G 与 `allow_container_restart`，不做降级。需要验收结论的用户应走该
+  配置，而不是降级的观测运行。
+- **Windows 下无法直接安装 Docker，评测怎么启动？**：先让用户决策两条
+  路线（见「命令 → 跨平台启动决策」）。(A) 用 WSL 启动全量评测：Windows
+  工作目录挂载进 WSL（改动在 Windows、运行在 WSL），Linux venv + Docker，
+  容器身份/资源采样、结构化日志窗口、M5 kill/restart 证据完整；(B) 直接
+  在 Windows 跑降级评测：profile 留空 `resource_container` 并设
+  `require_4u8g=false` → host-default 降级模式（M1 资源侧 0/None、无日志
+  窗口、M5 不要求容器重启），照常产出 `report.html`。两条路线都记入
+  报告；只有用户决策后（或用户点名平台）才执行。
+- **WSL 虚拟机反复重启 / core 容器反复重建 / ready 间歇性 000**：WSL2
+  的空闲电源管理会在最后一条 wsl 命令结束后约 60 秒关停虚拟机
+  （`vmIdleTimeout` 默认 60000 毫秒），后台 docker 服务挡不住关机；压测中
+  每次命令间隙 VM 都被回收，表现为 EchoMem core 反复
+  `service_stopped reason=sigterm`、容器反复重建（`Up 2 seconds`）、
+  `/api/v1/system/ready` 间歇性 000。修复：在 Windows 用户目录
+  `%USERPROFILE%\.wslconfig` 写入 `vmIdleTimeout`（毫秒，建议 ≥3600000），
+  然后 `wsl --shutdown` 重启 WSL 生效——该命令会终止 VM 内全部进程
+  （包括正在运行的压测），只能在运行间隙执行：
+  ```ini
+  [wsl2]
+  memory=4GB
+  processors=6
+  swap=6GB
+  vmIdleTimeout=3600000
+  ```
+  宿主内存紧张时（尤其 Windows 未配页面文件、提交内存贴近物理上限），
+  WSL 构建或压测中 vmmem 增长会触发宿主资源耗尽回收虚拟机（事件 ID
+  2004）；此时降低 `memory`、加大 `swap`，并在长构建/压测前腾出宿主
+  内存。判断是否被空闲关机：`uptime -p` 归零、`journalctl --list-boots`
+  出现多次启动记录、容器日志反复 `service_stopped reason=sigterm`。保险
+  做法：压测全程保持至少一条常驻 wsl 会话（如
+  `wsl -e bash -c "while true; do sleep 20; done"` 后台运行）——虚拟机有
+  客户端连接时不会被判空闲关机；该会话是环境支撑而非压测负载，须与运行
+  结果分开记录。
+- **M2/M3 种子验证 healthy=0/8（`seed.status=ENV_ERROR`），场景一个都
+  不执行**：观测套件语义灌种默认使用 synthetic 语料（与 M1 容量探索同一
+  `build_corpus(seed=42, memory_scale=1)`，已验证可用）；若选择 locomo
+  语料，其验证查询会被意图分类器判定 `resource=yes`，召回计划请求
+  `resource_engine`——单节点 `config.example.json` 未启用该引擎，服务端
+  响应 `degraded_reasons: ["engine_not_enabled:resource_engine"]`，期望
+  证据（LOCOMO-EVIDENCE 标记）无法匹配，8 个租户全部不健康，M2/M3 置
+  BLOCKED。处置：运行前按 interactive-workflow 的确认门**先问语料选择**
+  ——synthetic 为默认提案；locomo 需部署启用 `resource_engine` 才可用。
+  profile 显式 `semantic_seed_kind`（`synthetic`/`locomo`）始终优先。
 - **Windows 下中文乱码**：跑测试与探针时设 `PYTHONUTF8=1` /
   `PYTHONIOENCODING=utf-8`；否则 GBK 解码 UTF-8 证据会看起来像套件故障。
 - **M4 全矩阵 / M5 kill-重启需要授权**：安装本 skill 不等于授权。故障

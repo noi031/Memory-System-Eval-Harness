@@ -58,7 +58,7 @@ def test_combined_observation_uses_same_semantic_seed_hook(tmp_path, monkeypatch
         suite_dir=tmp_path, scenarios=["m2-fairness-4t","m3-baseline","m3-flood-uniform"])
     assert captured["seed"].func is runner._prepare_semantic_seed
     assert captured["seed"].keywords == {
-        "reuse_seed": "/unit/cache", "kind": "locomo", "dataset_path": "",
+        "reuse_seed": "/unit/cache", "kind": "synthetic", "dataset_path": "",
         "sample_id": "conv-30", "session_key": "session_1",
         "search_timeout_s": 60,
     }

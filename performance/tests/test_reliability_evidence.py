@@ -2,9 +2,6 @@ import copy
 import json
 
 from performance.targets.echomem.acceptance.reliability_evidence import recovery_counts, observability_counts
-from performance.targets.echomem.acceptance.main_metric_report import (
-    contention_matrix_counts, redacted_report, render,
-)
 from performance.targets.echomem.acceptance.observability_timeline import timeline_counts
 
 
@@ -32,15 +29,6 @@ def observability_sample():
                       "accepted_delta": 2, "queued_peak_during_load": 1}]}
 
 
-def test_empty_evidence_and_stale_conclusions_cannot_claim_recovery_or_coverage():
-    public = redacted_report({}, {"levels": []})
-    public["conclusions"]["M5"]["conclusion"] = "STALE-PASS"
-    html = render(public)
-    assert "STALE-PASS" not in html
-    assert "恢复证据不足" in html and "四元组覆盖证据不足" in html
-    assert "本次样本通过" not in html
-
-
 def test_recovery_keeps_unknown_counts_and_planned_samples_in_denominator():
     incomplete = recovery_sample()
     next(c for c in incomplete["checks"] if c["name"] == "message-reconciliation")["detail"] = '{}'
@@ -59,8 +47,6 @@ def test_failed_sample_overrides_stale_parent_pass():
     failed["checks"][-1]["status"] = "FAIL"
     public = recovery_counts({"status": "PASS", "samples": [recovery_sample(), failed]})
     assert public["status"] == "FAIL" and public["failed_samples"] == 1
-    html = render(redacted_report({"metrics": {"M5": {"samples": [failed]}}}, {"levels": []}))
-    assert "恢复检查出现失败" in html
 
 
 def test_missing_required_recovery_checks_do_not_count_as_pass():
@@ -94,26 +80,6 @@ def test_observability_revalidates_duplicates_and_nonfinite_values():
     assert public["invalid_cells"] == 1 and public["valid_cells"] == 0
     assert public["rows"][0]["wait_seconds_total"] is None
     json.dumps(public, allow_nan=False)
-
-
-def test_later_full_snapshot_does_not_hide_earlier_missing_cell():
-    incomplete = observability_sample()
-    incomplete["rows"] = []
-    matrix = {"expected_samples": 2, "samples": [{"M6": incomplete}, {"M6": observability_sample()}]}
-    _, raw = contention_matrix_counts(matrix)
-    public = observability_counts(raw)
-    assert public["status"] == "INCONCLUSIVE" and public["passed_repeats"] == 1
-    assert public["repeat_observations"][0]["missing_cells"] == 1
-    assert public["repeat_observations"][1]["valid_cells"] == 1
-    assert public["rows"][0]["accepted_delta"] == 2
-    assert "private-" not in json.dumps(public)
-
-
-def test_unexecuted_observability_repeat_prevents_complete_status():
-    _, raw = contention_matrix_counts({"expected_samples": 2, "samples": [{"M6": observability_sample()}]})
-    public = observability_counts(raw)
-    assert public["status"] == "INCONCLUSIVE"
-    assert public["passed_repeats"] == 1 and public["expected_repeats"] == 2
 
 
 def timeline_evidence():
@@ -194,16 +160,6 @@ def test_failed_monitor_and_reordered_samples_are_not_valid_coverage():
     evidence = timeline_evidence()
     evidence["during"].reverse()
     assert timeline_counts(evidence)["sampling_times_valid"] is False
-
-
-def test_timeline_is_included_in_public_six_metric_report():
-    raw = observability_sample()
-    raw["process_observations"] = timeline_evidence()
-    public = redacted_report({"metrics": {"M6": raw}}, {"levels": []})
-    assert public["M6"]["timeline"]["status"] == "PASS"
-    html = render(public)
-    assert "过程采样核验通过" in html and "逐次快照核验" in html
-    assert "private-" not in json.dumps(public) + html
 
 
 def test_legacy_wall_clock_can_measure_internal_gap_but_not_unrecorded_boundaries():

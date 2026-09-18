@@ -6,6 +6,11 @@ resource-container, fault_isolation, tenant_observability) that fail only
 degrade the affected metrics to INCONCLUSIVE/BLOCKED while the report is
 still published, so a local process deployment without Docker or protected
 observation APIs can run the observation suite honestly.
+
+Scenario selection follows the generic layer's load/probe convention:
+``--scenarios`` explicitly picks the load cases (the six M2/M3 observation
+labels), ``--probes`` explicitly picks the probe scenarios (``PROBE_NAMES``);
+when either is omitted the metric-derived defaults apply unchanged.
 """
 
 from __future__ import annotations
@@ -21,6 +26,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from performance.profile import expand_env_in
 from performance.targets.echomem.acceptance.capacity_experiment import run_exploration
 from performance.targets.echomem.acceptance.observation import (
     METRIC_NAMES,
@@ -33,15 +39,17 @@ from performance.targets.echomem.acceptance.preflight import run_preflight
 from performance.targets.echomem.acceptance.stage_observability import (
     collect_container_stage_events,
 )
-from performance.targets.echomem.main import _resolve_profile, load_profiles
-from performance.targets.echomem.orchestrator.probes import run_configured_probes
+from performance.targets.echomem.orchestrator.probes import PROBE_NAMES, run_configured_probes
 from performance.targets.echomem.orchestrator.runner import run_suite
-from performance.targets.echomem.orchestrator.suites import QuickSpec
+from performance.targets.echomem.orchestrator.suites import (
+    QuickSpec,
+    six_metric_observation_cases,
+)
 from performance.targets.echomem.probes._client import load_tenant_specs
 from performance.targets.echomem.probes.docker_inspect import inspect_container
 from performance.targets.echomem.probes.tenant_observability import expected_lanes_from_config
 from performance.targets.echomem.probes.tenant_observability import collect as collect_tenant_observability
-from performance.util import acquire_output_lock, load_env_file, read_json
+from performance.util import acquire_output_lock, load_env_file, read_json, resolve_relative_to
 
 
 class PublishedObservationError(RuntimeError):
@@ -59,11 +67,62 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def load_profiles(path: Path) -> list[dict[str, Any]]:
+    """读取 {"profiles":[...]} 或裸 list，过滤非 dict/无名条目。"""
+    payload = json.loads(Path(path).read_text(encoding="utf-8"))
+    profiles = payload.get("profiles") if isinstance(payload, dict) else payload
+    if not isinstance(profiles, list) or not profiles:
+        raise ValueError("profiles config must contain a non-empty profiles list")
+    return [item for item in profiles if isinstance(item, dict) and item.get("name")]
+
+
+def _resolve_profile(profile: dict[str, Any], profiles_path: Path) -> dict[str, Any]:
+    """把 profile 引用的文件路径解析为绝对路径（相对清单目录），并展开
+    ``${ENV:-default}`` 占位符。"""
+    profiles_dir = profiles_path.expanduser().resolve().parent
+    profile = expand_env_in(profile)
+    return {
+        **profile,
+        "tenant_config": resolve_relative_to(
+            str(profile.get("tenant_config") or ""), profiles_dir
+        ),
+        "preflight_config": resolve_relative_to(
+            str(profile.get("preflight_config") or ""), profiles_dir
+        ),
+        "fault_plan": resolve_relative_to(
+            str(profile.get("fault_plan") or ""), profiles_dir
+        ),
+    }
+
+
 def _metrics(value: str) -> list[str]:
     selected = [item.strip().upper() for item in value.split(",") if item.strip()]
     unknown = [item for item in selected if item not in METRIC_NAMES]
     if unknown or not selected:
         raise ValueError("metrics must be a comma-separated subset of M1,M2,M3,M4,M5,M6")
+    return list(dict.fromkeys(selected))
+
+
+def _scenario_labels(value: str) -> list[str]:
+    """逗号分隔文本 → 负载场景 label 列表；未知 label 或空值直接拒绝。"""
+    selected = [item.strip() for item in value.split(",") if item.strip()]
+    catalog = {str(case["label"]) for case in six_metric_observation_cases()}
+    unknown = [item for item in selected if item not in catalog]
+    if unknown or not selected:
+        raise ValueError(
+            "scenarios must be a comma-separated subset of " + ", ".join(sorted(catalog))
+        )
+    return list(dict.fromkeys(selected))
+
+
+def _probe_names(value: str) -> list[str]:
+    """逗号分隔文本 → 探针名列表；未知名或空值直接拒绝。"""
+    selected = [item.strip() for item in value.split(",") if item.strip()]
+    unknown = [item for item in selected if item not in PROBE_NAMES]
+    if unknown or not selected:
+        raise ValueError(
+            "probes must be a comma-separated subset of " + ", ".join(PROBE_NAMES)
+        )
     return list(dict.fromkeys(selected))
 
 
@@ -213,17 +272,27 @@ def _validate_stage_observability_config(
         raise ValueError("M1-M3 stage observability requires logging.format=json")
 
 
-def _configure(profile: dict[str, Any], selected: list[str], *, quick: bool) -> dict[str, Any]:
+def _configure(
+    profile: dict[str, Any],
+    selected: list[str],
+    *,
+    quick: bool,
+    probes: list[str] | None = None,
+) -> dict[str, Any]:
     from performance.targets.echomem.extended_profile import expand_extended_profile
     profile = expand_extended_profile(profile, selected)
     needs_m6_behaviors = "M6" in selected
     m6_only = set(selected) == {"M6"}
-    needs_fault = "M4" in selected or needs_m6_behaviors
+    wants_fault_probe = probes is not None and "fault-isolation" in probes
+    wants_recovery_probe = probes is not None and "commit-recovery" in probes
+    wants_observability_probe = probes is not None and "tenant-observability" in probes
+    needs_fault = "M4" in selected or needs_m6_behaviors or wants_fault_probe
+    needs_recovery = "M5" in selected or needs_m6_behaviors or wants_recovery_probe
     readiness = check_readiness({
         **profile,
         "fault_isolation": {**(profile.get("fault_isolation") or {}), "enabled": needs_fault},
         "tenant_observability": {**(profile.get("tenant_observability") or {}),
-                                  "enabled": needs_m6_behaviors},
+                                  "enabled": needs_m6_behaviors or wants_observability_probe},
     }, strict=False)
     if not readiness.get("ok"):
         raise RuntimeError(json.dumps(readiness, ensure_ascii=False))
@@ -299,7 +368,7 @@ def _configure(profile: dict[str, Any], selected: list[str], *, quick: bool) -> 
         # M4 走 BLOCKED（无 cases），不浪费压测时间打无效流量。
         fault["enabled"] = False
     recovery = {
-        "enabled": "M5" in selected or needs_m6_behaviors,
+        "enabled": needs_recovery,
         "tenant": tenant_ids[0],
         "container": profile.get("resource_container", ""),
         "messages": 4 if m6_only else 12, "content_chars": 1000,
@@ -311,7 +380,7 @@ def _configure(profile: dict[str, Any], selected: list[str], *, quick: bool) -> 
     has_restart_control = bool(
         recovery.get("container") or recovery.get("pid") or recovery.get("restart_command")
     )
-    if (("M5" in selected or needs_m6_behaviors) and has_restart_control
+    if (needs_recovery and has_restart_control
             and recovery.get("allow_container_restart") is not True):
         raise ValueError("M5/M6 RESET requires commit_recovery.allow_container_restart=true for the dedicated target container")
     return {
@@ -327,15 +396,16 @@ def _configure(profile: dict[str, Any], selected: list[str], *, quick: bool) -> 
         "metrics_enabled": True,
         "invalid_input": {"enabled": True, "token_env": "ECHOMEM_TEST_CONTROL_TOKEN",
                           **(profile.get("invalid_input") or {})},
-        "fault_isolation": fault if ("M4" in selected or needs_m6_behaviors) else {"enabled": False},
+        "fault_isolation": fault if needs_fault else {"enabled": False},
         "tenant_observability": {
             **(profile.get("tenant_observability") or {}),
-            "enabled": "M6" in selected and "tenant_observability" not in degraded,
+            "enabled": ("M6" in selected and "tenant_observability" not in degraded)
+                       or wants_observability_probe,
             "expected_tenants": tenant_ids,
             "expected_lanes": lanes,
             "token_env": "ECHOMEM_TEST_CONTROL_TOKEN",
         },
-        "commit_recovery": recovery if ("M5" in selected or needs_m6_behaviors) else None,
+        "commit_recovery": recovery if needs_recovery else None,
         "fairness_expectations": {"tenant_ids": tenant_ids[:4]},
     }
 
@@ -353,9 +423,12 @@ def run(args: argparse.Namespace, *, output_lock=None) -> dict[str, Any]:
     if len(matches) != 1:
         raise ValueError(f"profile {profile_name!r} was not found exactly once")
     selected = _metrics(args.metrics)
+    scenarios = _scenario_labels(args.scenarios) if args.scenarios else None
+    probes = _probe_names(args.probes) if args.probes else None
     m6_only = set(selected) == {"M6"}
     profile = _configure(
-        _resolve_profile(matches[0], args.profiles), selected, quick=args.quick
+        _resolve_profile(matches[0], args.profiles), selected, quick=args.quick,
+        probes=probes,
     )
     output = args.out_dir.expanduser().resolve()
     output.mkdir(parents=True, exist_ok=True)
@@ -457,12 +530,14 @@ def run(args: argparse.Namespace, *, output_lock=None) -> dict[str, Any]:
             publish_stage([code for code in selected if code != "M1"])
 
         load_metrics = [name for name in selected if name in {"M2", "M3"}]
-        scenarios = []
-        if "M2" in load_metrics:
-            scenarios.extend(("m2-fairness-4t", "m2-fairness-8t"))
-        if "M3" in load_metrics:
-            scenarios.extend(("m3-baseline", "m3-flood-uniform", "m3-flood-single-tenant",
-                              "m3-heterogeneous-tenants"))
+        if scenarios is None:
+            # 未显式选择时按指标推导默认负载场景（与缺省行为一致）。
+            scenarios = []
+            if "M2" in load_metrics:
+                scenarios.extend(("m2-fairness-4t", "m2-fairness-8t"))
+            if "M3" in load_metrics:
+                scenarios.extend(("m3-baseline", "m3-flood-uniform", "m3-flood-single-tenant",
+                                  "m3-heterogeneous-tenants"))
         if "M4" in selected and "m3-baseline" not in scenarios:
             scenarios.append("m3-baseline")
         if "M6" in selected:
@@ -527,7 +602,7 @@ def run(args: argparse.Namespace, *, output_lock=None) -> dict[str, Any]:
             probes, commands = run_configured_probes(
                 profile, base_url=profile["base_url"], suite_dir=output,
                 auth_headers={}, tenant_config=tenant_config, quick=args.quick,
-                timeout_s=args.timeout_s,
+                timeout_s=args.timeout_s, probes=probes,
             )
         except Exception as exc:
             if early_report is None:
@@ -578,6 +653,8 @@ def run(args: argparse.Namespace, *, output_lock=None) -> dict[str, Any]:
             "real_embedding_required": True,
             "credentials_source": "environment variables; tenant config contains env names only",
             "execution_status": result["status"],
+            "load_scenarios": scenarios,
+            "probe_selection": probes,
             "profile": _public_profile(profile),
             "model_preflight": profile.get("model_preflight"),
             "probe_executions": commands,
@@ -595,11 +672,36 @@ def run(args: argparse.Namespace, *, output_lock=None) -> dict[str, Any]:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description=__doc__)
+    load_catalog = ", ".join(
+        str(case["label"]) for case in six_metric_observation_cases()
+    )
+    parser = argparse.ArgumentParser(
+        description=__doc__,
+        epilog=(
+            "load scenarios: " + load_catalog + "\n"
+            "probes: " + ", ".join(PROBE_NAMES)
+        ),
+    )
     parser.add_argument("--profiles", required=True, type=Path)
     parser.add_argument("--profile", help="profile name; optional when the file contains exactly one profile")
     parser.add_argument("--out-dir", required=True, type=Path)
     parser.add_argument("--metrics", default="M1,M2,M3")
+    parser.add_argument(
+        "--scenarios", default="",
+        help=(
+            "explicit load scenarios (comma-separated); when omitted the "
+            "selected metrics decide the load cases, and M4/M6 dependencies "
+            "are appended automatically"
+        ),
+    )
+    parser.add_argument(
+        "--probes", default="",
+        help=(
+            "explicit probe scenarios (comma-separated); when omitted every "
+            "configured probe runs, and probes required by the selected "
+            "metrics are never excluded"
+        ),
+    )
     parser.add_argument("--env-file", type=Path)
     parser.add_argument("--quick", action="store_true")
     parser.add_argument("--resume", action="store_true")

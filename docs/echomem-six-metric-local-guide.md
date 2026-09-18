@@ -22,7 +22,7 @@ PR34 的代码默认六项，裸用 `quick` 包装脚本也会选中六项。
 > **当前代码位置**：六项观测入口已通过
 > [PR32](https://github.com/tech-innovation-group/Memory-System-Eval-Harness/pull/32)
 > 合入 `performance_refactor`。请直接检出并更新 `performance_refactor`，再执行文中的
-> `observation_run.py` 和 `run_six_metrics.sh`。这是当前 M1-M6 仅有的两个启动入口。
+> `observation_run.py`。这是当前 M1-M6 唯一的启动入口。
 
 > **报告出口自检**：当前入口无论完成、阻塞还是执行异常，都会在指定
 > `OUTPUT_DIR` 写出 `report.html`。如果运行结束后没有该文件，本轮不能作为当前
@@ -900,10 +900,10 @@ OUTPUT_DIR="results/local-m1-m3-default-$(date +%Y%m%d-%H%M%S)"
 `--metrics` 可使用 `M1` 到 `M6`，也可传 `M1,M2,M3`。只测 M6：
 
 ```bash
-performance/targets/echomem/run_six_metrics.sh m6 \
-  .local-stress/six-metrics.profile.json \
-  results/local-m6 \
-  .local-stress/test.env
+.venv/bin/python -m performance.targets.echomem.observation_run \
+  --profiles .local-stress/six-metrics.profile.json \
+  --out-dir results/local-m6 \
+  --env-file .local-stress/test.env --metrics M6
 ```
 
 中断后使用原 profile、原输出目录和 `--resume`：

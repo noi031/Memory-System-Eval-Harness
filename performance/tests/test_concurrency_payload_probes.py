@@ -11,7 +11,6 @@ from performance.targets.echomem.acceptance.observation import (
     write_observation_report,
 )
 from performance.targets.echomem.orchestrator.probes import run_configured_probes
-from performance.targets.echomem.orchestrator.report import render_objective_suite_html
 from performance.targets.echomem.probes.payload_boundary import _case_outcome, _poll_commit
 from performance.targets.echomem.probes.concurrency_topology import (
     _capacity_levels,
@@ -110,36 +109,6 @@ def test_commit_202_is_polled_to_terminal_completion() -> None:
     assert row["archive_id_present"] is True
     assert row["terminal_state"] == "completed"
     assert row["poll_count"] == 1
-
-
-def test_report_renders_topology_and_payload_evidence() -> None:
-    topology = {
-        "matrix": [{
-            "level": 16, "topology": "many-users-one-session-serial",
-            "actual_users": 8, "requested_users": 16, "completed_2xx": 7,
-            "offered": 8, "p95_ms": 123.0, "throughput_rps_2xx": 4.2,
-            "tenant_throughput_jain": .99, "http_counts": {"200": 7, "429": 1},
-        }]
-    }
-    boundary = {
-        "cases": [{"api": "search", "encoding": "binary", "content_bytes": 1024,
-                   "wire_bytes": 1024, "http_status": 415,
-                   "reason_code": "UNSUPPORTED_MEDIA_TYPE", "elapsed_ms": 2.0}],
-        "long_commit": {"requested_chars": 1048576},
-        "mcp_add_memory": {"status": "PASS"},
-    }
-    result = {
-        "profiles": [{
-            "name": "local",
-            "objectives": [],
-            "concurrency_topology": {"checks": [{"detail": json.dumps(topology)}]},
-            "payload_boundary": {"checks": [{"detail": json.dumps(boundary)}]},
-        }]
-    }
-    page = render_objective_suite_html(result)
-    assert "many-users-one-session-serial" in page
-    assert "UNSUPPORTED_MEDIA_TYPE" in page
-    assert "1048576" in page
 
 
 def test_orchestrator_runs_both_new_probes(tmp_path) -> None:

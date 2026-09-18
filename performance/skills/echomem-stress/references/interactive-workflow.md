@@ -13,7 +13,7 @@
 | EchoMem | 找到仓库/部署；`/api/v1/system/ready` 成功 |
 | 运行时 | Python 3.11+ 依赖已装；需要时 Docker 可达 |
 | 真实模型 | LLM 与 Embedding 的 preflight 都成功 |
-| 租户 | 存在独立凭据；容量档推荐 32 个 |
+| 租户 | 存在独立凭据；按用户指定数量开通 |
 | 控制面 | fault 与 tenant-observability 端点可鉴权（仅完整覆盖需要；见下） |
 | 恢复目标 | 为 M5 识别出专用本地容器（仅完整覆盖需要；见下） |
 | 输出 | 新目录，必须位于 `performance/targets/echomem/results/` 之下；或用户明确选择续跑的既有目录 |
@@ -28,8 +28,8 @@ token 时 M6 BLOCKED；host-default（无容器）时 M1 资源口径 0/None、�
 中止运行的硬门失败（target-url/ready）。检查过程中绝不回显密钥值。
 
 profile 钉住 `required_embedding_model` 时，逐字比较成功的 Embedding
-preflight 模型名。当前正式 profile 的值为 `qwen3.7-text-embedding-flash`；
-能工作的其他模型请求不可作为替代。
+preflight 模型名。模型由使用者在配置阶段确认并写入 profile；能工作的其他
+模型请求不可作为替代。
 
 设置缺失时，把用户引向唯一本地指南 `performance/targets/echomem/README.md`。
 不要发明第二条部署路径。
@@ -38,52 +38,43 @@ preflight 模型名。当前正式 profile 的值为 `qwen3.7-text-embedding-fla
 
 **确认门不可跳过**：任何会消耗模型额度、产生负载或破坏性效果的步骤启动
 之前，必须已获得用户确认。用户已点名指标或模式时，点名本身即范围确认，
-但预览命令仍须展示并获得确认；用户未点名时，把默认范围 M1-M3 作为提案
-请求确认，禁止以「默认」为由直接执行。可用的显式备选：
+但预览命令仍须展示并获得确认；用户未指名时，必须逐项询问获取范围与全部
+参数，skill 不提供任何默认提案或默认参数。可用的范围形式：
 
-1. **快速链路检查（新机器推荐）**：真实 HTTP 与真实 provider、缩短采样。
-   验证接线，不验证容量。同样必须先确认再跑——quick 是用户的选择，不是
-   助手的默认动作。
-2. **前三项指标（默认提案）**：M1 容量、M2 公平性、M3 Search 优先级。
+1. **快速链路检查**：真实 HTTP 与真实 provider、缩短采样。验证接线，不
+   验证容量。同样必须先确认再跑——quick 是用户的选择，不是助手的默认
+   动作。
+2. **前三项指标**：M1 容量、M2 公平性、M3 Search 优先级（由用户点名）。
 3. **完整 M1-M6**：含租户故障注入与真实容器重启。
 4. **单指标**：接受 M1 至 M6 中一个或多个。
 5. **续跑**：同一 profile 与输出目录用 `--resume` 继续。
 6. **纯报告**：不施加新负载，只重建或检查既有证据。
 
-执行前展示简洁预览：
+执行前展示简洁预览（数值来自用户已指定的参数）：
 
 ```text
 目标:        EchoMem <branch>@<commit>
 套件:        <branch>@<commit>
-范围:        M1,M2,M3
+范围:        <用户指定的指标>
 模型:        <llm-name> / <embedding-name>（preflight 通过）
-租户:        32 个独立凭据
+租户:        <用户指定的租户数> 个独立凭据
 资源:        观测到的 Docker 限制，或 host-default
+语料:        synthetic（默认提案，与 M1 一致）| locomo（需部署启用 resource_engine）
 破坏性:      无 | 租户故障 | 容器 kill/重启
 输出:        <绝对路径>
 ```
 
-预览必须展示**最终生效的参数值**（默认值或用户覆盖后的值），并标注每个
-数值来源是「默认」还是「本次指定」：
+运行会执行语义灌种的观测指标（M2/M3）前，**必须先问语料选择**：默认
+提案为 synthetic（与 M1 容量探索同一 `build_corpus(seed=42,
+memory_scale=1)`，已验证可用）；locomo 语料的验证查询会被意图分类器归入
+资源域，需要部署启用 `resource_engine`，否则种子验证以
+`healthy=0/8`（`seed.status=ENV_ERROR`）失败、场景不执行。语料是
+**待确认提案**，不是免确认默认；用户不选时询问获取，不得替用户拍板。
 
-```text
-热用户档位:          1,2,4,8,16,32（默认；可覆盖）
-要求并发:            32 个同时在途请求（默认；0 = 不校验）
-每档时长:            300s（默认；quick 15s）
-每用户 Search RPS:   1（默认）
-租户总数:            32（默认；M2 至少 8 个独立凭据）
-M4 采样:             10/100 样本 × 3 重复（默认，按 quick/full）
-M5 样本:             3（默认；每次 202→kill→恢复）
-M5 恢复超时:         180s（默认；探针默认值）
-M6 采样间隔:         20s（默认）
-EchoMem 限制:        观测并报告；不用于封顶客户端负载
-异构租户:            Search 权重 8:4:2:1 / Commit 权重 1:2:4:8
-```
-
-每一项都可被用户覆盖：确认「档位/并发/用户数/时长加大或减小」的意图后，
-把对应 profile 字段改掉再预览（配置键与默认值见 SKILL.md「参数配置」
-表）。用户明确说「就用默认」后不再追问同一项；用户未提及时，展示
-默认值提案请求一次整体确认，确认前不得按默认值执行。
+预览必须展示**最终生效的每个参数值**：档位、要求并发、每档时长、每用户
+Search RPS、租户总数、M4 采样、M5 样本/恢复超时、M6 采样间隔。每一项都
+必须来自用户已确认的意图；用户未指定某项时，询问获取，不得假设。确认前
+不得执行任何耗额度/负载步骤。
 
 M4 与 M5 必须针对专用测试部署。远程登录、共享计算、故障注入与容器
 kill/重启需要当次运行获得明确授权；安装本 skill 不等于授权。
@@ -98,8 +89,8 @@ kill/重启需要当次运行获得明确授权；安装本 skill 不等于授�
    且服务端与运行端持有相同的随机 `ECHOMEM_TEST_CONTROL_TOKEN`。
 3. 完整覆盖需要确认这些端点存在：`GET/POST /api/inspect/test-control/fault`
    与 `GET /api/inspect/tenant-observability`。端点缺失（404）或 token 缺失
-   只降级 M4/M6（BLOCKED），观测运行照常进行；正式 `--six-metrics` 验收
-   仍要求它们。
+   只降级 M4/M6（BLOCKED），观测运行照常进行；正式验收（profile 的
+   `six_metrics_observation` 打开）仍要求它们。
 4. 开通独立租户：
 
 ```bash
@@ -120,10 +111,10 @@ chmod 600 .local-stress/tenants.json .local-stress/test.env
 同样是消耗真实模型额度的步骤，不是免确认动作）：
 
 ```bash
-performance/targets/echomem/run_six_metrics.sh quick \
-  .local-stress/six-metrics.profile.json \
-  performance/targets/echomem/results/local-six-metrics-quick \
-  .local-stress/test.env
+.venv/bin/python -m performance.targets.echomem.observation_run \
+  --profiles .local-stress/six-metrics.profile.json \
+  --out-dir performance/targets/echomem/results/local-six-metrics-quick \
+  --env-file .local-stress/test.env --quick
 ```
 
 快速结果按设计是 `PARTIAL`，绝不能报成容量边界或正式验收结果。
@@ -152,7 +143,7 @@ P50/P95/P99、吞吐、错误分类、召回分子/分母、CPU、内存、pendi
 的证据。把实测峰值吞吐换算为读重、均衡、写重 DAU 估计；标注为基于模型的
 换算而非实测用户。
 
-对默认 32 租户目标，区分这些测量：
+对所选租户档位目标，区分这些测量：
 
 - 32 档位上配置的活动租户或热用户数；
 - 实际峰值同时在途 HTTP 请求数；
@@ -224,7 +215,9 @@ EchoMem 容器或进程。重启后不新建替代请求，轮询原操作；重
 
 ```bash
 # OUTPUT 必须形如 performance/targets/echomem/results/<run-name>/
-performance/targets/echomem/run_six_metrics.sh full PROFILE OUTPUT ENV_FILE
+.venv/bin/python -m performance.targets.echomem.observation_run \
+  --profiles PROFILE --env-file ENV_FILE --out-dir OUTPUT \
+  --metrics M1,M2,M3,M4,M5,M6
 ```
 
 前三项或所选指标：
@@ -237,9 +230,9 @@ performance/targets/echomem/run_six_metrics.sh full PROFILE OUTPUT ENV_FILE
   --out-dir OUTPUT
 ```
 
-CLI 层 `--metrics` 缺省选择 `M1,M2,M3`、`full` 包装选择全部六项——这描述
-的是工具事实，**不是免确认许可**：实际传给运行器的指标列表必须来自用户
-已确认的范围，未确认前禁止直接调用。
+CLI 层 `--metrics` 缺省选择 `M1,M2,M3`，显式传 `M1,M2,M3,M4,M5,M6` 才跑
+全部六项——这描述的是工具事实，**不是免确认许可**：实际传给运行器的
+指标列表必须来自用户已确认的范围，未确认前禁止直接调用。
 
 同目录续跑：
 

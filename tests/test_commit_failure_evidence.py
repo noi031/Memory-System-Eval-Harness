@@ -8,7 +8,6 @@ from types import SimpleNamespace
 from performance.targets.echomem.probes.failure_evidence import failure_evidence, reference
 from performance.targets.echomem.probes.concurrency_topology import _commit_call, _summary
 from scripts.collect_commit_diagnostics import collect
-from performance.targets.echomem.orchestrator.report import _probe_visual
 from scripts.run_commit_diagnostic import diagnose
 
 
@@ -77,14 +76,6 @@ class EvidenceTests(unittest.TestCase):
         self.assertTrue(row["archive_id_ref"])
         self.assertNotIn("archive-private", json.dumps(result))
         self.assertNotIn("sk-secret", json.dumps(result))
-
-    def test_report_labels_log_evidence_separately(self):
-        rendered = _probe_visual("commit_diagnostic", {"checks": [{"detail": {"rows": [{
-            "terminal_state": "failed", "terminal_evidence": {"error_present": False},
-            "service_failure_evidence": {"error_type": "ExtractorError"},
-        }]}}]})
-        self.assertIn("ExtractorError", rendered)
-        self.assertIn("服务日志（任务标识匹配）", rendered)
 
 
 if __name__ == "__main__":

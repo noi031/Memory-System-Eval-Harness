@@ -1,4 +1,10 @@
-"""Plain-language charts for the bounded Commit diagnostic, using measured data."""
+"""Plain-language charts for the bounded Commit diagnostic, using measured data.
+
+Standalone visualization utility (no dependency on the observation report):
+renders the concurrency-topology matrix and commit/search outcome tiles for
+one scene, optionally with a previous run for comparison. Consumed by
+``scripts.build_commit_diagnostic_report`` and its test.
+"""
 from __future__ import annotations
 
 from collections import Counter
@@ -6,7 +12,24 @@ import html
 import json
 from pathlib import Path
 
-from .report import _check_detail, render_objective_suite_html
+from typing import Any
+
+
+def _check_detail(payload: dict[str, Any]) -> dict[str, Any]:
+    """取探针制品的最后一条 check 的 detail（dict 或 JSON 文本）。"""
+    checks = payload.get("checks")
+    if not isinstance(checks, list) or not checks:
+        return {}
+    detail = checks[-1].get("detail") if isinstance(checks[-1], dict) else None
+    if isinstance(detail, dict):
+        return detail
+    if isinstance(detail, str):
+        try:
+            parsed = json.loads(detail)
+            return parsed if isinstance(parsed, dict) else {}
+        except json.JSONDecodeError:
+            return {}
+    return {}
 
 
 def _escape(value):
@@ -20,6 +43,16 @@ def _scene(result):
     profile = profiles[0]
     matrix = _check_detail(profile.get("concurrency_topology", {})).get("matrix", [])
     return profile, matrix[0] if matrix else {}
+
+
+def _empty_page(result):
+    """无可用矩阵时的诚实回退页：不把缺失证据当通过。"""
+    return (
+        "<!doctype html><html lang='zh-CN'><head><meta charset='utf-8'>"
+        "<title>EchoMem 并发诊断 · 无场景数据</title></head><body><main>"
+        "<h1>没有可绘制的并发场景矩阵</h1><p>结果中没有 concurrency_topology "
+        "矩阵或 profiles 为空；不会用缺失证据生成图表。</p></main></body></html>"
+    )
 
 
 def _ratio(value, total):
@@ -45,7 +78,7 @@ def _distribution(title, subtitle, segments, total, note):
 def render_commit_diagnostic_html(result):
     profile, scene = _scene(result)
     if not scene:
-        return render_objective_suite_html(result)
+        return _empty_page(result)
     level = scene["level"]
     operations = scene["operations"]
     commit, search = operations.get("commit", {}), operations.get("search", {})

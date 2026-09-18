@@ -2,11 +2,17 @@
 
 ``run_configured_probes`` 逐个执行 profile 里显式配置的探针段（capability /
 blackbox / missing_cases / concurrent_commit / fault_isolation /
-limit_failure_sweep / commit_recovery / fault_plan），每个探针以子进程方式
-运行（临时 YAML profile 写入、CLI 命令构造、产物读回与状态保留见通用层
-``performance.probe.run_configured_probe``）。未配置的探针不跑；缺前置条件
-（如 blackbox 需要已完成 Commit 与租户配置）只记 INCONCLUSIVE 命令记录，
-不产出制品。
+limit_failure_sweep / commit_recovery / fault_plan / nxn_isolation /
+disconnect_recovery），每个探针以子进程方式运行（临时 YAML profile 写入、
+CLI 命令构造、产物读回与状态保留见通用层 ``performance.probe.
+run_configured_probe``）。未配置的探针不跑；缺前置条件（如 blackbox 需要已完成
+Commit 与租户配置）只记 INCONCLUSIVE 命令记录，不产出制品。
+
+``probes`` 参数是显式探针选择（observation_run ``--probes`` 的合法名集合
+``PROBE_NAMES``）：为 None 时全部已配置探针照旧运行；给定列表时只运行
+「选中 ∪ 指标必需」的探针（fault-isolation / commit-recovery /
+tenant-observability 在对应指标被选中时不可被排除），选中但未配置的探针以
+探针自身默认参数运行，缺前置条件时诚实记 INCONCLUSIVE。
 
 返回 (artifacts, commands)：artifacts 的键即 suite 顶层合并键（如
 ``capability_probe``/``commit_recovery``/``fault_suite``），值带 ``path``；
@@ -30,6 +36,54 @@ from performance.util import expand_template, read_json
 PROBES_DIR = Path(__file__).resolve().parent.parent / "probes"
 
 _AUTH_HEADER_NAMES = {"x-auth-key", "authorization"}
+
+# 可选择探针名（kebab-case，与 profile 配置段一一对应）。observation_run 的
+# --probes 按此表校验与过滤；缺省（probes=None）时全部已配置探针照旧运行。
+PROBE_NAMES = (
+    "invalid-input",
+    "capability",
+    "blackbox-contract",
+    "missing-cases",
+    "concurrent-commit",
+    "fault-isolation",
+    "limit-failure-sweep",
+    "commit-recovery",
+    "tenant-observability",
+    "concurrency-topology",
+    "payload-boundary",
+    "fault-plan",
+    "nxn-isolation",
+    "disconnect-recovery",
+)
+
+
+def _selected(selected: list[str] | None, name: str, *, required: bool = False) -> bool:
+    """探针选择过滤：``selected is None`` 视为全部（现状）；显式列表只认
+    选中项与指标必需项。"""
+    if selected is None:
+        return True
+    return name in selected or required
+
+
+def _probe_config(
+    profile: dict[str, Any],
+    key: str,
+    selected: list[str] | None,
+    name: str,
+    *,
+    required: bool = False,
+) -> dict[str, Any] | None:
+    """按选择取探针配置段。
+
+    ``selected is None``：无配置段返回 None（不跑，保持现状）；显式选择时：
+    未选中返回 None，选中但未配置返回 ``{}``（探针按自身默认参数运行）。
+    """
+    config = profile.get(key)
+    if selected is None:
+        return config if isinstance(config, dict) else None
+    if not _selected(selected, name, required=required):
+        return None
+    return config if isinstance(config, dict) else {}
 
 
 def _first_completed_commit_csv(formal_root: Path) -> tuple[Path, str] | None:
@@ -137,13 +191,17 @@ def _run_limit_failure_sweep(
     suite_dir: Path,
     timeout_s: float,
     quick: bool = False,
+    probes: list[str] | None = None,
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     """在正式套件之后跑可选的真实限流阶梯。
 
     正式 ``saturation`` case 只测 Commit 忙时 Search，不保证出现队列满响应，
     无法单独证明 429/503/Retry-After/reason_code 契约。本阶梯显式驱动公开
-    端点并保留原始行为供审计。
+    端点并保留原始行为供审计。显式探针选择未包含 limit-failure-sweep 时
+    整个阶梯跳过（不产生命令记录）。
     """
+    if probes is not None and "limit-failure-sweep" not in probes:
+        return {}, []
     config = profile.get("limit_failure_sweep")
     if not isinstance(config, dict):
         return {}, [{
@@ -223,6 +281,7 @@ def run_configured_probes(
     tenant_config: dict[str, Any],
     quick: bool,
     timeout_s: float = 7200.0,
+    probes: list[str] | None = None,
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     """执行 profile 显式配置的真实探针，返回 (artifacts, commands)。
 
@@ -230,7 +289,9 @@ def run_configured_probes(
     是已解析的租户 JSON（用于凭据解析），``profile["tenant_config"]`` 是已
     解析为绝对路径的租户配置文件（探针需要以文件路径读取）。``auth_headers``
     提供 X-Auth-Key 时作为凭据解析的兜底；``timeout_s`` 是探针子进程的
-    墙上超时上限（各探针在此基础上再按类型收紧）。
+    墙上超时上限（各探针在此基础上再按类型收紧）。``probes`` 是显式探针
+    选择（``PROBE_NAMES`` 的子集）：None 时全部已配置探针照旧运行；给定
+    列表时只运行「选中 ∪ 指标必需」的探针。
     """
     artifacts: dict[str, Any] = {}
     commands: list[dict[str, Any]] = []
@@ -247,7 +308,9 @@ def run_configured_probes(
                 break
     redact = {auth_key} if auth_key else set()
 
-    invalid_input = profile.get("invalid_input")
+    observation_mode = bool(profile.get("six_metrics_observation"))
+
+    invalid_input = _probe_config(profile, "invalid_input", probes, "invalid-input")
     if isinstance(invalid_input, dict) and invalid_input.get("enabled", True):
         output = suite_dir / "invalid-input.json"
         params = {"tenant_config": str(tenant_path)}
@@ -263,7 +326,9 @@ def run_configured_probes(
         if payload:
             artifacts["invalid_input"] = {**payload, "path": str(output)}
 
-    concurrency_topology = profile.get("concurrency_topology")
+    concurrency_topology = _probe_config(
+        profile, "concurrency_topology", probes, "concurrency-topology"
+    )
     if isinstance(concurrency_topology, dict) and concurrency_topology.get("enabled", True):
         output = suite_dir / "concurrency-topology.json"
         params = {"tenant_config": str(tenant_path), **concurrency_topology}
@@ -277,7 +342,7 @@ def run_configured_probes(
 
     # Run the oversized-payload audit after capacity/fairness diagnostics so a
     # long Commit cannot contaminate their queue and latency windows.
-    payload_boundary = profile.get("payload_boundary")
+    payload_boundary = _probe_config(profile, "payload_boundary", probes, "payload-boundary")
     if isinstance(payload_boundary, dict) and payload_boundary.get("enabled", True):
         output = suite_dir / "payload-boundary.json"
         params = {"tenant_config": str(tenant_path), **payload_boundary}
@@ -289,7 +354,7 @@ def run_configured_probes(
         if payload:
             artifacts["payload_boundary"] = {**payload, "path": str(output)}
 
-    capability = profile.get("capability_probe")
+    capability = _probe_config(profile, "capability_probe", probes, "capability")
     if isinstance(capability, dict):
         output = suite_dir / "capability-probe.json"
         params: dict[str, Any] = {}
@@ -326,7 +391,8 @@ def run_configured_probes(
         if payload:
             artifacts["capability_probe"] = {**payload, "path": str(output)}
 
-    if commit_csv and tenant_path.is_file():
+    blackbox_selected = _selected(probes, "blackbox-contract")
+    if blackbox_selected and commit_csv and tenant_path.is_file():
         output = suite_dir / "blackbox-contract-probe.json"
         params = {"commit_csv": str(commit_csv), "tenant": tenant_index}
         if auth_key:
@@ -345,7 +411,7 @@ def run_configured_probes(
         commands.append(execution)
         if payload:
             artifacts["blackbox_contract_probe"] = {**payload, "path": str(output)}
-    else:
+    elif blackbox_selected:
         commands.append({
             "status": "INCONCLUSIVE",
             "reason": (
@@ -354,7 +420,7 @@ def run_configured_probes(
             ),
         })
 
-    missing = profile.get("missing_cases")
+    missing = _probe_config(profile, "missing_cases", probes, "missing-cases")
     if isinstance(missing, dict) and missing.get("enabled", True):
         output = suite_dir / "missing-cases.json"
         params: dict[str, Any] = {"tenant_config": str(tenant_path)}
@@ -381,7 +447,7 @@ def run_configured_probes(
         if payload:
             artifacts["missing_cases"] = {**payload, "path": str(output)}
 
-    concurrent = profile.get("concurrent_commit")
+    concurrent = _probe_config(profile, "concurrent_commit", probes, "concurrent-commit")
     if isinstance(concurrent, dict) and concurrent.get("enabled", True):
         output = suite_dir / "concurrent-commit.json"
         params = {"tenant_config": str(tenant_path)}
@@ -402,10 +468,73 @@ def run_configured_probes(
         if payload:
             artifacts["concurrent_commit"] = {**payload, "path": str(output)}
 
-    fault_isolation = profile.get("fault_isolation")
+    # 跨租户数据隔离（遗留探针，M1-M6 无此语义）：验证租户 A 的内容
+    # 不可被租户 B 检索到，属于只读数据面检查，无故障注入。
+    nxn = _probe_config(profile, "nxn_isolation", probes, "nxn-isolation")
+    if isinstance(nxn, dict) and nxn.get("enabled", True):
+        output = suite_dir / "nxn-isolation.json"
+        params: dict[str, Any] = {"tenant_config": str(tenant_path)}
+        for key in ("markers_per_tenant", "timeout_s", "commit_poll_timeout_s", "auth_header"):
+            value = nxn.get(key)
+            if value not in (None, ""):
+                params[key] = value
+        payload, execution = run_configured_probe(
+            params,
+            probes_dir=PROBES_DIR,
+            scene="nxn_isolation.py",
+            output=output,
+            base_url=base_url,
+            timeout_s=min(timeout_s, 900),
+            redact_values=redact,
+        )
+        commands.append(execution)
+        if payload:
+            artifacts["nxn_isolation"] = {**payload, "path": str(output)}
+
+    # 客户端断连稳健性（遗留探针，M1-M6 无此语义）：在 Commit 进行中断开
+    # 客户端连接并核对服务端收敛行为；服务端无孤儿任务契约时按 INCONCLUSIVE
+    # 诚实降级。无破坏性操作。
+    disconnect = _probe_config(
+        profile, "disconnect_recovery", probes, "disconnect-recovery"
+    )
+    if isinstance(disconnect, dict) and disconnect.get("enabled", True):
+        output = suite_dir / "disconnect-recovery.json"
+        params = {"tenant": _resolve_tenant_id(tenant_config, "")}
+        if auth_key:
+            params["auth_key"] = auth_key
+        elif auth_key_env:
+            params["auth_key_env"] = auth_key_env
+        pid = disconnect.get("pid") or (profile.get("resource_evidence") or {}).get("process_id")
+        if pid not in (None, ""):
+            params["pid"] = pid
+        for key in ("requests", "disconnect_delay_s", "recovery_wait_s",
+                    "post_recovery_wait_s", "auth_header"):
+            value = disconnect.get(key)
+            if value not in (None, ""):
+                params[key] = value
+        payload, execution = run_configured_probe(
+            params,
+            probes_dir=PROBES_DIR,
+            scene="disconnect_recovery.py",
+            output=output,
+            base_url=base_url,
+            timeout_s=min(timeout_s, 600),
+            redact_values=redact,
+        )
+        commands.append(execution)
+        if payload:
+            artifacts["disconnect_recovery"] = {**payload, "path": str(output)}
+
+    fault_required = observation_mode and bool(
+        (profile.get("fault_isolation") or {}).get("enabled", False)
+    )
+    fault_isolation = _probe_config(
+        profile, "fault_isolation", probes, "fault-isolation", required=fault_required
+    )
     degraded = set((profile.get("readiness") or {}).get("degraded") or [])
-    if (profile.get("six_metrics") or profile.get("six_metrics_observation")) \
-            and "fault_isolation" in degraded:
+    if (profile.get("six_metrics") or observation_mode) \
+            and "fault_isolation" in degraded \
+            and _selected(probes, "fault-isolation", required=fault_required):
         # 受保护故障控制面在 readiness 预检中已被判定不可用：
         # 不启动 24 例长采样矩阵，记录 INCONCLUSIVE 命令保留审计线索。
         commands.append({"status": "INCONCLUSIVE",
@@ -437,7 +566,6 @@ def run_configured_probes(
             if value not in (None, ""):
                 params[key] = value
         cases = [params]
-        observation_mode = bool(profile.get("six_metrics_observation"))
         if profile.get("six_metrics") or observation_mode:
             tenant_ids = list((profile.get("fairness_expectations") or {}).get("tenant_ids", []))
             cases = [
@@ -489,11 +617,17 @@ def run_configured_probes(
         suite_dir=suite_dir,
         timeout_s=timeout_s,
         quick=quick,
+        probes=probes,
     )
     artifacts.update(sweep_artifacts)
     commands.extend(sweep_commands)
 
-    observability = profile.get("tenant_observability")
+    observability = _probe_config(
+        profile, "tenant_observability", probes, "tenant-observability",
+        required=observation_mode and bool(
+            (profile.get("tenant_observability") or {}).get("enabled", False)
+        ),
+    )
     if isinstance(observability, dict) and observability.get("enabled", True):
         output = suite_dir / "tenant-observability.json"
         payload, execution = run_configured_probe(
@@ -505,7 +639,10 @@ def run_configured_probes(
         if payload:
             artifacts["tenant_observability"] = {**payload, "path": str(output)}
 
-    recovery = profile.get("commit_recovery")
+    recovery = _probe_config(
+        profile, "commit_recovery", probes, "commit-recovery",
+        required=observation_mode and profile.get("commit_recovery") is not None,
+    )
     if isinstance(recovery, dict) and tenant_path.is_file():
         output = suite_dir / "commit-recovery.json"
         recovery_tenant = _resolve_tenant_id(
@@ -570,7 +707,11 @@ def run_configured_probes(
             artifacts["commit_recovery"] = samples[0]
 
     fault_plan_value = profile.get("fault_plan")
-    if fault_plan_value:
+    if not fault_plan_value:
+        if probes is not None and "fault-plan" in probes:
+            commands.append({"status": "INCONCLUSIVE",
+                             "reason": "profile 未配置 fault_plan，无法启动故障计划套件"})
+    elif _selected(probes, "fault-plan"):
         plan_path = Path(str(fault_plan_value))
         if plan_path.is_file():
             plan_path = _materialize_fault_plan(

@@ -331,8 +331,9 @@ def run_configured_probe(
 def main(argv: list[str] | None = None) -> int:
     """CLI: forward ``--target <system>`` to the target's orchestration entry.
 
-    Probe execution itself is driven by the target's ``main.py`` (e.g.
-    ``python probe.py --target echomem --profiles ...``).
+    Probe execution itself is driven by the target's entry module (e.g.
+    ``python probe.py --target echomem --profiles ...`` routes to
+    ``observation_run``).
     """
     argv = list(sys.argv[1:] if argv is None else argv)
     target_result = dispatch(argv)
